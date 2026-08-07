@@ -1099,10 +1099,9 @@ export class DashboardComponent implements Component {
 			return lastAgentActivityAt !== null && (lastVisitedAt === null || lastAgentActivityAt > lastVisitedAt);
 		}).length;
 		const lines: string[] = [];
-		const focus = this.selectedRow() ?? allRows[0] ?? null;
 		const ptyHealth = this.ptyHealth();
 
-		lines.push(...this.renderOverview(width, focus, { needs, working, completed, unread }, ptyHealth));
+		lines.push(...this.renderOverview(width, { needs, working, completed, unread }, ptyHealth));
 		if (!ptyHealth.ok && ptyHealth.issue) lines.push(...renderPtyWarningBanner(this.theme, ptyHealth.issue, width));
 		if (this.flash) lines.push(...renderFlashBanner(this.flash, width, { bottomGap: true }));
 
@@ -1148,20 +1147,10 @@ export class DashboardComponent implements Component {
 
 	private renderOverview(
 		width: number,
-		row: Row | null,
 		counts: { needs: number; working: number; completed: number; unread: number },
 		ptyHealth: PtyHealth,
 	): string[] {
-		return renderAgentboardHeader(
-			width,
-			this.theme,
-			row,
-			counts,
-			ptyHealth,
-			this.filterQuery,
-			this.deps.defaultCwd,
-			this.mode === "select" ? this.selectionCount() : 0,
-		);
+		return renderAgentboardHeader(width, this.theme, counts, ptyHealth, this.filterQuery);
 	}
 
 	private renderFooter(width: number): string[] {
@@ -1720,12 +1709,9 @@ type HeaderCounts = { needs: number; working: number; completed: number; unread:
 function renderAgentboardHeader(
 	width: number,
 	theme: ThemeLike,
-	row: Row | null,
 	counts: HeaderCounts,
 	ptyHealth: PtyHealth,
 	filterQuery: string,
-	defaultCwd: string,
-	selectionCount = 0,
 ): string[] {
 	if (width < AGENTBOARD_HEADER_MIN_WIDTH) {
 		const raw = [
@@ -1737,7 +1723,7 @@ function renderAgentboardHeader(
 		return raw.map((line, i) => headerBgLine(line, width, i));
 	}
 
-	const textRows = headerTextRows(theme, row, counts, ptyHealth, filterQuery, defaultCwd, selectionCount);
+	const textRows = headerTextRows(theme, counts, ptyHealth, filterQuery);
 	const textStart = Math.max(0, Math.round((PI_ICON.length - textRows.length) / 2));
 	const raw = blankLines(HEADER_TOP_PADDING);
 	raw.push(
@@ -1751,32 +1737,13 @@ function renderAgentboardHeader(
 
 function headerTextRows(
 	theme: ThemeLike,
-	row: Row | null,
 	counts: HeaderCounts,
 	ptyHealth: PtyHealth,
 	filterQuery: string,
-	defaultCwd: string,
-	selectionCount: number,
 ): string[] {
 	const title = `${theme.fg("accent", theme.bold("AgentBoard"))} ${theme.fg("muted", AGENTBOARD_VERSION)} ${theme.fg("dim", "·")} ${renderPtyHealth(theme, ptyHealth)}`;
-	const contextBits: string[] = [];
-	let contextPrefix = theme.fg("muted", "Background Pi sessions");
-	if (row) {
-		const state = rowState(row);
-		contextPrefix = `${stageFg(state, stateGlyph(state, row.alive, row.hostAlive))} ${theme.fg("text", row.meta.name)}`;
-		if (row.meta.defaultModel) contextBits.push(row.meta.defaultModel);
-		if (row.meta.defaultThinking) contextBits.push(`thinking:${row.meta.defaultThinking}`);
-		contextBits.push(GROUP_LABELS[state]);
-		if (row.alive) contextBits.push("live");
-		if (row.hostAlive) contextBits.push("hosted");
-		if (row.meta.worktreeMode === "worktree") contextBits.push("worktree");
-	}
-	const path = displayPath(row ? row.meta.repoCwd || row.meta.cwd : defaultCwd);
-	contextBits.push(path);
-	if (selectionCount > 0) contextBits.push(`${selectionCount} selected`);
 	return [
 		title,
-		`${contextPrefix} ${theme.fg("muted", contextBits.join(" · "))}`,
 		headerStageSummary(theme, counts, filterQuery, false),
 	];
 }
