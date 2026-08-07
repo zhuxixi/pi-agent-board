@@ -26,7 +26,7 @@ export interface PtyAttachOptions {
 const require = createRequire(import.meta.url);
 const { Terminal } = require("@xterm/headless") as { Terminal: new (opts: Record<string, unknown>) => XtermLike };
 
-const DETACH_KEYS = new Set(["\x1d", "\x07"]); // ctrl+], ctrl+g
+const DETACH_KEYS = new Set(["\x1d"]); // ctrl+]
 const MOUSE_ENABLE = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
 const MOUSE_DISABLE = "\x1b[?1006l\x1b[?1002l\x1b[?1000l";
 const XTSHIFTESCAPE_SELECT = "\x1b[>0s";
@@ -211,8 +211,7 @@ export class PtyAttachComponent implements Component {
 		if (
 			DETACH_KEYS.has(data) ||
 			matchesKey(data, Key.left) ||
-			matchesKey(data, Key.ctrl("]")) ||
-			matchesKey(data, Key.ctrl("g"))
+			matchesKey(data, Key.ctrl("]"))
 		) {
 			if (this.childInputLooksEmpty()) {
 				this.detach();
