@@ -1692,16 +1692,14 @@ function readAgentBoardVersion(): string {
 // ANSI rendering of /Users/rutvik/Downloads/pi-logo-on-dark.svg.
 // The SVG is a 4x4 grid mark: P-shaped left form plus a separate lower-right stem.
 const PI_ICON = [
-	"██████  ",
-	"██  ██  ",
-	"████  ██",
-	"██    ██",
+	" ▐▛███▜▌",
+	"▝▜█████▛▘",
 ] as const;
 const PI_ICON_WIDTH = Math.max(...PI_ICON.map((line) => visibleWidth(line)));
 const HEADER_LEFT_PADDING = 2;
 const HEADER_TEXT_GAP = 4;
-const HEADER_TOP_PADDING = 1;
-const HEADER_BOTTOM_PADDING = 2;
+const HEADER_TOP_PADDING = 0;
+const HEADER_BOTTOM_PADDING = 1;
 const AGENTBOARD_HEADER_MIN_WIDTH = HEADER_LEFT_PADDING + PI_ICON_WIDTH + HEADER_TEXT_GAP + 24;
 
 type HeaderCounts = { needs: number; working: number; completed: number; unread: number };
@@ -1720,7 +1718,7 @@ function renderAgentboardHeader(
 			clip(headerStageSummary(theme, counts, filterQuery, true), width),
 			...blankLines(HEADER_BOTTOM_PADDING),
 		];
-		return raw.map((line, i) => headerBgLine(line, width, i));
+		return raw.map((line) => headerBgLine(line, width));
 	}
 
 	const textRows = headerTextRows(theme, counts, ptyHealth, filterQuery);
@@ -1732,7 +1730,7 @@ function renderAgentboardHeader(
 		),
 	);
 	raw.push(...blankLines(HEADER_BOTTOM_PADDING));
-	return raw.map((line, i) => headerBgLine(line, width, i));
+	return raw.map((line) => headerBgLine(line, width));
 }
 
 function headerTextRows(
@@ -1823,19 +1821,10 @@ function ansiBg(r: number, g: number, b: number): string {
 	return `\x1b[48;2;${r};${g};${b}m`;
 }
 
-function headerBgLine(content: string, width: number, row: number): string {
+function headerBgLine(content: string, width: number): string {
 	const clipped = clip(content, width);
 	const rest = Math.max(0, width - visibleWidth(clipped));
-	return `${clipped}${gridFill(row, width - rest, rest)}`;
-}
-
-function gridFill(row: number, startCol: number, count: number): string {
-	let out = "";
-	for (let i = 0; i < count; i++) {
-		const col = startCol + i;
-		out += row % 2 === 0 && col % 4 === 0 ? ansiFg(51, 65, 85, "·") : " ";
-	}
-	return out;
+	return `${clipped}${" ".repeat(rest)}`;
 }
 
 function blankLines(count: number): string[] {
