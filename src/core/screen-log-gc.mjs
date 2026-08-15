@@ -28,15 +28,27 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 const HOST_FRESH_GRACE_MS = 10_000;
 
 /**
+ * An "alive"/"starting" claim older than this is not trusted: heartbeat-persisted
+ * lastSeenAt goes stale when a runner dies, and a dead pid can later be recycled by
+ * an unrelated process — pid liveness alone must not exempt a view forever.
+ */
+const ALIVE_CLAIM_MAX_AGE_MS = 3 * DAY_MS;
+
+/**
  * Normalize the `screenLogRetentionDays` pref.
  * @param {unknown} value
  * @returns {number|null} days, or null when GC is disabled (pref = 0)
  */
 export function normalizeRetentionDays(value) {
-	if (value == null) return DEFAULT_SCREEN_LOG_RETENTION_DAYS;
-	const n = Number(value);
-	if (!Number.isFinite(n) || n < 0) return DEFAULT_SCREEN_LOG_RETENTION_DAYS;
-	const days = Math.floor(n);
+	// Only finite numbers and non-blank numeric strings are meaningful. Anything else
+	// (booleans, arrays, "", "  ", objects) is a hand-edit accident → default window,
+	// never a silent disable.
+	const usable =
+		(typeof value === "number" && Number.isFinite(value)) ||
+		(typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value)));
+	if (!usable) return DEFAULT_SCREEN_LOG_RETENTION_DAYS;
+	const days = Math.floor(Number(value));
+	if (days < 0) return DEFAULT_SCREEN_LOG_RETENTION_DAYS;
 	// Anything flooring to 0 (0, "0", "0.0", fractions in (0,1)) means "disabled".
 	// A 0-day retention would otherwise compute cutoff=now and delete EVERY ended log.
 	return days === 0 ? null : days;
@@ -60,7 +72,7 @@ export function normalizeScreenLogMaxBytes(value) {
  * @returns {{ scanned: number, removed: number, skippedActive: number, skippedFresh: number, bytesReclaimed: number, errors: number }}
  */
 export function pruneScreenLogs(root, opts = {}) {
-	const stats = { scanned: 0, removed: 0, skippedActive: 0, skippedFresh: 0, bytesReclaimed: 0, errors: 0 };
+	const stats = { scanned: 0, removed: 0, skippedActive: 0, skippedFresh: 0, skippedForeign: 0, bytesReclaimed: 0, errors: 0 };
 	const retentionDays = normalizeRetentionDays(opts.retentionDays);
 	if (retentionDays === null) return stats;
 	const now = Number.isFinite(opts.now) ? opts.now : Date.now();
@@ -74,9 +86,16 @@ export function pruneScreenLogs(root, opts = {}) {
 	}
 	for (const entry of entries) {
 		if (!entry.isDirectory()) continue;
-		// Only real view dirs are eligible: a foreign directory that happens to
-		// contain a file named screen.log must never lose it.
-		if (!existsSync(P.metaPath(root, entry.name))) continue;
+		// A view dir carries meta.json — or at least host.json (a view whose meta.json
+		// was externally deleted is still a view and must stay reclaimable). A foreign
+		// directory that happens to contain a screen.log must never lose it; count the
+		// ones that do so the skip is visible in stats.
+		if (!existsSync(P.metaPath(root, entry.name)) && !existsSync(P.hostPath(root, entry.name))) {
+			try {
+				if (statSync(P.screenLogPath(root, entry.name)).size > 0) stats.skippedForeign++;
+			} catch {}
+			continue;
+		}
 		const logFile = P.screenLogPath(root, entry.name);
 		/** @type {number} */
 		let size;
@@ -124,9 +143,12 @@ function ageBasisMs(root, viewId, logFile, now) {
 			if (now - statSync(hostFile).mtimeMs < HOST_FRESH_GRACE_MS) return "active";
 		} catch {}
 		if (host.endedAt == null && (host.state === "alive" || host.state === "starting")) {
-			// A runner killed by SIGKILL/OOM leaves state "alive" on disk forever.
-			// Cross-check the pid so crashed views stay reclaimable.
-			if (Number.isInteger(host.runnerPid) && isAlive(host.runnerPid)) return "active";
+			// A runner killed by SIGKILL/OOM leaves state "alive" on disk forever, and its
+			// pid may later be recycled by an unrelated long-lived process (isAlive also
+			// treats EPERM as alive). Trust the claim only when the heartbeat refreshed
+			// lastSeenAt recently AND the pid is actually alive.
+			const claimFresh = Number.isFinite(host.lastSeenAt) && now - host.lastSeenAt < ALIVE_CLAIM_MAX_AGE_MS;
+			if (claimFresh && Number.isInteger(host.runnerPid) && isAlive(host.runnerPid)) return "active";
 		}
 		if (Number.isFinite(host.endedAt)) return host.endedAt;
 	}

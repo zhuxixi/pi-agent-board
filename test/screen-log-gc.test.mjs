@@ -55,6 +55,12 @@ test("normalizeRetentionDays maps prefs values", () => {
 	assert.equal(normalizeRetentionDays(0.5), null);
 	assert.equal(normalizeRetentionDays("0.0"), null);
 	assert.equal(normalizeRetentionDays(" 0"), null);
+	// Garbage values are hand-edit accidents: default window, never a silent disable.
+	assert.equal(normalizeRetentionDays(""), DEFAULT_SCREEN_LOG_RETENTION_DAYS);
+	assert.equal(normalizeRetentionDays(" "), DEFAULT_SCREEN_LOG_RETENTION_DAYS);
+	assert.equal(normalizeRetentionDays(false), DEFAULT_SCREEN_LOG_RETENTION_DAYS);
+	assert.equal(normalizeRetentionDays([]), DEFAULT_SCREEN_LOG_RETENTION_DAYS);
+	assert.equal(normalizeRetentionDays("abc"), DEFAULT_SCREEN_LOG_RETENTION_DAYS);
 });
 
 test("normalizeScreenLogMaxBytes maps prefs values", () => {
@@ -133,8 +139,8 @@ test("a live runner pid keeps the view exempt even with a stale host.json", () =
 	try {
 		const now = Date.now();
 		makeView(root, "live", {
-			host: { state: "alive", endedAt: null, runnerPid: process.pid },
-			hostMtimeMs: now - 30 * DAY_MS, // heartbeat somehow stalled, but the pid lives
+			host: { state: "alive", endedAt: null, runnerPid: process.pid, lastSeenAt: now },
+			hostMtimeMs: now - 30 * DAY_MS, // heartbeat file timestamp somehow stalled
 			logBytes: 4096,
 			logMtimeMs: now - 30 * DAY_MS,
 		});
@@ -147,7 +153,27 @@ test("a live runner pid keeps the view exempt even with a stale host.json", () =
 	}
 });
 
-test("foreign directories without meta.json are never swept", () => {
+test("a live pid with an ancient lastSeenAt does not exempt the view (pid recycling)", () => {
+	const root = freshRoot();
+	try {
+		const now = Date.now();
+		// Runner died long ago; its pid was recycled by an unrelated process (process.pid
+		// is alive), but the "alive" claim is 30 days stale — do not trust it.
+		makeView(root, "recycled", {
+			host: { state: "alive", endedAt: null, runnerPid: process.pid, lastSeenAt: now - 30 * DAY_MS },
+			hostMtimeMs: now - 30 * DAY_MS,
+			logBytes: 4096,
+			logMtimeMs: now - 30 * DAY_MS,
+		});
+		const stats = pruneScreenLogs(root, { now });
+		assert.equal(stats.removed, 1);
+		assert.equal(existsSync(P.screenLogPath(root, "recycled")), false);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("foreign directories without any view marker are skipped and counted", () => {
 	const root = freshRoot();
 	try {
 		const now = Date.now();
@@ -158,8 +184,27 @@ test("foreign directories without meta.json are never swept", () => {
 		utimesSync(P.screenLogPath(root, "not-a-view"), old, old);
 		const stats = pruneScreenLogs(root, { now });
 		assert.equal(stats.scanned, 0);
+		assert.equal(stats.skippedForeign, 1);
 		assert.equal(stats.removed, 0);
 		assert.equal(existsSync(P.screenLogPath(root, "not-a-view")), true);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a view whose meta.json was deleted externally stays reclaimable via host.json", () => {
+	const root = freshRoot();
+	try {
+		const now = Date.now();
+		// meta.json gone, host.json survives: still a view, still sweepable.
+		mkdirSync(P.viewDir(root, "orphan"), { recursive: true });
+		atomicWriteJson(P.hostPath(root, "orphan"), { state: "exited", endedAt: now - 10 * DAY_MS });
+		writeFileSync(P.screenLogPath(root, "orphan"), Buffer.alloc(4096, 65));
+		const old = (now - 10 * DAY_MS) / 1000;
+		utimesSync(P.hostPath(root, "orphan"), old, old);
+		const stats = pruneScreenLogs(root, { now });
+		assert.equal(stats.removed, 1);
+		assert.equal(existsSync(P.screenLogPath(root, "orphan")), false);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
