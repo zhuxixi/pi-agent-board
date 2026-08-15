@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, statSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -79,33 +79,56 @@ test("pty-runner creates host socket, broadcasts output, forwards input, finaliz
 	}
 });
 
-test("pty-runner protects dash-prefixed initial prompts while keeping argv delivery", async () => {
+test("pty-runner honors screenLogMaxBytes from host config", async () => {
 	const root = freshRoot();
 	let runner;
 	try {
-		const meta = createView(root, { id: "v1", name: "pty", cwd: process.cwd() });
-		const capturePath = join(root, "argv-prompt.txt");
-		const configPath = P.hostConfigPath(root, "v1");
+		const meta = createView(root, { id: "cap1", name: "cap", cwd: process.cwd() });
+		const configPath = P.hostConfigPath(root, "cap1");
 		atomicWriteJson(configPath, {
 			root,
-			viewId: "v1",
+			viewId: "cap1",
 			sessionFile: meta.sessionFile,
 			cwd: process.cwd(),
-			initialPrompt: "- Create a ticket\n- Run the fix",
+			initialPrompt: null,
 			piCommand: process.execPath,
 			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
 			model: null,
 			tools: null,
-			env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1", FAKE_PTY_ARGV_CAPTURE_PATH: capturePath },
+			env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" },
 			cols: 80,
 			rows: 24,
+			screenLogMaxBytes: 2048,
 		});
 		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
-		await waitFor(() => existsSync(P.controlSocketPath(root, "v1")) && readHost(root, "v1")?.state === "alive");
-		await waitFor(() => existsSync(capturePath) && readFileSync(capturePath, "utf8") === " - Create a ticket\n- Run the fix");
+		await waitFor(() => existsSync(P.controlSocketPath(root, "cap1")) && readHost(root, "cap1")?.state === "alive");
+
+		const socket = createConnection(P.controlSocketPath(root, "cap1"));
+		await once(socket, "connect");
+		// ~8 KB of echoed output → well over the 2 KB cap → runner must compact.
+		send(socket, { type: "input", data: `${"x".repeat(8192)}\n` });
+		await waitFor(() => {
+			try {
+				return statSync(P.screenLogPath(root, "cap1")).size > 0;
+			} catch {
+				return false;
+			}
+		});
+		send(socket, { type: "input", data: "exit\n" });
+		await waitFor(() => readHost(root, "cap1")?.endedAt != null);
+		// Compaction happens synchronously inside onData; size must settle ≤ cap.
+		const size = await waitFor(() => {
+			try {
+				const s = statSync(P.screenLogPath(root, "cap1")).size;
+				return s <= 2048 ? s : false;
+			} catch {
+				return false;
+			}
+		});
+		assert.ok(size > 0 && size <= 2048, `screen.log should be compacted to <=2048 bytes, got ${size}`);
+		socket.end();
 	} finally {
-		try { runner?.kill("SIGTERM"); } catch {}
-		await new Promise((r) => setTimeout(r, 50));
-		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+		try { runner?.kill(); } catch {}
+		rmSync(root, { recursive: true, force: true });
 	}
 });
