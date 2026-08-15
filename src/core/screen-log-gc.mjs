@@ -130,10 +130,7 @@ export function pruneScreenLogs(root, opts = {}) {
 			stats.removed++;
 			stats.bytesReclaimed += size;
 		} catch (err) {
-			// A concurrent sweep (a second dashboard sharing the root) may have won the
-			// unlink after our stat: the reclaim goal is achieved — count it as removed
-			// (without the bytes, which the winner already accounted for), not an error.
-			if (err && err.code === "ENOENT") stats.removed++;
+			if (classifyUnlinkFailure(err) === "removed") stats.removed++;
 			else stats.errors++;
 		}
 	}
@@ -171,6 +168,20 @@ function ageBasisMs(root, viewId, logFile, now) {
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * Classify an unlinkSync failure. ENOENT after a successful stat means a concurrent
+ * sweep (a second dashboard sharing the root) won the unlink: the reclaim goal is
+ * achieved, so it counts as removed (without the bytes, which the winner accounted
+ * for), never as an error. Everything else is a real failure.
+ * Extracted as a pure predicate because the stat→unlink race cannot be reproduced
+ * deterministically in tests — the predicate is the part that can silently regress.
+ * @param {unknown} err
+ * @returns {"removed"|"error"}
+ */
+export function classifyUnlinkFailure(err) {
+	return err && err.code === "ENOENT" ? "removed" : "error";
 }
 
 /**
