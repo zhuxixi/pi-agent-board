@@ -39,7 +39,14 @@ function main() {
 
 	const socketPath = P.controlSocketPath(config.root, config.viewId);
 	const screenLog = P.screenLogPath(config.root, config.viewId);
-	let screenLogBytes = reconcileScreenLog(screenLog);
+	// Optional per-install cap override from launch prefs (screenLogMaxSize).
+	// undefined → screen-log.mjs falls back to its built-in default.
+	const screenLogMaxBytes =
+		Number.isFinite(config.screenLogMaxBytes) && config.screenLogMaxBytes > 0
+			? Math.floor(config.screenLogMaxBytes)
+			: undefined;
+	const screenLogLimits = { maxBytes: screenLogMaxBytes };
+	let screenLogBytes = reconcileScreenLog(screenLog, screenLogLimits);
 	try {
 		if (existsSync(socketPath)) unlinkSync(socketPath);
 	} catch {}
@@ -119,7 +126,7 @@ function main() {
 	update({ childPid, state: "alive" });
 
 	child.onData((data) => {
-		screenLogBytes = appendBoundedScreenLog(screenLog, data, screenLogBytes);
+		screenLogBytes = appendBoundedScreenLog(screenLog, data, screenLogBytes, screenLogLimits);
 		broadcast({ type: "output", data });
 	});
 	child.onExit((code) => {
