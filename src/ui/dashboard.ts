@@ -788,7 +788,7 @@ export class DashboardComponent implements Component {
 		});
 		if (!res.ok) this.notice(res.error ?? "Dispatch failed", "error");
 		else {
-			this.lastLaunchPrefs = { cwd: launchCwd, model: launchModel, thinkingLevel: launchThinking };
+			this.lastLaunchPrefs = { ...this.deps.service.getLaunchPrefs?.(), cwd: launchCwd, model: launchModel, thinkingLevel: launchThinking };
 			try {
 				this.deps.service.saveLaunchPrefs?.(this.lastLaunchPrefs);
 			} catch {

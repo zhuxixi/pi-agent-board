@@ -9,6 +9,7 @@ import { createRequire } from "node:module";
 import { createConnection } from "node:net";
 import { resolve } from "node:path";
 import { applyAutoStateToStatus, autoStateEnabled, heuristicAutoState } from "../core/auto-state.mjs";
+import { appendLine } from "../core/atomic.mjs";
 import { finalizeRun, projectViewState, reduceEvent } from "../core/events.mjs";
 import { clearDiagnostics, appendDiagnostic, tailDiagnostics } from "../core/diagnostics.mjs";
 import { emptyEvidenceSnapshot, finalizeEvidence, readEvidence, reduceEvidence, summarizeEvidence, writeEvidence } from "../core/evidence.mjs";
@@ -37,6 +38,7 @@ import {
 	writeState,
 } from "../core/store.mjs";
 import { diagnoseNodePtyFailure, ensureNodePtySpawnHelperExecutable, nodePtyFallbackMessage, probeNodePtyEnvironment } from "../core/pty-support.mjs";
+import { normalizeScreenLogMaxBytes, pruneScreenLogs } from "../core/screen-log-gc.mjs";
 
 /** @typedef {import("../core/types.mjs").RunKind} RunKind */
 
@@ -55,6 +57,7 @@ import { diagnoseNodePtyFailure, ensureNodePtySpawnHelperExecutable, nodePtyFall
  *   launchTitle?: typeof launchTitleProcess,
  *   launchAutoState?: typeof launchAutoStateProcess,
  *   ptySupport?: (opts?: { refresh?: boolean, maxAgeMs?: number }) => { ok: boolean, reason?: string|null, issue?: any },
+ *   pruneScreenLogs?: typeof pruneScreenLogs,
  * }} opts
  */
 export function createService(opts) {
@@ -66,6 +69,24 @@ export function createService(opts) {
 	const ptySupport = opts.ptySupport ?? ptyHostAvailability;
 	const ptyRunnerScript = opts.ptyRunnerScript ?? opts.runnerScript;
 	const titleRunnerScript = opts.titleRunnerScript ?? null;
+
+	const pruneScreenLogsImpl = opts.pruneScreenLogs ?? pruneScreenLogs;
+	// Reclaim replay logs of long-ended views on dashboard startup. Deferred via
+	// setImmediate so the first frame is unaffected; any failure must not break
+	// the dashboard.
+	setImmediate(() => {
+		try {
+			const stats = pruneScreenLogsImpl(root, { retentionDays: readLaunchPrefs(root).screenLogRetentionDays });
+			// One JSONL record per pass that actually reclaimed something. `removed` is a
+			// one-time event per file, so records stay proportional to real usage.
+			// Persistent conditions (a permanent foreign dir, a recurring unlink failure)
+			// ride along as record fields but never trigger a record on their own —
+			// otherwise this file would itself grow without bound from routine opens.
+			if (stats && stats.removed > 0) {
+				appendLine(P.gcHistoryPath(root), JSON.stringify({ at: Date.now(), ...stats }));
+			}
+		} catch {}
+	}).unref?.();
 
 	/**
 	 * Launch a run (dispatch or reply) against an existing view, updating its state to queued.
@@ -119,6 +140,7 @@ export function createService(opts) {
 			env: {},
 			cols: Number(process.env.COLUMNS || 120),
 			rows: Number(process.env.LINES || 36),
+			screenLogMaxBytes: normalizeScreenLogMaxBytes(readLaunchPrefs(root).screenLogMaxSize),
 		};
 		const socketPath = P.controlSocketPath(root, meta.id);
 		const { pid } = launchHostImpl(root, config, { runnerScript: ptyRunnerScript });
