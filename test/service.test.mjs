@@ -98,6 +98,8 @@ test("launch prefs round-trip through service", () => {
 			cwd: "/tmp/work",
 			model: "openai/gpt-5.4",
 			thinkingLevel: "high",
+			screenLogRetentionDays: null,
+			screenLogMaxSize: null,
 		});
 	} finally {
 		rmSync(root, { recursive: true, force: true });
