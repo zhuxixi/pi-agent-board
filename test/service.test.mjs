@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { createService, shouldProbePtySupport } from "../src/runtime/service.mjs";
 import { diagnoseNodePtyFailure } from "../src/core/pty-support.mjs";
 import * as P from "../src/core/paths.mjs";
-import { createView, readState, writeHost, writeHostPid, writeState } from "../src/core/store.mjs";
+import { createView, readState, writeHost, writeHostPid, writeLaunchPrefs, writeState } from "../src/core/store.mjs";
 
 function freshRoot() {
 	return mkdtempSync(join(tmpdir(), "agentview-service-"));
@@ -729,6 +729,59 @@ test("reconcile finalizes stale starting/alive host snapshots", () => {
 		const next = readState(root, "v1");
 		assert.equal(next.semanticState, "failed");
 		assert.equal(next.processState, "exited");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("createService schedules screen log GC with the prefs retention", async () => {
+	const root = freshRoot();
+	try {
+		writeLaunchPrefs(root, { screenLogRetentionDays: 3 });
+		const calls = [];
+		service(root, { pruneScreenLogs: (r, o) => calls.push([r, o]) });
+		// GC is deferred via setImmediate; one tick is enough (FIFO order).
+		await new Promise((r) => setImmediate(r));
+		assert.equal(calls.length, 1);
+		assert.equal(calls[0][0], root);
+		assert.deepEqual(calls[0][1], { retentionDays: 3 });
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a failing screen log GC does not break createService", async () => {
+	const root = freshRoot();
+	try {
+		const svc = service(root, {
+			pruneScreenLogs: () => {
+				throw new Error("gc boom");
+			},
+		});
+		await new Promise((r) => setImmediate(r));
+		assert.equal(typeof svc.row, "function"); // service still constructed fine
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("ensureHost passes screenLogMaxBytes from prefs into HostConfig", async () => {
+	const root = freshRoot();
+	try {
+		writeLaunchPrefs(root, { screenLogMaxSize: 2048 });
+		const meta = createView(root, { id: "gc1", name: "gc1", cwd: process.cwd() });
+		writeFileSync(meta.sessionFile, "");
+		let captured = null;
+		const svc = service(root, {
+			ptySupport: () => ({ ok: true }),
+			launchHost: (r, config) => {
+				captured = config;
+				return { pid: null, configPath: "/no/host-config.json" };
+			},
+		});
+		const result = svc.ensureHost("gc1");
+		assert.equal(result.ok, true);
+		assert.equal(captured.screenLogMaxBytes, 2048);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

@@ -211,6 +211,7 @@ export const GROUP_LABELS = {
  * @property {Record<string,string>} env
  * @property {number} cols
  * @property {number} rows
+ * @property {number|null} screenLogMaxBytes per-view screen.log write cap; null = runner default
  */
 
 /**
