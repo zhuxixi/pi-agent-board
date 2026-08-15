@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -828,6 +828,25 @@ test("screen log GC writes a summary record to gc-history.jsonl when it reclaims
 test("screen log GC stays silent when nothing is reclaimed", async () => {
 	const root = freshRoot();
 	try {
+		service(root);
+		await new Promise((r) => setImmediate(r));
+		assert.equal(existsSync(P.gcHistoryPath(root)), false);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("persistent skippedForeign does not trigger gc-history records", async () => {
+	const root = freshRoot();
+	try {
+		const now = Date.now();
+		// A permanent foreign dir holding an old screen.log: skippedForeign > 0 on
+		// every pass, but nothing is ever removed — no record may be appended.
+		const foreign = join(P.viewsDir(root), "not-a-view");
+		mkdirSync(foreign, { recursive: true });
+		writeFileSync(P.screenLogPath(root, "not-a-view"), Buffer.alloc(4096, 65));
+		const oldSecs = (now - 30 * 24 * 60 * 60 * 1000) / 1000;
+		utimesSync(P.screenLogPath(root, "not-a-view"), oldSecs, oldSecs);
 		service(root);
 		await new Promise((r) => setImmediate(r));
 		assert.equal(existsSync(P.gcHistoryPath(root)), false);

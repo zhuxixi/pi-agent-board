@@ -77,10 +77,12 @@ export function createService(opts) {
 	setImmediate(() => {
 		try {
 			const stats = pruneScreenLogsImpl(root, { retentionDays: readLaunchPrefs(root).screenLogRetentionDays });
-			// Give the sweep a production sink: one JSONL record per eventful pass.
-			// Steady-state passes that reclaim nothing stay silent, so the file
-			// does not grow from routine dashboard opens.
-			if (stats && (stats.removed > 0 || stats.errors > 0 || stats.skippedForeign > 0)) {
+			// One JSONL record per pass that actually reclaimed something. `removed` is a
+			// one-time event per file, so records stay proportional to real usage.
+			// Persistent conditions (a permanent foreign dir, a recurring unlink failure)
+			// ride along as record fields but never trigger a record on their own —
+			// otherwise this file would itself grow without bound from routine opens.
+			if (stats && stats.removed > 0) {
 				appendLine(P.gcHistoryPath(root), JSON.stringify({ at: Date.now(), ...stats }));
 			}
 		} catch {}

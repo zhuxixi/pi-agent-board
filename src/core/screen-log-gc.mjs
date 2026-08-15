@@ -129,8 +129,12 @@ export function pruneScreenLogs(root, opts = {}) {
 			unlinkSync(logFile);
 			stats.removed++;
 			stats.bytesReclaimed += size;
-		} catch {
-			stats.errors++;
+		} catch (err) {
+			// A concurrent sweep (a second dashboard sharing the root) may have won the
+			// unlink after our stat: the reclaim goal is achieved — count it as removed
+			// (without the bytes, which the winner already accounted for), not an error.
+			if (err && err.code === "ENOENT") stats.removed++;
+			else stats.errors++;
 		}
 	}
 	return stats;
