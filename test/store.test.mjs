@@ -44,6 +44,25 @@ test("launch prefs carry screen log knobs with null defaults", () => {
 	}
 });
 
+test("merge-then-save preserves screen log knobs (dashboard dispatch contract)", () => {
+	const root = freshRoot();
+	try {
+		// Hand-edited knobs live in launch-prefs.json; the dashboard UI manages
+		// only cwd/model/thinkingLevel. The fix merges current prefs before
+		// saving, so the knobs must survive the round trip.
+		writeLaunchPrefs(root, { screenLogRetentionDays: 3, screenLogMaxSize: 2048 });
+		const current = readLaunchPrefs(root);
+		writeLaunchPrefs(root, { ...current, cwd: "/new/cwd", model: "m1", thinkingLevel: "low" });
+		const after = readLaunchPrefs(root);
+		assert.equal(after.screenLogRetentionDays, 3);
+		assert.equal(after.screenLogMaxSize, 2048);
+		assert.equal(after.cwd, "/new/cwd");
+		assert.equal(after.model, "m1");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("createView writes meta, state, roster, session path", () => {
 	const root = freshRoot();
 	try {
