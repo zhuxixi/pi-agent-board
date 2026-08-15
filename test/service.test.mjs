@@ -854,3 +854,39 @@ test("persistent skippedForeign does not trigger gc-history records", async () =
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("errors-only GC passes produce no gc-history record", async () => {
+	const root = freshRoot();
+	try {
+		const now = Date.now();
+		const DAY = 24 * 60 * 60 * 1000;
+		createView(root, { id: "gcerr", name: "gcerr", cwd: process.cwd() });
+		writeHost(root, {
+			version: 1,
+			viewId: "gcerr",
+			mode: "pty",
+			runnerPid: null,
+			childPid: null,
+			socketPath: "",
+			state: "exited",
+			startedAt: now - 11 * DAY,
+			lastSeenAt: now - 10 * DAY,
+			endedAt: now - 10 * DAY,
+			exitCode: 0,
+			error: null,
+			cols: 80,
+			rows: 24,
+			attachedClients: 0,
+		});
+		// A directory named screen.log: stat succeeds, unlink fails with EISDIR on
+		// every pass — a persistent errors>0 condition that must stay silent.
+		mkdirSync(P.screenLogPath(root, "gcerr"));
+		const oldSecs = (now - 10 * DAY) / 1000;
+		utimesSync(P.hostPath(root, "gcerr"), oldSecs, oldSecs);
+		service(root);
+		await new Promise((r) => setImmediate(r));
+		assert.equal(existsSync(P.gcHistoryPath(root)), false);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});

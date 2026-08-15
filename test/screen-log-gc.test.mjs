@@ -8,6 +8,7 @@ import { atomicWriteJson } from "../src/core/atomic.mjs";
 import * as P from "../src/core/paths.mjs";
 import {
 	DEFAULT_SCREEN_LOG_RETENTION_DAYS,
+	classifyUnlinkFailure,
 	normalizeRetentionDays,
 	normalizeScreenLogMaxBytes,
 	pruneScreenLogs,
@@ -40,6 +41,17 @@ function makeView(root, viewId, { host = null, hostMtimeMs = null, logBytes = 12
 		}
 	}
 }
+
+test("classifyUnlinkFailure treats ENOENT as reclaimed, everything else as error", () => {
+	// The stat→unlink race cannot be reproduced deterministically, so the predicate
+	// is what gets locked: ENOENT must never inflate errors (it would ride into
+	// gc-history records), and real failures must never masquerade as removed.
+	assert.equal(classifyUnlinkFailure({ code: "ENOENT" }), "removed");
+	assert.equal(classifyUnlinkFailure({ code: "EISDIR" }), "error");
+	assert.equal(classifyUnlinkFailure({ code: "EPERM" }), "error");
+	assert.equal(classifyUnlinkFailure(new Error("boom")), "error");
+	assert.equal(classifyUnlinkFailure(undefined), "error");
+});
 
 test("normalizeRetentionDays maps prefs values", () => {
 	assert.equal(normalizeRetentionDays(0), null); // disabled
