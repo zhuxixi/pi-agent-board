@@ -12,12 +12,20 @@
  *   pty-runner holds an in-memory byte counter for its log and external mutation
  *   would race with it. Live logs are bounded by the runner's own cap.
  */
-import { readdirSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { readJson } from "./atomic.mjs";
 import * as P from "./paths.mjs";
+import { isAlive } from "./pid.mjs";
 
 export const DEFAULT_SCREEN_LOG_RETENTION_DAYS = 7;
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * A live pty-runner heartbeat-persists host.json every second, and a booting runner
+ * persists state "starting" before the service's own writeHost lands. A host.json
+ * modified within this window therefore means a runner is live or mid-launch.
+ */
+const HOST_FRESH_GRACE_MS = 10_000;
 
 /**
  * Normalize the `screenLogRetentionDays` pref.
@@ -25,10 +33,13 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * @returns {number|null} days, or null when GC is disabled (pref = 0)
  */
 export function normalizeRetentionDays(value) {
-	if (value === 0 || value === "0") return null;
+	if (value == null) return DEFAULT_SCREEN_LOG_RETENTION_DAYS;
 	const n = Number(value);
-	if (!Number.isFinite(n) || n <= 0) return DEFAULT_SCREEN_LOG_RETENTION_DAYS;
-	return Math.floor(n);
+	if (!Number.isFinite(n) || n < 0) return DEFAULT_SCREEN_LOG_RETENTION_DAYS;
+	const days = Math.floor(n);
+	// Anything flooring to 0 (0, "0", "0.0", fractions in (0,1)) means "disabled".
+	// A 0-day retention would otherwise compute cutoff=now and delete EVERY ended log.
+	return days === 0 ? null : days;
 }
 
 /**
@@ -37,8 +48,8 @@ export function normalizeRetentionDays(value) {
  * @returns {number|null} bytes, or null to keep the runner's built-in default
  */
 export function normalizeScreenLogMaxBytes(value) {
-	const n = Number(value);
-	return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+	const n = Math.floor(Number(value));
+	return Number.isFinite(n) && n > 0 ? n : null;
 }
 
 /**
@@ -63,6 +74,9 @@ export function pruneScreenLogs(root, opts = {}) {
 	}
 	for (const entry of entries) {
 		if (!entry.isDirectory()) continue;
+		// Only real view dirs are eligible: a foreign directory that happens to
+		// contain a file named screen.log must never lose it.
+		if (!existsSync(P.metaPath(root, entry.name))) continue;
 		const logFile = P.screenLogPath(root, entry.name);
 		/** @type {number} */
 		let size;
@@ -73,7 +87,7 @@ export function pruneScreenLogs(root, opts = {}) {
 		}
 		if (size <= 0) continue;
 		stats.scanned++;
-		const basis = ageBasisMs(root, entry.name, logFile);
+		const basis = ageBasisMs(root, entry.name, logFile, now);
 		if (basis === "active") {
 			stats.skippedActive++;
 			continue;
@@ -95,13 +109,27 @@ export function pruneScreenLogs(root, opts = {}) {
 
 /**
  * Age basis for one view's log: host endedAt when known, else the log's mtime.
- * @param {string} root @param {string} viewId @param {string} logFile
+ * @param {string} root @param {string} viewId @param {string} logFile @param {number} now
  * @returns {number|null|"active"} epoch ms, "active" for live views, null when unknown
  */
-function ageBasisMs(root, viewId, logFile) {
-	const host = readJson(P.hostPath(root, viewId), null);
-	if (host && host.endedAt == null && (host.state === "alive" || host.state === "starting")) return "active";
-	if (host && Number.isFinite(host.endedAt)) return host.endedAt;
+function ageBasisMs(root, viewId, logFile, now) {
+	const hostFile = P.hostPath(root, viewId);
+	const host = readJson(hostFile, null);
+	if (host) {
+		// Fresh host.json = a runner is heartbeating or mid-launch. Checking mtime first
+		// closes the launch TOCTOU window (runner boots and opens the log before the
+		// service's writeHost records "starting"): a stale read can never delete the
+		// log of a runner that just started.
+		try {
+			if (now - statSync(hostFile).mtimeMs < HOST_FRESH_GRACE_MS) return "active";
+		} catch {}
+		if (host.endedAt == null && (host.state === "alive" || host.state === "starting")) {
+			// A runner killed by SIGKILL/OOM leaves state "alive" on disk forever.
+			// Cross-check the pid so crashed views stay reclaimable.
+			if (Number.isInteger(host.runnerPid) && isAlive(host.runnerPid)) return "active";
+		}
+		if (Number.isFinite(host.endedAt)) return host.endedAt;
+	}
 	try {
 		return statSync(logFile).mtimeMs;
 	} catch {

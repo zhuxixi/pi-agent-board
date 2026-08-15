@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,6 +9,7 @@ import * as P from "../src/core/paths.mjs";
 import {
 	DEFAULT_SCREEN_LOG_RETENTION_DAYS,
 	normalizeRetentionDays,
+	normalizeScreenLogMaxBytes,
 	pruneScreenLogs,
 } from "../src/core/screen-log-gc.mjs";
 
@@ -18,10 +20,18 @@ function freshRoot() {
 }
 
 /** Create a view dir with a small meta.json, optional host.json, optional screen.log. */
-function makeView(root, viewId, { host = null, logBytes = 128, logMtimeMs = null } = {}) {
+function makeView(root, viewId, { host = null, hostMtimeMs = null, logBytes = 128, logMtimeMs = null } = {}) {
 	mkdirSync(P.viewDir(root, viewId), { recursive: true });
 	writeFileSync(P.metaPath(root, viewId), "{}");
-	if (host) atomicWriteJson(P.hostPath(root, viewId), host);
+	if (host) {
+		atomicWriteJson(P.hostPath(root, viewId), host);
+		// host.json is written fresh; backdate when the scenario needs the heartbeat
+		// grace window to have expired (a live runner rewrites it every second).
+		if (hostMtimeMs != null) {
+			const secs = hostMtimeMs / 1000;
+			utimesSync(P.hostPath(root, viewId), secs, secs);
+		}
+	}
 	if (logBytes > 0) {
 		writeFileSync(P.screenLogPath(root, viewId), Buffer.alloc(logBytes, 65));
 		if (logMtimeMs != null) {
@@ -39,13 +49,35 @@ test("normalizeRetentionDays maps prefs values", () => {
 	assert.equal(normalizeRetentionDays(-2), DEFAULT_SCREEN_LOG_RETENTION_DAYS);
 	assert.equal(normalizeRetentionDays(NaN), DEFAULT_SCREEN_LOG_RETENTION_DAYS);
 	assert.equal(normalizeRetentionDays(undefined), DEFAULT_SCREEN_LOG_RETENTION_DAYS);
+	assert.equal(normalizeRetentionDays(null), DEFAULT_SCREEN_LOG_RETENTION_DAYS);
+	// Every zero form disables — a floored-to-0 retention must never reach the sweep
+	// (cutoff would equal now and delete every ended view's log regardless of age).
+	assert.equal(normalizeRetentionDays(0.5), null);
+	assert.equal(normalizeRetentionDays("0.0"), null);
+	assert.equal(normalizeRetentionDays(" 0"), null);
+});
+
+test("normalizeScreenLogMaxBytes maps prefs values", () => {
+	assert.equal(normalizeScreenLogMaxBytes(2048), 2048);
+	assert.equal(normalizeScreenLogMaxBytes("4096"), 4096);
+	// Fractions in (0,1) floor to 0 and must become null, not a 0-byte cap.
+	assert.equal(normalizeScreenLogMaxBytes(0.5), null);
+	assert.equal(normalizeScreenLogMaxBytes(0), null);
+	assert.equal(normalizeScreenLogMaxBytes(-5), null);
+	assert.equal(normalizeScreenLogMaxBytes("x"), null);
+	assert.equal(normalizeScreenLogMaxBytes(null), null);
+	assert.equal(normalizeScreenLogMaxBytes(undefined), null);
 });
 
 test("removes screen.log of ended views past retention, keeps other files", () => {
 	const root = freshRoot();
 	try {
 		const now = Date.now();
-		makeView(root, "old", { host: { state: "exited", endedAt: now - 10 * DAY_MS }, logBytes: 4096 });
+		makeView(root, "old", {
+			host: { state: "exited", endedAt: now - 10 * DAY_MS },
+			hostMtimeMs: now - 10 * DAY_MS, // heartbeat stopped at exit
+			logBytes: 4096,
+		});
 		const stats = pruneScreenLogs(root, { now });
 		assert.equal(stats.removed, 1);
 		assert.equal(stats.bytesReclaimed, 4096);
@@ -76,11 +108,71 @@ test("active views are never touched, even with old logs", () => {
 	}
 });
 
+test("stale-alive view with a dead runner pid is reclaimed", () => {
+	const root = freshRoot();
+	try {
+		const now = Date.now();
+		// A runner killed by SIGKILL/OOM leaves host.json saying "alive" forever.
+		const deadPid = spawnSync(process.execPath, ["-e", "0"]).pid;
+		makeView(root, "crashed", {
+			host: { state: "alive", endedAt: null, runnerPid: deadPid },
+			hostMtimeMs: now - 30 * DAY_MS, // no heartbeat since the crash
+			logBytes: 4096,
+			logMtimeMs: now - 30 * DAY_MS,
+		});
+		const stats = pruneScreenLogs(root, { now });
+		assert.equal(stats.removed, 1);
+		assert.equal(existsSync(P.screenLogPath(root, "crashed")), false);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a live runner pid keeps the view exempt even with a stale host.json", () => {
+	const root = freshRoot();
+	try {
+		const now = Date.now();
+		makeView(root, "live", {
+			host: { state: "alive", endedAt: null, runnerPid: process.pid },
+			hostMtimeMs: now - 30 * DAY_MS, // heartbeat somehow stalled, but the pid lives
+			logBytes: 4096,
+			logMtimeMs: now - 30 * DAY_MS,
+		});
+		const stats = pruneScreenLogs(root, { now });
+		assert.equal(stats.removed, 0);
+		assert.equal(stats.skippedActive, 1);
+		assert.equal(existsSync(P.screenLogPath(root, "live")), true);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("foreign directories without meta.json are never swept", () => {
+	const root = freshRoot();
+	try {
+		const now = Date.now();
+		const foreign = join(P.viewsDir(root), "not-a-view");
+		mkdirSync(foreign, { recursive: true });
+		writeFileSync(P.screenLogPath(root, "not-a-view"), Buffer.alloc(4096, 65));
+		const old = (now - 30 * DAY_MS) / 1000;
+		utimesSync(P.screenLogPath(root, "not-a-view"), old, old);
+		const stats = pruneScreenLogs(root, { now });
+		assert.equal(stats.scanned, 0);
+		assert.equal(stats.removed, 0);
+		assert.equal(existsSync(P.screenLogPath(root, "not-a-view")), true);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("recently ended views are kept", () => {
 	const root = freshRoot();
 	try {
 		const now = Date.now();
-		makeView(root, "fresh", { host: { state: "exited", endedAt: now - 1 * DAY_MS } });
+		makeView(root, "fresh", {
+			host: { state: "exited", endedAt: now - 1 * DAY_MS },
+			hostMtimeMs: now - 1 * DAY_MS,
+		});
 		const stats = pruneScreenLogs(root, { now });
 		assert.equal(stats.removed, 0);
 		assert.equal(stats.skippedFresh, 1);
@@ -124,9 +216,16 @@ test("an unlink failure does not abort the sweep", () => {
 	try {
 		const now = Date.now();
 		// A directory named screen.log: statSync succeeds with size>0, unlinkSync fails (EISDIR).
-		makeView(root, "broken", { host: { state: "exited", endedAt: now - 10 * DAY_MS }, logBytes: 0 });
+		makeView(root, "broken", {
+			host: { state: "exited", endedAt: now - 10 * DAY_MS },
+			hostMtimeMs: now - 10 * DAY_MS,
+			logBytes: 0,
+		});
 		mkdirSync(P.screenLogPath(root, "broken"));
-		makeView(root, "normal", { host: { state: "exited", endedAt: now - 10 * DAY_MS } });
+		makeView(root, "normal", {
+			host: { state: "exited", endedAt: now - 10 * DAY_MS },
+			hostMtimeMs: now - 10 * DAY_MS,
+		});
 		const stats = pruneScreenLogs(root, { now });
 		assert.equal(stats.errors, 1);
 		assert.equal(stats.removed, 1);
