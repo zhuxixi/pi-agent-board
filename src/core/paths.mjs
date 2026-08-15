@@ -19,8 +19,6 @@ export function defaultRoot() {
 export const rosterPath = (root) => path.join(root, "roster.json");
 /** @param {string} root */
 export const launchPrefsPath = (root) => path.join(root, "launch-prefs.json");
-/** @param {string} root */
-export const gcHistoryPath = (root) => path.join(root, "gc-history.jsonl");
 
 /** @param {string} root */
 export const viewsDir = (root) => path.join(root, "views");

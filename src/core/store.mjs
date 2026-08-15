@@ -54,14 +54,7 @@ export function removeFromRoster(root, viewId) {
 
 /** @param {string} root @returns {LaunchPrefs} */
 export function readLaunchPrefs(root) {
-	return readJson(P.launchPrefsPath(root), {
-		version: 1,
-		cwd: null,
-		model: null,
-		thinkingLevel: null,
-		screenLogRetentionDays: null,
-		screenLogMaxSize: null,
-	});
+	return readJson(P.launchPrefsPath(root), { version: 1, cwd: null, model: null, thinkingLevel: null });
 }
 
 /** @param {string} root @param {Partial<LaunchPrefs>} prefs */
@@ -71,8 +64,6 @@ export function writeLaunchPrefs(root, prefs) {
 		cwd: prefs.cwd ?? null,
 		model: prefs.model ?? null,
 		thinkingLevel: prefs.thinkingLevel ?? null,
-		screenLogRetentionDays: prefs.screenLogRetentionDays ?? null,
-		screenLogMaxSize: prefs.screenLogMaxSize ?? null,
 	});
 }
 
