@@ -73,6 +73,9 @@ test("normalizeScreenLogMaxBytes maps prefs values", () => {
 	assert.equal(normalizeScreenLogMaxBytes("x"), null);
 	assert.equal(normalizeScreenLogMaxBytes(null), null);
 	assert.equal(normalizeScreenLogMaxBytes(undefined), null);
+	// Garbage values must not coerce into a pathological cap (true → 1 byte).
+	assert.equal(normalizeScreenLogMaxBytes(true), null);
+	assert.equal(normalizeScreenLogMaxBytes([2048]), null);
 });
 
 test("removes screen.log of ended views past retention, keeps other files", () => {
@@ -192,13 +195,39 @@ test("foreign directories without any view marker are skipped and counted", () =
 	}
 });
 
+test("a stray or foreign host.json does not make a directory sweepable", () => {
+	const root = freshRoot();
+	try {
+		const now = Date.now();
+		const oldSecs = (now - 30 * DAY_MS) / 1000;
+		// Variant 1: unparseable host.json
+		mkdirSync(P.viewDir(root, "stray-garbage"), { recursive: true });
+		writeFileSync(P.hostPath(root, "stray-garbage"), "not json{");
+		writeFileSync(P.screenLogPath(root, "stray-garbage"), Buffer.alloc(4096, 65));
+		utimesSync(P.screenLogPath(root, "stray-garbage"), oldSecs, oldSecs);
+		// Variant 2: parseable host.json but for a DIFFERENT view
+		mkdirSync(P.viewDir(root, "stray-mismatch"), { recursive: true });
+		atomicWriteJson(P.hostPath(root, "stray-mismatch"), { viewId: "someone-else", state: "exited", endedAt: now - 30 * DAY_MS });
+		utimesSync(P.hostPath(root, "stray-mismatch"), oldSecs, oldSecs);
+		writeFileSync(P.screenLogPath(root, "stray-mismatch"), Buffer.alloc(4096, 65));
+		utimesSync(P.screenLogPath(root, "stray-mismatch"), oldSecs, oldSecs);
+		const stats = pruneScreenLogs(root, { now });
+		assert.equal(stats.removed, 0);
+		assert.equal(stats.skippedForeign, 2);
+		assert.equal(existsSync(P.screenLogPath(root, "stray-garbage")), true);
+		assert.equal(existsSync(P.screenLogPath(root, "stray-mismatch")), true);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("a view whose meta.json was deleted externally stays reclaimable via host.json", () => {
 	const root = freshRoot();
 	try {
 		const now = Date.now();
-		// meta.json gone, host.json survives: still a view, still sweepable.
+		// meta.json gone, a valid host.json for THIS view survives: still sweepable.
 		mkdirSync(P.viewDir(root, "orphan"), { recursive: true });
-		atomicWriteJson(P.hostPath(root, "orphan"), { state: "exited", endedAt: now - 10 * DAY_MS });
+		atomicWriteJson(P.hostPath(root, "orphan"), { viewId: "orphan", state: "exited", endedAt: now - 10 * DAY_MS });
 		writeFileSync(P.screenLogPath(root, "orphan"), Buffer.alloc(4096, 65));
 		const old = (now - 10 * DAY_MS) / 1000;
 		utimesSync(P.hostPath(root, "orphan"), old, old);

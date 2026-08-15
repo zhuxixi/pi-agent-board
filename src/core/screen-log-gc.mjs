@@ -35,20 +35,30 @@ const HOST_FRESH_GRACE_MS = 10_000;
 const ALIVE_CLAIM_MAX_AGE_MS = 3 * DAY_MS;
 
 /**
+ * Shared input gate for the prefs normalizers: only finite numbers and non-blank
+ * numeric strings are meaningful. Anything else (booleans, arrays, "", "  ",
+ * objects) is a hand-edit accident, not a value.
+ * @param {unknown} value
+ * @returns {number|null} the coerced finite number, or null when not usable
+ */
+function coerceUsableNumber(value) {
+	if (typeof value === "number") return Number.isFinite(value) ? value : null;
+	if (typeof value === "string" && value.trim() !== "") {
+		const n = Number(value);
+		return Number.isFinite(n) ? n : null;
+	}
+	return null;
+}
+
+/**
  * Normalize the `screenLogRetentionDays` pref.
  * @param {unknown} value
  * @returns {number|null} days, or null when GC is disabled (pref = 0)
  */
 export function normalizeRetentionDays(value) {
-	// Only finite numbers and non-blank numeric strings are meaningful. Anything else
-	// (booleans, arrays, "", "  ", objects) is a hand-edit accident → default window,
-	// never a silent disable.
-	const usable =
-		(typeof value === "number" && Number.isFinite(value)) ||
-		(typeof value === "string" && value.trim() !== "" && Number.isFinite(Number(value)));
-	if (!usable) return DEFAULT_SCREEN_LOG_RETENTION_DAYS;
-	const days = Math.floor(Number(value));
-	if (days < 0) return DEFAULT_SCREEN_LOG_RETENTION_DAYS;
+	const n = coerceUsableNumber(value);
+	if (n === null || n < 0) return DEFAULT_SCREEN_LOG_RETENTION_DAYS;
+	const days = Math.floor(n);
 	// Anything flooring to 0 (0, "0", "0.0", fractions in (0,1)) means "disabled".
 	// A 0-day retention would otherwise compute cutoff=now and delete EVERY ended log.
 	return days === 0 ? null : days;
@@ -60,8 +70,10 @@ export function normalizeRetentionDays(value) {
  * @returns {number|null} bytes, or null to keep the runner's built-in default
  */
 export function normalizeScreenLogMaxBytes(value) {
-	const n = Math.floor(Number(value));
-	return Number.isFinite(n) && n > 0 ? n : null;
+	const n = coerceUsableNumber(value);
+	if (n === null) return null;
+	const bytes = Math.floor(n);
+	return bytes > 0 ? bytes : null;
 }
 
 /**
@@ -69,7 +81,7 @@ export function normalizeScreenLogMaxBytes(value) {
  * Best-effort: a per-file failure is counted and skipped, never thrown.
  * @param {string} root
  * @param {{ retentionDays?: number|null, now?: number }} [opts]
- * @returns {{ scanned: number, removed: number, skippedActive: number, skippedFresh: number, bytesReclaimed: number, errors: number }}
+ * @returns {{ scanned: number, removed: number, skippedActive: number, skippedFresh: number, skippedForeign: number, bytesReclaimed: number, errors: number }}
  */
 export function pruneScreenLogs(root, opts = {}) {
 	const stats = { scanned: 0, removed: 0, skippedActive: 0, skippedFresh: 0, skippedForeign: 0, bytesReclaimed: 0, errors: 0 };
@@ -86,11 +98,9 @@ export function pruneScreenLogs(root, opts = {}) {
 	}
 	for (const entry of entries) {
 		if (!entry.isDirectory()) continue;
-		// A view dir carries meta.json — or at least host.json (a view whose meta.json
-		// was externally deleted is still a view and must stay reclaimable). A foreign
-		// directory that happens to contain a screen.log must never lose it; count the
-		// ones that do so the skip is visible in stats.
-		if (!existsSync(P.metaPath(root, entry.name)) && !existsSync(P.hostPath(root, entry.name))) {
+		if (!isViewDir(root, entry.name)) {
+			// Foreign dirs must never lose a file; count the ones holding a screen.log
+			// so the skip is visible in stats.
 			try {
 				if (statSync(P.screenLogPath(root, entry.name)).size > 0) stats.skippedForeign++;
 			} catch {}
@@ -157,4 +167,17 @@ function ageBasisMs(root, viewId, logFile, now) {
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * A sweep-eligible directory is a real view: it carries meta.json, or — when
+ * meta.json was externally deleted — a host.json that is parseable AND names this
+ * directory as its view. A stray/garbage host.json in a foreign directory must not
+ * make that directory's screen.log a deletion candidate.
+ * @param {string} root @param {string} viewId
+ */
+function isViewDir(root, viewId) {
+	if (existsSync(P.metaPath(root, viewId))) return true;
+	const host = readJson(P.hostPath(root, viewId), null);
+	return Boolean(host && host.viewId === viewId);
 }

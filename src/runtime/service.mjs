@@ -9,6 +9,7 @@ import { createRequire } from "node:module";
 import { createConnection } from "node:net";
 import { resolve } from "node:path";
 import { applyAutoStateToStatus, autoStateEnabled, heuristicAutoState } from "../core/auto-state.mjs";
+import { appendLine } from "../core/atomic.mjs";
 import { finalizeRun, projectViewState, reduceEvent } from "../core/events.mjs";
 import { clearDiagnostics, appendDiagnostic, tailDiagnostics } from "../core/diagnostics.mjs";
 import { emptyEvidenceSnapshot, finalizeEvidence, readEvidence, reduceEvidence, summarizeEvidence, writeEvidence } from "../core/evidence.mjs";
@@ -75,7 +76,13 @@ export function createService(opts) {
 	// the dashboard.
 	setImmediate(() => {
 		try {
-			pruneScreenLogsImpl(root, { retentionDays: readLaunchPrefs(root).screenLogRetentionDays });
+			const stats = pruneScreenLogsImpl(root, { retentionDays: readLaunchPrefs(root).screenLogRetentionDays });
+			// Give the sweep a production sink: one JSONL record per eventful pass.
+			// Steady-state passes that reclaim nothing stay silent, so the file
+			// does not grow from routine dashboard opens.
+			if (stats && (stats.removed > 0 || stats.errors > 0 || stats.skippedForeign > 0)) {
+				appendLine(P.gcHistoryPath(root), JSON.stringify({ at: Date.now(), ...stats }));
+			}
 		} catch {}
 	}).unref?.();
 

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -782,6 +782,55 @@ test("ensureHost passes screenLogMaxBytes from prefs into HostConfig", async () 
 		const result = svc.ensureHost("gc1");
 		assert.equal(result.ok, true);
 		assert.equal(captured.screenLogMaxBytes, 2048);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("screen log GC writes a summary record to gc-history.jsonl when it reclaims", async () => {
+	const root = freshRoot();
+	try {
+		const now = Date.now();
+		const DAY = 24 * 60 * 60 * 1000;
+		createView(root, { id: "gc9", name: "gc9", cwd: process.cwd() });
+		writeHost(root, {
+			version: 1,
+			viewId: "gc9",
+			mode: "pty",
+			runnerPid: null,
+			childPid: null,
+			socketPath: "",
+			state: "exited",
+			startedAt: now - 11 * DAY,
+			lastSeenAt: now - 10 * DAY,
+			endedAt: now - 10 * DAY,
+			exitCode: 0,
+			error: null,
+			cols: 80,
+			rows: 24,
+			attachedClients: 0,
+		});
+		writeFileSync(P.screenLogPath(root, "gc9"), Buffer.alloc(4096, 65));
+		// Backdate host.json past the heartbeat grace window so the sweep acts.
+		const oldSecs = (now - 10 * DAY) / 1000;
+		utimesSync(P.hostPath(root, "gc9"), oldSecs, oldSecs);
+		service(root); // no pruneScreenLogs override → the real sweep runs
+		await new Promise((r) => setImmediate(r));
+		const lines = readFileSync(P.gcHistoryPath(root), "utf8").trim().split("\n");
+		const record = JSON.parse(lines[lines.length - 1]);
+		assert.equal(record.removed, 1);
+		assert.ok(record.bytesReclaimed >= 4096);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("screen log GC stays silent when nothing is reclaimed", async () => {
+	const root = freshRoot();
+	try {
+		service(root);
+		await new Promise((r) => setImmediate(r));
+		assert.equal(existsSync(P.gcHistoryPath(root)), false);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
