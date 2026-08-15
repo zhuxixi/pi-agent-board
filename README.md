@@ -1,11 +1,11 @@
 # Pi Agent Board
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/rutvikchandla3/pi-agent-board/main/assets/banner.png" alt="Pi Agent Board" width="100%" />
+  <img src="https://raw.githubusercontent.com/zhuxixi/pi-agent-board/main/assets/banner.png" alt="Pi Agent Board" width="100%" />
 </p>
 
 <p align="center">
-  <a href="https://github.com/rutvikchandla3/pi-agent-board/blob/main/assets/demo.mp4"><strong>30s demo</strong></a>
+  <a href="https://github.com/zhuxixi/pi-agent-board/blob/main/assets/demo.mp4"><strong>30s demo</strong></a>
   | <a href="https://pi.dev/packages?name=pi-agent-board">Pi package gallery</a>
   | <a href="https://www.npmjs.com/package/pi-agent-board">npm</a>
 </p>
