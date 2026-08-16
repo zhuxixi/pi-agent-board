@@ -826,7 +826,12 @@ export class PtyAttachComponent implements Component {
 	/** Schedule the next jiggle retry with backoff. */
 	private scheduleNextJiggleRetry(): void {
 		const delay = nextRetryDelay(this.jiggleRetryState);
-		if (delay === null) return;
+		if (delay === null) {
+			// Chain exhausted (max retries) — mark stopped so checkClearSequence
+			// short-circuits on subsequent output chunks.
+			this.jiggleRetryState = stopRetry(this.jiggleRetryState);
+			return;
+		}
 		this.jiggleRetryTimer = setTimeout(() => {
 			this.jiggleRetryTimer = null;
 			if (this.closed || !this.connected) return;
