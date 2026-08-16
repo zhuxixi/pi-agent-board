@@ -403,7 +403,10 @@ export class PtyAttachComponent implements Component {
 
 	private finishAttachTransition(): void {
 		if (!this.attaching) return;
-		this.cancelJiggleRetry();
+		// Note: jiggle retry chain is NOT cancelled here — it survives the settle
+		// transition because any successful jiggle triggers a fullRender which emits
+		// \x1b[2J, self-cancelling the chain. Extra jiggles during the settled state
+		// are harmless (they just cause a brief full-render flicker).
 		this.attaching = false;
 		if (this.attachSettleTimer) {
 			clearTimeout(this.attachSettleTimer);
@@ -802,6 +805,10 @@ export class PtyAttachComponent implements Component {
 
 	/** Start the jiggle retry chain after initial jiggle. */
 	private startJiggleRetry(): void {
+		if (this.jiggleRetryTimer) {
+			clearTimeout(this.jiggleRetryTimer);
+			this.jiggleRetryTimer = null;
+		}
 		this.jiggleRetryState = createJiggleRetryState();
 		this.clearCarry = "";
 		this.scheduleNextJiggleRetry();
@@ -809,6 +816,7 @@ export class PtyAttachComponent implements Component {
 
 	/** Check socket output for full-clear sequence; cancel retry if found. */
 	private checkClearSequence(data: string): void {
+		if (this.jiggleRetryState.stopped) return;
 		const result = feedJiggleRetry(this.jiggleRetryState, data, this.clearCarry);
 		this.jiggleRetryState = result.state;
 		this.clearCarry = result.carry;
