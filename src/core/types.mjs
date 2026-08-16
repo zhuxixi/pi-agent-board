@@ -211,6 +211,7 @@ export const GROUP_LABELS = {
  * @property {Record<string,string>} env
  * @property {number} cols
  * @property {number} rows
+ * @property {number|null} screenLogMaxBytes per-view screen.log write cap; null = runner default
  */
 
 /**
@@ -372,6 +373,8 @@ export const GROUP_LABELS = {
  * @property {string|null} cwd
  * @property {string|null} model
  * @property {"off"|"minimal"|"low"|"medium"|"high"|"xhigh"|null} thinkingLevel
+ * @property {number|null} screenLogRetentionDays days before an ended view's screen.log is GC'd; 0 disables GC
+ * @property {number|null} screenLogMaxSize per-view screen.log write cap in bytes; null = built-in default
  */
 
 export {};

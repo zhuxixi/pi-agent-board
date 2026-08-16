@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createService, shouldProbePtySupport } from "../src/runtime/service.mjs";
 import { diagnoseNodePtyFailure } from "../src/core/pty-support.mjs";
 import * as P from "../src/core/paths.mjs";
-import { createView, readState, writeHost, writeHostPid, writeState } from "../src/core/store.mjs";
+import { createView, readState, writeHost, writeHostPid, writeLaunchPrefs, writeState } from "../src/core/store.mjs";
 
 function freshRoot() {
 	return mkdtempSync(join(tmpdir(), "agentview-service-"));
@@ -98,6 +98,8 @@ test("launch prefs round-trip through service", () => {
 			cwd: "/tmp/work",
 			model: "openai/gpt-5.4",
 			thinkingLevel: "high",
+			screenLogRetentionDays: null,
+			screenLogMaxSize: null,
 		});
 	} finally {
 		rmSync(root, { recursive: true, force: true });
@@ -727,6 +729,163 @@ test("reconcile finalizes stale starting/alive host snapshots", () => {
 		const next = readState(root, "v1");
 		assert.equal(next.semanticState, "failed");
 		assert.equal(next.processState, "exited");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("createService schedules screen log GC with the prefs retention", async () => {
+	const root = freshRoot();
+	try {
+		writeLaunchPrefs(root, { screenLogRetentionDays: 3 });
+		const calls = [];
+		service(root, { pruneScreenLogs: (r, o) => calls.push([r, o]) });
+		// GC is deferred via setImmediate; one tick is enough (FIFO order).
+		await new Promise((r) => setImmediate(r));
+		assert.equal(calls.length, 1);
+		assert.equal(calls[0][0], root);
+		assert.deepEqual(calls[0][1], { retentionDays: 3 });
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a failing screen log GC does not break createService", async () => {
+	const root = freshRoot();
+	try {
+		const svc = service(root, {
+			pruneScreenLogs: () => {
+				throw new Error("gc boom");
+			},
+		});
+		await new Promise((r) => setImmediate(r));
+		assert.equal(typeof svc.row, "function"); // service still constructed fine
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("ensureHost passes screenLogMaxBytes from prefs into HostConfig", async () => {
+	const root = freshRoot();
+	try {
+		writeLaunchPrefs(root, { screenLogMaxSize: 2048 });
+		const meta = createView(root, { id: "gc1", name: "gc1", cwd: process.cwd() });
+		writeFileSync(meta.sessionFile, "");
+		let captured = null;
+		const svc = service(root, {
+			ptySupport: () => ({ ok: true }),
+			launchHost: (r, config) => {
+				captured = config;
+				return { pid: null, configPath: "/no/host-config.json" };
+			},
+		});
+		const result = svc.ensureHost("gc1");
+		assert.equal(result.ok, true);
+		assert.equal(captured.screenLogMaxBytes, 2048);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("screen log GC writes a summary record to gc-history.jsonl when it reclaims", async () => {
+	const root = freshRoot();
+	try {
+		const now = Date.now();
+		const DAY = 24 * 60 * 60 * 1000;
+		createView(root, { id: "gc9", name: "gc9", cwd: process.cwd() });
+		writeHost(root, {
+			version: 1,
+			viewId: "gc9",
+			mode: "pty",
+			runnerPid: null,
+			childPid: null,
+			socketPath: "",
+			state: "exited",
+			startedAt: now - 11 * DAY,
+			lastSeenAt: now - 10 * DAY,
+			endedAt: now - 10 * DAY,
+			exitCode: 0,
+			error: null,
+			cols: 80,
+			rows: 24,
+			attachedClients: 0,
+		});
+		writeFileSync(P.screenLogPath(root, "gc9"), Buffer.alloc(4096, 65));
+		// Backdate host.json past the heartbeat grace window so the sweep acts.
+		const oldSecs = (now - 10 * DAY) / 1000;
+		utimesSync(P.hostPath(root, "gc9"), oldSecs, oldSecs);
+		service(root); // no pruneScreenLogs override → the real sweep runs
+		await new Promise((r) => setImmediate(r));
+		const lines = readFileSync(P.gcHistoryPath(root), "utf8").trim().split("\n");
+		const record = JSON.parse(lines[lines.length - 1]);
+		assert.equal(record.removed, 1);
+		assert.ok(record.bytesReclaimed >= 4096);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("screen log GC stays silent when nothing is reclaimed", async () => {
+	const root = freshRoot();
+	try {
+		service(root);
+		await new Promise((r) => setImmediate(r));
+		assert.equal(existsSync(P.gcHistoryPath(root)), false);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("persistent skippedForeign does not trigger gc-history records", async () => {
+	const root = freshRoot();
+	try {
+		const now = Date.now();
+		// A permanent foreign dir holding an old screen.log: skippedForeign > 0 on
+		// every pass, but nothing is ever removed — no record may be appended.
+		const foreign = join(P.viewsDir(root), "not-a-view");
+		mkdirSync(foreign, { recursive: true });
+		writeFileSync(P.screenLogPath(root, "not-a-view"), Buffer.alloc(4096, 65));
+		const oldSecs = (now - 30 * 24 * 60 * 60 * 1000) / 1000;
+		utimesSync(P.screenLogPath(root, "not-a-view"), oldSecs, oldSecs);
+		service(root);
+		await new Promise((r) => setImmediate(r));
+		assert.equal(existsSync(P.gcHistoryPath(root)), false);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("errors-only GC passes produce no gc-history record", async () => {
+	const root = freshRoot();
+	try {
+		const now = Date.now();
+		const DAY = 24 * 60 * 60 * 1000;
+		createView(root, { id: "gcerr", name: "gcerr", cwd: process.cwd() });
+		writeHost(root, {
+			version: 1,
+			viewId: "gcerr",
+			mode: "pty",
+			runnerPid: null,
+			childPid: null,
+			socketPath: "",
+			state: "exited",
+			startedAt: now - 11 * DAY,
+			lastSeenAt: now - 10 * DAY,
+			endedAt: now - 10 * DAY,
+			exitCode: 0,
+			error: null,
+			cols: 80,
+			rows: 24,
+			attachedClients: 0,
+		});
+		// A directory named screen.log: stat succeeds, unlink fails with EISDIR on
+		// every pass — a persistent errors>0 condition that must stay silent.
+		mkdirSync(P.screenLogPath(root, "gcerr"));
+		const oldSecs = (now - 10 * DAY) / 1000;
+		utimesSync(P.hostPath(root, "gcerr"), oldSecs, oldSecs);
+		service(root);
+		await new Promise((r) => setImmediate(r));
+		assert.equal(existsSync(P.gcHistoryPath(root)), false);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
