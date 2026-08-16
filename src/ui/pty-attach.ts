@@ -8,6 +8,13 @@ import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@
 import { isProbablyEmptyPiInputLine } from "../core/pty-input.mjs";
 import { findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
 import { createAttachOutputRenderScheduler, nextAttachRender, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
+import {
+	createJiggleRetryState,
+	feedOutput as feedJiggleRetry,
+	nextRetryDelay,
+	advanceRetry,
+	stopRetry,
+} from "../core/pty-attach-jiggle-retry.mjs";
 import { clampInt, parseMouseInputChunk, resolveWheelLines, scrollViewportTop, selectionDragScrollLines } from "../core/pty-scroll.mjs";
 
 export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null };
@@ -112,9 +119,13 @@ export class PtyAttachComponent implements Component {
 	private retryTimer: ReturnType<typeof setTimeout> | null = null;
 	private loadingTimer: ReturnType<typeof setInterval> | null = null;
 	private redrawTimer: ReturnType<typeof setTimeout> | null = null;
-	private liveRedrawTimer: ReturnType<typeof setTimeout> | null = null;
-	private forcedRedrawAfterLiveOutput = false;
 	private mouseRefreshTimers: Array<ReturnType<typeof setTimeout>> = [];
+	// Jiggle retry chain: re-send resize jiggle until we see a full-clear sequence
+	// in the PTY output, proving the child pi-tui did a fullRender and the replay
+	// garbage has been flushed. Replaces the one-shot forceChildRedrawAfterLiveOutput.
+	private jiggleRetryState = createJiggleRetryState();
+	private jiggleRetryTimer: ReturnType<typeof setTimeout> | null = null;
+	private clearCarry = "";
 	private osc52Carry = "";
 	private passthroughCarry = "";
 	private readonly connectStartedAt = Date.now();
@@ -307,6 +318,7 @@ export class PtyAttachComponent implements Component {
 			this.send({ type: "hello", clientId: `ui-${Date.now()}`, wantOutput: true });
 			this.sendResize();
 			this.forceChildRedraw();
+			this.startJiggleRetry();
 			this.enableMouseScroll();
 			this.scheduleRender();
 			this.startAttachSettle();
@@ -391,6 +403,7 @@ export class PtyAttachComponent implements Component {
 
 	private finishAttachTransition(): void {
 		if (!this.attaching) return;
+		this.cancelJiggleRetry();
 		this.attaching = false;
 		if (this.attachSettleTimer) {
 			clearTimeout(this.attachSettleTimer);
@@ -410,10 +423,6 @@ export class PtyAttachComponent implements Component {
 		if (this.redrawTimer) {
 			clearTimeout(this.redrawTimer);
 			this.redrawTimer = null;
-		}
-		if (this.liveRedrawTimer) {
-			clearTimeout(this.liveRedrawTimer);
-			this.liveRedrawTimer = null;
 		}
 	}
 
@@ -791,6 +800,44 @@ export class PtyAttachComponent implements Component {
 		this.redrawTimer.unref?.();
 	}
 
+	/** Start the jiggle retry chain after initial jiggle. */
+	private startJiggleRetry(): void {
+		this.jiggleRetryState = createJiggleRetryState();
+		this.clearCarry = "";
+		this.scheduleNextJiggleRetry();
+	}
+
+	/** Check socket output for full-clear sequence; cancel retry if found. */
+	private checkClearSequence(data: string): void {
+		const result = feedJiggleRetry(this.jiggleRetryState, data, this.clearCarry);
+		this.jiggleRetryState = result.state;
+		this.clearCarry = result.carry;
+		if (result.clearFound) this.cancelJiggleRetry();
+	}
+
+	/** Schedule the next jiggle retry with backoff. */
+	private scheduleNextJiggleRetry(): void {
+		const delay = nextRetryDelay(this.jiggleRetryState);
+		if (delay === null) return;
+		this.jiggleRetryTimer = setTimeout(() => {
+			this.jiggleRetryTimer = null;
+			if (this.closed || !this.connected) return;
+			this.forceChildRedraw();
+			this.jiggleRetryState = advanceRetry(this.jiggleRetryState);
+			this.scheduleNextJiggleRetry();
+		}, delay);
+		this.jiggleRetryTimer.unref?.();
+	}
+
+	/** Cancel the jiggle retry chain. */
+	private cancelJiggleRetry(): void {
+		if (this.jiggleRetryTimer) {
+			clearTimeout(this.jiggleRetryTimer);
+			this.jiggleRetryTimer = null;
+		}
+		this.jiggleRetryState = stopRetry(this.jiggleRetryState);
+	}
+
 	private tryScrollBy(linesUp: number): boolean {
 		const result = scrollViewportTop(this.viewportTop, this.bottomViewportTop(this.bodyHeight()), linesUp);
 		this.viewportTop = result.viewportTop;
@@ -856,7 +903,7 @@ export class PtyAttachComponent implements Component {
 				const msg = JSON.parse(line);
 				if (msg.type === "output" && typeof msg.data === "string") {
 					this.pushOutput(msg.data, { forwardProtocols: true });
-					this.forceChildRedrawAfterLiveOutput();
+					this.checkClearSequence(msg.data);
 					continue;
 				}
 				if (msg.type === "hello" || msg.type === "status") this.status = "attached";
@@ -870,17 +917,6 @@ export class PtyAttachComponent implements Component {
 			}
 		}
 		if (needsRender) this.scheduleRender();
-	}
-
-	private forceChildRedrawAfterLiveOutput(): void {
-		if (this.forcedRedrawAfterLiveOutput || this.liveRedrawTimer || this.closed) return;
-		this.liveRedrawTimer = setTimeout(() => {
-			this.liveRedrawTimer = null;
-			if (this.closed || !this.connected) return;
-			this.forcedRedrawAfterLiveOutput = true;
-			this.forceChildRedraw();
-		}, 120);
-		this.liveRedrawTimer.unref?.();
 	}
 
 	private forwardTerminalProtocols(data: string): void {
@@ -965,6 +1001,7 @@ export class PtyAttachComponent implements Component {
 
 	private close(): void {
 		this.closed = true;
+		this.cancelJiggleRetry();
 		this.disableMouseScroll();
 		this.clearMouseRefreshTimers();
 		this.clearPendingClick();
