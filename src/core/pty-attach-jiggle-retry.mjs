@@ -31,9 +31,7 @@ export function feedOutput(state, data, carry) {
 	const combined = carry + data;
 	const clearFound = hasFullClearSequence(combined);
 	const newCarry = clearFound ? "" : tailCarry(combined);
-	const newState = clearFound
-		? { ...state, clearDetected: true }
-		: state;
+	const newState = clearFound ? { ...state, clearDetected: true } : state;
 	return { state: newState, carry: newCarry, clearFound };
 }
 

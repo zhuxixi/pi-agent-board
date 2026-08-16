@@ -1,14 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+	advanceRetry,
 	BACKOFF_MS,
-	MAX_RETRIES,
 	createJiggleRetryState,
 	feedOutput,
-	nextRetryDelay,
-	advanceRetry,
-	stopRetry,
 	hasFullClearSequence,
+	MAX_RETRIES,
+	nextRetryDelay,
+	stopRetry,
 } from "../src/core/pty-attach-jiggle-retry.mjs";
 
 // --- hasFullClearSequence ---
