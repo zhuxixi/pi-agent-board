@@ -62,7 +62,7 @@ Open the board with `pi /agent-board` or `/agent-board` inside Pi.
 
 - Type a task in the bottom input, then press `enter`.
 - Confirm **Start session**, or adjust `cwd`, model, and thinking level first.
-- Watch rows move through `Queued`, `Running`, `Needs input`, `In Progress`, `Done`, `Failed`, and `Stopped`.
+- Watch rows move through `Queued`, `Running`, `Needs answer`, `Needs instructions`, `Done`, `Failed`, and `Stopped`.
 - Press `space` to peek at the selected row's summary, blocker, and latest output.
 - Press `r` to reply inline without attaching.
 - Press `enter`, `right`, or `>` to attach to the real Pi session.
