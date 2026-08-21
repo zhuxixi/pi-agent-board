@@ -220,3 +220,49 @@ test("runner keeps a completed fake worker idle when auto-done is disabled", { t
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
 });
+
+test("runner does not clobber a manual completion made during post-exit model passes", { timeout: 30000 }, async () => {
+	const root = mkdtempSync(join(tmpdir(), "agentview-run-manual-"));
+	process.env.FAKE_PI_MODE = "completed";
+	process.env.FAKE_PI_SUMMARY_DELAY_MS = "2000";
+	try {
+		const meta = createView(root, { id: "view_1", name: "fix", cwd: root });
+		const config = makeConfig(root, "view_1", "run_1", meta.sessionFile, root, "fix the bug");
+		const st = readState(root, "view_1");
+		st.currentRunId = "run_1";
+		const { writeState } = await import("../src/core/store.mjs");
+		writeState(root, st);
+
+		const { pid } = launchRun(root, config, { runnerScript: RUNNER });
+		assert.ok(pid && pid > 0, "runner spawned");
+
+		// Wait for the worker to exit (terminal state persisted); the runner is now
+		// inside its post-exit model passes (fake --model calls are slowed 2s).
+		await waitFor(() => {
+			const s = readStatus(root, "view_1", "run_1");
+			return s && s.endedAt ? s : null;
+		});
+
+		// User marks the row done manually while the model passes are in flight.
+		const { createService } = await import("../src/runtime/service.mjs");
+		assert.deepEqual(createService({ root }).markCompleted("view_1"), { ok: true });
+
+		// Let the runner finish its passes and exit.
+		await waitFor(() => {
+			try {
+				process.kill(pid, 0);
+				return false;
+			} catch {
+				return true;
+			}
+		}, 25000);
+
+		const state = readState(root, "view_1");
+		assert.equal(state.semanticState, "completed");
+		assert.equal(state.autoState, null);
+	} finally {
+		delete process.env.FAKE_PI_MODE;
+		delete process.env.FAKE_PI_SUMMARY_DELAY_MS;
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});

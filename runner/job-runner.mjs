@@ -102,6 +102,19 @@ function main() {
 		dirty = false;
 	};
 
+	/**
+	 * Persist only if the user hasn't marked the row done manually since the last
+	 * persist. projectViewState() overwrites the row state unconditionally, so a
+	 * post-exit model pass must never persist its stale in-memory status over a
+	 * fresh manual completion.
+	 */
+	const persistUnlessManual = (force = false) => {
+		const latestView = readState(root, viewId);
+		if (isManualCompletion(latestView)) return false;
+		persist(force);
+		return true;
+	};
+
 	const scheduleFlush = () => {
 		if (flushTimer) {
 			dirty = true;
@@ -206,12 +219,12 @@ function main() {
 				if (changed) {
 					finalizeEvidence(evidence, status, Date.now());
 					status.evidenceSummary = summarizeEvidence(evidence);
-					persist(true);
+					persistUnlessManual(true);
 				}
 				return maybeModelSummary(config, status);
 			})
 			.then((changed) => {
-				if (changed) persist(true);
+				if (changed) persistUnlessManual(true);
 			})
 			.catch(() => {})
 			.finally(() => {
@@ -343,10 +356,6 @@ async function maybeModelAutoState(config, status, evidence) {
 	const classification = autoStateFromModelOrHeuristic(out, latest, { lastAgentActivityAt: status.lastAgentActivityAt ?? null });
 	const changed = applyAutoStateToStatus(status, classification, Date.now());
 	if (changed) {
-		// Second check right before persisting: persist() projects status onto the
-		// row state, so bail out if the user completed the row while we applied.
-		const latestView = readState(config.root, config.viewId);
-		if (isManualCompletion(latestView)) return false;
 		appendDiagnostic(config.root, config.viewId, { source: "runner", runId: config.runId, code: "auto_state_classified", message: "Auto-state classifier refined terminal state", details: { kind: classification.kind, confidence: classification.confidence, source: classification.source, reason: classification.reason } });
 	}
 	return changed;
@@ -377,6 +386,10 @@ async function maybeModelSummary(config, status) {
 		[...config.piArgsPrefix, "--mode", "json", "-p", "--no-session", "--model", model, prompt],
 		15000,
 	);
+	// The user may have marked the row done manually during the summary call.
+	// Updating the stale status and letting the caller persist would clobber the
+	// manual completion, so bail out before touching the in-memory status.
+	if (isManualCompletion(readState(config.root, config.viewId))) return false;
 	const text = out.trim().split("\n").slice(-1)[0]?.trim();
 	if (text) {
 		status.summary = text.replace(/^["']|["']$/g, "").slice(0, 80);
