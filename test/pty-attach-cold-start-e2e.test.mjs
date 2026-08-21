@@ -30,53 +30,79 @@ async function waitFor(predicate, timeoutMs = 10000) {
 	throw new Error("timed out waiting");
 }
 
-// The stub TUI starts 8s in — beyond the OLD chain's ~5.12s window, so only the
-// TUI-frame re-arm (issue #10) can produce a clear. Old choreography fails this.
+function spawnRunner(root, viewId, piArgsPrefix, env = {}) {
+	const meta = createView(root, { id: viewId, name: "cold", cwd: process.cwd() });
+	atomicWriteJson(P.hostConfigPath(root, viewId), {
+		root,
+		viewId,
+		sessionFile: meta.sessionFile,
+		cwd: process.cwd(),
+		initialPrompt: null,
+		piCommand: process.execPath,
+		piArgsPrefix,
+		model: null,
+		tools: null,
+		env,
+		cols: 120,
+		rows: 36,
+	});
+	const runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), P.hostConfigPath(root, viewId)], {
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	return runner;
+}
+
+function cleanup(root, runner, socket) {
+	try { socket?.end(); } catch {}
+	// Give the runner a beat to tear down before removing the tmpdir.
+	setTimeout(() => {
+		try { runner?.kill("SIGTERM"); } catch {}
+		rmSync(root, { recursive: true, force: true });
+	}, 80);
+}
+
+// Hold-protocol cold-start heal (issue #25): the attach shrinks the child PTY
+// to (W-1,H-1) and holds; when the cold child TUI finally starts (4.5s), its
+// first \x1b[?2026h frame triggers the re-arm which restores the original size;
+// the now-rendering child sees the width delta and fullRenders with \x1b[2J.
+// Assert the heal lands within 3s of the first frame and the PTY ends at the
+// original size.
+//
+// The stub TUI delay MUST be < NO_FRAME_RESTORE_MS (6s): if it started later,
+// G1 would release the hold before the TUI booted, so no width delta would
+// ever exist (plan brief said 8s — that exercised G1, not the re-arm heal).
 test(
-	"cold-start attach: chain re-arms on first TUI frame and sees full clear",
+	"cold-start attach: shrink-and-hold re-arms on first TUI frame, heals in <=3s, ends at original size",
 	{ skip: !hasNodePty && "node-pty unavailable", timeout: 45000 },
 	async () => {
-		const root = mkdtempSync(join(tmpdir(), "agentview-coldstart-"));
+		const root = mkdtempSync(join(tmpdir(), "agentview-hold-"));
 		let runner;
 		let socket;
 		const t0 = Date.now();
 		try {
-			const meta = createView(root, { id: "cold1", name: "cold", cwd: process.cwd() });
-			atomicWriteJson(P.hostConfigPath(root, "cold1"), {
-				root,
-				viewId: "cold1",
-				sessionFile: meta.sessionFile,
-				cwd: process.cwd(),
-				initialPrompt: null,
-				piCommand: process.execPath,
-				piArgsPrefix: [resolve("test-support/fake-coldstart-tui-pi.mjs")],
-				model: null,
-				tools: null,
-				env: { STUB_TUI_DELAY_MS: "8000" },
-				cols: 120,
-				rows: 36,
-			});
-			runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), P.hostConfigPath(root, "cold1")], {
-				stdio: ["ignore", "pipe", "pipe"],
+			runner = spawnRunner(root, "cold1", [resolve("test-support/fake-coldstart-tui-pi.mjs")], {
+				STUB_TUI_DELAY_MS: "4500",
 			});
 			await waitFor(() => existsSync(P.controlSocketPath(root, "cold1")) && readHost(root, "cold1")?.state === "alive");
 
 			socket = createConnection(P.controlSocketPath(root, "cold1"));
 			await once(socket, "connect");
 
-			let clearAt = null;
 			let frameAt = null;
+			let clearAt = null;
+			// Record every resize the controller sends so we can assert the
+			// restore (original size) actually went out.
+			const resizes = [];
 			const controller = createJiggleRetryController({
-				sendJiggle: () => {
-					send(socket, { type: "resize", cols: 195, rows: 38 });
-					setTimeout(() => send(socket, { type: "resize", cols: 196, rows: 39 }), 200);
+				sendResize: (cols, rows) => {
+					resizes.push([cols, rows]);
+					send(socket, { type: "resize", cols, rows });
 				},
 				setTimeoutFn: (fn, ms) => setTimeout(fn, ms),
 				clearTimeoutFn: (t) => clearTimeout(t),
 			});
-			controller.start(); // connect-time chain, like the component
+			controller.start(196, 39); // protocol sends original + shrink + hold itself
 			send(socket, { type: "hello", clientId: "e2e", wantOutput: true });
-			send(socket, { type: "resize", cols: 196, rows: 39 }); // initial sendResize
 
 			let buf = "";
 			socket.on("data", (chunk) => {
@@ -89,10 +115,7 @@ test(
 						const msg = JSON.parse(line);
 						if (msg.type === "output" && typeof msg.data === "string") {
 							controller.feed(msg.data);
-							// Detection is driven off the controller's carry-safe state machine:
-							// a clear split across socket messages is still detected, unlike a
-							// naive msg.data.includes scan which would flake on chunk
-							// boundaries.
+							// Sample off the controller's own state machine (carry-safe).
 							if (frameAt === null && controller.getState().tuiFrameSeen) {
 								frameAt = Date.now() - t0;
 							}
@@ -105,28 +128,85 @@ test(
 			});
 
 			await waitFor(() => clearAt !== null, 30000);
-			// 下界证明清屏来自 TUI 启动之后（8s stub 计时器定死的）。re-arm 的证明不再用
-			// 绝对截止时间（它把 runner+pty 启动开销也算进去，负载高的 CI 上可能越界），
-			// 改用「首帧 → 清屏」的相对时差：re-arm 链在首帧后 120ms 发 jiggle，清屏应
-			// 紧随其后（<1.5s）；若没有 re-arm，退避尾部要到 11.12s 才发 jiggle，即首帧
-			// 后约 3.1s 才清屏——两者差一个数量级，且启动延迟会同时平移两个时间戳，
-			// 不会造成误判（旧编排仍然必失败）。
-			assert.ok(clearAt >= 7800, `clear arrived too early (${clearAt}ms) — not from the re-armed chain`);
 			assert.ok(frameAt !== null, "controller never saw a TUI frame");
 			const frameToClear = clearAt - frameAt;
 			assert.ok(
-				frameToClear < 1500,
-				`clear followed first TUI frame by ${frameToClear}ms — expected ~120ms from the re-armed chain's first retry; without re-arm the backoff tail fires at 11120ms (~3.1s after the 8s stub frame)`,
+				frameToClear <= 3000,
+				`clear followed the first TUI frame by ${frameToClear}ms — expected a few round-trips (restore → child width delta → fullRender). Old pulse protocol heals at >10s or never.`,
 			);
+
+			// Final state: not held, chain stopped, restore sent, PTY back at original.
 			const s = controller.getState();
+			assert.equal(s.held, false);
 			assert.equal(s.clearDetected, true);
-			assert.equal(s.stopped, true);
 			assert.equal(s.tuiFrameSeen, true);
-			controller.stop();
+			assert.deepEqual(resizes.at(-1), [196, 39], "last resize must be the restore to original");
+			// Runner-side confirmation: host.json settles at the original size.
+			await waitFor(() => {
+				const h = readHost(root, "cold1");
+				return h?.cols === 196 && h?.rows === 39;
+			}, 10000);
+			controller.restoreAndStop();
 		} finally {
-			try { socket?.end(); } catch {}
-			try { runner?.kill("SIGTERM"); } catch {}
-			rmSync(root, { recursive: true, force: true });
+			cleanup(root, runner, socket);
+		}
+	},
+);
+
+// Non-pi shell child: never emits TUI frames and never responds to resizes, so
+// no clear can ever arrive. G1 (NO_FRAME_RESTORE_MS = 6s) must restore the PTY
+// to the original size so a shell attach is not left one column narrower.
+test(
+	"shell child attach: G1 restores the original size within 8s when no TUI frame ever arrives",
+	{ skip: !hasNodePty && "node-pty unavailable", timeout: 20000 },
+	async () => {
+		const root = mkdtempSync(join(tmpdir(), "agentview-shell-"));
+		let runner;
+		let socket;
+		try {
+			runner = spawnRunner(root, "shell1", [resolve("test-support/fake-pty-pi.mjs")]);
+			await waitFor(() => existsSync(P.controlSocketPath(root, "shell1")) && readHost(root, "shell1")?.state === "alive");
+
+			socket = createConnection(P.controlSocketPath(root, "shell1"));
+			await once(socket, "connect");
+
+			const resizes = [];
+			const controller = createJiggleRetryController({
+				sendResize: (cols, rows) => {
+					resizes.push([cols, rows]);
+					send(socket, { type: "resize", cols, rows });
+				},
+				setTimeoutFn: (fn, ms) => setTimeout(fn, ms),
+				clearTimeoutFn: (t) => clearTimeout(t),
+			});
+			controller.start(120, 36);
+			send(socket, { type: "hello", clientId: "e2e", wantOutput: true });
+
+			let buf = "";
+			socket.on("data", (chunk) => {
+				buf += chunk.toString("utf8");
+				const lines = buf.split("\n");
+				buf = lines.pop() ?? "";
+				for (const line of lines) {
+					if (!line.trim()) continue;
+					try {
+						const msg = JSON.parse(line);
+						if (msg.type === "output" && typeof msg.data === "string") {
+							controller.feed(msg.data);
+						}
+					} catch {}
+				}
+			});
+
+			// start() sent [120,36] then [119,35]. G1 fires at 6s (no frame) and
+			// must send [120,36] again — so two [120,36] sends total within 8s.
+			await waitFor(() => resizes.filter(([c, r]) => c === 120 && r === 36).length >= 2, 10000);
+			const s = controller.getState();
+			assert.equal(s.held, false, "hold must be released after G1 restore");
+			assert.equal(s.tuiFrameSeen, false);
+			controller.restoreAndStop();
+		} finally {
+			cleanup(root, runner, socket);
 		}
 	},
 );
