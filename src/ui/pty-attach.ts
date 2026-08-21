@@ -48,11 +48,6 @@ const OSC52_MAX_BYTES = 1_000_000;
 const OSC52_CARRY_MAX_BYTES = OSC52_MAX_BYTES + 4096;
 const TERMINAL_PASSTHROUGH_MAX_BYTES = 5_000_000;
 const TERMINAL_PASSTHROUGH_CARRY_MAX_BYTES = TERMINAL_PASSTHROUGH_MAX_BYTES + 4096;
-/** Delay between the shrink and restore halves of a resize jiggle. 200ms keeps
- * the two SIGWINCHs apart well beyond pi-tui's 16ms render throttle, so a busy
- * (booting) child processes them as two separate renders instead of coalescing
- * the pair into a net-zero size change. */
-const JIGGLE_RESTORE_MS = 200;
 const KITTY_IMAGE_PREFIX = "\x1b_G";
 const ITERM2_FILE_PREFIX = "\x1b]1337;File=";
 
@@ -118,16 +113,16 @@ export class PtyAttachComponent implements Component {
 	private parserBuffer = "";
 	private retryTimer: ReturnType<typeof setTimeout> | null = null;
 	private loadingTimer: ReturnType<typeof setInterval> | null = null;
-	private redrawTimer: ReturnType<typeof setTimeout> | null = null;
 	private mouseRefreshTimers: Array<ReturnType<typeof setTimeout>> = [];
-	// Jiggle retry chain: re-send resize jiggle until we see a full-clear sequence
-	// in the PTY output, proving the child pi-tui did a fullRender and the replay
-	// garbage has been flushed. The controller re-arms once on the child TUI's
-	// first frame so cold-start attaches get a fresh budget exactly when the
-	// child can finally observe a resize (issue #10).
+	// Shrink-and-hold jiggle protocol (issue #25): on attach we resize the child to
+	// (cols-1, rows-1) and hold it there until the child emits a full clear
+	// (\x1b[2J) — any render the child makes while held sees a width delta and
+	// must fullRender, so boot-storm coalescing of ±1 pulses can no longer
+	// produce a net-zero change. The controller restores the original size on
+	// clear / first TUI frame (re-arm) / no-frame 6s guard / budget exhaustion /
+	// close / external resize (guards G1-G5, see controller module).
 	private readonly jiggleRetry = createJiggleRetryController({
-		sendJiggle: () => this.forceChildRedraw(),
-		shouldFire: () => !this.closed && this.connected,
+		sendResize: (cols, rows) => this.sendResize(cols, rows),
 		setTimeoutFn: (fn, ms) => {
 			const t = setTimeout(fn, ms);
 			t.unref?.();
@@ -332,9 +327,7 @@ export class PtyAttachComponent implements Component {
 			this.connected = true;
 			this.status = "attached";
 			this.send({ type: "hello", clientId: `ui-${Date.now()}`, wantOutput: true });
-			this.sendResize();
-			this.forceChildRedraw();
-			this.jiggleRetry.start();
+			this.jiggleRetry.start(this.cols, this.rows);
 			this.enableMouseScroll();
 			this.scheduleRender();
 			this.startAttachSettle();
@@ -398,7 +391,7 @@ export class PtyAttachComponent implements Component {
 	/**
 	 * Attach transition lifecycle. Keep the loading banner up while the screen-log replay
 	 * and the initial resize-jiggle redraws settle, so the buffer doesn't visibly scroll or
-	 * flash through the viewport on attach. Each `forceChildRedraw` defers the settle
+	 * flash through the viewport on attach. Each output chunk defers the settle
 	 * window; a hard timeout guards against a session that never produces output.
 	 */
 	private startAttachSettle(): void {
@@ -441,13 +434,6 @@ export class PtyAttachComponent implements Component {
 		// Force a full clear so the loading banner is replaced atomically by the settled
 		// buffer, instead of diffing banner lines into buffer lines.
 		this.scheduleRender(true);
-	}
-
-	private clearRedrawTimer(): void {
-		if (this.redrawTimer) {
-			clearTimeout(this.redrawTimer);
-			this.redrawTimer = null;
-		}
 	}
 
 	private clearMouseRefreshTimers(): void {
@@ -792,6 +778,9 @@ export class PtyAttachComponent implements Component {
 		if (size.cols === this.cols && size.rows === this.rows) return;
 		this.cols = size.cols;
 		this.rows = size.rows;
+		// A real terminal resize supersedes the hold protocol: cancel any armed
+		// hold and adopt the new size as the baseline (guard G4, issue #25).
+		this.jiggleRetry.notifyExternalResize(size.cols, size.rows);
 		this.term.resize(this.cols, this.rows);
 		this.sendResize();
 		this.enableMouseScroll();
@@ -800,28 +789,6 @@ export class PtyAttachComponent implements Component {
 	private sendResize(cols = this.cols, rows = this.rows): void {
 		this.send({ type: "resize", cols, rows });
 		this.clampViewportTop(this.bodyHeight());
-	}
-
-	private forceChildRedraw(): void {
-		this.clearRedrawTimer();
-		if (!this.connected) return;
-		const cols = this.cols;
-		const rows = this.rows;
-		const jiggle = localResizeJiggleSize(cols, rows);
-		if (!jiggle) return;
-		// A completed-session reattach often starts from an old screen.log recorded at
-		// a different terminal size. Real terminal zoom fixes that by causing SIGWINCH;
-		// do the same proactively so the child Pi redraws for the attach viewport.
-		this.sendResize(jiggle.cols, jiggle.rows);
-		this.deferAttachSettle();
-		this.redrawTimer = setTimeout(() => {
-			this.redrawTimer = null;
-			if (!this.closed && this.connected) {
-				this.sendResize(cols, rows);
-				this.deferAttachSettle();
-			}
-		}, JIGGLE_RESTORE_MS);
-		this.redrawTimer.unref?.();
 	}
 
 	/** Feed socket output into the jiggle retry controller (clear/frame detection). */
@@ -993,13 +960,12 @@ export class PtyAttachComponent implements Component {
 	private close(): void {
 		this.closed = true;
 		this.imeCoalesceUninstall?.();
-		this.jiggleRetry.stop();
+		this.jiggleRetry.restoreAndStop();
 		this.disableMouseScroll();
 		this.clearMouseRefreshTimers();
 		this.clearPendingClick();
 		this.clearSelectionAutoScroll();
 		this.clearRetry();
-		this.clearRedrawTimer();
 		this.stopLoadingTicker();
 		this.outputRenderScheduler.dispose();
 		if (this.attachSettleTimer) {
@@ -1016,13 +982,6 @@ export class PtyAttachComponent implements Component {
 		this.socket = null;
 		this.connected = false;
 	}
-}
-
-function localResizeJiggleSize(cols: number, rows: number): { cols: number; rows: number } | null {
-	if (cols > 21 && rows > 6) return { cols: cols - 1, rows: rows - 1 };
-	if (rows > 6) return { cols, rows: rows - 1 };
-	if (cols > 21) return { cols: cols - 1, rows };
-	return null;
 }
 
 function sameMousePoint(a: MousePoint, b: MousePoint): boolean {
