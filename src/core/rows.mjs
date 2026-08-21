@@ -36,6 +36,7 @@ import { GROUP_LABELS, GROUP_ORDER, SEMANTIC_STATES } from "./types.mjs";
  * @property {string|null} followUpPreview
  * @property {string} steeringState
  * @property {number} lastActivityAt
+ * @property {number} createdAt
  */
 
 /** @param {Row} row @returns {SemanticState} */
@@ -139,6 +140,7 @@ export function rowView(row, now) {
 		followUpPreview: row.state?.followUps?.lastQueuedPreview ?? null,
 		steeringState: row.state?.steering?.status ?? "none",
 		lastActivityAt,
+		createdAt: row.meta.createdAt ?? row.meta.updatedAt ?? 0,
 	};
 }
 
@@ -148,8 +150,9 @@ function oneLine(text) {
 }
 
 /**
- * Group rows by semantic state in GROUP_ORDER. Within a group: pinned first, then most
- * recently active first. Empty groups are omitted.
+ * Group rows by semantic state in GROUP_ORDER. Within a group: pinned first, then
+ * creation order (oldest first) — the order is stable and never reshuffles on activity.
+ * Empty groups are omitted.
  * @param {Row[]} rows
  * @param {number} now
  * @returns {Array<{ state: SemanticState, label: string, rows: RowView[] }>}
@@ -171,7 +174,7 @@ export function groupRows(rows, now) {
  * a single folder renders as a flat list (no redundant folder header).
  * @param {Row[]} rows
  * @param {number} now
- * @returns {Array<{ state: SemanticState, label: string, rowCount: number, showFolders: boolean, folders: Array<{ key: string, name: string, path: string, rows: RowView[], lastActivityAt: number, pinned: boolean }> }>}
+ * @returns {Array<{ state: SemanticState, label: string, rowCount: number, showFolders: boolean, folders: Array<{ key: string, name: string, path: string, rows: RowView[], createdAt: number, pinned: boolean }> }>}
  */
 export function groupRowsByFolder(rows, now) {
 	const views = rows.map((r) => rowView(r, now));
@@ -184,23 +187,35 @@ export function groupRowsByFolder(rows, now) {
 			const key = view.folderKey;
 			const existing = byFolder.get(key);
 			if (existing) existing.rows.push(view);
-			else byFolder.set(key, { key, name: view.folderName, path: view.folderPath, rows: [view], lastActivityAt: view.lastActivityAt, pinned: view.pinned });
+			else byFolder.set(key, { key, name: view.folderName, path: view.folderPath, rows: [view], createdAt: view.createdAt, pinned: view.pinned });
 		}
 		const folders = [...byFolder.values()].map((folder) => {
 			folder.rows = sortRowViews(folder.rows);
-			folder.lastActivityAt = Math.max(...folder.rows.map((r) => r.lastActivityAt));
+			// Folder creation time = its first-created row, so folders keep a stable,
+			// creation-ordered position and don't jump when any row inside gets busy.
+			folder.createdAt = Math.min(...folder.rows.map((r) => r.createdAt));
 			folder.pinned = folder.rows.some((r) => r.pinned);
 			return folder;
-		}).sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.lastActivityAt - a.lastActivityAt || a.name.localeCompare(b.name));
+		}).sort((a, b) => Number(b.pinned) - Number(a.pinned) || a.createdAt - b.createdAt || a.name.localeCompare(b.name));
 		const showFolders = folders.length > 1;
 		groups.push({ state, label: GROUP_LABELS[state], rowCount: inState.length, showFolders, folders });
 	}
 	return groups;
 }
 
-/** @param {RowView[]} views */
+/**
+ * Stable row order: pinned first, then creation order (oldest first), then id.
+ * Activity time deliberately does not participate, so rows never reshuffle while
+ * sessions are running.
+ * @param {RowView[]} views
+ */
 function sortRowViews(views) {
-	return views.sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.lastActivityAt - a.lastActivityAt);
+	return views.sort(
+		(a, b) =>
+			Number(b.pinned) - Number(a.pinned) ||
+			a.createdAt - b.createdAt ||
+			a.id.localeCompare(b.id),
+	);
 }
 
 /** @param {string} path */
