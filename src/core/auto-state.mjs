@@ -195,7 +195,7 @@ export function autoStateFromModelOrHeuristic(modelOutput, latestAssistantText, 
  */
 export function applyAutoStateToStatus(status, classification, now = Date.now()) {
 	if (!classification || status.processState === "alive") return false;
-	if (status.semanticState === "failed" || status.semanticState === "stopped") return false;
+	if (status.semanticState === "failed" || status.semanticState === "stopped" || status.semanticState === "completed") return false;
 	const nextState = semanticStateForAutoKind(classification.kind);
 	const before = `${status.semanticState}|${status.question ?? ""}|${status.summary ?? ""}|${status.autoState?.source ?? ""}|${status.autoState?.textHash ?? ""}`;
 	status.semanticState = nextState;
@@ -218,7 +218,7 @@ export function applyAutoStateToStatus(status, classification, now = Date.now())
  */
 export function applyAutoStateToViewState(state, classification, now = Date.now()) {
 	if (!classification || state.processState === "alive") return false;
-	if (state.semanticState === "failed" || state.semanticState === "stopped") return false;
+	if (state.semanticState === "failed" || state.semanticState === "stopped" || state.semanticState === "completed") return false;
 	const nextState = semanticStateForAutoKind(classification.kind);
 	const before = `${state.semanticState}|${state.question ?? ""}|${state.summary ?? ""}|${state.autoState?.source ?? ""}|${state.autoState?.textHash ?? ""}`;
 	state.semanticState = nextState;

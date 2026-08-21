@@ -87,3 +87,19 @@ test("buildAutoStatePrompt omits done option by default and restores it when fla
 	assert.ok(!/^- done:/m.test(buildAutoStatePrompt("Fix the bug.")));
 	assert.ok(/^- done:/m.test(buildAutoStatePrompt("Fix the bug.", { AGENT_BOARD_AUTO_STATE_NO_DONE: "0" })));
 });
+
+test("applyAutoStateToStatus never overwrites a manually completed row", () => {
+	const status = {
+		processState: "exited",
+		semanticState: "completed",
+		currentTool: null,
+		question: null,
+		error: null,
+		latestAssistantPreview: "Done. Fixed the bug and tests pass.",
+		summary: "Done.",
+	};
+	const changed = applyAutoStateToStatus(status, heuristicAutoState(status.latestAssistantPreview), 100);
+	assert.equal(changed, false);
+	assert.equal(status.semanticState, "completed");
+	assert.equal(status.autoState, undefined);
+});
