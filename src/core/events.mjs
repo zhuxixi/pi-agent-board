@@ -122,14 +122,15 @@ export function reduceEvent(status, event, now, opts = {}) {
 				if (msg.errorMessage) status.error = msg.errorMessage;
 				else if (msg.stopReason === "stop") status.error = null;
 				const text = assistantText(msg);
+				let nb = { needsInput: false, question: null };
 				if (text) {
 					// Store the full latest text (truncated) so peek shows meaningful output;
 					// deriveSummary() condenses it to a first sentence for the row.
 					status.latestAssistantPreview = truncate(text, PREVIEW_MAX);
-					const nb = detectNeedsInput(text);
+					nb = detectNeedsInput(text);
 					status.question = nb.question;
 				}
-				status.semanticState = "working";
+				status.semanticState = nb.needsInput ? "needs_input" : "working";
 				preservePendingQuestion(status);
 				status.lastActivityAt = now;
 				status.lastAgentActivityAt = now;

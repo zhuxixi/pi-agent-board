@@ -181,6 +181,35 @@ test("message_end assistant updates preview and detects question", () => {
 	assert.match(s.question, /Which name/);
 });
 
+test("message_end text ending with a question moves alive run to needs_input", () => {
+	const s = createRunStatus(cfg(), 1, 1000);
+	reduceEvent(
+		s,
+		{ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Should I continue with option A?" }] } },
+		2000,
+	);
+	assert.equal(s.semanticState, "needs_input");
+	assert.match(s.question, /option A/);
+	assert.equal(projectViewState(s, 2100).needsInput, true);
+});
+
+test("alive run returns to working after a following message without a question", () => {
+	const s = createRunStatus(cfg(), 1, 1000);
+	reduceEvent(
+		s,
+		{ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Which target should I use?" }] } },
+		2000,
+	);
+	assert.equal(s.semanticState, "needs_input");
+	reduceEvent(
+		s,
+		{ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Proceeding with the default target." }] } },
+		2500,
+	);
+	assert.equal(s.semanticState, "working");
+	assert.equal(s.question, null);
+});
+
 test("ignores unknown + header events", () => {
 	const s = createRunStatus(cfg(), 1, 1000);
 	assert.equal(reduceEvent(s, { type: "queue_update" }, 2000), false);
