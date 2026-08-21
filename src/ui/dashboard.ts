@@ -21,6 +21,7 @@ import {
 	resolveLaunchContext,
 	supportedThinkingLevels,
 } from "../core/launch-options.mjs";
+import { createPrewarmScheduler } from "../core/prewarm-schedule.mjs";
 import { filterRows, groupRowsByFolder, rowState, stateGlyph } from "../core/rows.mjs";
 import { loadSessionView } from "../core/session-view.mjs";
 import { GROUP_LABELS } from "../core/types.mjs";
@@ -125,6 +126,7 @@ export class DashboardComponent implements Component {
 	private sessionScrollTop = 0;
 	private evidenceScrollTop = 0;
 	private prewarmedId: string | null = null;
+	private readonly prewarmScheduler = createPrewarmScheduler(() => this.prewarmSelected(), 200);
 	private flash: { text: string; level: FlashLevel } | null = null;
 	private inputNotice: InputNotice | null = null;
 	private launch: LaunchState | null = null;
@@ -173,7 +175,7 @@ export class DashboardComponent implements Component {
 		} else if (!this.selectedId || !this.orderedIds.includes(this.selectedId)) {
 			this.selectedId = this.orderedIds[0];
 		}
-		if (this.selectedId && this.selectedId !== previousSelected) this.prewarmSelected();
+		if (this.selectedId && this.selectedId !== previousSelected) this.prewarmScheduler.schedule();
 	}
 
 	private selectedRow(): Row | null {
@@ -241,10 +243,13 @@ export class DashboardComponent implements Component {
 		const nextId = this.orderedIds[next];
 		if (nextId === this.selectedId) return;
 		this.selectedId = nextId;
-		this.prewarmSelected();
+		this.prewarmScheduler.schedule();
 	}
 
 	private prewarmSelected(): void {
+		// A debounced timer can outlive mode changes; never prewarm from modes
+		// where selectedId is not the navigation target.
+		if (this.mode !== "list" && this.mode !== "select") return;
 		const id = this.selectedId;
 		if (!id || id === this.prewarmedId) return;
 		const row = this.selectedRow();
@@ -1085,10 +1090,10 @@ export class DashboardComponent implements Component {
 
 	dispose(): void {
 		/* poll interval is owned by the factory */
+		this.prewarmScheduler.cancel();
 	}
 
 	render(width: number): string[] {
-		const t = this.theme;
 		const allRows = this.deps.service.rows();
 		const needs = allRows.filter((r) => r.state?.semanticState === "needs_input").length;
 		const working = allRows.filter((r) => r.state?.semanticState === "working").length;
@@ -1490,7 +1495,7 @@ export class DashboardComponent implements Component {
 		return renderCenteredBox(lines, width, this.tui.terminal?.rows ?? 24, t);
 	}
 
-	private renderLaunchField(width: number, index: number, text: string, selected: boolean): string {
+	private renderLaunchField(width: number, _index: number, text: string, selected: boolean): string {
 		const prefix = selected ? this.theme.fg("accent", "› ") : this.theme.fg("dim", "  ");
 		const label = clip(text, Math.max(1, width - 2));
 		return padTo(`${prefix}${selected ? this.theme.fg("accent", label) : label}`, width);
@@ -1773,7 +1778,7 @@ function renderPtyHealth(theme: ThemeLike, health: PtyHealth): string {
 	return theme.fg("success", text);
 }
 
-function renderPtyWarningBanner(theme: ThemeLike, issue: PtyIssue, width: number): string[] {
+function renderPtyWarningBanner(_theme: ThemeLike, issue: PtyIssue, width: number): string[] {
 	return renderFlashBanner(
 		{ text: `${issue.summary} Fix: ${issue.fixHint} Press ! for exact steps.`, level: "warn" },
 		width,

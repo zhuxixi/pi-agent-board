@@ -100,7 +100,11 @@ export async function openDashboard(
 					requestDashboardRender(tui);
 				}, POLL_MS);
 				const withDispose = comp as DashboardComponent & { dispose: () => void };
+				// Chain the component's own dispose so its cleanup (prewarm scheduler
+				// cancel) still runs; a plain assignment would shadow the prototype method.
+				const origDispose = comp.dispose.bind(comp);
 				withDispose.dispose = () => {
+					origDispose();
 					if (interval) clearInterval(interval);
 					interval = null;
 				};

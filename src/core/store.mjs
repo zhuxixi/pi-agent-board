@@ -225,6 +225,12 @@ export function listRows(root, opts = {}) {
 	/** @type {Row[]} */
 	const rows = [];
 	for (const viewId of roster.views) {
+		// Archived short-circuit: archived rows are invisible on the dashboard, so
+		// never pay for their artifact files (state/evidence/host/diagnostics...).
+		// meta.json is the single authoritative source of the archived flag.
+		const meta = readMeta(root, viewId);
+		if (!meta) continue;
+		if (meta.archived && !opts.includeArchived) continue;
 		const row = loadRow(root, viewId);
 		if (!row) continue;
 		if (row.meta.archived && !opts.includeArchived) continue;
