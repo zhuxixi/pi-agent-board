@@ -6,8 +6,8 @@
 
 <p align="center">
   <a href="https://github.com/zhuxixi/pi-agent-board/blob/main/assets/demo.mp4"><strong>30s demo</strong></a>
-  | <a href="https://pi.dev/packages?name=pi-agent-board">Pi package gallery</a>
-  | <a href="https://www.npmjs.com/package/pi-agent-board">npm</a>
+  | <a href="https://pi.dev/packages?name=@zhuxixi/pi-agent-board">Pi package gallery</a>
+  | <a href="https://www.npmjs.com/package/@zhuxixi/pi-agent-board">npm</a>
 </p>
 
 Pi Agent Board is a full-screen TUI dashboard for [Pi](https://github.com/earendil-works/pi-mono). It lets you dispatch, monitor, peek/reply to, attach to, and clean up multiple background Pi sessions from one place.
@@ -25,7 +25,7 @@ Pi Agent Board is a full-screen TUI dashboard for [Pi](https://github.com/earend
 From npm:
 
 ```bash
-pi install npm:pi-agent-board
+pi install npm:@zhuxixi/pi-agent-board
 pi /agent-board
 ```
 
@@ -125,7 +125,7 @@ If the version is already bumped, skip `npm version patch`.
 Use `npm version minor` or `npm version major` instead when the release warrants it. After publish, users install with:
 
 ```bash
-pi install npm:pi-agent-board
+pi install npm:@zhuxixi/pi-agent-board
 ```
 
 The Pi package gallery uses the `pi.video` and `pi.image` URLs from `package.json`.
