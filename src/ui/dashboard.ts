@@ -17,6 +17,7 @@ import {
 	canonicalModelRef,
 	clampThinkingLevel,
 	listDirectorySuggestions,
+	existingCwdCandidates,
 	nextCwdPickerState,
 	resolveDirectoryValue,
 	resolveLaunchContext,
@@ -709,7 +710,7 @@ export class DashboardComponent implements Component {
 		if (picker === "cwd") {
 			try {
 				ensureCwdStatsSeeded(this.deps.root);
-				launch.cwdRanked = rankedCwdCandidates(this.deps.root, 8);
+				launch.cwdRanked = existingCwdCandidates(rankedCwdCandidates(this.deps.root, 8));
 			} catch {
 				launch.cwdRanked = [];
 			}

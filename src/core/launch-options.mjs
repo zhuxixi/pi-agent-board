@@ -317,6 +317,15 @@ function existsDir(dir) {
 }
 
 /**
+ * Keep only candidates whose path is an existing directory.
+ * @param {CwdCandidate[]} candidates
+ * @returns {CwdCandidate[]}
+ */
+export function existingCwdCandidates(candidates) {
+	return candidates.filter((entry) => existsDir(entry.path));
+}
+
+/**
  * @typedef {Object} CwdCandidate
  * @property {string} path
  * @property {number} count
@@ -344,6 +353,9 @@ export function filterCwdCandidates(candidates, query) {
  * @returns {{mode: "favorites"|"browse", suggestions: string[]}}
  */
 export function nextCwdPickerState(query, ranked, baseCwd) {
+	if (!ranked || ranked.length === 0) {
+		return { mode: "browse", suggestions: listDirectorySuggestions(query, baseCwd) };
+	}
 	const matches = filterCwdCandidates(ranked, query);
 	if (String(query ?? "").trim() === "" || matches.length > 0) {
 		return { mode: "favorites", suggestions: matches.map((entry) => entry.path) };

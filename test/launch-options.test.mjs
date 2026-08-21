@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { filterCwdCandidates, listDirectorySuggestions, nextCwdPickerState } from "../src/core/launch-options.mjs";
+import { existingCwdCandidates, filterCwdCandidates, listDirectorySuggestions, nextCwdPickerState } from "../src/core/launch-options.mjs";
 
 const ranked = [
 	{ path: "/home/elling", count: 107 },
@@ -33,6 +33,30 @@ test("nextCwdPickerState: matching query stays favorites in ranked order", () =>
 		"/home/elling/git-repo/github/zima-blue-cli",
 		"/home/elling/git-repo/github/jfox",
 	]);
+});
+
+test("nextCwdPickerState falls back to browse when ranked is empty", () => {
+	const root = mkdtempSync(join(tmpdir(), "cwd-picker-empty-"));
+	try {
+		const state = nextCwdPickerState("", [], root);
+		assert.equal(state.mode, "browse");
+		assert.deepEqual(state.suggestions, listDirectorySuggestions("", root));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("existingCwdCandidates drops stale paths and keeps real dirs", () => {
+	const root = mkdtempSync(join(tmpdir(), "cwd-picker-stale-"));
+	try {
+		const kept = existingCwdCandidates([
+			{ path: root, count: 3 },
+			{ path: join(root, "gone"), count: 2 },
+		]);
+		assert.deepEqual(kept, [{ path: root, count: 3 }]);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 test("nextCwdPickerState: unmatched query falls back to filesystem browse", () => {
