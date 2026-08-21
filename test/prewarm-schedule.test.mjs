@@ -6,13 +6,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 test("rapid schedules fire prewarm once after quiet period", async () => {
 	let fired = 0;
-	const s = createPrewarmScheduler(() => { fired += 1; }, 15);
+	// Generous margins: 50ms debounce with a 15ms mid-flight check leaves ~35ms of
+	// event-loop-stall headroom, so a loaded CI runner cannot let the timer fire
+	// early and fail the "still debouncing" assertion spuriously.
+	const s = createPrewarmScheduler(() => { fired += 1; }, 50);
 	s.schedule();
 	s.schedule();
 	s.schedule();
-	await sleep(5);
+	await sleep(15);
 	assert.equal(fired, 0); // still debouncing
-	await sleep(25);
+	await sleep(100);
 	assert.equal(fired, 1); // exactly once
 });
 
