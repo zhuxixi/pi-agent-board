@@ -77,7 +77,7 @@ Ctrl+N 打开 launch 对话框后，`cwd` 字段进入目录选择器，目前�
 ### 选择器交互
 
 `LaunchState` 增加字段：
-- `cwdRanked: string[]`：打开 picker 时由 `rankedCwdCandidates(root, 8)` 生成；
+- `cwdRanked: {path, count}[]`：打开 picker 时由 `rankedCwdCandidates(root, 8)` 生成；
 - `cwdPickerMode: "favorites" | "browse"`：候选模式 / 文件系统浏览模式。
 
 行为规则（`openLaunchPicker("cwd")` 与 `handleLaunchPickerKey`）：
@@ -117,8 +117,8 @@ Ctrl+N 打开 launch 对话框后，`cwd` 字段进入目录选择器，目前�
   排序（count 优先、lastUsed tie-break）、损坏文件容错、home 兜底、空表行为。
 - 候选匹配逻辑（新函数，放 launch-options.mjs 或 cwd-stats.mjs）：大小写不敏感、
   路径任意部分匹配、无匹配判定。
-- `test/dashboard-render.test.mjs` 按现有模式补断言：favorites 模式渲染行
-  （路径 + 次数）、browse 模式渲染不变。
+- `test/dashboard-render.test.mjs`：repo 现状无 DashboardComponent 单测 harness，picker
+  渲染断言由 Task 5 手工验收覆盖（路径 + 次数、browse 模式渲染不变）。
 - 所有测试用 tmp dir 作 root（沿 paths.mjs「显式 root 可测」约定）。
 
 ## Verification
