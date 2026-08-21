@@ -13,14 +13,14 @@ import { fileURLToPath } from "node:url";
 import { appendLine, readJson } from "../src/core/atomic.mjs";
 import { createRunStatus, finalizeRun, projectViewState, reduceEvent } from "../src/core/events.mjs";
 import { encodePromptForCliArg } from "../src/core/prompt-transport.mjs";
-import { applyAutoStateToStatus, autoStateEnabled, autoStateFromModelOrHeuristic, autoStateModel, buildAutoStatePrompt, heuristicAutoState } from "../src/core/auto-state.mjs";
+import { applyAutoStateToStatus, autoStateEnabled, autoStateFromModelOrHeuristic, autoStateModel, buildAutoStatePrompt, heuristicAutoState, isManualCompletion } from "../src/core/auto-state.mjs";
 import { appendDiagnostic } from "../src/core/diagnostics.mjs";
 import { emptyEvidenceSnapshot, finalizeEvidence, reduceEvidence, summarizeEvidence, writeEvidence, writeRunEvidence } from "../src/core/evidence.mjs";
 import { claimNextFollowUp, completeFollowUp, releaseFollowUp } from "../src/core/follow-up-queue.mjs";
 import { newRunId } from "../src/core/ids.mjs";
 import { launchRun } from "../src/core/launch.mjs";
 import * as P from "../src/core/paths.mjs";
-import { readState, writeState, writeStatus } from "../src/core/store.mjs";
+import { readState, readStatus, writeState, writeStatus } from "../src/core/store.mjs";
 import { readSteering, recordPlanReady } from "../src/core/steering.mjs";
 import { buildApprovePlanPrompt, buildPlanChangesPrompt, buildPlanRequestPrompt } from "../src/core/steering-prompts.mjs";
 
@@ -100,6 +100,19 @@ function main() {
 		writeEvidence(root, evidence);
 		writeState(root, projectViewState(status, now, readState(root, viewId)));
 		dirty = false;
+	};
+
+	/**
+	 * Persist only if the user hasn't marked the row done manually since the last
+	 * persist. projectViewState() overwrites the row state unconditionally, so a
+	 * post-exit model pass must never persist its stale in-memory status over a
+	 * fresh manual completion.
+	 */
+	const persistUnlessManual = (force = false) => {
+		const latestView = readState(root, viewId);
+		if (isManualCompletion(latestView)) return false;
+		persist(force);
+		return true;
 	};
 
 	const scheduleFlush = () => {
@@ -206,12 +219,12 @@ function main() {
 				if (changed) {
 					finalizeEvidence(evidence, status, Date.now());
 					status.evidenceSummary = summarizeEvidence(evidence);
-					persist(true);
+					persistUnlessManual(true);
 				}
 				return maybeModelSummary(config, status);
 			})
 			.then((changed) => {
-				if (changed) persist(true);
+				if (changed) persistUnlessManual(true);
 			})
 			.catch(() => {})
 			.finally(() => {
@@ -333,6 +346,13 @@ async function maybeModelAutoState(config, status, evidence) {
 		[...config.piArgsPrefix, "--mode", "json", "-p", "--no-session", "--model", model, prompt],
 		15000,
 	);
+	// Fresh read: the user may have marked the row done manually during the model
+	// call. completeView clears autoState in both state.json and status.json, so a
+	// manual completion is detectable here; applying the classification to the stale
+	// in-memory status would clobber the user's verdict.
+	const fresh = readStatus(config.root, config.viewId, config.runId);
+	if (!fresh || isManualCompletion(fresh)) return false;
+	Object.assign(status, fresh);
 	const classification = autoStateFromModelOrHeuristic(out, latest, { lastAgentActivityAt: status.lastAgentActivityAt ?? null });
 	const changed = applyAutoStateToStatus(status, classification, Date.now());
 	if (changed) {
@@ -366,6 +386,10 @@ async function maybeModelSummary(config, status) {
 		[...config.piArgsPrefix, "--mode", "json", "-p", "--no-session", "--model", model, prompt],
 		15000,
 	);
+	// The user may have marked the row done manually during the summary call.
+	// Updating the stale status and letting the caller persist would clobber the
+	// manual completion, so bail out before touching the in-memory status.
+	if (isManualCompletion(readState(config.root, config.viewId))) return false;
 	const text = out.trim().split("\n").slice(-1)[0]?.trim();
 	if (text) {
 		status.summary = text.replace(/^["']|["']$/g, "").slice(0, 80);

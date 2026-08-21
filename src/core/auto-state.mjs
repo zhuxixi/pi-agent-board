@@ -40,6 +40,18 @@ function isOff(value) {
 	return typeof value === "string" && /^(0|false|off|no)$/i.test(value.trim());
 }
 
+/**
+ * Whether automatic `done` classification is disabled.
+ * Default (env unset): disabled — completed is only ever set by the user.
+ * Set AGENT_BOARD_AUTO_STATE_NO_DONE to 0/false/off/no to restore auto-done.
+ * @param {NodeJS.ProcessEnv|Record<string,string|undefined>} [env]
+ */
+export function autoStateDoneDisabled(env = process.env) {
+	const raw = env.AGENT_BOARD_AUTO_STATE_NO_DONE;
+	if (typeof raw !== "string" || !raw.trim()) return true;
+	return !isOff(raw);
+}
+
 /** @param {AutoStateKind} kind @returns {SemanticState} */
 export function semanticStateForAutoKind(kind) {
 	switch (kind) {
@@ -55,22 +67,35 @@ export function semanticStateForAutoKind(kind) {
 /**
  * Prompt used by runners for the cheap classifier pass.
  * @param {string} latestAssistantText
+ * @param {NodeJS.ProcessEnv|Record<string,string|undefined>} [env]
  */
-export function buildAutoStatePrompt(latestAssistantText) {
+export function buildAutoStatePrompt(latestAssistantText, env = process.env) {
 	const text = truncate(String(latestAssistantText || "").trim(), 6000);
-	return `Classify the LAST assistant response for a coding-agent dashboard.\n\nChoose exactly one state:\n- needs_input: the assistant asks the user for a decision, clarification, approval, credentials, or is blocked waiting for the user.\n- in_progress: work is partial, next steps remain, verification is pending/failed, or the assistant says it will continue later.\n- done: the requested work is complete, final answer given, no user input required.\n\nReturn ONLY minified JSON with this shape:\n{"state":"needs_input|in_progress|done","confidence":"high|medium|low","reason":"short reason <=18 words","question":"user-facing question or null"}\n\nLast assistant response:\n${text}`;
+	const doneLine = autoStateDoneDisabled(env)
+		? ""
+		: "- done: the requested work is complete, final answer given, no user input required.\n";
+	const doneNote = autoStateDoneDisabled(env)
+		? "The user marks completed manually in the dashboard, so completion signals (done/completed/finished) must be classified as in_progress.\n"
+		: "";
+	const states = autoStateDoneDisabled(env) ? "needs_input|in_progress" : "needs_input|in_progress|done";
+	return `Classify the LAST assistant response for a coding-agent dashboard.\n\nChoose exactly one state:\n- needs_input: the assistant asks the user for a decision, clarification, approval, credentials, or is blocked waiting for the user.\n- in_progress: work is partial, next steps remain, verification is pending/failed, or the assistant says it will continue later.\n${doneLine}${doneNote}\nReturn ONLY minified JSON with this shape:\n{"state":"${states}","confidence":"high|medium|low","reason":"short reason <=18 words","question":"user-facing question or null"}\n\nLast assistant response:\n${text}`;
 }
 
 /**
  * Parse and normalize model JSON. Returns null if the response is unusable.
  * @param {string} raw
- * @param {{ latestAssistantText?: string, now?: number, lastAgentActivityAt?: number|null }} [opts]
+ * @param {{ latestAssistantText?: string, now?: number, lastAgentActivityAt?: number|null, env?: NodeJS.ProcessEnv|Record<string,string|undefined> }} [opts]
  */
 export function parseAutoStateModelOutput(raw, opts = {}) {
 	const obj = extractJsonObject(raw);
 	if (!obj) return null;
-	const kind = normalizeKind(obj.state ?? obj.kind ?? obj.status);
+	let kind = normalizeKind(obj.state ?? obj.kind ?? obj.status);
 	if (!kind) return null;
+	let downgraded = false;
+	if (kind === "done" && autoStateDoneDisabled(opts.env ?? process.env)) {
+		kind = "in_progress";
+		downgraded = true;
+	}
 	const confidence = normalizeConfidence(obj.confidence);
 	const latest = opts.latestAssistantText ?? "";
 	const nb = detectNeedsInput(latest);
@@ -78,7 +103,9 @@ export function parseAutoStateModelOutput(raw, opts = {}) {
 	return makeClassification(kind, {
 		source: "model",
 		confidence,
-		reason: cleanReason(obj.reason) || defaultReason(kind),
+		reason: downgraded
+			? "Model reported done but auto-done is disabled"
+			: cleanReason(obj.reason) || defaultReason(kind),
 		question,
 		now: opts.now,
 		lastAgentActivityAt: opts.lastAgentActivityAt ?? null,
@@ -90,7 +117,7 @@ export function parseAutoStateModelOutput(raw, opts = {}) {
  * Conservative fallback classifier. It should be useful, but never clever enough to
  * overrule strong question/error signals.
  * @param {string} latestAssistantText
- * @param {{ now?: number, lastAgentActivityAt?: number|null }} [opts]
+ * @param {{ now?: number, lastAgentActivityAt?: number|null, env?: NodeJS.ProcessEnv|Record<string,string|undefined> }} [opts]
  */
 export function heuristicAutoState(latestAssistantText, opts = {}) {
 	const text = String(latestAssistantText || "").trim();
@@ -110,11 +137,24 @@ export function heuristicAutoState(latestAssistantText, opts = {}) {
 	const lower = text.toLowerCase();
 	const pending = hasPendingSignal(lower);
 	const done = hasDoneSignal(lower);
-	if (done && !pending) {
+	const env = opts.env ?? process.env;
+	if (done && !pending && !autoStateDoneDisabled(env)) {
 		return makeClassification("done", {
 			source: "heuristic",
 			confidence: hasStrongDoneSignal(lower) ? "high" : "medium",
 			reason: "Assistant reported the work is complete",
+			now: opts.now,
+			lastAgentActivityAt: opts.lastAgentActivityAt ?? null,
+			latestAssistantText: text,
+		});
+	}
+	if (done && !pending) {
+		// Auto-done disabled: completion signals stay out of the completed bucket;
+		// the user marks completed manually from the dashboard.
+		return makeClassification("in_progress", {
+			source: "heuristic",
+			confidence: hasStrongDoneSignal(lower) ? "medium" : "low",
+			reason: "Assistant reported completion but auto-done is disabled",
 			now: opts.now,
 			lastAgentActivityAt: opts.lastAgentActivityAt ?? null,
 			latestAssistantText: text,
@@ -151,6 +191,17 @@ export function autoStateFromModelOrHeuristic(modelOutput, latestAssistantText, 
 }
 
 /**
+ * Whether a row/status shows a manual completion. completeView clears autoState on
+ * both state.json and status.json when the user marks done, so `autoState == null`
+ * combined with `completed` is the manual-completion signal. Auto-classified
+ * completed rows keep autoState and stay refinable by a later model pass.
+ * @param {{ semanticState?: string, autoState?: unknown|null }|null|undefined} state
+ */
+export function isManualCompletion(state) {
+	return Boolean(state && state.semanticState === "completed" && state.autoState == null);
+}
+
+/**
  * Mutate a RunStatus with a classification. Returns true if state/metadata changed.
  * @param {import("./types.mjs").RunStatus} status
  * @param {import("./types.mjs").AutoStateClassification} classification
@@ -159,6 +210,8 @@ export function autoStateFromModelOrHeuristic(modelOutput, latestAssistantText, 
 export function applyAutoStateToStatus(status, classification, now = Date.now()) {
 	if (!classification || status.processState === "alive") return false;
 	if (status.semanticState === "failed" || status.semanticState === "stopped") return false;
+	// Manual completions are user verdicts and must never be overwritten.
+	if (isManualCompletion(status)) return false;
 	const nextState = semanticStateForAutoKind(classification.kind);
 	const before = `${status.semanticState}|${status.question ?? ""}|${status.summary ?? ""}|${status.autoState?.source ?? ""}|${status.autoState?.textHash ?? ""}`;
 	status.semanticState = nextState;
@@ -182,6 +235,8 @@ export function applyAutoStateToStatus(status, classification, now = Date.now())
 export function applyAutoStateToViewState(state, classification, now = Date.now()) {
 	if (!classification || state.processState === "alive") return false;
 	if (state.semanticState === "failed" || state.semanticState === "stopped") return false;
+	// Manual completions are user verdicts and must never be overwritten.
+	if (isManualCompletion(state)) return false;
 	const nextState = semanticStateForAutoKind(classification.kind);
 	const before = `${state.semanticState}|${state.question ?? ""}|${state.summary ?? ""}|${state.autoState?.source ?? ""}|${state.autoState?.textHash ?? ""}`;
 	state.semanticState = nextState;

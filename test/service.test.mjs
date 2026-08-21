@@ -7,7 +7,7 @@ import { test } from "node:test";
 import { createService, shouldProbePtySupport } from "../src/runtime/service.mjs";
 import { diagnoseNodePtyFailure } from "../src/core/pty-support.mjs";
 import * as P from "../src/core/paths.mjs";
-import { createView, readState, writeHost, writeHostPid, writeLaunchPrefs, writeState } from "../src/core/store.mjs";
+import { createView, readState, readStatus, writeHost, writeHostPid, writeLaunchPrefs, writeState, writeStatus } from "../src/core/store.mjs";
 
 function freshRoot() {
 	return mkdtempSync(join(tmpdir(), "agentview-service-"));
@@ -391,12 +391,35 @@ test("syncForegroundEvent finalizes attached foreground turn from assistant outp
 		svc.syncForegroundEvent(meta.sessionFile, { type: "agent_end" });
 
 		const next = readState(root, "v1");
-		assert.equal(next.semanticState, "completed");
+		assert.equal(next.semanticState, "idle");
 		assert.equal(next.processState, "exited");
 		assert.equal(next.latestAssistantPreview, "All done.");
-		assert.equal(next.autoState?.kind, "done");
+		assert.equal(next.autoState?.kind, "in_progress");
 		assert.equal(svc.row("v1").alive, false);
 	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("syncForegroundEvent auto-completes foreground turn when auto-done flag is off", async () => {
+	const root = freshRoot();
+	process.env.AGENT_BOARD_AUTO_STATE_NO_DONE = "0";
+	try {
+		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const svc = service(root);
+		svc.syncForegroundEvent(meta.sessionFile, { type: "agent_start" });
+		svc.syncForegroundEvent(meta.sessionFile, {
+			type: "message_end",
+			message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "All done." }] },
+		});
+		svc.syncForegroundEvent(meta.sessionFile, { type: "agent_end" });
+
+		const next = readState(root, "v1");
+		assert.equal(next.semanticState, "completed");
+		assert.equal(next.processState, "exited");
+		assert.equal(next.autoState?.kind, "done");
+	} finally {
+		delete process.env.AGENT_BOARD_AUTO_STATE_NO_DONE;
 		rmSync(root, { recursive: true, force: true });
 	}
 });
@@ -912,6 +935,61 @@ test("ensureHost probes PTY support with TTL cache, not forced refresh", () => {
 	} finally {
 		if (oldForce === undefined) delete process.env.AGENT_BOARD_FORCE_PTY;
 		else process.env.AGENT_BOARD_FORCE_PTY = oldForce;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("markCompleted clears autoState in the run status so in-flight model passes skip refinement", () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const s = readState(root, "v1");
+		s.semanticState = "idle";
+		s.processState = "exited";
+		s.currentRunId = "run_1";
+		s.summary = "All done.";
+		s.latestAssistantPreview = "All done.";
+		writeState(root, s);
+		writeStatus(root, {
+			version: 1,
+			runId: "run_1",
+			viewId: "v1",
+			pid: null,
+			startedAt: 1,
+			endedAt: 2,
+			exitCode: 0,
+			kind: "dispatch",
+			prompt: "x",
+			model: null,
+			semanticState: "completed",
+			processState: "exited",
+			summary: "All done.",
+			lastActivityAt: 2,
+			currentTool: null,
+			latestAssistantPreview: "All done.",
+			question: null,
+			pendingQuestions: [],
+			error: null,
+			lastAgentActivityAt: null,
+			stopReason: null,
+			stoppedByUser: false,
+			turns: 1,
+			toolCount: 0,
+			eventCount: 0,
+			lastEventAt: null,
+			usage: null,
+			stallReason: null,
+			evidenceSummary: null,
+			autoState: { version: 1, kind: "done", semanticState: "completed", confidence: "high", source: "heuristic", reason: "done", question: null, classifiedAt: 2, lastAgentActivityAt: null, textHash: "abc" },
+		});
+
+		assert.deepEqual(service(root).markCompleted("v1"), { ok: true });
+		const nextStatus = readStatus(root, "v1", "run_1");
+		assert.equal(nextStatus.autoState, null);
+		const next = readState(root, "v1");
+		assert.equal(next.semanticState, "completed");
+		assert.equal(next.autoState, null);
+	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
 });

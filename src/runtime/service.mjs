@@ -36,6 +36,7 @@ import {
 	writeLaunchPrefs,
 	writeMeta,
 	writeState,
+	writeStatus,
 } from "../core/store.mjs";
 import { diagnoseNodePtyFailure, ensureNodePtySpawnHelperExecutable, nodePtyFallbackMessage, probeNodePtyEnvironment } from "../core/pty-support.mjs";
 import { normalizeScreenLogMaxBytes, pruneScreenLogs } from "../core/screen-log-gc.mjs";
@@ -270,6 +271,15 @@ export function createService(opts) {
 		state.summary = completionSummary(state);
 		state.lastActivityAt = Date.now();
 		state.updatedAt = Date.now();
+		// Also clear autoState in the run status so in-flight model passes
+		// (job-runner / state-runner) see the manual completion and skip refinement.
+		if (state.currentRunId) {
+			const status = readStatus(root, viewId, state.currentRunId);
+			if (status) {
+				status.autoState = null;
+				writeStatus(root, status);
+			}
+		}
 		writeState(root, state);
 		return { ok: true };
 	}

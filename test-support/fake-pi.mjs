@@ -62,6 +62,13 @@ function hash(s) {
 async function main() {
 	persistSession();
 
+	// Simulate a slow model pass (summary/auto-state) so tests can race a manual
+	// mark-done against in-flight post-exit model calls. Only one-shot --model
+	// invocations are slowed; the worker invocation uses --session instead.
+	if (process.env.FAKE_PI_SUMMARY_DELAY_MS && arg("--model")) {
+		await sleep(Number(process.env.FAKE_PI_SUMMARY_DELAY_MS));
+	}
+
 	// Header (first line in real json mode is the session header).
 	emit({ type: "session", version: 3, id: "fake-header", timestamp: new Date(0).toISOString(), cwd });
 
