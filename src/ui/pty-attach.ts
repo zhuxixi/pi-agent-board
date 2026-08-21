@@ -8,6 +8,7 @@ import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@
 import { isProbablyEmptyPiInputLine } from "../core/pty-input.mjs";
 import { findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
 import { createAttachOutputRenderScheduler, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
+import { installImeCursorCoalesce } from "../core/ime-cursor-coalesce.mjs";
 import { createJiggleRetryController } from "../core/pty-attach-jiggle-controller.mjs";
 import { clampInt, parseMouseInputChunk, resolveWheelLines, scrollViewportTop, selectionDragScrollLines } from "../core/pty-scroll.mjs";
 
@@ -170,6 +171,10 @@ export class PtyAttachComponent implements Component {
 	// into many small chunks; painting after each chunk would drive the outer TUI to its
 	// frame cap and expose intermediate frames (visible as flicker on a busy session).
 	private readonly outputRenderScheduler = createAttachOutputRenderScheduler(() => this.scheduleRender());
+	// Fold pi-tui's post-frame cursor-park writes back into the frame's sync block so the
+	// terminal reports one stable IME cursor rect per frame instead of two (issue #28).
+	// Never active when AGENT_BOARD_IME_FIX=0; no-op passthrough if pi-tui changes shape.
+	private readonly imeCoalesceUninstall: (() => void) | null;
 
 	constructor(
 		private readonly tui: TUI,
@@ -181,6 +186,9 @@ export class PtyAttachComponent implements Component {
 		const size = this.currentSize();
 		this.cols = size.cols;
 		this.rows = size.rows;
+		// Assigned in the body (not as a field initializer) so it runs after the `tui`
+		// parameter property is set regardless of the TS loader's field-init semantics.
+		this.imeCoalesceUninstall = installImeCursorCoalesce(this.tui);
 		this.term = new Terminal({ cols: this.cols, rows: this.rows, scrollback: 2000, allowProposedApi: true });
 		// Keep mouse reporting enabled by default so wheel scrolling and local drag-to-copy
 		// selection can coexist inside the attach surface. Set AGENT_BOARD_ATTACH_MOUSE=0
@@ -984,6 +992,7 @@ export class PtyAttachComponent implements Component {
 
 	private close(): void {
 		this.closed = true;
+		this.imeCoalesceUninstall?.();
 		this.jiggleRetry.stop();
 		this.disableMouseScroll();
 		this.clearMouseRefreshTimers();
