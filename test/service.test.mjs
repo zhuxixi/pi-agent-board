@@ -391,12 +391,35 @@ test("syncForegroundEvent finalizes attached foreground turn from assistant outp
 		svc.syncForegroundEvent(meta.sessionFile, { type: "agent_end" });
 
 		const next = readState(root, "v1");
-		assert.equal(next.semanticState, "completed");
+		assert.equal(next.semanticState, "idle");
 		assert.equal(next.processState, "exited");
 		assert.equal(next.latestAssistantPreview, "All done.");
-		assert.equal(next.autoState?.kind, "done");
+		assert.equal(next.autoState?.kind, "in_progress");
 		assert.equal(svc.row("v1").alive, false);
 	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("syncForegroundEvent auto-completes foreground turn when auto-done flag is off", async () => {
+	const root = freshRoot();
+	process.env.AGENT_BOARD_AUTO_STATE_NO_DONE = "0";
+	try {
+		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const svc = service(root);
+		svc.syncForegroundEvent(meta.sessionFile, { type: "agent_start" });
+		svc.syncForegroundEvent(meta.sessionFile, {
+			type: "message_end",
+			message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "All done." }] },
+		});
+		svc.syncForegroundEvent(meta.sessionFile, { type: "agent_end" });
+
+		const next = readState(root, "v1");
+		assert.equal(next.semanticState, "completed");
+		assert.equal(next.processState, "exited");
+		assert.equal(next.autoState?.kind, "done");
+	} finally {
+		delete process.env.AGENT_BOARD_AUTO_STATE_NO_DONE;
 		rmSync(root, { recursive: true, force: true });
 	}
 });
