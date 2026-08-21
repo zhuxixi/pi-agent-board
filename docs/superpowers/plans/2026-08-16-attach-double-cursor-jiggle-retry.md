@@ -409,12 +409,9 @@ In `onSocketData()`, inside the `msg.type === "output"` branch, after `this.push
 this.checkClearSequence(msg.data);
 ```
 
-- [ ] **Step 5: Wire into finishAttachTransition() — cancel retry**
+- [ ] **Step 5: finishAttachTransition() — do NOT cancel retry (updated post-review)**
 
-In `finishAttachTransition()`, at the top (after the `if (!this.attaching) return;` guard), add:
-```typescript
-this.cancelJiggleRetry();
-```
+**Update (final review, commit 806bf3e):** the retry chain intentionally survives the settle transition. Originally this step wired `cancelJiggleRetry()` into `finishAttachTransition()`, but review found that kills the chain at ~410ms in the silent cold-start case — the exact failure mode this feature fixes — leaving only retry 1 reachable. The chain now self-terminates on: clear detected / max retries / close(). Post-settle jiggles only fire when the child consumed all earlier jiggles (screen already stale), trading a brief full-render flicker for self-healing.
 
 - [ ] **Step 6: Wire into close() — cancel retry**
 

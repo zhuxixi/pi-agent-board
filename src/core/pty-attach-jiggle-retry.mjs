@@ -3,6 +3,12 @@
 export const BACKOFF_MS = Object.freeze([120, 500, 1500, 3000]);
 export const MAX_RETRIES = BACKOFF_MS.length;
 
+// Verified empirically in issue #2: a resize jiggle makes the child pi-tui run
+// fullRender(true), whose output begins with a full clear — a controlled test
+// against a live idle session received 2 clear sequences + ~920KB full repaint
+// per jiggle. So \x1b[2J in the socket output is a reliable "jiggle landed"
+// signal. If pi-tui ever changes fullRender to skip the clear, the detector
+// silently degrades to the old one-shot behavior after MAX_RETRIES.
 const FULL_CLEAR = "\x1b[2J";
 /** Carry enough bytes to catch a split escape sequence at chunk boundary. */
 const CARRY_LEN = FULL_CLEAR.length - 1; // 3 bytes: \x1b, \x1b[, \x1b[2

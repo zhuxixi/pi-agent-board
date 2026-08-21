@@ -79,16 +79,17 @@ private checkClearSequence(data: string): void;
 /** 安排下一次重试 */
 private scheduleNextJiggle(): void;
 
-/** 取消重试（close/finishAttachTransition 时调用） */
+/** 取消重试（close 时调用；settle 时故意不取消，见生命周期） */
 private cancelJiggleRetry(): void;
 ```
 
 修改点：
 - `connect()` 成功后 → 调 `startJiggleRetry()`
 - `onSocketData()` 处理 output 时 → 调 `checkClearSequence(data)`
-- `finishAttachTransition()` → 调 `cancelJiggleRetry()`
 - `close()` → 调 `cancelJiggleRetry()`
 - **移除** `forceChildRedrawAfterLiveOutput()` 和 `forcedRedrawAfterLiveOutput` 字段（被重试链取代）
+
+**设计变更（final review 后，commit 806bf3e）**：`finishAttachTransition()` **不再取消**重试链——settle 取消会让静默冷启动场景下只剩 retry 1 可达（链 ~410ms 就死），正是本 feature 要修的场景。链的自然终止条件：检测到清屏 / 达到 4 次上限 / close()。settle 后的残余 jiggle 只在子端吞掉所有此前 jiggle 时发生（此时画面本就脏），用一次全屏重绘闪烁换自愈是值得的；健康 session 下首个 jiggle 的清屏就会被检测到，链在 settle 前已停。
 
 ### 数据流
 ```

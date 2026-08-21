@@ -405,8 +405,13 @@ export class PtyAttachComponent implements Component {
 		if (!this.attaching) return;
 		// Note: jiggle retry chain is NOT cancelled here — it survives the settle
 		// transition because any successful jiggle triggers a fullRender which emits
-		// \x1b[2J, self-cancelling the chain. Extra jiggles during the settled state
-		// are harmless (they just cause a brief full-render flicker).
+		// \x1b[2J, self-cancelling the chain. Post-settle jiggles only occur when the
+		// child consumed none of the earlier ones (the exact failure mode this
+		// feature fixes); in that case the screen is already stale, so the trade-off
+		// of a brief full-render flicker (which also clears any in-progress text
+		// selection) is acceptable in exchange for self-healing. When the child is
+		// healthy, the very first jiggle's fullRender is detected and the chain
+		// stops before settle ends, so no post-settle jiggle fires at all.
 		this.attaching = false;
 		if (this.attachSettleTimer) {
 			clearTimeout(this.attachSettleTimer);
