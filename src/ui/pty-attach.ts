@@ -8,13 +8,7 @@ import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@
 import { isProbablyEmptyPiInputLine } from "../core/pty-input.mjs";
 import { findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
 import { createAttachOutputRenderScheduler, nextAttachRender, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
-import {
-	createJiggleRetryState,
-	feedOutput as feedJiggleRetry,
-	nextRetryDelay,
-	advanceRetry,
-	stopRetry,
-} from "../core/pty-attach-jiggle-retry.mjs";
+import { createJiggleRetryController } from "../core/pty-attach-jiggle-controller.mjs";
 import { clampInt, parseMouseInputChunk, resolveWheelLines, scrollViewportTop, selectionDragScrollLines } from "../core/pty-scroll.mjs";
 
 export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null };
@@ -53,6 +47,11 @@ const OSC52_MAX_BYTES = 1_000_000;
 const OSC52_CARRY_MAX_BYTES = OSC52_MAX_BYTES + 4096;
 const TERMINAL_PASSTHROUGH_MAX_BYTES = 5_000_000;
 const TERMINAL_PASSTHROUGH_CARRY_MAX_BYTES = TERMINAL_PASSTHROUGH_MAX_BYTES + 4096;
+/** Delay between the shrink and restore halves of a resize jiggle. 200ms keeps
+ * the two SIGWINCHs apart well beyond pi-tui's 16ms render throttle, so a busy
+ * (booting) child processes them as two separate renders instead of coalescing
+ * the pair into a net-zero size change. */
+const JIGGLE_RESTORE_MS = 200;
 const KITTY_IMAGE_PREFIX = "\x1b_G";
 const ITERM2_FILE_PREFIX = "\x1b]1337;File=";
 
@@ -122,10 +121,19 @@ export class PtyAttachComponent implements Component {
 	private mouseRefreshTimers: Array<ReturnType<typeof setTimeout>> = [];
 	// Jiggle retry chain: re-send resize jiggle until we see a full-clear sequence
 	// in the PTY output, proving the child pi-tui did a fullRender and the replay
-	// garbage has been flushed. Replaces the one-shot forceChildRedrawAfterLiveOutput.
-	private jiggleRetryState = createJiggleRetryState();
-	private jiggleRetryTimer: ReturnType<typeof setTimeout> | null = null;
-	private clearCarry = "";
+	// garbage has been flushed. The controller re-arms once on the child TUI's
+	// first frame so cold-start attaches get a fresh budget exactly when the
+	// child can finally observe a resize (issue #10).
+	private readonly jiggleRetry = createJiggleRetryController({
+		sendJiggle: () => this.forceChildRedraw(),
+		shouldFire: () => !this.closed && this.connected,
+		setTimeoutFn: (fn, ms) => {
+			const t = setTimeout(fn, ms);
+			t.unref?.();
+			return t;
+		},
+		clearTimeoutFn: (t) => clearTimeout(t as ReturnType<typeof setTimeout>),
+	});
 	private osc52Carry = "";
 	private passthroughCarry = "";
 	private readonly connectStartedAt = Date.now();
@@ -318,7 +326,7 @@ export class PtyAttachComponent implements Component {
 			this.send({ type: "hello", clientId: `ui-${Date.now()}`, wantOutput: true });
 			this.sendResize();
 			this.forceChildRedraw();
-			this.startJiggleRetry();
+			this.jiggleRetry.start();
 			this.enableMouseScroll();
 			this.scheduleRender();
 			this.startAttachSettle();
@@ -804,56 +812,13 @@ export class PtyAttachComponent implements Component {
 				this.sendResize(cols, rows);
 				this.deferAttachSettle();
 			}
-		}, 40);
+		}, JIGGLE_RESTORE_MS);
 		this.redrawTimer.unref?.();
 	}
 
-	/** Start the jiggle retry chain after initial jiggle. */
-	private startJiggleRetry(): void {
-		if (this.jiggleRetryTimer) {
-			clearTimeout(this.jiggleRetryTimer);
-			this.jiggleRetryTimer = null;
-		}
-		this.jiggleRetryState = createJiggleRetryState();
-		this.clearCarry = "";
-		this.scheduleNextJiggleRetry();
-	}
-
-	/** Check socket output for full-clear sequence; cancel retry if found. */
+	/** Feed socket output into the jiggle retry controller (clear/frame detection). */
 	private checkClearSequence(data: string): void {
-		if (this.jiggleRetryState.stopped) return;
-		const result = feedJiggleRetry(this.jiggleRetryState, data, this.clearCarry);
-		this.jiggleRetryState = result.state;
-		this.clearCarry = result.carry;
-		if (result.clearFound) this.cancelJiggleRetry();
-	}
-
-	/** Schedule the next jiggle retry with backoff. */
-	private scheduleNextJiggleRetry(): void {
-		const delay = nextRetryDelay(this.jiggleRetryState);
-		if (delay === null) {
-			// Chain exhausted (max retries) — mark stopped so checkClearSequence
-			// short-circuits on subsequent output chunks.
-			this.jiggleRetryState = stopRetry(this.jiggleRetryState);
-			return;
-		}
-		this.jiggleRetryTimer = setTimeout(() => {
-			this.jiggleRetryTimer = null;
-			if (this.closed || !this.connected) return;
-			this.forceChildRedraw();
-			this.jiggleRetryState = advanceRetry(this.jiggleRetryState);
-			this.scheduleNextJiggleRetry();
-		}, delay);
-		this.jiggleRetryTimer.unref?.();
-	}
-
-	/** Cancel the jiggle retry chain. */
-	private cancelJiggleRetry(): void {
-		if (this.jiggleRetryTimer) {
-			clearTimeout(this.jiggleRetryTimer);
-			this.jiggleRetryTimer = null;
-		}
-		this.jiggleRetryState = stopRetry(this.jiggleRetryState);
+		this.jiggleRetry.feed(data);
 	}
 
 	private tryScrollBy(linesUp: number): boolean {
@@ -1019,7 +984,7 @@ export class PtyAttachComponent implements Component {
 
 	private close(): void {
 		this.closed = true;
-		this.cancelJiggleRetry();
+		this.jiggleRetry.stop();
 		this.disableMouseScroll();
 		this.clearMouseRefreshTimers();
 		this.clearPendingClick();

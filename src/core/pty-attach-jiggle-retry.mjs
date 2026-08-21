@@ -1,6 +1,6 @@
 /** Pure logic for attach jiggle-retry: detect full-clear, schedule backoff retries. */
 
-export const BACKOFF_MS = Object.freeze([120, 500, 1500, 3000]);
+export const BACKOFF_MS = Object.freeze([120, 500, 1500, 3000, 6000, 10000, 15000, 20000]);
 export const MAX_RETRIES = BACKOFF_MS.length;
 
 // Verified empirically in issue #2: a resize jiggle makes the child pi-tui run
@@ -10,8 +10,12 @@ export const MAX_RETRIES = BACKOFF_MS.length;
 // signal. If pi-tui ever changes fullRender to skip the clear, the detector
 // silently degrades to the old one-shot behavior after MAX_RETRIES.
 const FULL_CLEAR = "\x1b[2J";
-/** Carry enough bytes to catch a split escape sequence at chunk boundary. */
-const CARRY_LEN = FULL_CLEAR.length - 1; // 3 bytes: \x1b, \x1b[, \x1b[2
+// pi-tui begins every frame (including differential frames) with a synchronized
+// output start sequence; boot-time extension output never contains it, so the
+// first occurrence marks "child TUI has started rendering" (issue #10).
+const TUI_FRAME_START = "\x1b[?2026h";
+/** Carry enough bytes to catch either target sequence split at a chunk boundary. */
+const CARRY_LEN = TUI_FRAME_START.length - 1; // 7 bytes
 
 /**
  * @typedef {Object} JiggleRetryState
@@ -27,18 +31,22 @@ export function createJiggleRetryState() {
 
 /**
  * Feed PTY output data into the state machine.
- * Returns new state, updated carry buffer, and whether a clear was found.
+ * Returns new state, updated carry buffer, and which target sequences were found.
  * @param {JiggleRetryState} state
  * @param {string} data - New output data chunk.
  * @param {string} carry - Leftover partial escape sequence from previous chunk.
- * @returns {{ state: JiggleRetryState, carry: string, clearFound: boolean }}
+ * @returns {{ state: JiggleRetryState, carry: string, clearFound: boolean, frameStartFound: boolean }}
  */
 export function feedOutput(state, data, carry) {
 	const combined = carry + data;
 	const clearFound = hasFullClearSequence(combined);
-	const newCarry = clearFound ? "" : tailCarry(combined);
+	const frameStartFound = hasTuiFrameStart(combined);
+	// Always keep the tail carry: a clear hit stops the chain (carry irrelevant), and
+	// a frame-start hit must still preserve a trailing half-sequence so an immediately
+	// following clear split across the next chunk is not missed.
+	const newCarry = tailCarry(combined);
 	const newState = clearFound ? { ...state, clearDetected: true } : state;
-	return { state: newState, carry: newCarry, clearFound };
+	return { state: newState, carry: newCarry, clearFound, frameStartFound };
 }
 
 /**
@@ -79,12 +87,23 @@ export function hasFullClearSequence(data) {
 	return data.includes(FULL_CLEAR);
 }
 
+/**
+ * Check if data contains the TUI frame-start (synchronized output) sequence.
+ * pi-tui begins every frame with \x1b[?2026h; boot-time extension output never
+ * contains it, so the first occurrence marks "child TUI has started rendering".
+ * @param {string} data
+ * @returns {boolean}
+ */
+export function hasTuiFrameStart(data) {
+	return data.includes(TUI_FRAME_START);
+}
+
 /** Extract the tail carry for cross-chunk boundary detection. */
 function tailCarry(data) {
-	// We only need to carry up to CARRY_LEN bytes to catch a split \x1b[2J.
+	// We only need to carry up to CARRY_LEN bytes to catch a split \x1b[2J or
+	// \x1b[?2026h. Find the last \x1b in the tail — everything before it can't be
+	// part of a split escape sequence.
 	const tail = data.slice(-CARRY_LEN);
-	// Find the last \x1b in the tail — everything before it can't be part of
-	// a split escape sequence.
 	const escIdx = tail.lastIndexOf("\x1b");
 	return escIdx >= 0 ? tail.slice(escIdx) : "";
 }

@@ -6,6 +6,7 @@ import {
 	createJiggleRetryState,
 	feedOutput,
 	hasFullClearSequence,
+	hasTuiFrameStart,
 	MAX_RETRIES,
 	nextRetryDelay,
 	stopRetry,
@@ -156,4 +157,51 @@ test("stopRetry does not mutate original state", () => {
 	const s = createJiggleRetryState();
 	stopRetry(s);
 	assert.equal(s.stopped, false);
+});
+
+// --- hasTuiFrameStart ---
+
+test("detects \\x1b[?2026h in plain data", () => {
+	assert.equal(hasTuiFrameStart("noise\x1b[?2026hframe"), true);
+});
+
+test("rejects data without \\x1b[?2026h", () => {
+	assert.equal(hasTuiFrameStart("plain output\x1b[2J"), false);
+});
+
+test("feedOutput detects frame start split across chunks", () => {
+	const state = createJiggleRetryState();
+	const first = feedOutput(state, "abc\x1b[?20", "");
+	assert.equal(first.frameStartFound, false);
+	const second = feedOutput(first.state, "26h rest", first.carry);
+	assert.equal(second.frameStartFound, true);
+});
+
+test("feedOutput detects clear split across chunks after carry widening", () => {
+	const state = createJiggleRetryState();
+	const first = feedOutput(state, "abc\x1b[2", "");
+	assert.equal(first.clearFound, false);
+	const second = feedOutput(first.state, "J rest", first.carry);
+	assert.equal(second.clearFound, true);
+});
+
+test("feedOutput reports both flags when one chunk has both sequences", () => {
+	const state = createJiggleRetryState();
+	const r = feedOutput(state, "\x1b[?2026h\x1b[2J\x1b[H", "");
+	assert.equal(r.frameStartFound, true);
+	assert.equal(r.clearFound, true);
+	assert.equal(r.state.clearDetected, true);
+});
+
+test("new backoff table: 8 retries totaling 56120ms", () => {
+	assert.deepEqual([...BACKOFF_MS], [120, 500, 1500, 3000, 6000, 10000, 15000, 20000]);
+	assert.equal(MAX_RETRIES, 8);
+	assert.equal(BACKOFF_MS.reduce((a, b) => a + b, 0), 56120);
+	let s = createJiggleRetryState();
+	const delays = [];
+	for (let d = nextRetryDelay(s); d !== null; d = nextRetryDelay(s)) {
+		delays.push(d);
+		s = advanceRetry(s);
+	}
+	assert.deepEqual(delays, [...BACKOFF_MS]);
 });
