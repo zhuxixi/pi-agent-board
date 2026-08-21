@@ -17,11 +17,13 @@ import {
 	canonicalModelRef,
 	clampThinkingLevel,
 	listDirectorySuggestions,
+	nextCwdPickerState,
 	resolveDirectoryValue,
 	resolveLaunchContext,
 	supportedThinkingLevels,
 } from "../core/launch-options.mjs";
 import { createPrewarmScheduler } from "../core/prewarm-schedule.mjs";
+import { ensureCwdStatsSeeded, rankedCwdCandidates, recordCwdLaunch } from "../core/cwd-stats.mjs";
 import { filterRows, groupRowsByFolder, rowState, stateGlyph } from "../core/rows.mjs";
 import { loadSessionView } from "../core/session-view.mjs";
 import { GROUP_LABELS } from "../core/types.mjs";
@@ -81,6 +83,11 @@ interface InputNotice {
 	expiresAt: number;
 }
 
+interface CwdCandidate {
+	path: string;
+	count: number;
+}
+
 interface LaunchState {
 	fieldIndex: number;
 	picker: LaunchPicker;
@@ -89,6 +96,8 @@ interface LaunchState {
 	cwdQuery: string;
 	cwdSuggestions: string[];
 	cwdSuggestionIndex: number;
+	cwdRanked: CwdCandidate[];
+	cwdPickerMode: "favorites" | "browse";
 	choices: LaunchChoice[];
 	scopeSource: "scoped" | "all";
 	model: LaunchModel | null;
@@ -102,6 +111,7 @@ interface LaunchState {
 
 export interface DashboardDeps {
 	service: Service;
+	root: string;
 	defaultCwd: string;
 	availableModels: LaunchModel[];
 	currentModel: LaunchModel | null;
@@ -562,11 +572,24 @@ export class DashboardComponent implements Component {
 			launch.picker = null;
 			return;
 		}
+		if (launch.picker === "cwd" && matchesKey(data, Key.tab)) {
+			if (launch.cwdPickerMode === "favorites" && launch.cwdSuggestions.length > 0) {
+				const completed = launch.cwdSuggestions[launch.cwdSuggestionIndex] ?? launch.cwdSuggestions[0];
+				launch.cwdQuery = completed;
+				const state = nextCwdPickerState(launch.cwdQuery, launch.cwdRanked, launch.cwd);
+				launch.cwdPickerMode = state.mode;
+				launch.cwdSuggestions = state.suggestions;
+				launch.cwdSuggestionIndex = Math.max(0, state.suggestions.indexOf(completed));
+			}
+			return;
+		}
 		if (launch.picker === "cwd") {
 			const next = this.applyLaunchQueryInput(launch.cwdQuery, data);
 			if (next !== null) {
 				launch.cwdQuery = next;
-				launch.cwdSuggestions = listDirectorySuggestions(next, launch.cwd);
+				const state = nextCwdPickerState(next, launch.cwdRanked, launch.cwd);
+				launch.cwdPickerMode = state.mode;
+				launch.cwdSuggestions = state.suggestions;
 				launch.cwdSuggestionIndex = 0;
 			}
 			return;
@@ -611,6 +634,11 @@ export class DashboardComponent implements Component {
 		const prompt = this.input.trim();
 		if (!prompt) return this.toListMode();
 		const defaults = this.launchDefaults();
+		try {
+			ensureCwdStatsSeeded(this.deps.root);
+		} catch {
+			/* best effort: favorites degrade to browse mode */
+		}
 		this.launch = this.buildLaunchState(defaults.cwd, defaults.model, defaults.thinking);
 		this.mode = "launch";
 		this.inputNotice = null;
@@ -647,7 +675,6 @@ export class DashboardComponent implements Component {
 			thinkingOptions: ThinkingLevel[];
 			scopeSource: "scoped" | "all";
 		};
-		const initialBrowserCwd = homeLaunchRoot(cwd);
 		const modelFiltered = filterLaunchChoices(context.choices, "");
 		const modelIndex = Math.max(0, modelFiltered.findIndex((choice) => sameLaunchModel(choice.model, context.selectedModel)));
 		const thinkingOptions = supportedThinkingLevels(context.selectedModel) as ThinkingLevel[];
@@ -658,9 +685,11 @@ export class DashboardComponent implements Component {
 			picker: null,
 			action: "background",
 			cwd,
-			cwdQuery: initialBrowserCwd,
-			cwdSuggestions: listDirectorySuggestions(initialBrowserCwd, cwd),
+			cwdQuery: "",
+			cwdSuggestions: [],
 			cwdSuggestionIndex: 0,
+			cwdRanked: [],
+			cwdPickerMode: "browse",
 			choices: context.choices,
 			scopeSource: context.scopeSource,
 			model: context.selectedModel,
@@ -678,8 +707,16 @@ export class DashboardComponent implements Component {
 		if (!launch) return;
 		launch.picker = picker;
 		if (picker === "cwd") {
-			launch.cwdQuery = seed ?? launch.cwdQuery ?? homeLaunchRoot(launch.cwd);
-			launch.cwdSuggestions = listDirectorySuggestions(launch.cwdQuery, launch.cwd);
+			try {
+				ensureCwdStatsSeeded(this.deps.root);
+				launch.cwdRanked = rankedCwdCandidates(this.deps.root, 8);
+			} catch {
+				launch.cwdRanked = [];
+			}
+			launch.cwdQuery = seed ?? "";
+			const state = nextCwdPickerState(launch.cwdQuery, launch.cwdRanked, launch.cwd);
+			launch.cwdPickerMode = state.mode;
+			launch.cwdSuggestions = state.suggestions;
 			launch.cwdSuggestionIndex = 0;
 			return;
 		}
@@ -794,6 +831,11 @@ export class DashboardComponent implements Component {
 		if (!res.ok) this.notice(res.error ?? "Dispatch failed", "error");
 		else {
 			this.lastLaunchPrefs = { ...this.deps.service.getLaunchPrefs?.(), cwd: launchCwd, model: launchModel, thinkingLevel: launchThinking };
+			try {
+				recordCwdLaunch(this.deps.root, launchCwd);
+			} catch {
+				/* best effort: stats must never block dispatch */
+			}
 			try {
 				this.deps.service.saveLaunchPrefs?.(this.lastLaunchPrefs);
 			} catch {
@@ -1660,10 +1702,6 @@ function findLaunchModelByRef(models: LaunchModel[], ref: string): LaunchModel |
 
 function stripBracketedPaste(data: string): string {
 	return data.replace(/\x1b\[200~|\x1b\[201~/g, "");
-}
-
-function homeLaunchRoot(fallback: string): string {
-	return process.env.HOME || process.env.USERPROFILE ? "~" : fallback;
 }
 
 function renderCenteredBox(lines: string[], width: number, height: number, theme: ThemeLike): string[] {
