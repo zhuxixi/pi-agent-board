@@ -1094,7 +1094,6 @@ export class DashboardComponent implements Component {
 	}
 
 	render(width: number): string[] {
-		const t = this.theme;
 		const allRows = this.deps.service.rows();
 		const needs = allRows.filter((r) => r.state?.semanticState === "needs_input").length;
 		const working = allRows.filter((r) => r.state?.semanticState === "working").length;
@@ -1496,7 +1495,7 @@ export class DashboardComponent implements Component {
 		return renderCenteredBox(lines, width, this.tui.terminal?.rows ?? 24, t);
 	}
 
-	private renderLaunchField(width: number, index: number, text: string, selected: boolean): string {
+	private renderLaunchField(width: number, _index: number, text: string, selected: boolean): string {
 		const prefix = selected ? this.theme.fg("accent", "› ") : this.theme.fg("dim", "  ");
 		const label = clip(text, Math.max(1, width - 2));
 		return padTo(`${prefix}${selected ? this.theme.fg("accent", label) : label}`, width);
@@ -1779,7 +1778,7 @@ function renderPtyHealth(theme: ThemeLike, health: PtyHealth): string {
 	return theme.fg("success", text);
 }
 
-function renderPtyWarningBanner(theme: ThemeLike, issue: PtyIssue, width: number): string[] {
+function renderPtyWarningBanner(_theme: ThemeLike, issue: PtyIssue, width: number): string[] {
 	return renderFlashBanner(
 		{ text: `${issue.summary} Fix: ${issue.fixHint} Press ! for exact steps.`, level: "warn" },
 		width,
