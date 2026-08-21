@@ -227,8 +227,9 @@ function pendingQuestions(status) {
 }
 
 function questionFromArgs(args) {
+	if (typeof args?.question === "string" && args.question.trim()) return args.question.trim();
 	for (const item of Array.isArray(args?.questions) ? args.questions : []) {
-		const question = String(item?.question ?? "").trim();
+		const question = String(item?.question ?? item?.prompt ?? "").trim();
 		if (question) return question;
 	}
 	return "Answer the pending question";

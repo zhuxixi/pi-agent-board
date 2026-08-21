@@ -160,6 +160,28 @@ test("interactive questions remain visible across parallel activity until each c
 	assert.deepEqual(s.pendingQuestions, []);
 });
 
+test("questionFromArgs extracts pi question/questionnaire arg shapes", () => {
+	// pi `question` tool shape: args.question is a plain string.
+	const s1 = createRunStatus(cfg(), 1, 1000);
+	reduceEvent(s1, {
+		type: "tool_execution_start",
+		toolCallId: "q1",
+		toolName: "ask_questions",
+		args: { question: "Approve the plan?" },
+	}, 2000, { interactive: true });
+	assert.equal(s1.question, "Approve the plan?");
+
+	// pi `questionnaire` tool shape: args.questions[].prompt.
+	const s2 = createRunStatus(cfg(), 1, 1000);
+	reduceEvent(s2, {
+		type: "tool_execution_start",
+		toolCallId: "q1",
+		toolName: "ask_questions",
+		args: { questions: [{ prompt: "Pick the scope?" }] },
+	}, 2000, { interactive: true });
+	assert.equal(s2.question, "Pick the scope?");
+});
+
 test("message_end assistant updates preview and detects question", () => {
 	const s = createRunStatus(cfg(), 1, 1000);
 	reduceEvent(
