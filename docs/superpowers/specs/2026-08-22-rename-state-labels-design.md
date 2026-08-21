@@ -2,7 +2,7 @@
 
 - **Issue**: zhuxixi/pi-agent-board#15
 - **Date**: 2026-08-22
-- **Status**: draft — awaiting user approval
+- **Status**: approved (2026-08-22) — implemented on branch issue-15-rename-state-labels
 - **Type**: display-only rename, no data-model change
 
 ## 1. Problem
