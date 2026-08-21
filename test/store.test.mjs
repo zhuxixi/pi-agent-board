@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -208,6 +208,31 @@ test("status round-trips and loadRow reflects state", () => {
 		const row = loadRow(root, "v1");
 		assert.equal(row.state.semanticState, "completed");
 		assert.equal(row.alive, false);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("listRows tolerates archived views with only meta.json", () => {
+	const root = freshRoot();
+	try {
+		const live = createView(root, { id: "live1", name: "live", cwd: "/r" });
+		for (const id of ["arch1", "arch2"]) {
+			const meta = createView(root, { id, name: id, cwd: "/r" });
+			meta.archived = true;
+			writeMeta(root, meta);
+			// Simulate the worst case the short-circuit must handle: archived view
+			// dirs containing nothing but meta.json (no state/evidence/host files).
+			rmSync(P.viewDir(root, id), { recursive: true, force: true });
+			mkdirSync(P.viewDir(root, id), { recursive: true });
+			writeFileSync(P.metaPath(root, id), JSON.stringify(meta));
+		}
+		const rows = listRows(root);
+		assert.equal(rows.length, 1);
+		assert.equal(rows[0].meta.id, live.id);
+		const all = listRows(root, { includeArchived: true });
+		assert.equal(all.length, 3);
+		assert.equal(all.filter((r) => r.meta.archived).length, 2);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
