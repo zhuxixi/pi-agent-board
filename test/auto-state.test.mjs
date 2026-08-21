@@ -103,3 +103,12 @@ test("applyAutoStateToStatus never overwrites a manually completed row", () => {
 	assert.equal(status.semanticState, "completed");
 	assert.equal(status.autoState, undefined);
 });
+
+test("parseAutoStateModelOutput preserves genuine in_progress reason when auto-done disabled", () => {
+	const c = parseAutoStateModelOutput('{"state":"in_progress","confidence":"medium","reason":"verification still pending","question":null}', {
+		latestAssistantText: "I ran half the tests.",
+		lastAgentActivityAt: 42,
+	});
+	assert.equal(c.kind, "in_progress");
+	assert.equal(c.reason, "verification still pending");
+});

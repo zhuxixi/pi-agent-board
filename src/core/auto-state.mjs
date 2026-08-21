@@ -67,6 +67,7 @@ export function semanticStateForAutoKind(kind) {
 /**
  * Prompt used by runners for the cheap classifier pass.
  * @param {string} latestAssistantText
+ * @param {NodeJS.ProcessEnv|Record<string,string|undefined>} [env]
  */
 export function buildAutoStatePrompt(latestAssistantText, env = process.env) {
 	const text = truncate(String(latestAssistantText || "").trim(), 6000);
@@ -90,8 +91,10 @@ export function parseAutoStateModelOutput(raw, opts = {}) {
 	if (!obj) return null;
 	let kind = normalizeKind(obj.state ?? obj.kind ?? obj.status);
 	if (!kind) return null;
+	let downgraded = false;
 	if (kind === "done" && autoStateDoneDisabled(opts.env ?? process.env)) {
 		kind = "in_progress";
+		downgraded = true;
 	}
 	const confidence = normalizeConfidence(obj.confidence);
 	const latest = opts.latestAssistantText ?? "";
@@ -100,7 +103,7 @@ export function parseAutoStateModelOutput(raw, opts = {}) {
 	return makeClassification(kind, {
 		source: "model",
 		confidence,
-		reason: kind === "in_progress" && autoStateDoneDisabled(opts.env ?? process.env)
+		reason: downgraded
 			? "Model reported done but auto-done is disabled"
 			: cleanReason(obj.reason) || defaultReason(kind),
 		question,
