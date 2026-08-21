@@ -315,3 +315,38 @@ function existsDir(dir) {
 		return false;
 	}
 }
+
+/**
+ * @typedef {Object} CwdCandidate
+ * @property {string} path
+ * @property {number} count
+ */
+
+/**
+ * Filter ranked cwd candidates by case-insensitive substring match anywhere
+ * in the path (empty query keeps the full ranked list).
+ * @param {CwdCandidate[]} candidates
+ * @param {string} query
+ * @returns {CwdCandidate[]}
+ */
+export function filterCwdCandidates(candidates, query) {
+	const q = String(query ?? "").trim().toLowerCase();
+	if (!q) return candidates;
+	return candidates.filter((entry) => entry.path.toLowerCase().includes(q));
+}
+
+/**
+ * Decide cwd picker mode + suggestions for a query: favorites when the query
+ * is empty or matches ranked candidates, filesystem browse otherwise.
+ * @param {string} query
+ * @param {CwdCandidate[]} ranked
+ * @param {string} baseCwd
+ * @returns {{mode: "favorites"|"browse", suggestions: string[]}}
+ */
+export function nextCwdPickerState(query, ranked, baseCwd) {
+	const matches = filterCwdCandidates(ranked, query);
+	if (String(query ?? "").trim() === "" || matches.length > 0) {
+		return { mode: "favorites", suggestions: matches.map((entry) => entry.path) };
+	}
+	return { mode: "browse", suggestions: listDirectorySuggestions(query, baseCwd) };
+}
