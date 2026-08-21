@@ -16,8 +16,8 @@ import { firstSentence, truncate } from "./heuristics.mjs";
 const GENERIC_STATUS_TEXT = {
 	queued: new Set(["Queued"]),
 	working: new Set(["Working", "Working…", "Running", "Running…"]),
-	needs_input: new Set(["Needs input"]),
-	idle: new Set(["Idle", "In Progress"]),
+	needs_input: new Set(["Needs input", "Needs answer"]),
+	idle: new Set(["Idle", "In Progress", "Needs instructions"]),
 	completed: new Set(["Completed", "Done"]),
 	failed: new Set(["Failed"]),
 	stopped: new Set(["Stopped"]),
@@ -50,9 +50,9 @@ export function fallbackStatusText(state) {
 		case "working":
 			return "Running…";
 		case "needs_input":
-			return "Needs input";
+			return "Needs answer";
 		case "idle":
-			return "In Progress";
+			return "Needs instructions";
 		case "completed":
 			return "Done";
 		case "failed":

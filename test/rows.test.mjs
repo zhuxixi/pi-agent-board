@@ -84,7 +84,9 @@ test("groupRowsByFolder marks showFolders only when a stage spans multiple folde
 
 test("rowView normalizes generic status labels to current display names", () => {
 	assert.equal(rowView(row("a", "working", { summary: "Working…" }), 0).summary, "Running…");
-	assert.equal(rowView(row("b", "idle", { summary: "Idle" }), 0).summary, "In Progress");
+	assert.equal(rowView(row("b", "idle", { summary: "Idle" }), 0).summary, "Needs instructions");
+	assert.equal(rowView(row("c", "idle", { summary: "In Progress" }), 0).summary, "Needs instructions");
+	assert.equal(rowView(row("d", "needs_input", { summary: "Needs input" }), 0).summary, "Needs answer");
 });
 
 test("rowView exposes unread when newer agent activity exists", () => {
@@ -100,12 +102,12 @@ test("parseFilter splits state + terms", () => {
 
 test("parseFilter prefix matches multiple states", () => {
 	const f = parseFilter("s:need");
-	assert.deepEqual(f.states, ["needs_input"]);
+	assert.deepEqual(f.states, ["needs_input", "idle"]);
 });
 
 test("parseFilter accepts display-label aliases", () => {
 	assert.deepEqual(parseFilter("s:run").states, ["working"]);
-	assert.deepEqual(parseFilter("s:in-progress").states, ["idle"]);
+	assert.deepEqual(parseFilter("s:needs-instructions").states, ["idle"]);
 });
 
 test("filterRows by state", () => {

@@ -62,12 +62,12 @@ export const GROUP_ORDER = /** @type {const} */ ([
 
 /** Human labels for group headers. @type {Record<SemanticState,string>} */
 export const GROUP_LABELS = {
-	needs_input: "Needs input",
+	needs_input: "Needs answer",
 	working: "Running",
 	queued: "Queued",
 	failed: "Failed",
 	completed: "Done",
-	idle: "In Progress",
+	idle: "Needs instructions",
 	stopped: "Stopped",
 };
 
