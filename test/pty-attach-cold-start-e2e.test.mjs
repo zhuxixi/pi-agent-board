@@ -65,6 +65,7 @@ test(
 			await once(socket, "connect");
 
 			let clearAt = null;
+			let frameAt = null;
 			const controller = createJiggleRetryController({
 				sendJiggle: () => {
 					send(socket, { type: "resize", cols: 195, rows: 38 });
@@ -88,12 +89,13 @@ test(
 						const msg = JSON.parse(line);
 						if (msg.type === "output" && typeof msg.data === "string") {
 							controller.feed(msg.data);
-							// Detection is driven off the controller's carry-safe state machine: a
-							// clear split across socket messages is still detected, unlike a naive
-							// msg.data.includes scan which would flake on chunk boundaries. The
-							// [7800, 10000]ms window keeps ~1.8s headroom over the observed ~8.2s
-							// and stays below the 11.12s backoff-tail fire time, which is what
-							// proves the re-arm fired (and that the old choreography would fail).
+							// Detection is driven off the controller's carry-safe state machine:
+							// a clear split across socket messages is still detected, unlike a
+							// naive msg.data.includes scan which would flake on chunk
+							// boundaries.
+							if (frameAt === null && controller.getState().tuiFrameSeen) {
+								frameAt = Date.now() - t0;
+							}
 							if (clearAt === null && controller.getState().clearDetected) {
 								clearAt = Date.now() - t0;
 							}
@@ -103,10 +105,19 @@ test(
 			});
 
 			await waitFor(() => clearAt !== null, 30000);
-			// 下界证明清屏来自 TUI 启动之后；上界 <11.1s 证明是 re-arm（首帧+120ms）
-			// 而非退避尾部第 6 档（11.12s 才能命中）——旧表最后一档 5.12s 注定失败。
+			// 下界证明清屏来自 TUI 启动之后（8s stub 计时器定死的）。re-arm 的证明不再用
+			// 绝对截止时间（它把 runner+pty 启动开销也算进去，负载高的 CI 上可能越界），
+			// 改用「首帧 → 清屏」的相对时差：re-arm 链在首帧后 120ms 发 jiggle，清屏应
+			// 紧随其后（<1.5s）；若没有 re-arm，退避尾部要到 11.12s 才发 jiggle，即首帧
+			// 后约 3.1s 才清屏——两者差一个数量级，且启动延迟会同时平移两个时间戳，
+			// 不会造成误判（旧编排仍然必失败）。
 			assert.ok(clearAt >= 7800, `clear arrived too early (${clearAt}ms) — not from the re-armed chain`);
-			assert.ok(clearAt <= 10000, `clear arrived too late (${clearAt}ms) — re-arm did not fire`);
+			assert.ok(frameAt !== null, "controller never saw a TUI frame");
+			const frameToClear = clearAt - frameAt;
+			assert.ok(
+				frameToClear < 1500,
+				`clear followed first TUI frame by ${frameToClear}ms — expected ~120ms from the re-armed chain's first retry; without re-arm the backoff tail fires at 11120ms (~3.1s after the 8s stub frame)`,
+			);
 			const s = controller.getState();
 			assert.equal(s.clearDetected, true);
 			assert.equal(s.stopped, true);
