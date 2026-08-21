@@ -958,7 +958,7 @@ export function createService(opts) {
 						s.question = null;
 						s.pendingQuestions = [];
 						s.error = failed ? (s.error ?? row.host.error ?? "PTY host exited unexpectedly") : null;
-						s.summary = failed ? "Failed (PTY host exited)" : "In Progress";
+						s.summary = failed ? "Failed (PTY host exited)" : "Needs instructions";
 						s.updatedAt = now;
 						writeState(root, s);
 						appendDiagnostic(root, row.meta.id, { source: "service", level: failed ? "error" : "info", code: "host_reconciled", message: failed ? "PTY host exited before final event" : "PTY host finalized without final event", details: { hostState: row.host.state, exitCode: row.host.exitCode } });

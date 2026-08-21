@@ -923,7 +923,7 @@ export class DashboardComponent implements Component {
 			currentRunId: null,
 			semanticState: "idle",
 			processState: "exited",
-			summary: "In Progress",
+			summary: "Needs instructions",
 			lastActivityAt: Date.now(),
 			updatedAt: Date.now(),
 			needsInput: false,
@@ -1754,7 +1754,7 @@ function headerTextRows(
 function headerStageSummary(theme: ThemeLike, counts: HeaderCounts, filterQuery: string, compact: boolean): string {
 	const joiner = theme.fg("dim", " · ");
 	const parts = [
-		headerStagePart(theme, "needs_input", counts.needs, compact ? "awaiting" : "awaiting input"),
+		headerStagePart(theme, "needs_input", counts.needs, compact ? "answer" : "needs answer"),
 		headerStagePart(theme, "working", counts.working, "running"),
 		headerUnreadPart(theme, counts.unread),
 		headerStagePart(theme, "completed", counts.completed, "done"),

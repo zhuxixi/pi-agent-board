@@ -14,7 +14,7 @@ Pi Agent Board is a full-screen TUI dashboard for [Pi](https://github.com/earend
 
 ## Problems It Solves
 
-- Run several Pi tasks at once without losing track of which are queued, running, waiting for input, in progress, done, failed, or stopped.
+- Run several Pi tasks at once without losing track of which are queued, running, needs answer, needs instructions, done, failed, or stopped.
 - Keep real Pi sessions durable and resumable after `/reload`, closing Pi, or restarting the terminal.
 - Check the latest output and answer follow-up questions without interrupting a running session.
 - Attach to the full interactive Pi session only when hands-on work is needed.
@@ -62,7 +62,7 @@ Open the board with `pi /agent-board` or `/agent-board` inside Pi.
 
 - Type a task in the bottom input, then press `enter`.
 - Confirm **Start session**, or adjust `cwd`, model, and thinking level first.
-- Watch rows move through `Queued`, `Running`, `Needs input`, `In Progress`, `Done`, `Failed`, and `Stopped`.
+- Watch rows move through `Queued`, `Running`, `Needs answer`, `Needs instructions`, `Done`, `Failed`, and `Stopped`.
 - Press `space` to peek at the selected row's summary, blocker, and latest output.
 - Press `r` to reply inline without attaching.
 - Press `enter`, `right`, or `>` to attach to the real Pi session.

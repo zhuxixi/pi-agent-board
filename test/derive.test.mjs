@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { deriveSummary, fallbackStatusText, finalizeSemanticState } from "../src/core/derive.mjs";
+import { deriveSummary, fallbackStatusText, finalizeSemanticState, normalizeGenericStatusText } from "../src/core/derive.mjs";
 
 test("finalizeSemanticState matrix", () => {
 	assert.equal(
@@ -93,6 +93,13 @@ test("deriveSummary falls back to preview then status text", () => {
 test("fallbackStatusText", () => {
 	assert.equal(fallbackStatusText("queued"), "Queued");
 	assert.equal(fallbackStatusText("working"), "Running…");
-	assert.equal(fallbackStatusText("needs_input"), "Needs input");
-	assert.equal(fallbackStatusText("idle"), "In Progress");
+	assert.equal(fallbackStatusText("needs_input"), "Needs answer");
+	assert.equal(fallbackStatusText("idle"), "Needs instructions");
+});
+
+test("normalizeGenericStatusText maps legacy labels to current ones", () => {
+	assert.equal(normalizeGenericStatusText("idle", "Idle"), "Needs instructions");
+	assert.equal(normalizeGenericStatusText("idle", "In Progress"), "Needs instructions");
+	assert.equal(normalizeGenericStatusText("needs_input", "Needs input"), "Needs answer");
+	assert.equal(normalizeGenericStatusText("idle", "Custom summary"), "Custom summary");
 });
