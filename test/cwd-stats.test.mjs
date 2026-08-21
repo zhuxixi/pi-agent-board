@@ -151,3 +151,43 @@ test("ensureCwdStatsSeeded seeds once and is idempotent", () => {
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("rankedCwdCandidates keeps home fallback when the list saturates", () => {
+	const root = freshRoot();
+	try {
+		writeViews(root, [
+			["v1", "/d1", 100],
+			["v2", "/d2", 200],
+			["v3", "/d3", 300],
+		]);
+		seedCwdStatsFromViews(root);
+		const ranked = rankedCwdCandidates(root, 2);
+		assert.deepEqual(ranked, [
+			{ path: "/d3", count: 1 },
+			{ path: "/d2", count: 1 },
+			{ path: os.homedir(), count: 0 },
+		]);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("rankedCwdCandidates appends home with its real count when sliced out by limit", () => {
+	const root = freshRoot();
+	try {
+		writeViews(root, [
+			["v1", os.homedir(), 100],
+			["v2", "/d1", 200],
+			["v3", "/d2", 300],
+		]);
+		seedCwdStatsFromViews(root);
+		const ranked = rankedCwdCandidates(root, 2);
+		assert.deepEqual(ranked, [
+			{ path: "/d2", count: 1 },
+			{ path: "/d1", count: 1 },
+			{ path: os.homedir(), count: 1 },
+		]);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});

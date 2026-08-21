@@ -103,8 +103,10 @@ export function rankedCwdCandidates(root, limit = 8) {
 		lastUsed: entry.lastUsed,
 	}));
 	rows.sort((a, b) => b.count - a.count || b.lastUsed - a.lastUsed);
-	const out = rows.map(({ path, count }) => ({ path, count }));
+	const out = rows.slice(0, Math.max(1, limit)).map(({ path, count }) => ({ path, count }));
 	const home = os.homedir();
-	if (!out.some((entry) => entry.path === home)) out.push({ path: home, count: 0 });
-	return out.slice(0, Math.max(1, limit));
+	if (out.some((entry) => entry.path === home)) return out;
+	const homeRow = rows.find((entry) => entry.path === home);
+	out.push(homeRow ? { path: home, count: homeRow.count } : { path: home, count: 0 });
+	return out;
 }
