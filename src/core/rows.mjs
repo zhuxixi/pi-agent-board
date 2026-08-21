@@ -140,7 +140,7 @@ export function rowView(row, now) {
 		followUpPreview: row.state?.followUps?.lastQueuedPreview ?? null,
 		steeringState: row.state?.steering?.status ?? "none",
 		lastActivityAt,
-		createdAt: row.meta.createdAt ?? row.meta.updatedAt ?? 0,
+		createdAt: row.meta.createdAt ?? 0,
 	};
 }
 

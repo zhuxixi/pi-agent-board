@@ -12,7 +12,7 @@ function row(id, semanticState, extra = {}) {
 			repoCwd: extra.repoCwd ?? "/repo",
 			worktreeMode: extra.worktreeMode ?? "off",
 			pinned: extra.pinned ?? false,
-			updatedAt: 0,
+			updatedAt: extra.updatedAt ?? 0,
 			createdAt: extra.createdAt ?? 0,
 		},
 		state: {
@@ -53,6 +53,14 @@ test("groupRows ignores activity recency so order stays stable", () => {
 		row("b", "working", { createdAt: 200, lastActivityAt: 100 }),
 	];
 	const [working] = groupRows(rows, 1000);
+	assert.deepEqual(working.rows.map((r) => r.id), ["a", "b"]);
+});
+
+test("rows missing meta.createdAt fall back to 0, not updatedAt", () => {
+	const legacy = row("a", "working", { updatedAt: 999 });
+	delete legacy.meta.createdAt;
+	const fresh = row("b", "working", { createdAt: 100 });
+	const [working] = groupRows([legacy, fresh], 1000);
 	assert.deepEqual(working.rows.map((r) => r.id), ["a", "b"]);
 });
 
