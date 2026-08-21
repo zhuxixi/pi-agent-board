@@ -140,6 +140,41 @@ test("notifyExternalResize cancels hold, adopts new size, stops chain (G4)", () 
 	assert.equal(resizes.length, 0);
 });
 
+test("slow boot: G1 released, first frame re-arms hold, clear restores", () => {
+	const { controller, scheduler, resizes } = makeController();
+	controller.start(170, 36);
+	const g1 = scheduler.findByDelay(6000);
+	assert.ok(g1);
+	scheduler.fire(g1); // G1 releases the hold before the TUI boots
+	assert.deepEqual(resizes.slice(-1), [[170, 36]]);
+	assert.equal(controller.getState().held, false);
+	// TUI boots late: first frame re-arms a fresh hold (F1 probe)
+	controller.feed("\x1b[?2026h first frame");
+	assert.deepEqual(resizes.slice(-1), [[169, 35]], "probe re-shrinks and holds");
+	assert.equal(controller.getState().held, true);
+	assert.equal(controller.getState().tuiFrameSeen, true);
+	// The now-running child fullRenders on the width delta → clear restores
+	controller.feed("x\x1b[2J");
+	assert.deepEqual(resizes.slice(-1), [[170, 36]], "clear restores original size");
+	const s = controller.getState();
+	assert.equal(s.held, false);
+	assert.equal(s.clearDetected, true);
+	assert.equal(s.stopped, true);
+});
+
+test("no re-arm probe after chain exhausted (stopped)", () => {
+	const { controller, scheduler, resizes } = makeController();
+	controller.start(170, 36);
+	scheduler.fireNext(); // G1(6000) fires first in Map order → restore, held=false
+	assert.equal(controller.getState().held, false);
+	for (let i = 0; i < 8; i++) scheduler.fireNext(); // exhaust the 8-entry chain (G2)
+	assert.equal(controller.getState().stopped, true);
+	const before = resizes.length;
+	controller.feed("\x1b[?2026h late frame");
+	assert.equal(resizes.length, before, "no probe after chain stopped");
+	assert.equal(controller.getState().held, false);
+});
+
 test("full G1 window passes while frames keep arriving → held restored by G2 only", () => {
 	const { controller, scheduler, resizes } = makeController();
 	controller.start(170, 36);

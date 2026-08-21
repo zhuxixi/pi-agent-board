@@ -132,7 +132,7 @@ test(
 			const frameToClear = clearAt - frameAt;
 			assert.ok(
 				frameToClear <= 3000,
-				`clear followed the first TUI frame by ${frameToClear}ms — expected a few round-trips (restore → child width delta → fullRender). Old pulse protocol heals at >10s or never.`,
+				`clear followed the first TUI frame by ${frameToClear}ms — expected a few round-trips (restore → child width delta → fullRender). heal did not follow the re-arm restore within 3s.`,
 			);
 
 			// Final state: not held, chain stopped, restore sent, PTY back at original.
@@ -204,6 +204,89 @@ test(
 			const s = controller.getState();
 			assert.equal(s.held, false, "hold must be released after G1 restore");
 			assert.equal(s.tuiFrameSeen, false);
+			controller.restoreAndStop();
+		} finally {
+			cleanup(root, runner, socket);
+		}
+	},
+);
+
+// Slow-boot heal (F1, final review): the TUI boots AFTER G1 (NO_FRAME_RESTORE_MS
+// = 6s) has already released the hold, so the child baselines at the original
+// size. The first frame's re-arm must re-hold (probe), the running child then
+// fullRenders on the width delta, and the clear restores the original size.
+// This is the capability the old pulse protocol had (heal at any boot time)
+// that the initial hold design would have lost for boots >6s.
+test(
+	"slow boot >6s: first frame re-arms hold after G1, heals in <=3s, ends at original size",
+	{ skip: !hasNodePty && "node-pty unavailable", timeout: 30000 },
+	async () => {
+		const root = mkdtempSync(join(tmpdir(), "agentview-holdslow-"));
+		let runner;
+		let socket;
+		const t0 = Date.now();
+		try {
+			runner = spawnRunner(root, "slow1", [resolve("test-support/fake-coldstart-tui-pi.mjs")], {
+				STUB_TUI_DELAY_MS: "7000", // > G1's 6000: TUI starts after the hold is released
+			});
+			await waitFor(() => existsSync(P.controlSocketPath(root, "slow1")) && readHost(root, "slow1")?.state === "alive");
+
+			socket = createConnection(P.controlSocketPath(root, "slow1"));
+			await once(socket, "connect");
+
+			let frameAt = null;
+			let clearAt = null;
+			const resizes = [];
+			const controller = createJiggleRetryController({
+				sendResize: (cols, rows) => {
+					resizes.push([cols, rows]);
+					send(socket, { type: "resize", cols, rows });
+				},
+				setTimeoutFn: (fn, ms) => setTimeout(fn, ms),
+				clearTimeoutFn: (t) => clearTimeout(t),
+			});
+			controller.start(196, 39);
+			send(socket, { type: "hello", clientId: "e2e", wantOutput: true });
+
+			let buf = "";
+			socket.on("data", (chunk) => {
+				buf += chunk.toString("utf8");
+				const lines = buf.split("\n");
+				buf = lines.pop() ?? "";
+				for (const line of lines) {
+					if (!line.trim()) continue;
+					try {
+						const msg = JSON.parse(line);
+						if (msg.type === "output" && typeof msg.data === "string") {
+							controller.feed(msg.data);
+							if (frameAt === null && controller.getState().tuiFrameSeen) {
+								frameAt = Date.now() - t0;
+							}
+							if (clearAt === null && controller.getState().clearDetected) {
+								clearAt = Date.now() - t0;
+							}
+						}
+					} catch {}
+				}
+			});
+
+			await waitFor(() => clearAt !== null, 25000);
+			assert.ok(frameAt !== null, "controller never saw a TUI frame");
+			const frameToClear = clearAt - frameAt;
+			assert.ok(
+				frameToClear <= 3000,
+				`slow boot: clear followed the first TUI frame by ${frameToClear}ms — expected the re-armed hold to fullRender quickly.`,
+			);
+
+			const s = controller.getState();
+			assert.equal(s.held, false, "hold must be released after the clear restore");
+			assert.equal(s.clearDetected, true);
+			assert.equal(s.tuiFrameSeen, true);
+			assert.deepEqual(resizes.at(-1), [196, 39], "last resize must be the restore to original");
+			await waitFor(() => {
+				const h = readHost(root, "slow1");
+				return h?.cols === 196 && h?.rows === 39;
+			}, 10000);
 			controller.restoreAndStop();
 		} finally {
 			cleanup(root, runner, socket);

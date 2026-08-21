@@ -17,7 +17,9 @@
  * size: the now-rendering child sees a width different from its baseline
  * and fullRenders. Guards:
  *   G1 NO_FRAME_RESTORE_MS — no TUI frame within 6s → restore (no renderer
- *      to trigger; continuing to hold has no purpose).
+ *      to trigger; continuing to hold has no purpose). If the TUI boots even
+ *      later, its first frame re-arms a fresh hold (F1 slow-boot probe), so
+ *      healing still fires the moment the child actually starts rendering.
  *   G2 backoff budget exhausted without a clear → restore (non-pi children,
  *      dead sessions).
  *   G3 restoreAndStop() — component close/detach restores while the socket
@@ -152,11 +154,14 @@ export function createJiggleRetryController(deps) {
 	 * Feed one socket output chunk. A clear wins over the re-arm when both
 	 * appear in one chunk. The first TUI frame restores the held size (the
 	 * child is now rendering and will fullRender on the width delta) and
-	 * does NOT reschedule the chain.
+	 * does NOT reschedule the chain; if G1 already released the hold before
+	 * the TUI booted, the frame instead re-arms a fresh hold so the running
+	 * child still sees a width delta (F1 slow-boot probe).
 	 * @param {string} data
 	 */
 	function feed(data) {
 		if (state.clearDetected) return; // chain done; nothing left to detect
+		if (state.stopped) return; // chain ended (G2/G3/G4); output is inert
 		const result = feedOutput(state, data, carry);
 		state = result.state;
 		carry = result.carry;
@@ -169,7 +174,18 @@ export function createJiggleRetryController(deps) {
 		if (result.frameStartFound && !tuiFrameSeen) {
 			tuiFrameSeen = true;
 			clearG1Timer();
-			restoreIfHeld(); // re-arm: child is rendering, width delta now lands
+			if (held) {
+				restoreIfHeld(); // fast path: child is rendering, width delta now lands
+			} else {
+				// Slow boot: G1 released the hold before the TUI came up, so the
+				// child baselined at the original size. Re-arm a fresh hold — its
+				// next frame then sees a width delta and fullRenders. Guards: the
+				// clear path (primary) and G2 budget exhaustion (chain still
+				// ticking). G1 is NOT re-armed: frames are now flowing.
+				sendResize(originalCols - 1, originalRows - 1);
+				held = true;
+				restored = false;
+			}
 		}
 	}
 
