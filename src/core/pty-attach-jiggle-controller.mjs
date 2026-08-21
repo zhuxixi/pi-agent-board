@@ -88,7 +88,7 @@ export function createJiggleRetryController(deps) {
 			state = stopRetry({ ...state, clearDetected: true });
 			return;
 		}
-		if (result.frameStartFound && !tuiFrameSeen) {
+		if (result.frameStartFound && !tuiFrameSeen && !state.clearDetected) {
 			tuiFrameSeen = true;
 			clearTimer();
 			state = createJiggleRetryState();

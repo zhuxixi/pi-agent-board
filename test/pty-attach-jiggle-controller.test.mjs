@@ -86,6 +86,24 @@ test("clear wins when one chunk contains both frame-start and clear", () => {
 	assert.equal(s.tuiFrameSeen, false);
 });
 
+test("no re-arm after clear-wins settle: later differential frames stay inert", () => {
+	const { controller, scheduler } = makeController();
+	controller.start();
+	// same-chunk clear-wins: chain stops, latch never set
+	controller.feed("\x1b[?2026h\x1b[2J");
+	assert.equal(controller.getState().stopped, true);
+	assert.equal(controller.getState().clearDetected, true);
+	assert.equal(controller.getState().tuiFrameSeen, false);
+	// a later differential frame must NOT re-arm the already-stopped chain
+	controller.feed("\x1b[?2026h later differential frame");
+	const s = controller.getState();
+	assert.equal(s.stopped, true);
+	assert.equal(s.clearDetected, true);
+	assert.equal(s.tuiFrameSeen, false);
+	assert.equal(s.retryIndex, 0);
+	assert.equal(scheduler.timers.size, 0, "no pending retry timer after post-clear frame");
+});
+
 test("re-arm fires even after the chain exhausted (cold-boot case)", () => {
 	const { controller, scheduler, jiggles } = makeController();
 	controller.start();
