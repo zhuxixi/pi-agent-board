@@ -26,7 +26,10 @@ export function createPrewarmScheduler(prewarm, delayMs = 200) {
 	return {
 		schedule() {
 			if (timer !== null) clearTimeout(timer);
-			timer = setTimeout(fire, delayMs);
+			const pending = setTimeout(fire, delayMs);
+			// Never let a pending debounce hold the event loop open on exit.
+			if (typeof pending.unref === "function") pending.unref();
+			timer = pending;
 		},
 		cancel() {
 			if (timer !== null) {
