@@ -13,14 +13,14 @@ import { fileURLToPath } from "node:url";
 import { appendLine, readJson } from "../src/core/atomic.mjs";
 import { createRunStatus, finalizeRun, projectViewState, reduceEvent } from "../src/core/events.mjs";
 import { encodePromptForCliArg } from "../src/core/prompt-transport.mjs";
-import { applyAutoStateToStatus, autoStateEnabled, autoStateFromModelOrHeuristic, autoStateModel, buildAutoStatePrompt, heuristicAutoState } from "../src/core/auto-state.mjs";
+import { applyAutoStateToStatus, autoStateEnabled, autoStateFromModelOrHeuristic, autoStateModel, buildAutoStatePrompt, heuristicAutoState, isManualCompletion } from "../src/core/auto-state.mjs";
 import { appendDiagnostic } from "../src/core/diagnostics.mjs";
 import { emptyEvidenceSnapshot, finalizeEvidence, reduceEvidence, summarizeEvidence, writeEvidence, writeRunEvidence } from "../src/core/evidence.mjs";
 import { claimNextFollowUp, completeFollowUp, releaseFollowUp } from "../src/core/follow-up-queue.mjs";
 import { newRunId } from "../src/core/ids.mjs";
 import { launchRun } from "../src/core/launch.mjs";
 import * as P from "../src/core/paths.mjs";
-import { readState, writeState, writeStatus } from "../src/core/store.mjs";
+import { readState, readStatus, writeState, writeStatus } from "../src/core/store.mjs";
 import { readSteering, recordPlanReady } from "../src/core/steering.mjs";
 import { buildApprovePlanPrompt, buildPlanChangesPrompt, buildPlanRequestPrompt } from "../src/core/steering-prompts.mjs";
 
@@ -333,9 +333,20 @@ async function maybeModelAutoState(config, status, evidence) {
 		[...config.piArgsPrefix, "--mode", "json", "-p", "--no-session", "--model", model, prompt],
 		15000,
 	);
+	// Fresh read: the user may have marked the row done manually during the model
+	// call. completeView clears autoState in both state.json and status.json, so a
+	// manual completion is detectable here; applying the classification to the stale
+	// in-memory status would clobber the user's verdict.
+	const fresh = readStatus(config.root, config.viewId, config.runId);
+	if (!fresh || isManualCompletion(fresh)) return false;
+	Object.assign(status, fresh);
 	const classification = autoStateFromModelOrHeuristic(out, latest, { lastAgentActivityAt: status.lastAgentActivityAt ?? null });
 	const changed = applyAutoStateToStatus(status, classification, Date.now());
 	if (changed) {
+		// Second check right before persisting: persist() projects status onto the
+		// row state, so bail out if the user completed the row while we applied.
+		const latestView = readState(config.root, config.viewId);
+		if (isManualCompletion(latestView)) return false;
 		appendDiagnostic(config.root, config.viewId, { source: "runner", runId: config.runId, code: "auto_state_classified", message: "Auto-state classifier refined terminal state", details: { kind: classification.kind, confidence: classification.confidence, source: classification.source, reason: classification.reason } });
 	}
 	return changed;

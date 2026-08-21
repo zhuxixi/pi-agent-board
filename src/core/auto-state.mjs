@@ -191,6 +191,17 @@ export function autoStateFromModelOrHeuristic(modelOutput, latestAssistantText, 
 }
 
 /**
+ * Whether a row/status shows a manual completion. completeView clears autoState on
+ * both state.json and status.json when the user marks done, so `autoState == null`
+ * combined with `completed` is the manual-completion signal. Auto-classified
+ * completed rows keep autoState and stay refinable by a later model pass.
+ * @param {{ semanticState?: string, autoState?: unknown|null }|null|undefined} state
+ */
+export function isManualCompletion(state) {
+	return Boolean(state && state.semanticState === "completed" && state.autoState == null);
+}
+
+/**
  * Mutate a RunStatus with a classification. Returns true if state/metadata changed.
  * @param {import("./types.mjs").RunStatus} status
  * @param {import("./types.mjs").AutoStateClassification} classification
@@ -199,10 +210,8 @@ export function autoStateFromModelOrHeuristic(modelOutput, latestAssistantText, 
 export function applyAutoStateToStatus(status, classification, now = Date.now()) {
 	if (!classification || status.processState === "alive") return false;
 	if (status.semanticState === "failed" || status.semanticState === "stopped") return false;
-	// Manual completions (completeView clears autoState) are user verdicts and must
-	// never be overwritten. Auto-classified completed rows keep autoState and stay
-	// refinable by a later model pass (e.g. done -> needs_input correction).
-	if (status.semanticState === "completed" && status.autoState == null) return false;
+	// Manual completions are user verdicts and must never be overwritten.
+	if (isManualCompletion(status)) return false;
 	const nextState = semanticStateForAutoKind(classification.kind);
 	const before = `${status.semanticState}|${status.question ?? ""}|${status.summary ?? ""}|${status.autoState?.source ?? ""}|${status.autoState?.textHash ?? ""}`;
 	status.semanticState = nextState;
@@ -226,10 +235,8 @@ export function applyAutoStateToStatus(status, classification, now = Date.now())
 export function applyAutoStateToViewState(state, classification, now = Date.now()) {
 	if (!classification || state.processState === "alive") return false;
 	if (state.semanticState === "failed" || state.semanticState === "stopped") return false;
-	// Manual completions (completeView clears autoState) are user verdicts and must
-	// never be overwritten. Auto-classified completed rows keep autoState and stay
-	// refinable by a later model pass (e.g. done -> needs_input correction).
-	if (state.semanticState === "completed" && state.autoState == null) return false;
+	// Manual completions are user verdicts and must never be overwritten.
+	if (isManualCompletion(state)) return false;
 	const nextState = semanticStateForAutoKind(classification.kind);
 	const before = `${state.semanticState}|${state.question ?? ""}|${state.summary ?? ""}|${state.autoState?.source ?? ""}|${state.autoState?.textHash ?? ""}`;
 	state.semanticState = nextState;
