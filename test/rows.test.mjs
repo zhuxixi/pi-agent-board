@@ -12,8 +12,8 @@ function row(id, semanticState, extra = {}) {
 			repoCwd: extra.repoCwd ?? "/repo",
 			worktreeMode: extra.worktreeMode ?? "off",
 			pinned: extra.pinned ?? false,
-			updatedAt: 0,
-			createdAt: 0,
+			updatedAt: extra.updatedAt ?? 0,
+			createdAt: extra.createdAt ?? 0,
 		},
 		state: {
 			semanticState,
@@ -37,14 +37,31 @@ test("groupRows orders by GROUP_ORDER and omits empty groups", () => {
 	assert.deepEqual(groups.map((g) => g.state), ["working", "needs_input", "completed"]);
 });
 
-test("groupRows sorts pinned first then recent", () => {
+test("groupRows sorts pinned first then creation order (oldest first)", () => {
 	const rows = [
-		row("a", "working", { lastActivityAt: 100 }),
-		row("b", "working", { lastActivityAt: 300 }),
-		row("c", "working", { lastActivityAt: 200, pinned: true }),
+		row("a", "working", { createdAt: 100 }),
+		row("b", "working", { createdAt: 300 }),
+		row("c", "working", { createdAt: 200, pinned: true }),
 	];
 	const [working] = groupRows(rows, 1000);
-	assert.deepEqual(working.rows.map((r) => r.id), ["c", "b", "a"]);
+	assert.deepEqual(working.rows.map((r) => r.id), ["c", "a", "b"]);
+});
+
+test("groupRows ignores activity recency so order stays stable", () => {
+	const rows = [
+		row("a", "working", { createdAt: 100, lastActivityAt: 900 }),
+		row("b", "working", { createdAt: 200, lastActivityAt: 100 }),
+	];
+	const [working] = groupRows(rows, 1000);
+	assert.deepEqual(working.rows.map((r) => r.id), ["a", "b"]);
+});
+
+test("rows missing meta.createdAt fall back to 0, not updatedAt", () => {
+	const legacy = row("a", "working", { updatedAt: 999 });
+	delete legacy.meta.createdAt;
+	const fresh = row("b", "working", { createdAt: 100 });
+	const [working] = groupRows([legacy, fresh], 1000);
+	assert.deepEqual(working.rows.map((r) => r.id), ["a", "b"]);
 });
 
 test("rowView exposes folder place for dashboard rows", () => {
@@ -57,16 +74,25 @@ test("rowView exposes folder place for dashboard rows", () => {
 
 test("groupRowsByFolder nests rows by folder inside each stage", () => {
 	const rows = [
-		row("a", "working", { repoCwd: "/repo/r-code", lastActivityAt: 100 }),
-		row("b", "working", { repoCwd: "/repo/pi-agents-view", lastActivityAt: 300 }),
-		row("c", "working", { repoCwd: "/repo/r-code", lastActivityAt: 200 }),
-		row("d", "completed", { repoCwd: "/repo/r-code", lastActivityAt: 400 }),
+		row("a", "working", { repoCwd: "/repo/r-code", createdAt: 300 }),
+		row("b", "working", { repoCwd: "/repo/pi-agents-view", createdAt: 100 }),
+		row("c", "working", { repoCwd: "/repo/r-code", createdAt: 200 }),
+		row("d", "completed", { repoCwd: "/repo/r-code", createdAt: 400 }),
 	];
 	const groups = groupRowsByFolder(rows, 1000);
 	assert.deepEqual(groups.map((g) => g.state), ["working", "completed"]);
 	assert.deepEqual(groups[0].folders.map((f) => f.name), ["pi-agents-view", "r-code"]);
 	assert.deepEqual(groups[0].folders[1].rows.map((r) => r.id), ["c", "a"]);
 	assert.equal(groups[1].folders[0].name, "r-code");
+});
+
+test("groupRowsByFolder keeps folder order stable regardless of activity", () => {
+	const rows = [
+		row("a", "working", { repoCwd: "/repo/x", createdAt: 100, lastActivityAt: 1 }),
+		row("b", "working", { repoCwd: "/repo/y", createdAt: 200, lastActivityAt: 999 }),
+	];
+	const groups = groupRowsByFolder(rows, 1000);
+	assert.deepEqual(groups[0].folders.map((f) => f.name), ["x", "y"]);
 });
 
 test("groupRowsByFolder marks showFolders only when a stage spans multiple folders", () => {
