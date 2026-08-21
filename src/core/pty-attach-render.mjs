@@ -23,6 +23,27 @@ export function shouldScheduleAttachRenderForMessage(type) {
 export const ATTACH_OUTPUT_RENDER_INTERVAL_MS = 40;
 
 /**
+ * Resolve the PTY cursor to an ABSOLUTE buffer row for the projected window
+ * [start, start + height). xterm's buffer cursorY is relative to baseY (the child
+ * terminal's viewport top when scrolled to bottom), so the absolute row is
+ * baseY + cursorY. Returns null when the cursor is outside the projected window
+ * (e.g. the user scrolled up into history).
+ *
+ * The returned row must stay absolute: projection loops pass absolute buffer
+ * indices (buf.getLine(i) for i in [start, end)) and mouse selection points are
+ * absolute too. Returning a start-relative row only matches while start === 0;
+ * once scrollback exists the cursor cell never matches, which silently drops the
+ * visible PTY-cursor block AND the CURSOR_MARKER used to position the hardware
+ * cursor for IME candidate windows.
+ */
+export function projectPtyCursor(buf, start, height) {
+	if (typeof buf.cursorX !== "number" || typeof buf.cursorY !== "number" || buf.cursorX < 0 || buf.cursorY < 0) return null;
+	const row = buf.baseY + buf.cursorY;
+	if (row < start || row >= start + height) return null;
+	return { row, col: buf.cursorX };
+}
+
+/**
  * Coalesce PTY parser callbacks into a bounded stream of repaint requests.
  *
  * node-pty commonly splits one child-TUI update across many small chunks. Rendering
