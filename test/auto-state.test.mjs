@@ -112,3 +112,35 @@ test("parseAutoStateModelOutput preserves genuine in_progress reason when auto-d
 	assert.equal(c.kind, "in_progress");
 	assert.equal(c.reason, "verification still pending");
 });
+
+test("applyAutoStateToStatus refines auto-classified completed rows but protects manual ones", () => {
+	// Auto-classified completed keeps autoState, so a later model pass can refine it.
+	const autoCompleted = {
+		processState: "exited",
+		semanticState: "completed",
+		currentTool: null,
+		question: null,
+		error: null,
+		latestAssistantPreview: "Done. Tests pass.",
+		summary: "Done.",
+		autoState: { kind: "done", source: "heuristic", semanticState: "completed", confidence: "high", reason: "complete", classifiedAt: 100, textHash: "abc" },
+	};
+	const refine = heuristicAutoState("Which deployment target should I use?");
+	const refinedChanged = applyAutoStateToStatus(autoCompleted, refine, 200);
+	assert.equal(refinedChanged, true);
+	assert.equal(autoCompleted.semanticState, "needs_input");
+
+	// Manual completed (completeView clears autoState) stays untouched.
+	const manualCompleted = {
+		processState: "exited",
+		semanticState: "completed",
+		currentTool: null,
+		question: null,
+		error: null,
+		latestAssistantPreview: "Done. Fixed the bug and tests pass.",
+		summary: "Done.",
+	};
+	const manualChanged = applyAutoStateToStatus(manualCompleted, heuristicAutoState(manualCompleted.latestAssistantPreview), 100);
+	assert.equal(manualChanged, false);
+	assert.equal(manualCompleted.semanticState, "completed");
+});

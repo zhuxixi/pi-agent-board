@@ -198,7 +198,11 @@ export function autoStateFromModelOrHeuristic(modelOutput, latestAssistantText, 
  */
 export function applyAutoStateToStatus(status, classification, now = Date.now()) {
 	if (!classification || status.processState === "alive") return false;
-	if (status.semanticState === "failed" || status.semanticState === "stopped" || status.semanticState === "completed") return false;
+	if (status.semanticState === "failed" || status.semanticState === "stopped") return false;
+	// Manual completions (completeView clears autoState) are user verdicts and must
+	// never be overwritten. Auto-classified completed rows keep autoState and stay
+	// refinable by a later model pass (e.g. done -> needs_input correction).
+	if (status.semanticState === "completed" && status.autoState == null) return false;
 	const nextState = semanticStateForAutoKind(classification.kind);
 	const before = `${status.semanticState}|${status.question ?? ""}|${status.summary ?? ""}|${status.autoState?.source ?? ""}|${status.autoState?.textHash ?? ""}`;
 	status.semanticState = nextState;
@@ -221,7 +225,11 @@ export function applyAutoStateToStatus(status, classification, now = Date.now())
  */
 export function applyAutoStateToViewState(state, classification, now = Date.now()) {
 	if (!classification || state.processState === "alive") return false;
-	if (state.semanticState === "failed" || state.semanticState === "stopped" || state.semanticState === "completed") return false;
+	if (state.semanticState === "failed" || state.semanticState === "stopped") return false;
+	// Manual completions (completeView clears autoState) are user verdicts and must
+	// never be overwritten. Auto-classified completed rows keep autoState and stay
+	// refinable by a later model pass (e.g. done -> needs_input correction).
+	if (state.semanticState === "completed" && state.autoState == null) return false;
 	const nextState = semanticStateForAutoKind(classification.kind);
 	const before = `${state.semanticState}|${state.question ?? ""}|${state.summary ?? ""}|${state.autoState?.source ?? ""}|${state.autoState?.textHash ?? ""}`;
 	state.semanticState = nextState;
