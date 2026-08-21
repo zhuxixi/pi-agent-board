@@ -7,7 +7,7 @@ import type { Component, KeybindingsManager, TUI } from "@earendil-works/pi-tui"
 import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { isProbablyEmptyPiInputLine } from "../core/pty-input.mjs";
 import { findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
-import { createAttachOutputRenderScheduler, nextAttachRender, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
+import { createAttachOutputRenderScheduler, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
 import { createJiggleRetryController } from "../core/pty-attach-jiggle-controller.mjs";
 import { clampInt, parseMouseInputChunk, resolveWheelLines, scrollViewportTop, selectionDragScrollLines } from "../core/pty-scroll.mjs";
 
@@ -974,7 +974,7 @@ export class PtyAttachComponent implements Component {
 		// The PTY cursor: xterm buffer cursorY is relative to baseY (the viewport top of
 		// the child terminal); cursorX may equal cols (one past the last cell). Only render
 		// it when it lands inside the projected viewport.
-		const cursor = cursorInViewport(buf, start, height);
+		const cursor = projectPtyCursor(buf, start, height);
 		for (let i = start; i < end; i++) {
 			out.push(lineToAnsi(buf.getLine(i), reusable, this.term, i, selection, cursor));
 		}
@@ -1140,22 +1140,6 @@ function lineToAnsi(
 		out += CURSOR_MARKER + "\x1b[7m \x1b[0m";
 	}
 	return out + "\x1b[0m";
-}
-
-/**
- * Resolve the PTY cursor into viewport coordinates. xterm's buffer cursorY is relative
- * to baseY (the child terminal's viewport top); returns null when the cursor is outside
- * the projected window (e.g. the user scrolled up into history).
- */
-function cursorInViewport(
-	buf: XtermLike["buffer"]["active"],
-	start: number,
-	height: number,
-): { row: number; col: number } | null {
-	if (typeof buf.cursorX !== "number" || typeof buf.cursorY !== "number" || buf.cursorX < 0 || buf.cursorY < 0) return null;
-	const row = buf.baseY + buf.cursorY - start;
-	if (row < 0 || row >= height) return null;
-	return { row, col: buf.cursorX };
 }
 
 function attrKey(cell: BufferCellLike, selected = false, isCursor = false): string {
