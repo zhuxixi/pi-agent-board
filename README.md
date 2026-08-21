@@ -86,6 +86,7 @@ Useful environment variables:
 | `AGENT_BOARD_TITLE_MODEL=<model>` | Model for generated session titles. Defaults to `openai-codex/gpt-5.5`; use `off` to disable. |
 | `AGENT_BOARD_TITLE_THINKING_LEVEL=<level>` | Thinking level for title generation. Defaults to `low`; use `off` to omit it. |
 | `AGENT_BOARD_DISABLE_PTY=1` | Disable PTY attach mode. |
+| `AGENT_BOARD_IME_FIX=0` | Disable the IME cursor-rect coalescer (issue #28). The coalescer folds pi-tui's per-frame cursor-park writes into the frame's synchronized-output block so terminals report one stable IME cursor position per frame instead of two (candidate-window flicker in busy sessions). |
 | `AGENT_BOARD_FORCE_PTY=1` | Force PTY attach mode. |
 | `AGENT_BOARD_ATTACH_MOUSE=0` | Disable attach-view mouse handling and use terminal-native selection. |
 | `AGENT_BOARD_WHEEL_LINES=<1-50>` | Lines scrolled per mouse-wheel event in attach view. Defaults to `1`. |

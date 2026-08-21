@@ -7,7 +7,8 @@ import type { Component, KeybindingsManager, TUI } from "@earendil-works/pi-tui"
 import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { isProbablyEmptyPiInputLine } from "../core/pty-input.mjs";
 import { findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
-import { createAttachOutputRenderScheduler, nextAttachRender, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
+import { createAttachOutputRenderScheduler, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
+import { installImeCursorCoalesce } from "../core/ime-cursor-coalesce.mjs";
 import { createJiggleRetryController } from "../core/pty-attach-jiggle-controller.mjs";
 import { clampInt, parseMouseInputChunk, resolveWheelLines, scrollViewportTop, selectionDragScrollLines } from "../core/pty-scroll.mjs";
 
@@ -165,6 +166,10 @@ export class PtyAttachComponent implements Component {
 	// into many small chunks; painting after each chunk would drive the outer TUI to its
 	// frame cap and expose intermediate frames (visible as flicker on a busy session).
 	private readonly outputRenderScheduler = createAttachOutputRenderScheduler(() => this.scheduleRender());
+	// Fold pi-tui's post-frame cursor-park writes back into the frame's sync block so the
+	// terminal reports one stable IME cursor rect per frame instead of two (issue #28).
+	// Never active when AGENT_BOARD_IME_FIX=0; no-op passthrough if pi-tui changes shape.
+	private readonly imeCoalesceUninstall: (() => void) | null;
 
 	constructor(
 		private readonly tui: TUI,
@@ -176,6 +181,9 @@ export class PtyAttachComponent implements Component {
 		const size = this.currentSize();
 		this.cols = size.cols;
 		this.rows = size.rows;
+		// Assigned in the body (not as a field initializer) so it runs after the `tui`
+		// parameter property is set regardless of the TS loader's field-init semantics.
+		this.imeCoalesceUninstall = installImeCursorCoalesce(this.tui);
 		this.term = new Terminal({ cols: this.cols, rows: this.rows, scrollback: 2000, allowProposedApi: true });
 		// Keep mouse reporting enabled by default so wheel scrolling and local drag-to-copy
 		// selection can coexist inside the attach surface. Set AGENT_BOARD_ATTACH_MOUSE=0
@@ -941,7 +949,7 @@ export class PtyAttachComponent implements Component {
 		// The PTY cursor: xterm buffer cursorY is relative to baseY (the viewport top of
 		// the child terminal); cursorX may equal cols (one past the last cell). Only render
 		// it when it lands inside the projected viewport.
-		const cursor = cursorInViewport(buf, start, height);
+		const cursor = projectPtyCursor(buf, start, height);
 		for (let i = start; i < end; i++) {
 			out.push(lineToAnsi(buf.getLine(i), reusable, this.term, i, selection, cursor));
 		}
@@ -951,6 +959,7 @@ export class PtyAttachComponent implements Component {
 
 	private close(): void {
 		this.closed = true;
+		this.imeCoalesceUninstall?.();
 		this.jiggleRetry.restoreAndStop();
 		this.disableMouseScroll();
 		this.clearMouseRefreshTimers();
@@ -1099,22 +1108,6 @@ function lineToAnsi(
 		out += CURSOR_MARKER + "\x1b[7m \x1b[0m";
 	}
 	return out + "\x1b[0m";
-}
-
-/**
- * Resolve the PTY cursor into viewport coordinates. xterm's buffer cursorY is relative
- * to baseY (the child terminal's viewport top); returns null when the cursor is outside
- * the projected window (e.g. the user scrolled up into history).
- */
-function cursorInViewport(
-	buf: XtermLike["buffer"]["active"],
-	start: number,
-	height: number,
-): { row: number; col: number } | null {
-	if (typeof buf.cursorX !== "number" || typeof buf.cursorY !== "number" || buf.cursorX < 0 || buf.cursorY < 0) return null;
-	const row = buf.baseY + buf.cursorY - start;
-	if (row < 0 || row >= height) return null;
-	return { row, col: buf.cursorX };
 }
 
 function attrKey(cell: BufferCellLike, selected = false, isCursor = false): string {

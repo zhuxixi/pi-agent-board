@@ -88,6 +88,7 @@ export async function openDashboard(
 				};
 				const comp = new DashboardComponent(tui, theme as never, keybindings, wrappedDone, {
 					service,
+					root: service.getRoot(),
 					defaultCwd: ctx.cwd,
 					initialSelectedId: options.initialSelectedId,
 					availableModels,

@@ -17,6 +17,9 @@ import { assistantText, detectNeedsInput, toolPath, toolSummary, truncate } from
 
 const PREVIEW_MAX = 240;
 
+/** Tool names whose interactive execution blocks on a user answer. */
+const QUESTION_TOOL_NAMES = new Set(["ask_questions", "question", "questionnaire"]);
+
 /**
  * Build the initial status for a freshly-launched run.
  * @param {RunConfig} config
@@ -80,7 +83,7 @@ export function reduceEvent(status, event, now, opts = {}) {
 			const name = event.toolName ?? event.args?.name ?? "tool";
 			const args = event.args ?? {};
 			status.toolCount += 1;
-			if (opts.interactive && name === "ask_questions") {
+			if (opts.interactive && QUESTION_TOOL_NAMES.has(name)) {
 				upsertPendingQuestion(status, event.toolCallId, questionFromArgs(args));
 			} else if (pendingQuestions(status).length === 0) {
 				status.currentTool = { name, path: toolPath(args), summary: toolSummary(name, args) };
@@ -94,7 +97,7 @@ export function reduceEvent(status, event, now, opts = {}) {
 		}
 		case "tool_execution_end": {
 			if (event.isError) status.error = `Tool ${event.toolName ?? ""} failed`.trim();
-			if (opts.interactive && event.toolName === "ask_questions") removePendingQuestion(status, event.toolCallId);
+			if (opts.interactive && QUESTION_TOOL_NAMES.has(event.toolName ?? "")) removePendingQuestion(status, event.toolCallId);
 			status.currentTool = null;
 			status.semanticState = "working";
 			status.question = null;
@@ -227,8 +230,9 @@ function pendingQuestions(status) {
 }
 
 function questionFromArgs(args) {
+	if (typeof args?.question === "string" && args.question.trim()) return args.question.trim();
 	for (const item of Array.isArray(args?.questions) ? args.questions : []) {
-		const question = String(item?.question ?? "").trim();
+		const question = String(item?.question ?? item?.prompt ?? "").trim();
 		if (question) return question;
 	}
 	return "Answer the pending question";

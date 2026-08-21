@@ -21,6 +21,8 @@ export const rosterPath = (root) => path.join(root, "roster.json");
 export const launchPrefsPath = (root) => path.join(root, "launch-prefs.json");
 /** @param {string} root */
 export const gcHistoryPath = (root) => path.join(root, "gc-history.jsonl");
+/** @param {string} root */
+export const cwdStatsPath = (root) => path.join(root, "cwd-stats.json");
 
 /** @param {string} root */
 export const viewsDir = (root) => path.join(root, "views");
