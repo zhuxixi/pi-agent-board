@@ -70,6 +70,22 @@ export function mergeIntoSyncBlock(held, seq) {
 const activeWrappers = new WeakMap();
 
 /**
+ * Each wrapTerminalWrites() call returns its own guarded handle: idempotent
+ * per handle, refcounted across handles — the patch is torn down only when
+ * the LAST caller uninstalls (CR round 1, issue-1).
+ */
+function refcountedUninstall(entry) {
+	let done = false;
+	return () => {
+		if (done) return;
+		done = true;
+		entry.refs -= 1;
+		if (entry.refs > 0) return;
+		entry.teardown();
+	};
+}
+
+/**
  * Patch write/hideCursor/showCursor on a terminal instance so each frame's
  * out-of-block park/hide sequences are folded into the frame's sync block and
  * emitted as one write. Returns an uninstall function (idempotent, drops the
@@ -82,7 +98,7 @@ export function wrapTerminalWrites(terminal) {
 	const existing = activeWrappers.get(terminal);
 	if (existing) {
 		existing.refs += 1;
-		return existing.uninstall;
+		return refcountedUninstall(existing);
 	}
 
 	const original = {
@@ -145,10 +161,8 @@ export function wrapTerminalWrites(terminal) {
 	terminal.hideCursor = () => mergeOrEmit(ESC + "[?25l", original.hideCursor);
 	terminal.showCursor = () => mergeOrEmit(ESC + "[?25h", original.showCursor);
 
-	let uninstalled = false;
-	const uninstall = () => {
-		if (uninstalled) return;
-		uninstalled = true;
+	const entry = { refs: 1, teardown: null };
+	entry.teardown = () => {
 		flush();
 		terminal.write = original.write;
 		terminal.hideCursor = original.hideCursor;
@@ -156,8 +170,8 @@ export function wrapTerminalWrites(terminal) {
 		activeWrappers.delete(terminal);
 	};
 
-	activeWrappers.set(terminal, { uninstall, refs: 1 });
-	return uninstall;
+	activeWrappers.set(terminal, entry);
+	return refcountedUninstall(entry);
 }
 
 /**

@@ -150,7 +150,7 @@ test("uninstall flushes pending frame and restores original methods", async () =
 	assert.deepEqual(terminal.writes, [diff, "after", HIDE]);
 });
 
-test("overlapping installs share one wrapper and one uninstall flips at the last ref", async () => {
+test("overlapping installs share one wrapper; teardown only at the last uninstall", async () => {
 	const terminal = makeFakeTerminal();
 	const uninstallA = wrapTerminalWrites(terminal);
 	const uninstallB = wrapTerminalWrites(terminal);
@@ -158,12 +158,28 @@ test("overlapping installs share one wrapper and one uninstall flips at the last
 	terminal.write(diff);
 	terminal.write(park);
 	terminal.hideCursor();
-	uninstallA(); // one caller gone; wrapper must survive
+	uninstallA(); // one caller gone; the OTHER handle must keep the patch alive
 	await tick();
+	// CR round 1 issue-1 regression: coalescing must survive a partial uninstall.
 	assert.deepEqual(terminal.writes, [SYNC_BEGIN + "frame" + park + HIDE + SYNC_END]);
-	uninstallB();
+
+	// second burst still coalesces while B holds the patch
+	terminal.write(diff);
+	terminal.write(park);
+	terminal.hideCursor();
+	await tick();
+	assert.equal(terminal.writes.length, 2);
+	assert.deepEqual(terminal.writes[1], SYNC_BEGIN + "frame" + park + HIDE + SYNC_END);
+
+	uninstallB(); // last handle -> teardown
 	terminal.write(SYNC_BEGIN + "raw" + SYNC_END);
 	assert.deepEqual(terminal.writes.slice(-1), [SYNC_BEGIN + "raw" + SYNC_END]);
+
+	// both handles stay idempotent after teardown
+	uninstallA();
+	uninstallB();
+	terminal.hideCursor();
+	assert.deepEqual(terminal.writes.slice(-2), [SYNC_BEGIN + "raw" + SYNC_END, HIDE]);
 });
 
 test("empty and non-string writes pass straight through", () => {
