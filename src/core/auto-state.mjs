@@ -68,21 +68,31 @@ export function semanticStateForAutoKind(kind) {
  * Prompt used by runners for the cheap classifier pass.
  * @param {string} latestAssistantText
  */
-export function buildAutoStatePrompt(latestAssistantText) {
+export function buildAutoStatePrompt(latestAssistantText, env = process.env) {
 	const text = truncate(String(latestAssistantText || "").trim(), 6000);
-	return `Classify the LAST assistant response for a coding-agent dashboard.\n\nChoose exactly one state:\n- needs_input: the assistant asks the user for a decision, clarification, approval, credentials, or is blocked waiting for the user.\n- in_progress: work is partial, next steps remain, verification is pending/failed, or the assistant says it will continue later.\n- done: the requested work is complete, final answer given, no user input required.\n\nReturn ONLY minified JSON with this shape:\n{"state":"needs_input|in_progress|done","confidence":"high|medium|low","reason":"short reason <=18 words","question":"user-facing question or null"}\n\nLast assistant response:\n${text}`;
+	const doneLine = autoStateDoneDisabled(env)
+		? ""
+		: "- done: the requested work is complete, final answer given, no user input required.\n";
+	const doneNote = autoStateDoneDisabled(env)
+		? "The user marks completed manually in the dashboard, so completion signals (done/completed/finished) must be classified as in_progress.\n"
+		: "";
+	const states = autoStateDoneDisabled(env) ? "needs_input|in_progress" : "needs_input|in_progress|done";
+	return `Classify the LAST assistant response for a coding-agent dashboard.\n\nChoose exactly one state:\n- needs_input: the assistant asks the user for a decision, clarification, approval, credentials, or is blocked waiting for the user.\n- in_progress: work is partial, next steps remain, verification is pending/failed, or the assistant says it will continue later.\n${doneLine}${doneNote}\nReturn ONLY minified JSON with this shape:\n{"state":"${states}","confidence":"high|medium|low","reason":"short reason <=18 words","question":"user-facing question or null"}\n\nLast assistant response:\n${text}`;
 }
 
 /**
  * Parse and normalize model JSON. Returns null if the response is unusable.
  * @param {string} raw
- * @param {{ latestAssistantText?: string, now?: number, lastAgentActivityAt?: number|null }} [opts]
+ * @param {{ latestAssistantText?: string, now?: number, lastAgentActivityAt?: number|null, env?: NodeJS.ProcessEnv|Record<string,string|undefined> }} [opts]
  */
 export function parseAutoStateModelOutput(raw, opts = {}) {
 	const obj = extractJsonObject(raw);
 	if (!obj) return null;
-	const kind = normalizeKind(obj.state ?? obj.kind ?? obj.status);
+	let kind = normalizeKind(obj.state ?? obj.kind ?? obj.status);
 	if (!kind) return null;
+	if (kind === "done" && autoStateDoneDisabled(opts.env ?? process.env)) {
+		kind = "in_progress";
+	}
 	const confidence = normalizeConfidence(obj.confidence);
 	const latest = opts.latestAssistantText ?? "";
 	const nb = detectNeedsInput(latest);
@@ -90,7 +100,9 @@ export function parseAutoStateModelOutput(raw, opts = {}) {
 	return makeClassification(kind, {
 		source: "model",
 		confidence,
-		reason: cleanReason(obj.reason) || defaultReason(kind),
+		reason: kind === "in_progress" && autoStateDoneDisabled(opts.env ?? process.env)
+			? "Model reported done but auto-done is disabled"
+			: cleanReason(obj.reason) || defaultReason(kind),
 		question,
 		now: opts.now,
 		lastAgentActivityAt: opts.lastAgentActivityAt ?? null,

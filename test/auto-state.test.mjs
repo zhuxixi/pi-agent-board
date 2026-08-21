@@ -1,14 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { applyAutoStateToStatus, autoStateDoneDisabled, autoStateFromModelOrHeuristic, heuristicAutoState, parseAutoStateModelOutput } from "../src/core/auto-state.mjs";
+import { applyAutoStateToStatus, autoStateDoneDisabled, autoStateFromModelOrHeuristic, buildAutoStatePrompt, heuristicAutoState, parseAutoStateModelOutput } from "../src/core/auto-state.mjs";
 
 test("parseAutoStateModelOutput normalizes model JSON", () => {
 	const c = parseAutoStateModelOutput('{"state":"done","confidence":"high","reason":"tests passed","question":null}', {
 		latestAssistantText: "Done. Tests passed.",
 		lastAgentActivityAt: 42,
 	});
-	assert.equal(c.kind, "done");
-	assert.equal(c.semanticState, "completed");
+	assert.equal(c.kind, "in_progress");
+	assert.equal(c.semanticState, "idle");
+	assert.match(c.reason, /auto-done is disabled/i);
 	assert.equal(c.source, "model");
 	assert.equal(c.confidence, "high");
 	assert.equal(c.lastAgentActivityAt, 42);
@@ -70,4 +71,19 @@ test("applyAutoStateToStatus moves clean terminal run to completed when auto-don
 	assert.equal(changed, true);
 	assert.equal(status.semanticState, "completed");
 	assert.equal(status.autoState.kind, "done");
+});
+
+test("parseAutoStateModelOutput keeps done when auto-done flag is off", () => {
+	const c = parseAutoStateModelOutput('{"state":"done","confidence":"high","reason":"tests passed","question":null}', {
+		latestAssistantText: "Done. Tests passed.",
+		lastAgentActivityAt: 42,
+		env: { AGENT_BOARD_AUTO_STATE_NO_DONE: "0" },
+	});
+	assert.equal(c.kind, "done");
+	assert.equal(c.semanticState, "completed");
+});
+
+test("buildAutoStatePrompt omits done option by default and restores it when flag off", () => {
+	assert.ok(!/^- done:/m.test(buildAutoStatePrompt("Fix the bug.")));
+	assert.ok(/^- done:/m.test(buildAutoStatePrompt("Fix the bug.", { AGENT_BOARD_AUTO_STATE_NO_DONE: "0" })));
 });
