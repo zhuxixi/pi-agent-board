@@ -1516,9 +1516,19 @@ export class DashboardComponent implements Component {
 		lines.push("");
 		if (launch.picker === "cwd") {
 			lines.push(t.fg("warning", `cwd› ${singleLineInput(launch.cwdQuery)}${cursor()}`));
-			lines.push(...this.renderLaunchSuggestions(inner, launch.cwdSuggestions, launch.cwdSuggestionIndex, (value) => displayPath(value)));
-			lines.push("");
-			lines.push(t.fg("dim", "type to filter folders · enter choose · esc back"));
+			if (launch.cwdPickerMode === "favorites") {
+				const counts = new Map(launch.cwdRanked.map((entry) => [entry.path, entry.count]));
+				lines.push(...this.renderLaunchSuggestions(inner, launch.cwdSuggestions, launch.cwdSuggestionIndex, (value) => {
+					const count = counts.get(value) ?? 0;
+					return `${displayPath(value)}${count > 0 ? `  ${count}×` : ""}`;
+				}));
+				lines.push("");
+				lines.push(t.fg("dim", "常用目录 · type to search · tab complete · enter choose · esc back"));
+			} else {
+				lines.push(...this.renderLaunchSuggestions(inner, launch.cwdSuggestions, launch.cwdSuggestionIndex, (value) => displayPath(value)));
+				lines.push("");
+				lines.push(t.fg("dim", "type to filter folders · enter choose · esc back"));
+			}
 		} else if (launch.picker === "model") {
 			lines.push(t.fg("warning", `model› ${singleLineInput(launch.modelQuery)}${cursor()}`));
 			lines.push(...this.renderLaunchSuggestions(inner, launch.modelFiltered, launch.modelIndex, (choice) => `${formatLaunchModel(choice.model)}${choice.thinkingLevel ? ` · ${choice.thinkingLevel}` : ""}`));
