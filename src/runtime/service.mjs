@@ -763,6 +763,10 @@ export function createService(opts) {
 			return { ok: true, viewId: meta.id, reused: false };
 		},
 
+		getRoot() {
+			return root;
+		},
+
 		getLaunchPrefs() {
 			return readLaunchPrefs(root);
 		},
