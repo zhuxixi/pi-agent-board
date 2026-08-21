@@ -890,3 +890,28 @@ test("errors-only GC passes produce no gc-history record", async () => {
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("ensureHost probes PTY support with TTL cache, not forced refresh", () => {
+	const root = freshRoot();
+	const oldForce = process.env.AGENT_BOARD_FORCE_PTY;
+	try {
+		process.env.AGENT_BOARD_FORCE_PTY = "1";
+		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeFileSync(meta.sessionFile, JSON.stringify({ type: "session", id: "s1", cwd: "/r" }) + "\n");
+		const probeCalls = [];
+		const svc = service(root, {
+			ptySupport: (opts = {}) => { probeCalls.push(opts); return { ok: true }; },
+			launchHost: () => ({ pid: process.pid, configPath: "/no/host-config.json" }),
+		});
+		const res = svc.ensureHost("v1");
+		assert.equal(res.ok, true);
+		assert.ok(probeCalls.length >= 1);
+		for (const opts of probeCalls) {
+			assert.notEqual(opts?.refresh, true, "ensureHost must not force ptySupport refresh");
+		}
+	} finally {
+		if (oldForce === undefined) delete process.env.AGENT_BOARD_FORCE_PTY;
+		else process.env.AGENT_BOARD_FORCE_PTY = oldForce;
+		rmSync(root, { recursive: true, force: true });
+	}
+});

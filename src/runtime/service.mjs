@@ -671,7 +671,10 @@ export function createService(opts) {
 			if (!row) return { ok: false, error: "Unknown session" };
 			if (row.hostAlive && row.host?.socketPath) return { ok: true, socketPath: row.host.socketPath, started: false };
 
-			const pty = ptySupport({ refresh: true });
+			// Default probe semantics: success is cached for the process lifetime and a
+			// failed probe retries on a short TTL. Forcing refresh here would spawn a
+			// probe process on every keypress-driven prewarm when PTY support is broken.
+			const pty = ptySupport();
 			if (!pty.ok) return { ok: false, error: "PTY unavailable", fallbackReason: nodePtyFallbackMessage(pty) };
 			if (isAgentBusy(row)) return { ok: false, error: "A non-live background run is active for this session" };
 			if (!existsSync(row.meta.sessionFile)) return { ok: false, error: "Session file isn't ready yet" };
