@@ -88,7 +88,13 @@ test(
 						const msg = JSON.parse(line);
 						if (msg.type === "output" && typeof msg.data === "string") {
 							controller.feed(msg.data);
-							if (clearAt === null && msg.data.includes("\x1b[2J")) {
+							// Detection is driven off the controller's carry-safe state machine: a
+							// clear split across socket messages is still detected, unlike a naive
+							// msg.data.includes scan which would flake on chunk boundaries. The
+							// [7800, 10000]ms window keeps ~1.8s headroom over the observed ~8.2s
+							// and stays below the 11.12s backoff-tail fire time, which is what
+							// proves the re-arm fired (and that the old choreography would fail).
+							if (clearAt === null && controller.getState().clearDetected) {
 								clearAt = Date.now() - t0;
 							}
 						}

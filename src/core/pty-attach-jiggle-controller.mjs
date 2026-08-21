@@ -80,6 +80,7 @@ export function createJiggleRetryController(deps) {
 	 * @param {string} data
 	 */
 	function feed(data) {
+		if (state.clearDetected) return; // chain done; nothing left to detect
 		const result = feedOutput(state, data, carry);
 		state = result.state;
 		carry = result.carry;
