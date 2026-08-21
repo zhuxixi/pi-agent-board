@@ -40,6 +40,18 @@ function isOff(value) {
 	return typeof value === "string" && /^(0|false|off|no)$/i.test(value.trim());
 }
 
+/**
+ * Whether automatic `done` classification is disabled.
+ * Default (env unset): disabled — completed is only ever set by the user.
+ * Set AGENT_BOARD_AUTO_STATE_NO_DONE to 0/false/off/no to restore auto-done.
+ * @param {NodeJS.ProcessEnv|Record<string,string|undefined>} [env]
+ */
+export function autoStateDoneDisabled(env = process.env) {
+	const raw = env.AGENT_BOARD_AUTO_STATE_NO_DONE;
+	if (typeof raw !== "string" || !raw.trim()) return true;
+	return !isOff(raw);
+}
+
 /** @param {AutoStateKind} kind @returns {SemanticState} */
 export function semanticStateForAutoKind(kind) {
 	switch (kind) {
@@ -90,7 +102,7 @@ export function parseAutoStateModelOutput(raw, opts = {}) {
  * Conservative fallback classifier. It should be useful, but never clever enough to
  * overrule strong question/error signals.
  * @param {string} latestAssistantText
- * @param {{ now?: number, lastAgentActivityAt?: number|null }} [opts]
+ * @param {{ now?: number, lastAgentActivityAt?: number|null, env?: NodeJS.ProcessEnv|Record<string,string|undefined> }} [opts]
  */
 export function heuristicAutoState(latestAssistantText, opts = {}) {
 	const text = String(latestAssistantText || "").trim();
@@ -110,11 +122,24 @@ export function heuristicAutoState(latestAssistantText, opts = {}) {
 	const lower = text.toLowerCase();
 	const pending = hasPendingSignal(lower);
 	const done = hasDoneSignal(lower);
-	if (done && !pending) {
+	const env = opts.env ?? process.env;
+	if (done && !pending && !autoStateDoneDisabled(env)) {
 		return makeClassification("done", {
 			source: "heuristic",
 			confidence: hasStrongDoneSignal(lower) ? "high" : "medium",
 			reason: "Assistant reported the work is complete",
+			now: opts.now,
+			lastAgentActivityAt: opts.lastAgentActivityAt ?? null,
+			latestAssistantText: text,
+		});
+	}
+	if (done && !pending) {
+		// Auto-done disabled: completion signals stay out of the completed bucket;
+		// the user marks completed manually from the dashboard.
+		return makeClassification("in_progress", {
+			source: "heuristic",
+			confidence: hasStrongDoneSignal(lower) ? "medium" : "low",
+			reason: "Assistant reported completion but auto-done is disabled",
 			now: opts.now,
 			lastAgentActivityAt: opts.lastAgentActivityAt ?? null,
 			latestAssistantText: text,

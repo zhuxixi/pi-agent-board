@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { applyAutoStateToStatus, autoStateFromModelOrHeuristic, heuristicAutoState, parseAutoStateModelOutput } from "../src/core/auto-state.mjs";
+import { applyAutoStateToStatus, autoStateDoneDisabled, autoStateFromModelOrHeuristic, heuristicAutoState, parseAutoStateModelOutput } from "../src/core/auto-state.mjs";
 
 test("parseAutoStateModelOutput normalizes model JSON", () => {
 	const c = parseAutoStateModelOutput('{"state":"done","confidence":"high","reason":"tests passed","question":null}', {
@@ -22,11 +22,21 @@ test("autoStateFromModelOrHeuristic falls back to question heuristic", () => {
 });
 
 test("heuristicAutoState detects done and in-progress turns", () => {
-	assert.equal(heuristicAutoState("Done. Fixed the bug and tests pass.").kind, "done");
+	assert.equal(heuristicAutoState("Done. Fixed the bug and tests pass.").kind, "in_progress");
 	assert.equal(heuristicAutoState("I updated one file. Next step is to add tests.").kind, "in_progress");
 });
 
-test("applyAutoStateToStatus moves clean terminal run to completed", () => {
+test("heuristicAutoState restores done classification when auto-done flag is off", () => {
+	assert.equal(
+		heuristicAutoState("Done. Fixed the bug and tests pass.", { env: { AGENT_BOARD_AUTO_STATE_NO_DONE: "0" } }).kind,
+		"done",
+	);
+	assert.equal(autoStateDoneDisabled({}), true);
+	assert.equal(autoStateDoneDisabled({ AGENT_BOARD_AUTO_STATE_NO_DONE: "0" }), false);
+	assert.equal(autoStateDoneDisabled({ AGENT_BOARD_AUTO_STATE_NO_DONE: "off" }), false);
+});
+
+test("applyAutoStateToStatus keeps clean terminal run idle by default", () => {
 	const status = {
 		processState: "exited",
 		semanticState: "idle",
@@ -37,6 +47,26 @@ test("applyAutoStateToStatus moves clean terminal run to completed", () => {
 		summary: "Done. Fixed the bug and tests pass.",
 	};
 	const changed = applyAutoStateToStatus(status, heuristicAutoState(status.latestAssistantPreview), 100);
+	assert.equal(changed, true);
+	assert.equal(status.semanticState, "idle");
+	assert.equal(status.autoState.kind, "in_progress");
+});
+
+test("applyAutoStateToStatus moves clean terminal run to completed when auto-done flag is off", () => {
+	const status = {
+		processState: "exited",
+		semanticState: "idle",
+		currentTool: null,
+		question: null,
+		error: null,
+		latestAssistantPreview: "Done. Fixed the bug and tests pass.",
+		summary: "Done. Fixed the bug and tests pass.",
+	};
+	const changed = applyAutoStateToStatus(
+		status,
+		heuristicAutoState(status.latestAssistantPreview, { env: { AGENT_BOARD_AUTO_STATE_NO_DONE: "0" } }),
+		100,
+	);
 	assert.equal(changed, true);
 	assert.equal(status.semanticState, "completed");
 	assert.equal(status.autoState.kind, "done");
