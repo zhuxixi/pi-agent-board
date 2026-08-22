@@ -208,7 +208,9 @@ test("runner keeps a completed fake worker idle when auto-done is disabled", { t
 		assert.ok(pid && pid > 0, "runner spawned");
 		const status = await waitFor(() => {
 			const s = readStatus(root, "view_1", "run_1");
-			return s && s.endedAt ? s : null;
+			// endedAt alone is not enough: autoState is written asynchronously by the
+			// state runner, so wait for both before asserting on autoState.kind.
+			return s && s.endedAt && s.autoState ? s : null;
 		});
 		assert.ok(status, "status reached terminal state");
 		assert.equal(status.semanticState, "idle");

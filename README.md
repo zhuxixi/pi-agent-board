@@ -101,6 +101,7 @@ If the board reports `node-pty unavailable`, press `!` in the dashboard for diag
 npm install
 npm run typecheck
 npm test
+npm run test:coverage
 npm run pack:dry
 ```
 
@@ -110,7 +111,20 @@ Run all checks with:
 npm run verify
 ```
 
-`npm run verify` runs typecheck, tests, and a dry npm pack.
+`npm run verify` runs typecheck, tests, coverage, and a dry npm pack.
+
+### QA baseline
+
+Every push and PR runs the same checks in CI (`.github/workflows/ci.yml`, Node 22 + 24),
+and `main` branch protection requires both CI checks to pass before merging.
+
+Coverage is enforced by `c8` with thresholds configured in `.c8rc.json`
+(lines ≥ 85%, functions ≥ 80%, branches ≥ 70%). The TS UI layer
+(`src/ui/*.ts`, `src/commands/*.ts`) is covered by a smoke test
+(`test/ui-smoke.test.mjs`) that constructs and renders the real entrypoints;
+it is excluded from the coverage thresholds by design.
+
+Current baseline: 300+ tests, ~92% line coverage on the core modules.
 
 ## Publish
 

@@ -53,8 +53,9 @@
     "postinstall": "node scripts/patch-vulns.mjs",
     "typecheck": "tsc --noEmit",
     "test": "node --test test/*.test.mjs",
+    "test:coverage": "c8 node --test test/*.test.mjs",
     "pack:dry": "npm pack --dry-run",
-    "verify": "npm run typecheck && npm test && npm run pack:dry"
+    "verify": "npm run typecheck && npm test && npm run test:coverage && npm run pack:dry"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
@@ -72,6 +73,7 @@
     "@earendil-works/pi-coding-agent": "0.79.8",
     "@earendil-works/pi-tui": "0.79.8",
     "@types/node": "^25.9.1",
+    "c8": "^12.0.0",
     "typescript": "^5.9.3"
   },
   "dependencies": {
