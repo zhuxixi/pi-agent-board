@@ -1,0 +1,14 @@
+{
+	"reporter": ["text", "lcov"],
+	"exclude": [
+		"test/**",
+		"test-support/**",
+		"src/index.ts",
+		"src/ui/*.ts",
+		"src/commands/*.ts"
+	],
+	"check-coverage": true,
+	"lines": 85,
+	"functions": 80,
+	"branches": 70
+}
