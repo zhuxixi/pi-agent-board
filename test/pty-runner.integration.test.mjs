@@ -62,7 +62,17 @@ test("pty-runner creates host socket, broadcasts output, forwards input, finaliz
 			for (const line of lines) if (line.trim()) messages.push(JSON.parse(line));
 		});
 		send(socket, { type: "hello" });
-		await waitFor(() => messages.find((m) => m.type === "output" && m.data.includes("fake pi ready")));
+		// The socket carries only live output; output emitted before the client connects
+		// is replayed from the screen log (same as the UI attach path, pty-attach.ts
+		// replayScreenLog). Wait on the log so the boot banner is visible before we
+		// assert on realtime echo below.
+		await waitFor(() => {
+			try {
+				return readFileSync(P.screenLogPath(root, "v1"), "utf8").includes("fake pi ready");
+			} catch {
+				return false;
+			}
+		});
 		send(socket, { type: "input", data: "hello\r" });
 		await waitFor(() => messages.find((m) => m.type === "output" && m.data.includes("echo:hello")));
 		send(socket, { type: "resize", cols: 100, rows: 30 });
