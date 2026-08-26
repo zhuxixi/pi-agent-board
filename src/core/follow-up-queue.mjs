@@ -5,6 +5,24 @@ import { truncate } from "./heuristics.mjs";
 import { withViewLockSync } from "./locks.mjs";
 import * as P from "./paths.mjs";
 
+/**
+ * Run a queue mutation under the view lock, translating any failure (lock
+ * unavailable, fs errors inside the mutation) into {ok:false} so callers on
+ * the {ok} convention never see a throw (issue #33).
+ * @template T
+ * @param {string} root
+ * @param {string} viewId
+ * @param {() => T} fn
+ * @returns {T | { ok: false, error: string }}
+ */
+function lockedQueueOp(root, viewId, fn) {
+	try {
+		return withViewLockSync(root, viewId, "queue", fn);
+	} catch (err) {
+		return { ok: false, error: `follow-up queue lock unavailable: ${err instanceof Error ? err.message : String(err)}` };
+	}
+}
+
 /** @param {string} viewId @param {number} [now] @returns {import("./types.mjs").FollowUpQueue} */
 export function emptyFollowUpQueue(viewId, now = Date.now()) {
 	return { version: 1, viewId, nextSeq: 1, updatedAt: now, items: [] };
@@ -41,7 +59,7 @@ export function summarizeFollowUpQueue(queue) {
 export function enqueueFollowUp(root, viewId, text, opts = {}) {
 	const clean = String(text || "").trim();
 	if (!clean) return { ok: false, error: "Empty follow-up" };
-	return withViewLockSync(root, viewId, "queue", () => {
+	return lockedQueueOp(root, viewId, () => {
 		const queue = readFollowUpQueue(root, viewId);
 		const now = Date.now();
 		const item = {
@@ -70,7 +88,7 @@ export function enqueueFollowUp(root, viewId, text, opts = {}) {
 
 /** @param {string} root @param {string} viewId @param {{ runId?: string|null }} [opts] */
 export function claimNextFollowUp(root, viewId, opts = {}) {
-	return withViewLockSync(root, viewId, "queue", () => {
+	return lockedQueueOp(root, viewId, () => {
 		const queue = readFollowUpQueue(root, viewId);
 		const item = queue.items.filter((i) => i.status === "queued").sort((a, b) => a.seq - b.seq)[0];
 		if (!item) return { ok: false, error: "No queued follow-up" };
@@ -114,7 +132,7 @@ export function releaseFollowUp(root, viewId, itemId) {
 
 /** @param {string} root @param {string} viewId */
 export function removeLastFollowUp(root, viewId) {
-	return withViewLockSync(root, viewId, "queue", () => {
+	return lockedQueueOp(root, viewId, () => {
 		const queue = readFollowUpQueue(root, viewId);
 		const queued = queue.items.filter((i) => i.status === "queued").sort((a, b) => b.seq - a.seq);
 		const last = queued[0];
@@ -128,7 +146,7 @@ export function removeLastFollowUp(root, viewId) {
 
 /** @param {string} root @param {string} viewId */
 export function clearQueuedFollowUps(root, viewId) {
-	return withViewLockSync(root, viewId, "queue", () => {
+	return lockedQueueOp(root, viewId, () => {
 		const queue = readFollowUpQueue(root, viewId);
 		let cancelled = 0;
 		for (const item of queue.items) {
@@ -145,7 +163,7 @@ export function clearQueuedFollowUps(root, viewId) {
 
 /** @param {string} root @param {string} viewId @param {string} itemId @param {(item: import("./types.mjs").FollowUpItem) => void} mutate */
 function updateItem(root, viewId, itemId, mutate) {
-	return withViewLockSync(root, viewId, "queue", () => {
+	return lockedQueueOp(root, viewId, () => {
 		const queue = readFollowUpQueue(root, viewId);
 		const item = queue.items.find((i) => i.id === itemId);
 		if (!item) return { ok: false, error: "Unknown follow-up" };
