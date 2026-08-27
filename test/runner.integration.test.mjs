@@ -15,6 +15,30 @@ const FAKE_PI = join(ROOT_DIR, "test-support", "fake-pi.mjs");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/** Kill a detached runner before deleting its root so it can never orphan (issue #33). */
+async function killDetached(pid) {
+	if (!pid || pid <= 0) return;
+	try {
+		process.kill(pid, "SIGTERM");
+	} catch {
+		return; // already exited
+	}
+	const deadline = Date.now() + 1000;
+	while (Date.now() < deadline) {
+		await sleep(50);
+		try {
+			process.kill(pid, 0);
+		} catch {
+			return; // exited
+		}
+	}
+	try {
+		process.kill(pid, "SIGKILL");
+	} catch {
+		/* already gone */
+	}
+}
+
 /** Poll `fn()` until it returns truthy or timeout. */
 async function waitFor(fn, timeoutMs = 15000, intervalMs = 50) {
 	const start = Date.now();
@@ -48,6 +72,7 @@ test("runner auto-classifies a completed fake worker and writes durable artifact
 	process.env.FAKE_PI_MODE = "completed";
 	process.env.AGENT_BOARD_SUMMARY_MODEL = "off";
 	process.env.AGENT_BOARD_AUTO_STATE_NO_DONE = "0";
+	let runnerPid = null;
 	try {
 		const meta = createView(root, { id: "view_1", name: "fix", cwd: root });
 		const config = makeConfig(root, "view_1", "run_1", meta.sessionFile, root, "fix the bug");
@@ -58,8 +83,8 @@ test("runner auto-classifies a completed fake worker and writes durable artifact
 		const { writeState } = await import("../src/core/store.mjs");
 		writeState(root, st);
 
-		const { pid } = launchRun(root, config, { runnerScript: RUNNER });
-		assert.ok(pid && pid > 0, "runner spawned");
+		runnerPid = launchRun(root, config, { runnerScript: RUNNER }).pid;
+		assert.ok(runnerPid && runnerPid > 0, "runner spawned");
 
 		const status = await waitFor(() => {
 			const s = readStatus(root, "view_1", "run_1");
@@ -81,6 +106,7 @@ test("runner auto-classifies a completed fake worker and writes durable artifact
 		assert.equal(state.autoState?.kind, "done");
 		assert.equal(state.currentRunId, "run_1");
 	} finally {
+		await killDetached(runnerPid);
 		delete process.env.FAKE_PI_MODE;
 		delete process.env.AGENT_BOARD_SUMMARY_MODEL;
 		delete process.env.AGENT_BOARD_AUTO_STATE_NO_DONE;
@@ -93,10 +119,11 @@ test("runner classifies a question as needs_input", { timeout: 20000 }, async ()
 	const root = mkdtempSync(join(tmpdir(), "agentview-run-ni-"));
 	process.env.FAKE_PI_MODE = "needs_input";
 	process.env.AGENT_BOARD_SUMMARY_MODEL = "off";
+	let runnerPid = null;
 	try {
 		const meta = createView(root, { id: "v", name: "x", cwd: root });
 		const config = makeConfig(root, "v", "r", meta.sessionFile, root, "do it");
-		launchRun(root, config, { runnerScript: RUNNER });
+		runnerPid = launchRun(root, config, { runnerScript: RUNNER }).pid;
 		const status = await waitFor(() => {
 			const s = readStatus(root, "v", "r");
 			return s && s.endedAt ? s : null;
@@ -105,6 +132,7 @@ test("runner classifies a question as needs_input", { timeout: 20000 }, async ()
 		assert.equal(status.semanticState, "needs_input");
 		assert.ok(status.question, "extracted a question");
 	} finally {
+		await killDetached(runnerPid);
 		delete process.env.FAKE_PI_MODE;
 		delete process.env.AGENT_BOARD_SUMMARY_MODEL;
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
@@ -117,10 +145,11 @@ test("runner protects dash-prefixed prompts passed via argv", { timeout: 20000 }
 	process.env.FAKE_PI_FAIL_ON_DASH_PROMPT = "1";
 	process.env.AGENT_BOARD_SUMMARY_MODEL = "off";
 	process.env.AGENT_BOARD_AUTO_STATE_NO_DONE = "0";
+	let runnerPid = null;
 	try {
 		const meta = createView(root, { id: "v", name: "x", cwd: root });
 		const config = makeConfig(root, "v", "r", meta.sessionFile, root, "- Create a ticket");
-		launchRun(root, config, { runnerScript: RUNNER });
+		runnerPid = launchRun(root, config, { runnerScript: RUNNER }).pid;
 		const status = await waitFor(() => {
 			const s = readStatus(root, "v", "r");
 			return s && s.endedAt && s.semanticState === "completed" ? s : null;
@@ -129,6 +158,7 @@ test("runner protects dash-prefixed prompts passed via argv", { timeout: 20000 }
 		assert.equal(status.semanticState, "completed");
 		assert.equal(status.exitCode, 0);
 	} finally {
+		await killDetached(runnerPid);
 		delete process.env.FAKE_PI_MODE;
 		delete process.env.FAKE_PI_FAIL_ON_DASH_PROMPT;
 		delete process.env.AGENT_BOARD_SUMMARY_MODEL;
@@ -141,10 +171,11 @@ test("runner marks failed when the worker exits nonzero", { timeout: 20000 }, as
 	const root = mkdtempSync(join(tmpdir(), "agentview-run-fail-"));
 	process.env.FAKE_PI_MODE = "fail";
 	process.env.AGENT_BOARD_SUMMARY_MODEL = "off";
+	let runnerPid = null;
 	try {
 		const meta = createView(root, { id: "v", name: "x", cwd: root });
 		const config = makeConfig(root, "v", "r", meta.sessionFile, root, "do it");
-		launchRun(root, config, { runnerScript: RUNNER });
+		runnerPid = launchRun(root, config, { runnerScript: RUNNER }).pid;
 		const status = await waitFor(() => {
 			const s = readStatus(root, "v", "r");
 			return s && s.endedAt ? s : null;
@@ -153,6 +184,7 @@ test("runner marks failed when the worker exits nonzero", { timeout: 20000 }, as
 		assert.equal(status.semanticState, "failed");
 		assert.notEqual(status.exitCode, 0);
 	} finally {
+		await killDetached(runnerPid);
 		delete process.env.FAKE_PI_MODE;
 		delete process.env.AGENT_BOARD_SUMMARY_MODEL;
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
@@ -163,10 +195,11 @@ test("stopping the runner finalizes the run as stopped", { timeout: 20000 }, asy
 	const root = mkdtempSync(join(tmpdir(), "agentview-run-stop-"));
 	process.env.FAKE_PI_MODE = "hang";
 	process.env.AGENT_BOARD_SUMMARY_MODEL = "off";
+	let runnerPid = null;
 	try {
 		const meta = createView(root, { id: "v", name: "x", cwd: root });
 		const config = makeConfig(root, "v", "r", meta.sessionFile, root, "do it");
-		launchRun(root, config, { runnerScript: RUNNER });
+		runnerPid = launchRun(root, config, { runnerScript: RUNNER }).pid;
 
 		// Wait until the worker is actively running.
 		const working = await waitFor(() => {
@@ -186,6 +219,7 @@ test("stopping the runner finalizes the run as stopped", { timeout: 20000 }, asy
 		assert.ok(status, "run finalized after stop");
 		assert.equal(status.semanticState, "stopped");
 	} finally {
+		await killDetached(runnerPid);
 		delete process.env.FAKE_PI_MODE;
 		delete process.env.AGENT_BOARD_SUMMARY_MODEL;
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
@@ -197,6 +231,7 @@ test("runner keeps a completed fake worker idle when auto-done is disabled", { t
 	process.env.FAKE_PI_MODE = "completed";
 	process.env.AGENT_BOARD_SUMMARY_MODEL = "off";
 	delete process.env.AGENT_BOARD_AUTO_STATE_NO_DONE;
+	let runnerPid = null;
 	try {
 		const meta = createView(root, { id: "view_1", name: "fix", cwd: root });
 		const config = makeConfig(root, "view_1", "run_1", meta.sessionFile, root, "fix the bug");
@@ -204,8 +239,8 @@ test("runner keeps a completed fake worker idle when auto-done is disabled", { t
 		st.currentRunId = "run_1";
 		const { writeState } = await import("../src/core/store.mjs");
 		writeState(root, st);
-		const { pid } = launchRun(root, config, { runnerScript: RUNNER });
-		assert.ok(pid && pid > 0, "runner spawned");
+		runnerPid = launchRun(root, config, { runnerScript: RUNNER }).pid;
+		assert.ok(runnerPid && runnerPid > 0, "runner spawned");
 		const status = await waitFor(() => {
 			const s = readStatus(root, "view_1", "run_1");
 			// endedAt alone is not enough: autoState is written asynchronously by the
@@ -217,6 +252,7 @@ test("runner keeps a completed fake worker idle when auto-done is disabled", { t
 		assert.equal(status.processState, "exited");
 		assert.equal(status.autoState?.kind, "in_progress");
 	} finally {
+		await killDetached(runnerPid);
 		delete process.env.FAKE_PI_MODE;
 		delete process.env.AGENT_BOARD_SUMMARY_MODEL;
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
@@ -227,6 +263,7 @@ test("runner does not clobber a manual completion made during post-exit model pa
 	const root = mkdtempSync(join(tmpdir(), "agentview-run-manual-"));
 	process.env.FAKE_PI_MODE = "completed";
 	process.env.FAKE_PI_SUMMARY_DELAY_MS = "2000";
+	let runnerPid = null;
 	try {
 		const meta = createView(root, { id: "view_1", name: "fix", cwd: root });
 		const config = makeConfig(root, "view_1", "run_1", meta.sessionFile, root, "fix the bug");
@@ -235,8 +272,8 @@ test("runner does not clobber a manual completion made during post-exit model pa
 		const { writeState } = await import("../src/core/store.mjs");
 		writeState(root, st);
 
-		const { pid } = launchRun(root, config, { runnerScript: RUNNER });
-		assert.ok(pid && pid > 0, "runner spawned");
+		runnerPid = launchRun(root, config, { runnerScript: RUNNER }).pid;
+		assert.ok(runnerPid && runnerPid > 0, "runner spawned");
 
 		// Wait for the worker to exit (terminal state persisted); the runner is now
 		// inside its post-exit model passes (fake --model calls are slowed 2s).
@@ -252,7 +289,7 @@ test("runner does not clobber a manual completion made during post-exit model pa
 		// Let the runner finish its passes and exit.
 		await waitFor(() => {
 			try {
-				process.kill(pid, 0);
+				process.kill(runnerPid, 0);
 				return false;
 			} catch {
 				return true;
@@ -263,6 +300,7 @@ test("runner does not clobber a manual completion made during post-exit model pa
 		assert.equal(state.semanticState, "completed");
 		assert.equal(state.autoState, null);
 	} finally {
+		await killDetached(runnerPid);
 		delete process.env.FAKE_PI_MODE;
 		delete process.env.FAKE_PI_SUMMARY_DELAY_MS;
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
