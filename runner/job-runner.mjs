@@ -228,8 +228,18 @@ function main() {
 			})
 			.catch(() => {})
 			.finally(() => {
-				finalizeSteeringIfNeeded(config, status, evidence);
-				drainQueuedFollowUp(config, status);
+				// The finalize chain must never prevent process.exit: a lock/fs failure
+				// here used to pin the runner as a 100% CPU zombie (issue #33).
+				try {
+					finalizeSteeringIfNeeded(config, status, evidence);
+				} catch (err) {
+					tryAppendDiagnostic(config, "finalize_steering_failed", err);
+				}
+				try {
+					drainQueuedFollowUp(config, status);
+				} catch (err) {
+					tryAppendDiagnostic(config, "follow_up_drain_failed", err);
+				}
 				process.exit(stoppedByUser ? 0 : (code ?? 0));
 			});
 	});
@@ -280,6 +290,22 @@ function drainQueuedFollowUp(config, status) {
 	} catch (err) {
 		releaseFollowUp(config.root, config.viewId, item.id);
 		appendDiagnostic(config.root, config.viewId, { source: "queue", level: "error", code: "follow_up_drain_failed", message: "JSON runner could not start queued follow-up", details: { error: err instanceof Error ? err.message : String(err) } });
+	}
+}
+
+/** @param {import("../src/core/types.mjs").RunConfig} config @param {string} code @param {unknown} err */
+function tryAppendDiagnostic(config, code, err) {
+	try {
+		appendDiagnostic(config.root, config.viewId, {
+			source: "runner",
+			runId: config.runId,
+			level: "error",
+			code,
+			message: "Finalize step failed",
+			details: { error: err instanceof Error ? err.message : String(err) },
+		});
+	} catch {
+		/* root may be deleted — nothing to persist, exit anyway */
 	}
 }
 
