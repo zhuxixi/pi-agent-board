@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -30,6 +30,24 @@ test("follow-up queue is FIFO and durable", () => {
 		assert.equal(claimed.item.text, "first");
 		completeFollowUp(root, "v1", claimed.item.id);
 		assert.equal(claimNextFollowUp(root, "v1").item.text, "second");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("queue ops return {ok:false} when the lock path is unusable", { timeout: 5000 }, () => {
+	const root = freshRoot();
+	try {
+		const fileRoot = join(root, "notadir");
+		writeFileSync(fileRoot, "x", "utf8"); // ensureDir under a file path -> ENOTDIR, unrecoverable
+		const enq = enqueueFollowUp(fileRoot, "v1", "hello");
+		assert.equal(enq.ok, false);
+		assert.match(String(enq.error), /lock unavailable/);
+		const claim = claimNextFollowUp(fileRoot, "v1");
+		assert.equal(claim.ok, false);
+		assert.match(String(claim.error), /lock unavailable/);
+		const removed = removeLastFollowUp(fileRoot, "v1");
+		assert.equal(removed.ok, false);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
