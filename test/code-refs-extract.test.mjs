@@ -74,6 +74,39 @@ test("gh pr create resolves pr from a later URL and back-links issue 40", () => 
 	assert.equal(result.issue.url, "https://github.com/owner/repo/issues/40");
 });
 
+test("pr-body back-link is case-insensitive (Closes #40)", () => {
+	const result = extractCodeRefs(
+		{
+			commands: [{ command: 'gh pr create --body "Closes #40"' }],
+			assistantTexts: [],
+			worktreePath: null,
+			branch: null,
+			repoUrl: "owner/repo",
+			host: "github.com",
+		},
+		github()
+	);
+	assert.equal(result.issue.number, 40);
+	assert.equal(result.issue.strength, "claim");
+	assert.equal(result.issue.source, "pr-body");
+});
+
+test("null host with a host-templated provider yields no url (no malformed link)", () => {
+	const result = extractCodeRefs(
+		{
+			commands: [{ command: "gh issue comment 40 --body hi" }],
+			assistantTexts: [],
+			worktreePath: null,
+			branch: null,
+			repoUrl: "owner/repo",
+			host: null,
+		},
+		github()
+	);
+	assert.equal(result.issue.number, 40);
+	assert.equal(result.issue.url, null);
+});
+
 test("viewing 439/440/441 once each and commenting 453 twice", () => {
 	const result = extractCodeRefs(
 		{

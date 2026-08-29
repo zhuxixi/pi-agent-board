@@ -488,7 +488,7 @@ const REF_CONFIDENCE = { claim: "high", action: "high", view: "medium", mention:
 /** URL rules carry a `/issues/`, `/pull/`, or `/merge_requests/` path segment. */
 const URL_RULE_RE = /issues\/|pull\/|merge_requests\//;
 /** `closes #N` / `fixes #N` / `issue #N` back-link inside a `pr create` body. */
-const PR_BACKLINK_RE = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|issue)\s+#(\d{1,7})/;
+const PR_BACKLINK_RE = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|issue)\s+#(\d{1,7})/i;
 /** `issue-<N>-...` worktree/branch naming convention (engine-builtin). */
 const WORKTREE_RE = /(?:^|[/\\])issue-(\d{1,7})(?:-|$)/;
 /** Bare `#N` mentions. */
@@ -786,6 +786,8 @@ function toRef(c, provider, repoUrl, host) {
 function fillUrl(provider, kind, number, repoUrl, host) {
 	const template = provider.urlTemplates?.[kind];
 	if (!template || typeof repoUrl !== "string" || !repoUrl) return null;
+	// Templates embed {host}; without a host the URL would be malformed, so bail.
+	if (template.includes("{host}") && !host) return null;
 	const { owner, repo } = splitRepoUrl(repoUrl);
 	return template
 		.replaceAll("{host}", typeof host === "string" ? host : "")
