@@ -11,7 +11,8 @@ import { readJson } from "../src/core/atomic.mjs";
 import { appendDiagnostic } from "../src/core/diagnostics.mjs";
 import { applyAutoStateToStatus, applyAutoStateToViewState, autoStateEnabled, autoStateFromModelOrHeuristic, autoStateModel, buildAutoStatePrompt, heuristicAutoState } from "../src/core/auto-state.mjs";
 import { finalizeEvidence, readEvidence, summarizeEvidence, writeEvidence } from "../src/core/evidence.mjs";
-import { readState, readStatus, writeState, writeStatus } from "../src/core/store.mjs";
+import { updateCodeRefsFromEvidence } from "../src/core/code-refs-store.mjs";
+import { readState, readStatus, readMeta, writeState, writeStatus } from "../src/core/store.mjs";
 
 async function main() {
 	const configPath = process.argv[2];
@@ -19,6 +20,9 @@ async function main() {
 	/** @type {import("../src/core/types.mjs").AutoStateConfig|null} */
 	const config = readJson(configPath, null);
 	if (!config || !autoStateEnabled()) process.exit(0);
+
+	// Read the view meta once so code-ref extraction reuses it on the evidence write.
+	const meta = readMeta(config.root, config.viewId);
 
 	const state = readState(config.root, config.viewId);
 	if (!state || state.processState === "alive" || state.semanticState === "failed" || state.semanticState === "stopped") process.exit(0);
@@ -55,6 +59,7 @@ async function main() {
 	finalizeEvidence(evidence, { semanticState: latestState.semanticState, usage: null }, Date.now());
 	latestState.review = summarizeEvidence(evidence);
 	writeEvidence(config.root, evidence);
+	updateCodeRefsFromEvidence(config.root, config.viewId, evidence, meta);
 	writeState(config.root, latestState);
 	if (changed) {
 		appendDiagnostic(config.root, config.viewId, { source: "service", runId: config.runId, code: "auto_state_classified", message: "Auto-state classifier updated row state", details: { kind: classification.kind, confidence: classification.confidence, source: classification.source, reason: classification.reason } });

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createService, shouldProbePtySupport } from "../src/runtime/service.mjs";
+import { readCodeRefs } from "../src/core/code-refs-store.mjs";
 import { diagnoseNodePtyFailure } from "../src/core/pty-support.mjs";
 import * as P from "../src/core/paths.mjs";
 import { createView, readState, readStatus, writeHost, writeHostPid, writeLaunchPrefs, writeState, writeStatus } from "../src/core/store.mjs";
@@ -375,6 +376,28 @@ test("syncHostedEvent persists interactive questions and resets them on new inpu
 		assert.deepEqual(resumed.pendingQuestions, []);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("syncHostedEvent persists code refs (github.json) from bash gh commands", { skip: !gitAvailable() }, () => {
+	const root = freshRoot();
+	const repo = freshRoot();
+	try {
+		initRepo(repo);
+		execFileSync("git", ["-C", repo, "remote", "add", "origin", "https://github.com/acme/widget.git"], { stdio: "ignore" });
+		createView(root, { id: "v1", name: "a", cwd: repo, repoRoot: repo });
+		const svc = service(root);
+		assert.equal(svc.syncHostedEvent("v1", {
+			type: "tool_execution_start",
+			toolCallId: "t1",
+			toolName: "bash",
+			args: { command: "gh issue comment 40 --body hi" },
+		}), true);
+		assert.equal(existsSync(P.codeRefsPath(root, "v1")), true);
+		assert.equal(readCodeRefs(root, "v1").issue?.number, 40);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+		rmSync(repo, { recursive: true, force: true });
 	}
 });
 

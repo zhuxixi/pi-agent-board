@@ -16,11 +16,12 @@ import { encodePromptForCliArg } from "../src/core/prompt-transport.mjs";
 import { applyAutoStateToStatus, autoStateEnabled, autoStateFromModelOrHeuristic, autoStateModel, buildAutoStatePrompt, heuristicAutoState, isManualCompletion } from "../src/core/auto-state.mjs";
 import { appendDiagnostic } from "../src/core/diagnostics.mjs";
 import { emptyEvidenceSnapshot, finalizeEvidence, reduceEvidence, summarizeEvidence, writeEvidence, writeRunEvidence } from "../src/core/evidence.mjs";
+import { updateCodeRefsFromEvidence } from "../src/core/code-refs-store.mjs";
 import { claimNextFollowUp, completeFollowUp, releaseFollowUp } from "../src/core/follow-up-queue.mjs";
 import { newRunId } from "../src/core/ids.mjs";
 import { launchRun } from "../src/core/launch.mjs";
 import * as P from "../src/core/paths.mjs";
-import { readState, readStatus, writeState, writeStatus } from "../src/core/store.mjs";
+import { readState, readStatus, readMeta, writeState, writeStatus } from "../src/core/store.mjs";
 import { readSteering, recordPlanReady } from "../src/core/steering.mjs";
 import { buildApprovePlanPrompt, buildPlanChangesPrompt, buildPlanRequestPrompt } from "../src/core/steering-prompts.mjs";
 
@@ -54,12 +55,16 @@ function main() {
 	const stderrLog = P.stderrPath(root, viewId, runId);
 	const eventsLog = P.eventsPath(root, viewId, runId);
 
+	// Read the view meta once so code-ref extraction reuses it across every evidence write.
+	const meta = readMeta(root, viewId);
+
 	let status = createRunStatus(config, null, Date.now());
 	let evidence = emptyEvidenceSnapshot({ viewId, runId, source: "json-runner" });
 	appendDiagnostic(root, viewId, { source: "runner", runId, code: "runner_start", message: "Runner started", details: { kind: config.kind, cwd: config.cwd, model: config.model } });
 	writeStatus(root, status);
 	writeRunEvidence(root, evidence);
 	writeEvidence(root, evidence);
+	updateCodeRefsFromEvidence(root, viewId, evidence, meta);
 	writeState(root, projectViewState(status, Date.now(), readState(root, viewId)));
 
 	// Build worker args: pi --mode json -p --session <file> [--model m] [--thinking l] [--tools t] <prompt>
@@ -98,6 +103,7 @@ function main() {
 		writeStatus(root, status);
 		writeRunEvidence(root, evidence);
 		writeEvidence(root, evidence);
+		updateCodeRefsFromEvidence(root, viewId, evidence, meta);
 		writeState(root, projectViewState(status, now, readState(root, viewId)));
 		dirty = false;
 	};
