@@ -391,20 +391,22 @@ export function mergeProviders(builtins, user) {
 /**
  * Cached merged provider lists per store root. The cache key records the
  * `providers.json` mtime (null when the file is absent) so a file change
- * triggers a reload while unchanged files reuse the merged result.
- * @type {Map<string, {mtimeMs: number|null, providers: Provider[]}>}
+ * triggers a reload while unchanged files reuse the merged result. Validation
+ * errors are cached alongside so they can be surfaced once per mtime.
+ * @type {Map<string, {mtimeMs: number|null, providers: Provider[], errors: string[]}>}
  */
 const providerCache = new Map();
 
 /**
- * Resolve the effective provider list for a store root: builtins merged with
- * the user's `<root>/providers.json` when present. Never throws — a missing,
- * unparseable, or otherwise broken file falls back to builtins alone. The
- * merged result is cached by file mtime.
+ * Resolve the effective provider list for a store root, together with any
+ * per-provider validation errors from the user's `<root>/providers.json`.
+ * Never throws — a missing, unparseable, or otherwise broken file falls back to
+ * builtins alone; invalid provider entries are skipped and their messages
+ * returned in `errors`. Cached by file mtime.
  * @param {string} root
- * @returns {Provider[]}
+ * @returns {{providers: Provider[], errors: string[]}}
  */
-export function loadProviders(root) {
+export function loadProvidersWithErrors(root) {
 	const file = providersPath(root);
 	let mtimeMs = null;
 	try {
@@ -413,27 +415,44 @@ export function loadProviders(root) {
 		// no providers.json → builtins only
 	}
 	const cached = providerCache.get(root);
-	if (cached && cached.mtimeMs === mtimeMs) return cached.providers;
-	const providers = loadProvidersUncached(file);
-	providerCache.set(root, { mtimeMs, providers });
-	return providers;
+	if (cached && cached.mtimeMs === mtimeMs) return { providers: cached.providers, errors: cached.errors };
+	const loaded = loadProvidersUncached(file);
+	providerCache.set(root, { mtimeMs, providers: loaded.providers, errors: loaded.errors });
+	return loaded;
+}
+
+/**
+ * Resolve the effective provider list for a store root (validation errors
+ * discarded): builtins merged with the user's `<root>/providers.json` when
+ * present. Never throws — a missing, unparseable, or otherwise broken file
+ * falls back to builtins alone. Thin wrapper over {@link loadProvidersWithErrors}.
+ * @param {string} root
+ * @returns {Provider[]}
+ */
+export function loadProviders(root) {
+	return loadProvidersWithErrors(root).providers;
 }
 
 /**
  * Read + validate + merge without consulting the cache.
  * @param {string} file
- * @returns {Provider[]}
+ * @returns {{providers: Provider[], errors: string[]}}
  */
 function loadProvidersUncached(file) {
 	const raw = readJson(file, null);
-	if (!raw || typeof raw !== "object" || !Array.isArray(raw.providers)) return builtinProviders();
+	if (!raw || typeof raw !== "object" || !Array.isArray(raw.providers)) {
+		return { providers: builtinProviders(), errors: [] };
+	}
 	/** @type {Provider[]} */
 	const user = [];
+	/** @type {string[]} */
+	const errors = [];
 	for (const entry of raw.providers) {
-		const { provider } = validateProvider(entry);
+		const { provider, errors: entryErrors } = validateProvider(entry);
 		if (provider) user.push(provider);
+		errors.push(...entryErrors);
 	}
-	return mergeProviders(builtinProviders(), user);
+	return { providers: mergeProviders(builtinProviders(), user), errors };
 }
 
 /**
@@ -506,6 +525,7 @@ function isUrlRule(rule) {
  * @param {Array<{kind: "issue"|"pr", number: number, strength: string, source: string, lastIndex: number}>} candidates
  */
 function addCandidate(candidates, kind, number, strength, source, lastIndex) {
+	if (!Number.isInteger(number) || number <= 0) return;
 	candidates.push({ kind, number, strength, source, lastIndex });
 }
 

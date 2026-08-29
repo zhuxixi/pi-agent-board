@@ -4,7 +4,7 @@
 
 **Goal:** Show each board row's associated issue number and submitted PR number as inline badges, extracted locally from session evidence via a platform-agnostic regex-rule engine.
 
-**Architecture:** Pure extraction engine (`src/core/code-refs.mjs`, zero I/O) driven by per-platform regex rule bundles ("providers": builtin GitHub/GitLab + user `providers.json`, append-merged); artifact persistence in `src/core/code-refs-store.mjs` (per-view `github.json`, atomic writes); write-through hooks at all six `writeEvidence` call sites; rendering via existing RowView badge + peek detail patterns. Spec: `docs/superpowers/specs/2026-08-29-code-refs-badges-design.md` (decisions D1–D5 govern).
+**Architecture:** Pure extraction engine (`src/core/code-refs.mjs`, zero I/O) driven by per-platform regex rule bundles ("providers": builtin GitHub/GitLab + user `providers.json`, append-merged); artifact persistence in `src/core/code-refs-store.mjs` (per-view `github.json`, atomic writes); write-through hooks at all five `writeEvidence` call sites; rendering via existing RowView badge + peek detail patterns. Spec: `docs/superpowers/specs/2026-08-29-code-refs-badges-design.md` (decisions D1–D5 govern).
 
 **Tech Stack:** Node 20+ ESM `.mjs` (JSDoc types, no TS in core), `node --test`, pi-agent-board store layout.
 
@@ -162,10 +162,10 @@ Test cases must include (synthetic but modeled on real observed sessions):
 
 ---
 
-### Task 5: hook the six writeEvidence sites
+### Task 5: hook the five writeEvidence sites
 
 **Files:**
-- Modify: `runner/job-runner.mjs` (3 sites: initial write ~L62, `flush()` ~L100, final flush), `src/runtime/service.mjs` (syncRowEvent ~L519 and agent_end ~L550), `runner/state-runner.mjs` (~L57)
+- Modify: `runner/job-runner.mjs` (2 sites: initial write ~L66, shared `persist()` ~L105), `src/runtime/service.mjs` (syncRowEvent ~L519 and agent_end ~L550), `runner/state-runner.mjs` (~L57)
 - Test: extend `test/service.test.mjs` (or the existing runner integration style) minimally; full coverage arrives in Task 7.
 
 **Interfaces:**
@@ -178,7 +178,7 @@ Test cases must include (synthetic but modeled on real observed sessions):
 
 - [ ] **Step 1: failing test**: service-level — feed `syncRowEvent`-equivalent path (see how service.test.mjs fabricates rows) an event stream whose bash command is `gh issue comment 40 --body hi`; assert `<root>/views/<id>/github.json` exists with issue 40
 - [ ] **Step 2: run, fail**
-- [ ] **Step 3: implement the 6 hook calls**
+- [ ] **Step 3: implement the 5 hook calls**
 - [ ] **Step 4: tests pass**
 - [ ] **Step 5: commit** `feat(code-refs): extract on every evidence write (job-runner/service/state-runner)`
 

@@ -287,7 +287,7 @@ test("worktree path and git branch naming contribute issue claims", { skip: !git
 	const repo = makeRepo();
 	try {
 		execFileSync("git", ["-C", repo, "checkout", "-b", "issue-43-foo"], { stdio: "ignore" });
-		const ok = updateCodeRefsFromEvidence(root, "v1", { commands: [], assistantEvidence: [] }, {
+		const ok = updateCodeRefsFromEvidence(root, "v1", { commands: [{ id: "c1", command: "echo hi" }], assistantEvidence: [] }, {
 			cwd: repo,
 			repoRoot: repo,
 			worktreePath: "issue-42-code-refs",
@@ -302,4 +302,106 @@ test("worktree path and git branch naming contribute issue claims", { skip: !git
 		rmSync(root, { recursive: true, force: true });
 		rmSync(repo, { recursive: true, force: true });
 	}
+});
+
+test("empty evidence leaves an existing github.json untouched", () => {
+	const root = freshRoot();
+	try {
+		const ref = {
+			kind: "pr",
+			number: 45,
+			strength: "action",
+			confidence: "high",
+			source: "command",
+			url: "https://github.com/zhuxixi/pi-agent-board/pull/45",
+			lastIndex: 0,
+		};
+		writeCodeRefs(root, { version: 1, viewId: "v1", updatedAt: 1, provider: "github", issue: null, pr: ref, allRefs: [ref] });
+		const before = readCodeRefs(root, "v1");
+		const ok = updateCodeRefsFromEvidence(root, "v1", { commands: [], assistantEvidence: [] }, { cwd: "/tmp" });
+		assert.equal(ok, false);
+		const after = readCodeRefs(root, "v1");
+		assert.equal(after.updatedAt, before.updatedAt);
+		assert.deepEqual(after.pr, ref);
+		assert.deepEqual(after.allRefs, [ref]);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("broken providers.json emits one code_refs_config diagnostic", () => {
+	const root = freshRoot();
+	try {
+		writeFileSync(join(root, "providers.json"), JSON.stringify({ providers: [null] }));
+		assert.equal(updateCodeRefsFromEvidence(root, "v1", githubEvidence(), { cwd: "/tmp" }), true);
+		const configDiags = () => readDiagnostics(root, "v1").filter((d) => d.code === "code_refs_config");
+		assert.equal(configDiags().length, 1);
+		assert.equal(configDiags()[0].source, "code-refs");
+		assert.equal(configDiags()[0].level, "warn");
+		// same mtime → no repeat diagnostic
+		assert.equal(updateCodeRefsFromEvidence(root, "v1", githubEvidence(), { cwd: "/tmp" }), true);
+		assert.equal(configDiags().length, 1);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("valid providers.json emits no code_refs_config diagnostic", () => {
+	const root = freshRoot();
+	try {
+		writeFileSync(join(root, "providers.json"), JSON.stringify({
+			providers: [{ name: "acme", hosts: ["git.acme.com"], issuePrefix: "#", prPrefix: "!", rules: [{ pattern: "issue #?(\\d+)", kind: "issue", strength: "view" }] }],
+		}));
+		assert.equal(updateCodeRefsFromEvidence(root, "v1", githubEvidence(), { cwd: "/tmp" }), true);
+		assert.equal(readDiagnostics(root, "v1").filter((d) => d.code === "code_refs_config").length, 0);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("input size guard: only the last 200 commands reach the engine", () => {
+	const root = freshRoot();
+	const cwd = mkdtempSync(join(tmpdir(), "agentview-coderefs-norepo-"));
+	try {
+		const commands = Array.from({ length: 250 }, (_, i) => {
+			if (i === 0) return { id: "c0", command: "curl https://example.com/pull/111" };
+			if (i === 249) return { id: "c249", command: "curl https://example.com/pull/222" };
+			return { id: `c${i}`, command: "echo x" };
+		});
+		assert.equal(updateCodeRefsFromEvidence(root, "v1", { commands, assistantEvidence: [] }, { cwd }), true);
+		const snap = readCodeRefs(root, "v1");
+		assert.equal(snap.provider, "generic");
+		assert.equal(snap.pr.number, 222);
+		assert.ok(!snap.allRefs.some((r) => r.number === 111));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("input size guard: each command is truncated to 4000 chars before matching", () => {
+	const root = freshRoot();
+	const cwd = mkdtempSync(join(tmpdir(), "agentview-coderefs-norepo-"));
+	try {
+		const commands = [
+			{ id: "c0", command: "x".repeat(4000) + " curl https://example.com/pull/333" },
+			{ id: "c1", command: "curl https://example.com/pull/444" },
+		];
+		assert.equal(updateCodeRefsFromEvidence(root, "v1", { commands, assistantEvidence: [] }, { cwd }), true);
+		const snap = readCodeRefs(root, "v1");
+		assert.equal(snap.pr.number, 444);
+		assert.ok(!snap.allRefs.some((r) => r.number === 333));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
+test("normalizeCodeRefsSnapshot filters invalid allRefs elements", () => {
+	const pr45 = { kind: "pr", number: 45, strength: "action", confidence: "high", source: "command", url: null, lastIndex: 0 };
+	const normalized = normalizeCodeRefsSnapshot(
+		{ viewId: "v1", allRefs: [null, { kind: "issue", number: 0 }, pr45] },
+		{ viewId: "v1" }
+	);
+	assert.deepEqual(normalized.allRefs, [pr45]);
 });

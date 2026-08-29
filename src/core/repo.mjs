@@ -69,6 +69,7 @@ export function gitRemoteUrl(repoRoot) {
 		const out = execFileSync("git", ["-C", repoRoot, "remote", "get-url", "origin"], {
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "ignore"],
+			timeout: 2000,
 		});
 		url = out.trim() || null;
 	} catch {

@@ -36,7 +36,7 @@ Dashboard 每行（一个后台 pi session）目前只有 name + summary + age�
 
 ## 3. 架构
 
-复刻仓库既有「artifact → summarize → 合并进 Row → renderRow 徽章」模式（evidence/diagnostics/followUps/steering 同构）。新增一个纯函数引擎模块、一个 per-view artifact、六处写入钩子、两处渲染改动。
+复刻仓库既有「artifact → summarize → 合并进 Row → renderRow 徽章」模式（evidence/diagnostics/followUps/steering 同构）。新增一个纯函数引擎模块、一个 per-view artifact、五处写入钩子、两处渲染改动。
 
 ```
 事件流 → reduceEvidence → evidence.json ──┐
@@ -88,9 +88,9 @@ repo.mjs remoteHost()（带缓存）──────────────�
 - 读写走 `atomicWriteJson`（并发写者多，KB 已有教训）。
 - `readViewArtifactSummaries` 增加 `codeRefs:` 汇总；`Row`/`RowView` 加 `codeRefs` 字段。
 
-**C6 写入钩子（6 处，`writeEvidence` 的全部调用点）**
+**C6 写入钩子（5 处，`writeEvidence` 的全部调用点）**
 
-`runner/job-runner.mjs` ×3、`src/runtime/service.mjs` ×2、`runner/state-runner.mjs` ×1。统一收敛为一个 helper：`updateCodeRefsFromEvidence(root, viewId, evidence, meta)`——增量不重算：引擎输入只取 evidence 的 commands + 最近若干条 assistantTexts + meta.worktreePath/branch，纯正则，实测成本微秒级；每次 evidence 写入后顺带调用。失败只记 diagnostics，不影响主流程。
+`runner/job-runner.mjs` ×2（共用 persist()）、`src/runtime/service.mjs` ×2、`runner/state-runner.mjs` ×1。统一收敛为一个 helper：`updateCodeRefsFromEvidence(root, viewId, evidence, meta)`——增量不重算：引擎输入只取 evidence 的 commands + 最近若干条 assistantTexts + meta.worktreePath/branch，纯正则，实测成本微秒级；每次 evidence 写入后顺带调用。失败只记 diagnostics，不影响主流程。
 
 **C7 渲染**
 
@@ -123,6 +123,6 @@ repo.mjs remoteHost()（带缓存）──────────────�
 1. `repo.mjs` `gitRemoteHost` + 缓存（含单测）
 2. `code-refs.mjs` 引擎 + 内置规则 + schema 校验（含单测，覆盖率大头）
 3. `github.json` artifact 读写 + `readViewArtifactSummaries` 汇总 + Row/RowView 字段
-4. 6 处写入钩子
+4. 5 处写入钩子
 5. 渲染：徽章 + peek Refs 段
 6. 四层测试补齐 + `npm run verify`

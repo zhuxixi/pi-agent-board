@@ -273,3 +273,28 @@ test("parseRemoteHost and parseRemotePath parse https and ssh remotes", () => {
 	assert.equal(parseRemotePath(null), null);
 	assert.equal(parseRemotePath("not a remote"), null);
 });
+
+test("user rule foo(\\d*) matching foo yields no ref (non-positive number guard)", () => {
+	const provider = {
+		name: "test",
+		hosts: [],
+		issuePrefix: "#",
+		prPrefix: "#",
+		urlTemplates: null,
+		rules: [{ regex: /foo(\d*)/, pattern: "foo(\\d*)", kind: "issue", strength: "claim", numberFrom: "capture" }],
+	};
+	const result = extractCodeRefs(
+		{
+			commands: [{ command: "foo" }],
+			assistantTexts: [],
+			worktreePath: null,
+			branch: null,
+			repoUrl: null,
+			host: null,
+		},
+		provider
+	);
+	assert.equal(result.issue, null);
+	assert.equal(result.pr, null);
+	assert.deepEqual(result.allRefs, []);
+});

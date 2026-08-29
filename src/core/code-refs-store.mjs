@@ -10,11 +10,12 @@
  * of cycles.
  */
 import { execFileSync } from "node:child_process";
+import { statSync } from "node:fs";
 import { atomicWriteJson, readJson } from "./atomic.mjs";
 import * as P from "./paths.mjs";
 import {
 	extractCodeRefs,
-	loadProviders,
+	loadProvidersWithErrors,
 	matchProvider,
 	parseRemoteHost,
 	parseRemotePath,
@@ -70,13 +71,27 @@ export function normalizeCodeRefsSnapshot(raw, fallback) {
 		prPrefix: typeof raw.prPrefix === "string" ? raw.prPrefix : base.prPrefix,
 		issue: isRefObject(raw.issue) ? raw.issue : null,
 		pr: isRefObject(raw.pr) ? raw.pr : null,
-		allRefs: Array.isArray(raw.allRefs) ? raw.allRefs : [],
+		allRefs: Array.isArray(raw.allRefs) ? raw.allRefs.filter(isValidRefElement) : [],
 	};
 }
 
 /** @param {any} value @returns {boolean} */
 function isRefObject(value) {
 	return Boolean(value && typeof value === "object" && !Array.isArray(value));
+}
+
+/**
+ * A valid allRefs element is a ref-shaped object whose kind is issue/pr and
+ * whose number is a positive integer.
+ * @param {any} value @returns {boolean}
+ */
+function isValidRefElement(value) {
+	return Boolean(
+		isRefObject(value) &&
+		(value.kind === "issue" || value.kind === "pr") &&
+		Number.isInteger(value.number) &&
+		value.number > 0
+	);
 }
 
 /** @param {string} root @param {string} viewId @returns {CodeRefsSnapshot} */
@@ -125,6 +140,7 @@ function currentBranch(cwd) {
 		const out = execFileSync("git", ["-C", cwd, "branch", "--show-current"], {
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "ignore"],
+			timeout: 2000,
 		});
 		branch = out.trim() || null;
 	} catch {
@@ -152,11 +168,16 @@ function currentBranch(cwd) {
 export function updateCodeRefsFromEvidence(root, viewId, evidence, meta) {
 	if (process.env.AGENT_BOARD_CODE_REFS === "off") return false;
 	try {
+		const hasCommands = Array.isArray(evidence?.commands) && evidence.commands.length > 0;
+		const hasAssistantEvidence = Array.isArray(evidence?.assistantEvidence) && evidence.assistantEvidence.length > 0;
+		if (!hasCommands && !hasAssistantEvidence) return false;
 		const repoRoot = meta?.repoRoot ?? meta?.cwd ?? null;
 		const remoteUrl = repoRoot ? gitRemoteUrl(repoRoot) : null;
 		const host = remoteUrl ? parseRemoteHost(remoteUrl) : null;
 		const repoUrl = remoteUrl ? parseRemotePath(remoteUrl) : null;
-		const provider = matchProvider(loadProviders(root), host);
+		const { providers, errors } = loadProvidersWithErrors(root);
+		const provider = matchProvider(providers, host);
+		reportConfigErrors(root, viewId, evidence, errors);
 		const cwd = typeof meta?.cwd === "string" ? meta.cwd : null;
 		const worktreePath = typeof meta?.worktreePath === "string" ? meta.worktreePath : null;
 		const branch = currentBranch(cwd);
@@ -205,14 +226,55 @@ function contentOf(s) {
 	});
 }
 
+/** Last providers.json mtime per root for which a code_refs_config diagnostic was emitted. */
+const reportedConfigMtime = new Map();
+
 /**
- * Compose the pure engine input from evidence: all commands plus the last 20
- * assistant claim texts.
+ * Emit ONE `code_refs_config` diagnostic per distinct providers.json mtime so a
+ * broken config is surfaced without spamming every evidence write.
+ * @param {string} root
+ * @param {string} viewId
+ * @param {import("./types.mjs").EvidenceSnapshot|any} evidence
+ * @param {string[]} errors
+ */
+function reportConfigErrors(root, viewId, evidence, errors) {
+	if (errors.length === 0) return;
+	let mtimeMs = null;
+	try {
+		mtimeMs = statSync(P.providersPath(root)).mtimeMs;
+	} catch {
+		// file disappeared — nothing to report against
+	}
+	if (reportedConfigMtime.get(root) === mtimeMs) return;
+	reportedConfigMtime.set(root, mtimeMs);
+	try {
+		appendDiagnostic(root, viewId, {
+			runId: evidence?.runId ?? null,
+			source: "code-refs",
+			level: "warn",
+			code: "code_refs_config",
+			message: "providers.json has invalid entries",
+			details: { errors },
+		});
+	} catch {
+		// diagnostics must never break the evidence flow either
+	}
+}
+
+/**
+ * Compose the pure engine input from evidence: the last 200 commands (each
+ * truncated to 4000 chars) plus the last 20 assistant claim texts.
  * @param {any} evidence
  * @param {{ worktreePath: string|null, branch: string|null, repoUrl: string|null, host: string|null }} ctx
  */
 function buildEngineInput(evidence, ctx) {
-	const commands = Array.isArray(evidence?.commands) ? evidence.commands : [];
+	const rawCommands = Array.isArray(evidence?.commands) ? evidence.commands : [];
+	const commands = rawCommands.slice(-200).map((cmd) => {
+		if (cmd && typeof cmd.command === "string" && cmd.command.length > 4000) {
+			return { ...cmd, command: cmd.command.slice(0, 4000) };
+		}
+		return cmd;
+	});
 	const claims = Array.isArray(evidence?.assistantEvidence) ? evidence.assistantEvidence : [];
 	const assistantTexts = claims
 		.slice(-20)
