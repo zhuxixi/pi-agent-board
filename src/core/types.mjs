@@ -118,6 +118,7 @@ export const GROUP_LABELS = {
  * @property {DiagnosticSummary} [diagnostics] Compact diagnostics summary.
  * @property {FollowUpSummary} [followUps] Compact queued follow-up summary.
  * @property {SteeringSummary} [steering] Compact plan/approval steering summary.
+ * @property {CodeRefsSummary} [codeRefs] Compact issue/PR reference summary.
  * @property {AutoStateClassification|null} [autoState] Latest automatic terminal-state classification.
  */
 
@@ -363,6 +364,15 @@ export const GROUP_LABELS = {
  */
 
 /** @typedef {{ status:SteeringModeState, awaitingApproval:boolean, planPreview:string|null, updatedAt:number|null, question:string|null }} SteeringSummary */
+
+/**
+ * Compact issue/PR reference summary for a view (`github.json`).
+ * @typedef {Object} CodeRefsSummary
+ * @property {string|null} provider Resolved provider name (e.g. "github"), or null when no refs were found.
+ * @property {import("./code-refs.mjs").Ref|null} issue
+ * @property {import("./code-refs.mjs").Ref|null} pr
+ * @property {import("./code-refs.mjs").Ref[]} allRefs Distinct refs for the peek view (max 10).
+ */
 
 /** Roster index (`roster.json`). @typedef {Object} Roster @property {number} version @property {string[]} views */
 

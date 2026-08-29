@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import * as P from "../src/core/paths.mjs";
+import { readCodeRefs, writeCodeRefs } from "../src/core/code-refs-store.mjs";
 import {
 	addToRoster,
 	createView,
@@ -15,6 +16,7 @@ import {
 	readState,
 	readHost,
 	readStatus,
+	readViewArtifactSummaries,
 	removeFromRoster,
 	writeHost,
 	writeHostPid,
@@ -208,6 +210,37 @@ test("status round-trips and loadRow reflects state", () => {
 		const row = loadRow(root, "v1");
 		assert.equal(row.state.semanticState, "completed");
 		assert.equal(row.alive, false);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("readViewArtifactSummaries includes codeRefs and loadRow exposes it", () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const empty = readViewArtifactSummaries(root, "v1");
+		assert.deepEqual(empty.codeRefs, { provider: null, issue: null, pr: null, allRefs: [] });
+
+		const ref = {
+			kind: "issue",
+			number: 40,
+			strength: "view",
+			confidence: "medium",
+			source: "command",
+			url: null,
+			lastIndex: 1,
+		};
+		writeCodeRefs(root, { viewId: "v1", provider: "github", issue: ref, pr: null, allRefs: [ref] });
+
+		const sums = readViewArtifactSummaries(root, "v1");
+		assert.equal(sums.codeRefs.provider, "github");
+		assert.equal(sums.codeRefs.issue.number, 40);
+
+		const row = loadRow(root, "v1");
+		assert.equal(row.codeRefs.provider, "github");
+		assert.equal(row.state.codeRefs.provider, "github");
+		assert.deepEqual(readCodeRefs(root, "v1").allRefs, [ref]);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

@@ -7,6 +7,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { atomicWriteJson, ensureDir, readJson } from "./atomic.mjs";
 import * as P from "./paths.mjs";
 import { isAlive } from "./pid.mjs";
+import { readCodeRefs, summarizeCodeRefs } from "./code-refs-store.mjs";
 import { readDiagnosticSummary } from "./diagnostics.mjs";
 import { readEvidence, summarizeEvidence } from "./evidence.mjs";
 import { readFollowUpQueue, summarizeFollowUpQueue } from "./follow-up-queue.mjs";
@@ -181,6 +182,7 @@ function mtime(dir) {
  * @property {import("./types.mjs").DiagnosticSummary} [diagnostics]
  * @property {import("./types.mjs").FollowUpSummary} [followUps]
  * @property {import("./types.mjs").SteeringSummary} [steering]
+ * @property {import("./types.mjs").CodeRefsSummary} [codeRefs]
  */
 
 /** @param {string} root @param {string} viewId @returns {Row|null} */
@@ -211,7 +213,8 @@ export function readViewArtifactSummaries(root, viewId) {
 	const diagnostics = readDiagnosticSummary(root, viewId);
 	const followUps = summarizeFollowUpQueue(readFollowUpQueue(root, viewId));
 	const steering = summarizeSteering(readSteering(root, viewId));
-	return { review, diagnostics, followUps, steering };
+	const codeRefs = summarizeCodeRefs(readCodeRefs(root, viewId));
+	return { review, diagnostics, followUps, steering, codeRefs };
 }
 
 /**
