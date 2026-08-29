@@ -45,3 +45,51 @@ export function isDirty(repoRoot) {
 		return false;
 	}
 }
+
+/**
+ * Cached origin-remote host per repo root. Failures are cached as null so each
+ * repo root is only ever queried once per process.
+ * @type {Map<string, string|null>}
+ */
+const remoteHostCache = new Map();
+
+/** https://host[:port]/owner/repo(.git) */
+const HTTPS_REMOTE_RE = /^https?:\/\/([^/:\s]+)(?::\d+)?\//;
+
+/** git@host:owner/repo(.git) */
+const SSH_REMOTE_RE = /^git@([^/:\s]+):/;
+
+/**
+ * Host of the `origin` remote of `repoRoot`, lowercased and without port, or
+ * null when the repo has no origin remote or is not a repo. Supports
+ * `https://host/owner/repo(.git)` and `git@host:owner/repo(.git)`. The result
+ * (including misses) is cached per repoRoot.
+ * @param {string} repoRoot
+ * @returns {string|null}
+ */
+export function gitRemoteHost(repoRoot) {
+	const cached = remoteHostCache.get(repoRoot);
+	if (cached !== undefined) return cached;
+	let host = null;
+	try {
+		const out = execFileSync("git", ["-C", repoRoot, "remote", "get-url", "origin"], {
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+		});
+		const url = out.trim();
+		const match = HTTPS_REMOTE_RE.exec(url) ?? SSH_REMOTE_RE.exec(url);
+		if (match) host = match[1].toLowerCase();
+	} catch {
+		// not a repo or no origin remote
+	}
+	remoteHostCache.set(repoRoot, host);
+	return host;
+}
+
+/**
+ * Clear the gitRemoteHost cache. Test-only helper.
+ * @returns {void}
+ */
+export function clearRemoteHostCacheForTests() {
+	remoteHostCache.clear();
+}
