@@ -128,7 +128,7 @@ function currentBranch(cwd) {
 
 /**
  * Extract issue/PR refs from view evidence and persist the per-view snapshot.
- * The hook helper for the six `writeEvidence` sites: never throws, writes only
+ * The hook helper for every `writeEvidence` call site: never throws, writes only
  * when the serialized ref content actually changed, and is disabled entirely
  * by `AGENT_BOARD_CODE_REFS=off` (returns false without writing).
  *
