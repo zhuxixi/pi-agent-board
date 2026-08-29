@@ -228,7 +228,7 @@ test("validateProvider records errors for malformed hosts and urlTemplates", () 
 		urlTemplates: { pr: 7 },
 		rules: [{ pattern: "a(\\d+)", kind: "issue", strength: "view" }],
 	});
-	assert.deepEqual(r2.provider.urlTemplates, {});
+	assert.equal(r2.provider.urlTemplates, undefined);
 	assert.ok(r2.errors.length >= 1);
 	assert.match(r2.errors[0], /urlTemplates\.pr/);
 });
@@ -245,8 +245,52 @@ test("validateProvider tolerates malformed optional fields", () => {
 	assert.equal(provider.hosts, undefined);
 	assert.equal(provider.issuePrefix, undefined);
 	assert.equal(provider.prPrefix, undefined);
-	assert.deepEqual(provider.urlTemplates, {});
+	assert.equal(provider.urlTemplates, undefined);
 	assert.ok(errors.length >= 4);
+});
+
+test("validateProvider leaves all-invalid hosts and urlTemplates unset", () => {
+	const { provider, errors } = validateProvider({
+		name: "internal",
+		hosts: [5, {}],
+		urlTemplates: { issue: 7, pr: 8 },
+		rules: [{ pattern: "a(\\d+)", kind: "issue", strength: "view" }],
+	});
+	assert.equal(provider.hosts, undefined);
+	assert.equal(provider.urlTemplates, undefined);
+	assert.ok(errors.length >= 4);
+});
+
+test("validateProvider rejects capture rules without a capture group", () => {
+	const { provider, errors } = validateProvider({
+		name: "internal",
+		rules: [
+			{ pattern: "ig\\s+issue\\s+view\\s+\\d+", kind: "issue", strength: "view" },
+			{ pattern: "ig\\s+issue\\s+view\\s+#?(\\d+)", kind: "issue", strength: "view" },
+		],
+	});
+	assert.equal(errors.length, 1);
+	assert.match(errors[0], /rule 0/);
+	assert.match(errors[0], /capture group/);
+	assert.equal(provider.rules.length, 1);
+	assert.equal(provider.rules[0].pattern, "ig\\s+issue\\s+view\\s+#?(\\d+)");
+});
+
+test("capture-group validation tolerates char classes and named groups", () => {
+	const ok = validateProvider({
+		name: "internal",
+		rules: [{ pattern: "[()](?<n>\\d+)", kind: "issue", strength: "view" }],
+	});
+	assert.equal(ok.errors.length, 0);
+	assert.equal(ok.provider.rules.length, 1);
+
+	const rejected = validateProvider({
+		name: "internal",
+		rules: [{ pattern: "a[()]b", kind: "issue", strength: "view" }],
+	});
+	assert.equal(rejected.errors.length, 1);
+	assert.match(rejected.errors[0], /capture group/);
+	assert.equal(rejected.provider.rules.length, 0);
 });
 
 test("mergeProviders prepends user rules and overrides scalar fields", () => {
@@ -289,6 +333,19 @@ test("mergeProviders keeps builtin scalar fields when the user omits them", () =
 	assert.ok(gh.urlTemplates);
 	assert.equal(gh.rules.length, 10);
 	assert.equal(gh.rules[0].pattern, "gh\\s+ship\\s+#?(\\d+)");
+});
+
+test("mergeProviders falls back to builtin scalars when user values are all-invalid", () => {
+	const { provider: user } = validateProvider({
+		name: "github",
+		hosts: [5],
+		urlTemplates: { issue: 7 },
+		rules: [{ pattern: "gh\\s+ship\\s+#?(\\d+)", kind: "issue", strength: "action" }],
+	});
+	const merged = mergeProviders(builtinProviders(), [user]);
+	const gh = merged.find((p) => p.name === "github");
+	assert.deepEqual(gh.hosts, ["github.com"]);
+	assert.equal(gh.urlTemplates.issue, "https://{host}/{owner}/{repo}/issues/{number}");
 });
 
 test("mergeProviders appends unknown providers with defaults", () => {

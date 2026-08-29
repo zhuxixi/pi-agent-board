@@ -7,6 +7,7 @@ import { test } from "node:test";
 import {
 	clearRemoteHostCacheForTests,
 	gitRemoteHost,
+	gitRemoteUrl,
 	gitRepoRoot,
 	isDirty,
 	sameRepo,
@@ -103,6 +104,36 @@ test("gitRemoteHost parses https and ssh origin remotes", { skip: !gitAvailable(
 		);
 		clearRemoteHostCacheForTests();
 		assert.equal(gitRemoteHost(root), "gitlab.example.com");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("gitRemoteUrl returns the raw origin URL", { skip: !gitAvailable() }, () => {
+	const dir = mkdtempSync(join(tmpdir(), "agentview-url-"));
+	try {
+		execFileSync("git", ["-C", dir, "init", "-q"], { stdio: "ignore" });
+		execFileSync("git", ["-C", dir, "config", "user.email", "t@t.dev"], { stdio: "ignore" });
+		execFileSync("git", ["-C", dir, "config", "user.name", "t"], { stdio: "ignore" });
+		const root = gitRepoRoot(dir);
+		assert.equal(root, realpath(dir));
+		assert.equal(gitRemoteUrl(root), null);
+
+		execFileSync(
+			"git",
+			["-C", dir, "remote", "add", "origin", "https://github.com/zhuxixi/pi-agent-board.git"],
+			{ stdio: "ignore" }
+		);
+		clearRemoteHostCacheForTests();
+		assert.equal(gitRemoteUrl(root), "https://github.com/zhuxixi/pi-agent-board.git");
+
+		execFileSync(
+			"git",
+			["-C", dir, "remote", "set-url", "origin", "git@gitlab.example.com:team/demo.git"],
+			{ stdio: "ignore" }
+		);
+		clearRemoteHostCacheForTests();
+		assert.equal(gitRemoteUrl(root), "git@gitlab.example.com:team/demo.git");
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}

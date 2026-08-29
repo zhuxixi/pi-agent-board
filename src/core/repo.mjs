@@ -1,5 +1,6 @@
 /** Git repository identity. Pure node (shells out to `git`); returns null off-repo. */
 import { execFileSync } from "node:child_process";
+import { parseRemoteHost } from "./code-refs.mjs";
 
 /**
  * Resolve the git repo root containing `cwd`, or null if not in a repo.
@@ -47,43 +48,46 @@ export function isDirty(repoRoot) {
 }
 
 /**
- * Cached origin-remote host per repo root. Failures are cached as null so each
+ * Cached origin-remote URL per repo root. Failures are cached as null so each
  * repo root is only ever queried once per process.
  * @type {Map<string, string|null>}
  */
-const remoteHostCache = new Map();
-
-/** https://host[:port]/owner/repo(.git) */
-const HTTPS_REMOTE_RE = /^https?:\/\/([^/:\s]+)(?::\d+)?\//;
-
-/** git@host:owner/repo(.git) */
-const SSH_REMOTE_RE = /^git@([^/:\s]+):/;
+const remoteUrlCache = new Map();
 
 /**
- * Host of the `origin` remote of `repoRoot`, lowercased and without port, or
- * null when the repo has no origin remote or is not a repo. Supports
- * `https://host/owner/repo(.git)` and `git@host:owner/repo(.git)`. The result
- * (including misses) is cached per repoRoot.
+ * Raw URL of the `origin` remote of `repoRoot`, or null when the repo has no
+ * origin remote or is not a repo. The result (including misses) is cached per
+ * repoRoot.
  * @param {string} repoRoot
  * @returns {string|null}
  */
-export function gitRemoteHost(repoRoot) {
-	const cached = remoteHostCache.get(repoRoot);
+export function gitRemoteUrl(repoRoot) {
+	const cached = remoteUrlCache.get(repoRoot);
 	if (cached !== undefined) return cached;
-	let host = null;
+	let url = null;
 	try {
 		const out = execFileSync("git", ["-C", repoRoot, "remote", "get-url", "origin"], {
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "ignore"],
 		});
-		const url = out.trim();
-		const match = HTTPS_REMOTE_RE.exec(url) ?? SSH_REMOTE_RE.exec(url);
-		if (match) host = match[1].toLowerCase();
+		url = out.trim() || null;
 	} catch {
 		// not a repo or no origin remote
 	}
-	remoteHostCache.set(repoRoot, host);
-	return host;
+	remoteUrlCache.set(repoRoot, url);
+	return url;
+}
+
+/**
+ * Host of the `origin` remote of `repoRoot`, lowercased and without port, or
+ * null when the repo has no origin remote or is not a repo. Supports
+ * `https://host/owner/repo(.git)` and `git@host:owner/repo(.git)`; parsed from
+ * the cached raw remote URL.
+ * @param {string} repoRoot
+ * @returns {string|null}
+ */
+export function gitRemoteHost(repoRoot) {
+	return parseRemoteHost(gitRemoteUrl(repoRoot));
 }
 
 /**
@@ -91,5 +95,5 @@ export function gitRemoteHost(repoRoot) {
  * @returns {void}
  */
 export function clearRemoteHostCacheForTests() {
-	remoteHostCache.clear();
+	remoteUrlCache.clear();
 }

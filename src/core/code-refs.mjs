@@ -40,6 +40,39 @@ const VALID_KINDS = new Set(["issue", "pr"]);
 const VALID_STRENGTHS = new Set(["claim", "action", "view"]);
 const VALID_NUMBER_FROM = new Set(["capture", "outputUrl"]);
 
+/** https://host[:port]/owner/repo(.git) */
+const HTTPS_REMOTE_RE = /^https?:\/\/([^/:\s]+)(?::\d+)?\/(.+)$/;
+/** git@host:owner/repo(.git) */
+const SSH_REMOTE_RE = /^git@([^/:\s]+):(.+)$/;
+
+/**
+ * Lowercased host of a raw origin-remote URL, or null when it cannot be parsed.
+ * Supports `https://host/owner/repo(.git)` and `git@host:owner/repo(.git)`; an
+ * optional port is dropped.
+ * @param {string|null} url
+ * @returns {string|null}
+ */
+export function parseRemoteHost(url) {
+	if (typeof url !== "string" || !url) return null;
+	const match = HTTPS_REMOTE_RE.exec(url) ?? SSH_REMOTE_RE.exec(url);
+	return match ? match[1].toLowerCase() : null;
+}
+
+/**
+ * `owner/repo` path of a raw origin-remote URL (trailing `.git` stripped), or
+ * null when it cannot be parsed. Supports the same https/ssh shapes as
+ * `parseRemoteHost`; nested namespaces are kept (e.g. `group/sub/repo`).
+ * @param {string|null} url
+ * @returns {string|null}
+ */
+export function parseRemotePath(url) {
+	if (typeof url !== "string" || !url) return null;
+	const match = HTTPS_REMOTE_RE.exec(url) ?? SSH_REMOTE_RE.exec(url);
+	if (!match) return null;
+	const path = match[2].replace(/[?#].*$/, "").replace(/\/+$/, "").replace(/\.git$/i, "");
+	return path || null;
+}
+
 /**
  * Compile trusted rule specs into Rule objects. Throws on an invalid pattern;
  * only used for the builtin tables, which must stay valid.
@@ -179,9 +212,45 @@ export function validateProvider(raw) {
 }
 
 /**
+ * Count capturing groups in a regex source string, ignoring escaped chars,
+ * character classes, non-capturing groups, and lookaround groups.
+ * @param {string} source
+ * @returns {number}
+ */
+function countCaptureGroups(source) {
+	let count = 0;
+	let inClass = false;
+	for (let i = 0; i < source.length; i++) {
+		const ch = source[i];
+		if (ch === "\\") {
+			i++;
+			continue;
+		}
+		if (inClass) {
+			if (ch === "]") inClass = false;
+			continue;
+		}
+		if (ch === "[") {
+			inClass = true;
+			continue;
+		}
+		if (ch === "(") {
+			if (source[i + 1] === "?") {
+				// (?<name>...) is a named capturing group; (?<=, ?<! are lookbehind.
+				if (source[i + 2] === "<" && source[i + 3] !== "=" && source[i + 3] !== "!") count++;
+			} else {
+				count++;
+			}
+		}
+	}
+	return count;
+}
+
+/**
  * Compile and validate one raw rule; returns null (and records an error) when
- * any field is missing or invalid. The regex must compile and capture the
- * number in group 1 (except `numberFrom: "outputUrl"` rules).
+ * any field is missing or invalid. The regex must compile and, for
+ * `numberFrom: "capture"` rules, must contain at least one capture group for
+ * the number.
  * @param {any} raw
  * @param {number} index
  * @param {string} providerName
@@ -218,12 +287,20 @@ function validateRule(raw, index, providerName, errors) {
 		errors.push(`${where}: invalid regex "${pattern}": ${e.message}`);
 		return null;
 	}
-	return { regex, pattern, kind, strength, numberFrom: numberFrom ?? "capture" };
+	const resolvedNumberFrom = numberFrom ?? "capture";
+	if (resolvedNumberFrom === "capture" && countCaptureGroups(regex.source) === 0) {
+		errors.push(`${where}: capture rule must have a capture group`);
+		return null;
+	}
+	return { regex, pattern, kind, strength, numberFrom: resolvedNumberFrom };
 }
 
 /**
  * Validate optional scalar fields in place: malformed values are dropped (left
  * unset so mergeProviders falls back to the builtin) with an error recorded.
+ * A scalar list is only assigned when at least one entry parsed, so an
+ * all-invalid `hosts`/`urlTemplates` is treated as unset rather than as an
+ * empty override that would clobber the builtin values.
  * @param {any} raw
  * @param {string} name
  * @param {Provider} provider
@@ -238,7 +315,7 @@ function validateScalarFields(raw, name, provider, errors) {
 				if (typeof host === "string" && host) hosts.push(host);
 				else errors.push(`provider "${name}": hosts[${i}] must be a non-empty string`);
 			});
-			provider.hosts = hosts;
+			if (hosts.length > 0) provider.hosts = hosts;
 		} else {
 			errors.push(`provider "${name}": hosts must be an array of strings`);
 		}
@@ -263,7 +340,9 @@ function validateScalarFields(raw, name, provider, errors) {
 				if (typeof raw.urlTemplates.pr === "string") templates.pr = raw.urlTemplates.pr;
 				else errors.push(`provider "${name}": urlTemplates.pr must be a string`);
 			}
-			provider.urlTemplates = templates;
+			if (templates.issue !== undefined || templates.pr !== undefined) {
+				provider.urlTemplates = templates;
+			}
 		} else {
 			errors.push(`provider "${name}": urlTemplates must be an object`);
 		}
@@ -382,4 +461,347 @@ export function matchProvider(providers, host) {
 		}
 	}
 	return genericFallbackProvider();
+}
+
+/**
+ * @typedef {Object} Ref
+ * @property {"issue"|"pr"} kind
+ * @property {number} number
+ * @property {"claim"|"action"|"view"|"mention"} strength
+ * @property {"high"|"medium"|"low"} confidence
+ * @property {string} source
+ * @property {string|null} url
+ * @property {number} lastIndex
+ */
+
+/**
+ * @typedef {Object} CodeRefsResult
+ * @property {string} provider
+ * @property {Ref|null} issue
+ * @property {Ref|null} pr
+ * @property {Ref[]} allRefs
+ */
+
+const STRENGTH_RANK = { claim: 3, action: 2, view: 1, mention: 0 };
+const REF_CONFIDENCE = { claim: "high", action: "high", view: "medium", mention: "low" };
+
+/** URL rules carry a `/issues/`, `/pull/`, or `/merge_requests/` path segment. */
+const URL_RULE_RE = /issues\/|pull\/|merge_requests\//;
+/** `closes #N` / `fixes #N` / `issue #N` back-link inside a `pr create` body. */
+const PR_BACKLINK_RE = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|issue)\s+#(\d{1,7})/;
+/** `issue-<N>-...` worktree/branch naming convention (engine-builtin). */
+const WORKTREE_RE = /(?:^|[/\\])issue-(\d{1,7})(?:-|$)/;
+/** Bare `#N` mentions. */
+const MENTION_RE = /#(\d{1,7})/g;
+
+/** Worktree/branch naming is session metadata, treated as before the transcript. */
+const WORKTREE_INDEX = -1;
+
+/** @param {Rule} rule */
+function isUrlRule(rule) {
+	return URL_RULE_RE.test(rule.pattern);
+}
+
+/**
+ * @param {Array<{kind: "issue"|"pr", number: number, strength: string, source: string, lastIndex: number}>} candidates
+ */
+function addCandidate(candidates, kind, number, strength, source, lastIndex) {
+	candidates.push({ kind, number, strength, source, lastIndex });
+}
+
+/**
+ * Extract issue/PR references from session evidence against one provider. Pure
+ * (zero I/O): the caller has already resolved the provider for the repo host
+ * and passes `repoUrl` (`owner/repo`) plus `host` for urlTemplate filling.
+ *
+ * `input.commands` are scanned in array order; `input.assistantTexts` are
+ * treated as the ordered sequence continuing after commands (indexes keep
+ * counting). Rule strengths rank `claim > action > view > mention`; a tie in
+ * strength is broken by the highest `lastIndex`.
+ *
+ * @param {{commands: Array<{command: string}>, assistantTexts: string[], worktreePath: string|null, branch: string|null, repoUrl: string|null, host: string|null}} input
+ * @param {Provider} provider
+ * @returns {CodeRefsResult}
+ */
+export function extractCodeRefs(input, provider) {
+	input = input ?? {};
+	const commands = Array.isArray(input.commands) ? input.commands : [];
+	const assistantTexts = Array.isArray(input.assistantTexts) ? input.assistantTexts : [];
+	const worktreePath = input.worktreePath ?? null;
+	const branch = input.branch ?? null;
+	const repoUrl = input.repoUrl ?? null;
+	const host = input.host ?? null;
+	const rules = provider.rules;
+
+	/** @type {Array<{kind: "issue"|"pr", number: number, strength: string, source: string, lastIndex: number}>} */
+	const candidates = [];
+	/** @type {Array<{kind: "issue"|"pr", index: number}>} */
+	const pendingCreates = [];
+
+	// Rule 1: commands in order, against every provider rule.
+	commands.forEach((cmd, index) => {
+		const text = cmd && typeof cmd.command === "string" ? cmd.command : "";
+		if (!text) return;
+		for (const rule of rules) {
+			const m = rule.regex.exec(text);
+			if (!m) continue;
+			if (rule.numberFrom === "outputUrl") {
+				pendingCreates.push({ kind: rule.kind, index });
+				// Rule 4: PR back-link within a pr create command.
+				if (rule.kind === "pr") applyPrBacklink(text, index, candidates);
+			} else {
+				addCandidate(candidates, rule.kind, Number(m[1]), rule.strength, "command", index);
+			}
+		}
+	});
+
+	// Rule 2: assistant texts (indexes continue after commands) with URL rules only.
+	const urlRules = rules.filter(isUrlRule);
+	assistantTexts.forEach((text, i) => {
+		const index = commands.length + i;
+		if (typeof text !== "string" || !text) return;
+		for (const rule of urlRules) {
+			const m = rule.regex.exec(text);
+			if (!m) continue;
+			addCandidate(candidates, rule.kind, Number(m[1]), rule.strength, "url", index);
+		}
+	});
+
+	// Rule 3: resolve pending create markers against subsequent evidence.
+	for (const marker of pendingCreates) {
+		const resolved = resolveCreate(marker, commands, assistantTexts, urlRules);
+		if (resolved) {
+			addCandidate(candidates, marker.kind, resolved.number, "action", "create-url", resolved.index);
+		}
+	}
+
+	// Rule 5: worktree/branch naming (engine-builtin, not configurable).
+	for (const value of [worktreePath, branch]) {
+		if (typeof value !== "string" || !value) continue;
+		const m = WORKTREE_RE.exec(value);
+		if (m) addCandidate(candidates, "issue", Number(m[1]), "claim", "worktree", WORKTREE_INDEX);
+	}
+
+	// Rule 7 (first half): drop view signals seen fewer than twice. This runs
+	// before the mention check so a single discarded view does not suppress the
+	// bare-`#N` fallback.
+	discardWeakViews(candidates);
+
+	// Rule 6: bare `#N` mention fallback, only when no stronger issue signal.
+	if (!hasIssueCandidateAtLeastView(candidates)) {
+		const mention = mentionFallback(assistantTexts, commands.length);
+		if (mention) addCandidate(candidates, "issue", mention.number, "mention", "mention", mention.lastIndex);
+	}
+
+	// Rule 7 (second half): aggregate winners + allRefs.
+	return aggregate(candidates, provider, repoUrl, host);
+}
+
+/**
+ * @param {string} text
+ * @param {number} index
+ * @param {Array<{kind: "issue"|"pr", number: number, strength: string, source: string, lastIndex: number}>} candidates
+ */
+function applyPrBacklink(text, index, candidates) {
+	const m = PR_BACKLINK_RE.exec(text);
+	if (m) addCandidate(candidates, "issue", Number(m[1]), "claim", "pr-body", index);
+}
+
+/**
+ * @param {{kind: "issue"|"pr", index: number}} marker
+ * @param {Array<{command: string}>} commands
+ * @param {string[]} assistantTexts
+ * @param {Rule[]} urlRules
+ */
+function resolveCreate(marker, commands, assistantTexts, urlRules) {
+	const total = commands.length + assistantTexts.length;
+	for (let index = marker.index + 1; index < total; index++) {
+		const text = evidenceTextAt(index, commands, assistantTexts);
+		if (!text) continue;
+		for (const rule of urlRules) {
+			if (rule.kind !== marker.kind) continue;
+			const m = rule.regex.exec(text);
+			if (m) return { number: Number(m[1]), index };
+		}
+	}
+	return null;
+}
+
+/**
+ * @param {number} index
+ * @param {Array<{command: string}>} commands
+ * @param {string[]} assistantTexts
+ */
+function evidenceTextAt(index, commands, assistantTexts) {
+	if (index < commands.length) {
+		const cmd = commands[index];
+		return cmd && typeof cmd.command === "string" ? cmd.command : "";
+	}
+	const text = assistantTexts[index - commands.length];
+	return typeof text === "string" ? text : "";
+}
+
+/**
+ * Remove view candidates whose number was viewed fewer than twice (D1: view
+ * signals only count at frequency >= 2). Mutates `candidates` in place.
+ * @param {Array<{kind: "issue"|"pr", number: number, strength: string, source: string, lastIndex: number}>} candidates
+ */
+function discardWeakViews(candidates) {
+	const counts = new Map();
+	for (const c of candidates) {
+		if (c.strength !== "view") continue;
+		const key = `${c.kind}:${c.number}`;
+		counts.set(key, (counts.get(key) ?? 0) + 1);
+	}
+	for (let i = candidates.length - 1; i >= 0; i--) {
+		const c = candidates[i];
+		if (c.strength === "view" && (counts.get(`${c.kind}:${c.number}`) ?? 0) < 2) {
+			candidates.splice(i, 1);
+		}
+	}
+}
+
+/**
+ * @param {Array<{kind: "issue"|"pr", number: number, strength: string, source: string, lastIndex: number}>} candidates
+ */
+function hasIssueCandidateAtLeastView(candidates) {
+	return candidates.some((c) => c.kind === "issue" && STRENGTH_RANK[c.strength] >= STRENGTH_RANK.view);
+}
+
+/**
+ * Count bare `#N` mentions over the last 20 assistant texts. Returns the
+ * winner (and its last occurrence index) only when it appears at least 3 times
+ * and at least twice as often as the runner-up; otherwise null.
+ * @param {string[]} assistantTexts
+ * @param {number} baseIndex
+ */
+function mentionFallback(assistantTexts, baseIndex) {
+	const start = Math.max(0, assistantTexts.length - 20);
+	const counts = new Map();
+	const lastIndex = new Map();
+	for (let i = start; i < assistantTexts.length; i++) {
+		const text = assistantTexts[i];
+		if (typeof text !== "string") continue;
+		for (const m of text.matchAll(MENTION_RE)) {
+			const n = Number(m[1]);
+			counts.set(n, (counts.get(n) ?? 0) + 1);
+			lastIndex.set(n, baseIndex + i);
+		}
+	}
+	if (counts.size === 0) return null;
+	const ranked = [...counts.entries()].sort((a, b) => b[1] - a[1]);
+	const winner = ranked[0];
+	const runnerUp = ranked[1]?.[1] ?? 0;
+	if (winner[1] < 3 || winner[1] < 2 * runnerUp) return null;
+	return { number: winner[0], lastIndex: lastIndex.get(winner[0]) ?? baseIndex };
+}
+
+/**
+ * @param {Array<{kind: "issue"|"pr", number: number, strength: string, source: string, lastIndex: number}>} candidates
+ * @param {Provider} provider
+ * @param {string|null} repoUrl
+ * @param {string|null} host
+ */
+function aggregate(candidates, provider, repoUrl, host) {
+	/** @type {Map<string, {kind: "issue"|"pr", number: number, strength: string, source: string, lastIndex: number}>} */
+	const byKey = new Map();
+	for (const c of candidates) {
+		const key = `${c.kind}:${c.number}`;
+		const prev = byKey.get(key);
+		if (!prev) {
+			byKey.set(key, c);
+			continue;
+		}
+		const rank = STRENGTH_RANK[c.strength];
+		const prevRank = STRENGTH_RANK[prev.strength];
+		// Stronger wins; equal strength → most recent; equal recency → the more
+		// specific later-derived signal (e.g. create-url beats url).
+		if (rank > prevRank || (rank === prevRank && c.lastIndex >= prev.lastIndex)) {
+			byKey.set(key, c);
+		}
+	}
+
+	const issue = pickWinner(byKey, "issue");
+	const pr = pickWinner(byKey, "pr");
+	const allRefs = [...byKey.values()]
+		.sort((a, b) => STRENGTH_RANK[b.strength] - STRENGTH_RANK[a.strength] || b.lastIndex - a.lastIndex)
+		.slice(0, 10)
+		.map((c) => toRef(c, provider, repoUrl, host));
+
+	return {
+		provider: provider.name,
+		issue: issue ? toRef(issue, provider, repoUrl, host) : null,
+		pr: pr ? toRef(pr, provider, repoUrl, host) : null,
+		allRefs,
+	};
+}
+
+/**
+ * @param {Map<string, {kind: "issue"|"pr", number: number, strength: string, source: string, lastIndex: number}>} byKey
+ * @param {"issue"|"pr"} kind
+ */
+function pickWinner(byKey, kind) {
+	let best = null;
+	for (const c of byKey.values()) {
+		if (c.kind !== kind) continue;
+		if (!best) {
+			best = c;
+			continue;
+		}
+		const rank = STRENGTH_RANK[c.strength];
+		const bestRank = STRENGTH_RANK[best.strength];
+		if (rank > bestRank || (rank === bestRank && c.lastIndex > best.lastIndex)) best = c;
+	}
+	return best;
+}
+
+/**
+ * @param {{kind: "issue"|"pr", number: number, strength: string, source: string, lastIndex: number}} c
+ * @param {Provider} provider
+ * @param {string|null} repoUrl
+ * @param {string|null} host
+ * @returns {Ref}
+ */
+function toRef(c, provider, repoUrl, host) {
+	return {
+		kind: c.kind,
+		number: c.number,
+		strength: c.strength,
+		confidence: REF_CONFIDENCE[c.strength],
+		source: c.source,
+		url: c.strength === "mention" ? null : fillUrl(provider, c.kind, c.number, repoUrl, host),
+		lastIndex: c.lastIndex,
+	};
+}
+
+/**
+ * Fill a provider urlTemplate (`{host}`, `{owner}`, `{repo}`, `{number}`).
+ * Returns null when there is no template for the kind or no repoUrl.
+ * @param {Provider} provider
+ * @param {"issue"|"pr"} kind
+ * @param {number} number
+ * @param {string|null} repoUrl
+ * @param {string|null} host
+ */
+function fillUrl(provider, kind, number, repoUrl, host) {
+	const template = provider.urlTemplates?.[kind];
+	if (!template || typeof repoUrl !== "string" || !repoUrl) return null;
+	const { owner, repo } = splitRepoUrl(repoUrl);
+	return template
+		.replaceAll("{host}", typeof host === "string" ? host : "")
+		.replaceAll("{owner}", owner)
+		.replaceAll("{repo}", repo)
+		.replaceAll("{number}", String(number));
+}
+
+/**
+ * Split an `owner/repo` path into its owner and repo parts (repo name minus
+ * any trailing `.git`).
+ * @param {string} repoUrl
+ */
+function splitRepoUrl(repoUrl) {
+	const path = repoUrl.replace(/[?#].*$/, "").replace(/\/+$/, "").replace(/\.git$/i, "");
+	const slash = path.lastIndexOf("/");
+	if (slash === -1) return { owner: "", repo: path };
+	return { owner: path.slice(0, slash), repo: path.slice(slash + 1) };
 }
