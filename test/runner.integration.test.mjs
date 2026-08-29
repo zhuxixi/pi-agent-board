@@ -1,19 +1,41 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { test } from "node:test";
+import { readCodeRefs } from "../src/core/code-refs-store.mjs";
 import { launchRun } from "../src/core/launch.mjs";
+import { isAlive } from "../src/core/pid.mjs";
 import * as P from "../src/core/paths.mjs";
-import { createView, readPid, readState, readStatus } from "../src/core/store.mjs";
+import { rowView } from "../src/core/rows.mjs";
+import { createView, loadRow, readPid, readState, readStatus } from "../src/core/store.mjs";
 
 const ROOT_DIR = fileURLToPath(new URL("../", import.meta.url));
 const RUNNER = join(ROOT_DIR, "runner", "job-runner.mjs");
 const FAKE_PI = join(ROOT_DIR, "test-support", "fake-pi.mjs");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Whether `git` is available on PATH (code-refs extraction shells out to it). */
+function gitAvailable() {
+	try {
+		execFileSync("git", ["--version"], { stdio: "ignore" });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Temp git repo whose origin remote is github.com, so code-refs matches the github provider. */
+function makeGithubRepo() {
+	const dir = mkdtempSync(join(tmpdir(), "agentview-refs-repo-"));
+	execFileSync("git", ["-C", dir, "init", "-q"], { stdio: "ignore" });
+	execFileSync("git", ["-C", dir, "remote", "add", "origin", "https://github.com/zhuxixi/pi-agent-board.git"], { stdio: "ignore" });
+	return dir;
+}
 
 /** Kill a detached runner before deleting its root so it can never orphan (issue #33). */
 async function killDetached(pid) {
@@ -256,6 +278,61 @@ test("runner keeps a completed fake worker idle when auto-done is disabled", { t
 		delete process.env.FAKE_PI_MODE;
 		delete process.env.AGENT_BOARD_SUMMARY_MODEL;
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("runner extracts github issue/pr refs end-to-end into github.json and the row badge", { timeout: 20000, skip: !gitAvailable() }, async () => {
+	const boardRoot = mkdtempSync(join(tmpdir(), "agentview-refs-"));
+	const repo = makeGithubRepo();
+	process.env.FAKE_PI_MODE = "github-refs";
+	process.env.AGENT_BOARD_SUMMARY_MODEL = "off";
+	process.env.AGENT_BOARD_AUTO_STATE_NO_DONE = "0";
+	let runnerPid = null;
+	try {
+		const meta = createView(boardRoot, { id: "view_1", name: "fix", cwd: repo });
+		const config = makeConfig(boardRoot, "view_1", "run_1", meta.sessionFile, repo, "assign issue 40 and open a PR");
+		const st = readState(boardRoot, "view_1");
+		st.currentRunId = "run_1";
+		const { writeState } = await import("../src/core/store.mjs");
+		writeState(boardRoot, st);
+
+		runnerPid = launchRun(boardRoot, config, { runnerScript: RUNNER }).pid;
+		assert.ok(runnerPid && runnerPid > 0, "runner spawned");
+
+		const status = await waitFor(() => {
+			const s = readStatus(boardRoot, "view_1", "run_1");
+			return s && s.endedAt ? s : null;
+		});
+		assert.ok(status, "status reached terminal state");
+		// The runner persists endedAt first, then persists again after the
+		// heuristic auto-state upgrade (completed). Asserting right after
+		// endedAt races the second persist (CI Node 22 caught semanticState
+		// still "idle"). The runner's process exit is the deterministic
+		// barrier: the finalize chain completes before process.exit.
+		await waitFor(() => (isAlive(runnerPid) ? null : true));
+		const settled = readStatus(boardRoot, "view_1", "run_1");
+		assert.equal(settled.semanticState, "completed");
+
+		// github.json artifact: issue 40 claim + pr 45 action.
+		const snap = readCodeRefs(boardRoot, "view_1");
+		assert.equal(snap.provider, "github");
+		assert.equal(snap.issue?.number, 40);
+		assert.equal(snap.issue?.strength, "claim");
+		assert.equal(snap.pr?.number, 45);
+		assert.equal(snap.pr?.strength, "action");
+		assert.equal(snap.pr?.url, "https://github.com/zhuxixi/pi-agent-board/pull/45");
+
+		// Row badge from the per-view artifact.
+		const row = loadRow(boardRoot, "view_1");
+		assert.ok(row, "row loads");
+		assert.equal(rowView(row).refsBadge, "#40 ▸#45");
+	} finally {
+		await killDetached(runnerPid);
+		delete process.env.FAKE_PI_MODE;
+		delete process.env.AGENT_BOARD_SUMMARY_MODEL;
+		delete process.env.AGENT_BOARD_AUTO_STATE_NO_DONE;
+		rmSync(boardRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+		rmSync(repo, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
 });
 

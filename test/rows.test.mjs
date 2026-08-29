@@ -23,6 +23,7 @@ function row(id, semanticState, extra = {}) {
 			lastAgentActivityAt: extra.lastAgentActivityAt ?? null,
 		},
 		alive: extra.alive ?? false,
+		codeRefs: extra.codeRefs ?? null,
 	};
 }
 
@@ -118,6 +119,45 @@ test("rowView normalizes generic status labels to current display names", () => 
 test("rowView exposes unread when newer agent activity exists", () => {
 	assert.equal(rowView(row("a", "idle", { lastVisitedAt: 10, lastAgentActivityAt: 20 }), 0).unread, true);
 	assert.equal(rowView(row("b", "idle", { lastVisitedAt: 30, lastAgentActivityAt: 20 }), 0).unread, false);
+});
+
+test("rowView maps no codeRefs summary to an empty refsBadge", () => {
+	const view = rowView(row("a", "working"), 0);
+	assert.equal(view.refsBadge, "");
+	assert.equal(view.refsLowConfidence, false);
+	assert.equal(view.codeRefs, null);
+});
+
+test("rowView refsBadge joins winning issue and pr with provider prefixes", () => {
+	const issue = { kind: "issue", number: 40, confidence: "high" };
+	const pr = { kind: "pr", number: 45, confidence: "high" };
+	const summary = { provider: "github", issuePrefix: "#", prPrefix: "▸#", issue, pr, allRefs: [issue, pr] };
+	const view = rowView(row("a", "working", { codeRefs: summary }), 0);
+	assert.equal(view.refsBadge, "#40 ▸#45");
+	assert.equal(view.refsLowConfidence, false);
+	assert.deepEqual(view.codeRefs, summary);
+
+	const issueOnly = rowView(row("b", "working", { codeRefs: { ...summary, pr: null, allRefs: [issue] } }), 0);
+	assert.equal(issueOnly.refsBadge, "#40");
+
+	const prOnly = rowView(row("c", "working", { codeRefs: { ...summary, issue: null, allRefs: [pr] } }), 0);
+	assert.equal(prOnly.refsBadge, "▸#45");
+});
+
+test("rowView refsLowConfidence flags low-confidence winners", () => {
+	const lowIssue = { kind: "issue", number: 40, confidence: "low" };
+	const lowPr = { kind: "pr", number: 45, confidence: "low" };
+	const highPr = { kind: "pr", number: 45, confidence: "high" };
+	const base = { provider: "generic", issuePrefix: "#", prPrefix: "▸#" };
+	assert.equal(rowView(row("a", "working", { codeRefs: { ...base, issue: lowIssue, pr: highPr, allRefs: [] } }), 0).refsLowConfidence, true);
+	assert.equal(rowView(row("b", "working", { codeRefs: { ...base, issue: null, pr: lowPr, allRefs: [] } }), 0).refsLowConfidence, true);
+	assert.equal(rowView(row("c", "working", { codeRefs: { ...base, issue: null, pr: highPr, allRefs: [] } }), 0).refsLowConfidence, false);
+});
+
+test("rowView refsBadge uses provider-specific prefixes (gitlab PRs)", () => {
+	const pr = { kind: "pr", number: 12, confidence: "high" };
+	const view = rowView(row("a", "working", { codeRefs: { provider: "gitlab", issuePrefix: "#", prPrefix: "!", issue: null, pr, allRefs: [pr] } }), 0);
+	assert.equal(view.refsBadge, "!12");
 });
 
 test("parseFilter splits state + terms", () => {

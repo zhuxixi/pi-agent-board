@@ -23,6 +23,8 @@ export const launchPrefsPath = (root) => path.join(root, "launch-prefs.json");
 export const gcHistoryPath = (root) => path.join(root, "gc-history.jsonl");
 /** @param {string} root */
 export const cwdStatsPath = (root) => path.join(root, "cwd-stats.json");
+/** @param {string} root */
+export const providersPath = (root) => path.join(root, "providers.json");
 
 /** @param {string} root */
 export const viewsDir = (root) => path.join(root, "views");
@@ -64,6 +66,8 @@ export const pidPath = (root, viewId, runId) => path.join(runDir(root, viewId, r
 export const diagnosticsPath = (root, viewId) => path.join(viewDir(root, viewId), "diagnostics.jsonl");
 /** @param {string} root @param {string} viewId */
 export const evidencePath = (root, viewId) => path.join(viewDir(root, viewId), "evidence.json");
+/** @param {string} root @param {string} viewId */
+export const codeRefsPath = (root, viewId) => path.join(viewDir(root, viewId), "github.json");
 /** @param {string} root @param {string} viewId */
 export const viewEvidencePath = evidencePath;
 /** @param {string} root @param {string} viewId */

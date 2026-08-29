@@ -35,6 +35,9 @@ import { GROUP_LABELS, GROUP_ORDER, SEMANTIC_STATES } from "./types.mjs";
  * @property {number} followUpCount
  * @property {string|null} followUpPreview
  * @property {string} steeringState
+ * @property {string} refsBadge Inline issue/PR badge (e.g. "#40 ▸#45"); "" when there are no refs.
+ * @property {boolean} refsLowConfidence True when the winning issue or pr confidence is "low".
+ * @property {import("./types.mjs").CodeRefsSummary|null} codeRefs Compact ref summary the peek view consumes.
  * @property {number} lastActivityAt
  * @property {number} createdAt
  */
@@ -115,6 +118,7 @@ export function rowView(row, now) {
 	const place = folderName;
 	const lastVisitedAt = row.state?.lastVisitedAt ?? null;
 	const lastAgentActivityAt = row.state?.lastAgentActivityAt ?? null;
+	const refs = codeRefsBadge(row.codeRefs);
 	return {
 		id: row.meta.id,
 		name: row.meta.name,
@@ -139,8 +143,32 @@ export function rowView(row, now) {
 		followUpCount: row.state?.followUps?.queuedCount ?? 0,
 		followUpPreview: row.state?.followUps?.lastQueuedPreview ?? null,
 		steeringState: row.state?.steering?.status ?? "none",
+		refsBadge: refs.refsBadge,
+		refsLowConfidence: refs.refsLowConfidence,
+		codeRefs: row.codeRefs ?? null,
 		lastActivityAt,
 		createdAt: row.meta.createdAt ?? 0,
+	};
+}
+
+/**
+ * Map a CodeRefsSummary to the inline badge strings shown on dashboard rows:
+ * the winning issue and pr joined by a space, each prefixed with the provider
+ * prefix stored on the summary; plus the low-confidence flag that makes the
+ * dashboard dim the badge. Missing/garbage summaries yield an empty badge.
+ * @param {import("./types.mjs").CodeRefsSummary|null|undefined} summary
+ * @returns {{ refsBadge: string, refsLowConfidence: boolean }}
+ */
+function codeRefsBadge(summary) {
+	if (!summary) return { refsBadge: "", refsLowConfidence: false };
+	const issue = summary.issue;
+	const pr = summary.pr;
+	const parts = [];
+	if (issue && Number.isFinite(issue.number)) parts.push(`${summary.issuePrefix ?? "#"}${issue.number}`);
+	if (pr && Number.isFinite(pr.number)) parts.push(`${summary.prPrefix ?? "▸#"}${pr.number}`);
+	return {
+		refsBadge: parts.join(" "),
+		refsLowConfidence: issue?.confidence === "low" || pr?.confidence === "low",
 	};
 }
 

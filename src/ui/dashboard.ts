@@ -1363,7 +1363,8 @@ export class DashboardComponent implements Component {
 		const glyph = stateGlyph(rv.state, rv.alive, rv.hostAlive, rv.unread);
 		const marker = stageFg(rv.state, selected ? `›${glyph}` : ` ${glyph}`);
 		const statusBadges = `${rv.reviewReady ? "✓ " : ""}${rv.diagnosticStalled ? "⏳ " : ""}${rv.evidenceErrorCount || rv.diagnosticErrorCount ? "! " : ""}${rv.followUpCount ? `q${rv.followUpCount} ` : ""}${rv.steeringState && rv.steeringState !== "none" ? "π " : ""}`;
-		const badge = `${this.mode === "select" ? `${this.isSelectedForBatch(rv.id) ? "◉" : "○"} ` : ""}${rv.pinned ? "★ " : ""}${rv.worktree ? "⌥ " : ""}${statusBadges}`;
+		const refsBadge = rv.refsBadge ? (rv.refsLowConfidence ? t.fg("dim", rv.refsBadge) : rv.refsBadge) : "";
+		const badge = `${this.mode === "select" ? `${this.isSelectedForBatch(rv.id) ? "◉" : "○"} ` : ""}${rv.pinned ? "★ " : ""}${rv.worktree ? "⌥ " : ""}${statusBadges}${refsBadge ? `${refsBadge} ` : ""}`;
 		const ageRaw = ` ${rv.age}`;
 		const nameW = clamp(Math.floor(contentWidth * 0.34), 18, 30);
 		const folderW = opts.showFolder !== false ? (contentWidth >= 72 ? clamp(Math.floor(contentWidth * 0.16), 10, 22) : contentWidth >= 56 ? 10 : 0) : 0;
@@ -1395,6 +1396,17 @@ export class DashboardComponent implements Component {
 			out.push("");
 			out.push(t.fg("muted", "Auto-state"));
 			out.push(clip(`  ${auto.kind} · ${auto.confidence} · ${auto.source}${auto.reason ? ` — ${auto.reason}` : ""}`, width));
+		}
+		if (row.codeRefs && row.codeRefs.allRefs.length > 0) {
+			const codeRefs = row.codeRefs;
+			out.push("");
+			out.push(t.fg("muted", "Refs"));
+			if (codeRefs.provider) out.push(clip(`  ${codeRefs.provider}`, width));
+			for (const ref of codeRefs.allRefs) {
+				const prefix = ref.kind === "pr" ? (codeRefs.prPrefix ?? "▸#") : (codeRefs.issuePrefix ?? "#");
+				const line = `  ${ref.kind} ${prefix}${ref.number} · ${ref.confidence} · ${ref.source}${ref.url ? ` · ${ref.url}` : ""}`;
+				out.push(clip(line, width));
+			}
 		}
 		if (row.state?.question) {
 			out.push("");

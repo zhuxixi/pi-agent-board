@@ -13,6 +13,7 @@ import { appendLine } from "../core/atomic.mjs";
 import { finalizeRun, projectViewState, reduceEvent } from "../core/events.mjs";
 import { clearDiagnostics, appendDiagnostic, tailDiagnostics } from "../core/diagnostics.mjs";
 import { emptyEvidenceSnapshot, finalizeEvidence, readEvidence, reduceEvidence, summarizeEvidence, writeEvidence } from "../core/evidence.mjs";
+import { updateCodeRefsFromEvidence } from "../core/code-refs-store.mjs";
 import { claimNextFollowUp, completeFollowUp, enqueueFollowUp, readFollowUpQueue, releaseFollowUp, summarizeFollowUpQueue, clearQueuedFollowUps, removeLastFollowUp } from "../core/follow-up-queue.mjs";
 import { approvePlan as approvePlanState, markExecutingApprovedPlan, readSteering, recordPlanReady, requestPlan as requestPlanState, requestPlanChanges as requestPlanChangesState, summarizeSteering } from "../core/steering.mjs";
 import { buildApprovePlanPrompt, buildPlanChangesPrompt, buildPlanRequestPrompt } from "../core/steering-prompts.mjs";
@@ -517,6 +518,7 @@ export function createService(opts) {
 		try {
 			reduceEvidence(evidence, event, now);
 			writeEvidence(root, evidence);
+			updateCodeRefsFromEvidence(root, row.meta.id, evidence, row.meta);
 		} catch (err) {
 			appendDiagnostic(root, row.meta.id, { source: "evidence", level: "warn", code: "evidence_reduce_failed", message: "Could not reduce hosted evidence", details: { error: err instanceof Error ? err.message : String(err) } });
 		}
@@ -548,6 +550,7 @@ export function createService(opts) {
 			}
 			status.evidenceSummary = summarizeEvidence(evidence);
 			writeEvidence(root, evidence);
+			updateCodeRefsFromEvidence(root, row.meta.id, evidence, row.meta);
 			writeForegroundState(row, status);
 			pruneWarmHosts({ keepViewId: row.meta.id });
 			drainNextFollowUp(row.meta.id);
