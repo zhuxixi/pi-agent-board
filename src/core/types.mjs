@@ -369,6 +369,8 @@ export const GROUP_LABELS = {
  * Compact issue/PR reference summary for a view (`github.json`).
  * @typedef {Object} CodeRefsSummary
  * @property {string|null} provider Resolved provider name (e.g. "github"); always non-null after a successful extraction (falls back to "generic"), null only before any extraction has run.
+ * @property {string} issuePrefix Issue-number prefix resolved from the matched provider at write time (default "#").
+ * @property {string} prPrefix PR/MR-number prefix resolved from the matched provider at write time (default "▸#"; "!" for gitlab).
  * @property {import("./code-refs.mjs").Ref|null} issue
  * @property {import("./code-refs.mjs").Ref|null} pr
  * @property {import("./code-refs.mjs").Ref[]} allRefs Distinct refs for the peek view (max 10).

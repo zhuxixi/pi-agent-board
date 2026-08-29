@@ -28,6 +28,8 @@ import { appendDiagnostic } from "./diagnostics.mjs";
  * @property {string} viewId
  * @property {number} updatedAt
  * @property {string|null} provider
+ * @property {string} issuePrefix Issue-number prefix resolved from the matched provider (default "#").
+ * @property {string} prPrefix PR/MR-number prefix resolved from the matched provider (default "▸#").
  * @property {import("./code-refs.mjs").Ref|null} issue
  * @property {import("./code-refs.mjs").Ref|null} pr
  * @property {import("./code-refs.mjs").Ref[]} allRefs
@@ -41,6 +43,8 @@ export function emptyCodeRefsSnapshot(opts) {
 		viewId: opts.viewId,
 		updatedAt: now,
 		provider: null,
+		issuePrefix: "#",
+		prPrefix: "▸#",
 		issue: null,
 		pr: null,
 		allRefs: [],
@@ -62,6 +66,8 @@ export function normalizeCodeRefsSnapshot(raw, fallback) {
 		...raw,
 		viewId: typeof raw.viewId === "string" ? raw.viewId : base.viewId,
 		provider: typeof raw.provider === "string" ? raw.provider : (raw.provider === null ? null : base.provider),
+		issuePrefix: typeof raw.issuePrefix === "string" ? raw.issuePrefix : base.issuePrefix,
+		prPrefix: typeof raw.prPrefix === "string" ? raw.prPrefix : base.prPrefix,
 		issue: isRefObject(raw.issue) ? raw.issue : null,
 		pr: isRefObject(raw.pr) ? raw.pr : null,
 		allRefs: Array.isArray(raw.allRefs) ? raw.allRefs : [],
@@ -91,6 +97,8 @@ export function summarizeCodeRefs(snapshot) {
 	const s = normalizeCodeRefsSnapshot(snapshot, { viewId: snapshot?.viewId ?? "" });
 	return {
 		provider: s.provider,
+		issuePrefix: s.issuePrefix,
+		prPrefix: s.prPrefix,
 		issue: s.issue,
 		pr: s.pr,
 		allRefs: s.allRefs,
@@ -159,6 +167,8 @@ export function updateCodeRefsFromEvidence(root, viewId, evidence, meta) {
 			viewId,
 			updatedAt: Date.now(),
 			provider: result.provider,
+			issuePrefix: provider.issuePrefix,
+			prPrefix: provider.prPrefix,
 			issue: result.issue,
 			pr: result.pr,
 			allRefs: result.allRefs,
@@ -187,6 +197,8 @@ export function updateCodeRefsFromEvidence(root, viewId, evidence, meta) {
 function contentOf(s) {
 	return JSON.stringify({
 		provider: s.provider,
+		issuePrefix: s.issuePrefix,
+		prPrefix: s.prPrefix,
 		issue: s.issue,
 		pr: s.pr,
 		allRefs: s.allRefs,

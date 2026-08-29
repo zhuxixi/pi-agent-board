@@ -63,14 +63,18 @@ test("emptyCodeRefsSnapshot and normalizeCodeRefsSnapshot apply safe defaults", 
 	assert.equal(empty.issue, null);
 	assert.equal(empty.pr, null);
 	assert.deepEqual(empty.allRefs, []);
+	assert.equal(empty.issuePrefix, "#");
+	assert.equal(empty.prPrefix, "▸#");
 
 	const fromNull = normalizeCodeRefsSnapshot(null, { viewId: "v2" });
 	assert.equal(fromNull.viewId, "v2");
 	assert.equal(fromNull.provider, null);
 	assert.deepEqual(fromNull.allRefs, []);
+	assert.equal(fromNull.issuePrefix, "#");
+	assert.equal(fromNull.prPrefix, "▸#");
 
 	const junk = normalizeCodeRefsSnapshot(
-		{ viewId: 7, provider: 42, issue: "nope", pr: [], allRefs: "x" },
+		{ viewId: 7, provider: 42, issue: "nope", pr: [], allRefs: "x", issuePrefix: 5, prPrefix: null },
 		{ viewId: "v3" }
 	);
 	assert.equal(junk.viewId, "v3");
@@ -78,6 +82,8 @@ test("emptyCodeRefsSnapshot and normalizeCodeRefsSnapshot apply safe defaults", 
 	assert.equal(junk.issue, null);
 	assert.equal(junk.pr, null);
 	assert.deepEqual(junk.allRefs, []);
+	assert.equal(junk.issuePrefix, "#");
+	assert.equal(junk.prPrefix, "▸#");
 
 	const ref = {
 		kind: "issue",
@@ -89,13 +95,15 @@ test("emptyCodeRefsSnapshot and normalizeCodeRefsSnapshot apply safe defaults", 
 		lastIndex: 1,
 	};
 	const valid = normalizeCodeRefsSnapshot(
-		{ viewId: "v4", provider: "github", issue: ref, pr: null, allRefs: [ref] },
+		{ viewId: "v4", provider: "github", issue: ref, pr: null, allRefs: [ref], issuePrefix: "#", prPrefix: "!" },
 		{ viewId: "x" }
 	);
 	assert.equal(valid.viewId, "v4");
 	assert.equal(valid.provider, "github");
 	assert.deepEqual(valid.issue, ref);
 	assert.deepEqual(valid.allRefs, [ref]);
+	assert.equal(valid.issuePrefix, "#");
+	assert.equal(valid.prPrefix, "!");
 });
 
 test("writeCodeRefs round-trips through the artifact file", () => {
@@ -151,8 +159,8 @@ test("summarizeCodeRefs picks the summary fields defensively", () => {
 		lastIndex: 1,
 	};
 	const summary = summarizeCodeRefs({ viewId: "v1", provider: "github", issue: ref, pr: null, allRefs: [ref] });
-	assert.deepEqual(summary, { provider: "github", issue: ref, pr: null, allRefs: [ref] });
-	assert.deepEqual(summarizeCodeRefs(null), { provider: null, issue: null, pr: null, allRefs: [] });
+	assert.deepEqual(summary, { provider: "github", issue: ref, pr: null, allRefs: [ref], issuePrefix: "#", prPrefix: "▸#" });
+	assert.deepEqual(summarizeCodeRefs(null), { provider: null, issue: null, pr: null, allRefs: [], issuePrefix: "#", prPrefix: "▸#" });
 });
 
 test("updateCodeRefsFromEvidence writes issue 40 medium confidence from gh issue view x2", { skip: !gitAvailable() }, () => {
@@ -169,6 +177,8 @@ test("updateCodeRefsFromEvidence writes issue 40 medium confidence from gh issue
 		assert.equal(snap.issue.confidence, "medium");
 		assert.equal(snap.issue.url, "https://github.com/zhuxixi/pi-agent-board/issues/40");
 		assert.equal(snap.pr, null);
+		assert.equal(snap.issuePrefix, "#");
+		assert.equal(snap.prPrefix, "▸#");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 		rmSync(repo, { recursive: true, force: true });
@@ -264,6 +274,8 @@ test("no-repo cwd still extracts generic URL refs via the fallback provider", ()
 		assert.equal(snap.issue.confidence, "medium");
 		assert.equal(snap.pr.number, 5);
 		assert.equal(snap.pr.confidence, "high");
+		assert.equal(snap.issuePrefix, "#");
+		assert.equal(snap.prPrefix, "▸#");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 		rmSync(cwd, { recursive: true, force: true });

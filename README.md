@@ -82,6 +82,7 @@ Useful environment variables:
 | `AGENT_BOARD_AUTO_STATE=off` | Disable automatic terminal-state moves. |
 | `AGENT_BOARD_AUTO_STATE_MODEL=<model>` | Model for classifying finished turns. Defaults to `gpt-4o`; use `off` for heuristic-only. |
 | `AGENT_BOARD_AUTO_STATE_NO_DONE` | Disables automatic `completed` classification (default: enabled). Set to `0`/`false`/`off`/`no` to restore auto-done. |
+| `AGENT_BOARD_CODE_REFS=off` | Disable issue/PR badge extraction from session evidence. |
 | `AGENT_BOARD_SUMMARY_MODEL=<model>` | Model for short row summaries. Defaults to `gpt-4o`; use `off` to disable. |
 | `AGENT_BOARD_TITLE_MODEL=<model>` | Model for generated session titles. Defaults to `openai-codex/gpt-5.5`; use `off` to disable. |
 | `AGENT_BOARD_TITLE_THINKING_LEVEL=<level>` | Thinking level for title generation. Defaults to `low`; use `off` to omit it. |

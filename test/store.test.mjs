@@ -220,7 +220,7 @@ test("readViewArtifactSummaries includes codeRefs and loadRow exposes it", () =>
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
 		const empty = readViewArtifactSummaries(root, "v1");
-		assert.deepEqual(empty.codeRefs, { provider: null, issue: null, pr: null, allRefs: [] });
+		assert.deepEqual(empty.codeRefs, { provider: null, issue: null, pr: null, allRefs: [], issuePrefix: "#", prPrefix: "▸#" });
 
 		const ref = {
 			kind: "issue",
