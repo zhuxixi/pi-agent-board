@@ -14,8 +14,8 @@
  * `readJson` and caches the merged result by file mtime.
  */
 import { statSync } from "node:fs";
-import { join } from "node:path";
 import { readJson } from "./atomic.mjs";
+import { providersPath } from "./paths.mjs";
 
 /**
  * @typedef {Object} Provider
@@ -405,7 +405,7 @@ const providerCache = new Map();
  * @returns {Provider[]}
  */
 export function loadProviders(root) {
-	const file = join(root, "providers.json");
+	const file = providersPath(root);
 	let mtimeMs = null;
 	try {
 		mtimeMs = statSync(file).mtimeMs;
