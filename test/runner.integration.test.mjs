@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { readCodeRefs } from "../src/core/code-refs-store.mjs";
 import { launchRun } from "../src/core/launch.mjs";
+import { isAlive } from "../src/core/pid.mjs";
 import * as P from "../src/core/paths.mjs";
 import { rowView } from "../src/core/rows.mjs";
 import { createView, loadRow, readPid, readState, readStatus } from "../src/core/store.mjs";
@@ -303,7 +304,14 @@ test("runner extracts github issue/pr refs end-to-end into github.json and the r
 			return s && s.endedAt ? s : null;
 		});
 		assert.ok(status, "status reached terminal state");
-		assert.equal(status.semanticState, "completed");
+		// The runner persists endedAt first, then persists again after the
+		// heuristic auto-state upgrade (completed). Asserting right after
+		// endedAt races the second persist (CI Node 22 caught semanticState
+		// still "idle"). The runner's process exit is the deterministic
+		// barrier: the finalize chain completes before process.exit.
+		await waitFor(() => (isAlive(runnerPid) ? null : true));
+		const settled = readStatus(boardRoot, "view_1", "run_1");
+		assert.equal(settled.semanticState, "completed");
 
 		// github.json artifact: issue 40 claim + pr 45 action.
 		const snap = readCodeRefs(boardRoot, "view_1");
