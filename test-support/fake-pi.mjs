@@ -3,7 +3,11 @@
  * Fake `pi` worker for hermetic tests. Emulates `pi --mode json -p --session <file> <prompt>`:
  * emits a realistic JSON event stream to stdout and (optionally) persists a session file,
  * without any model/network/TTY. Behavior is controlled by $FAKE_PI_MODE:
- *   completed (default) | needs_input | fail | slow | hang
+ *   completed (default) | needs_input | fail | slow | hang | github-refs
+ *
+ * `github-refs` emits a bash tool execution for `gh issue edit 40 --add-assignee @me`
+ * followed by an assistant message containing a github.com pull URL, so the runner's
+ * evidence pipeline can extract issue/pr code refs end-to-end.
  */
 import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
 import * as path from "node:path";
@@ -85,9 +89,12 @@ async function main() {
 	emit({ type: "turn_start" });
 	emit({ type: "message_start", message: { role: "assistant", content: [] } });
 	if (mode === "slow") await sleep(150);
-	emit({ type: "tool_execution_start", toolCallId: "t1", toolName: "edit", args: { file_path: "src/auth/middleware.ts" } });
+	const isRefs = mode === "github-refs";
+	const toolName = isRefs ? "bash" : "edit";
+	const toolArgs = isRefs ? { command: "gh issue edit 40 --add-assignee @me" } : { file_path: "src/auth/middleware.ts" };
+	emit({ type: "tool_execution_start", toolCallId: "t1", toolName, args: toolArgs });
 	if (mode === "slow") await sleep(150);
-	emit({ type: "tool_execution_end", toolCallId: "t1", toolName: "edit", result: { ok: true }, isError: false });
+	emit({ type: "tool_execution_end", toolCallId: "t1", toolName, result: { ok: true }, isError: false });
 	emit({
 		type: "message_end",
 		message: {
@@ -96,8 +103,8 @@ async function main() {
 			stopReason: "toolUse",
 			usage: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, totalTokens: 15, cost: { total: 0 } },
 			content: [
-				{ type: "text", text: "Editing the auth middleware to fix the token expiry check." },
-				{ type: "toolCall", id: "t1", name: "edit", arguments: { file_path: "src/auth/middleware.ts" } },
+				{ type: "text", text: isRefs ? "Assigning issue #40 to myself." : "Editing the auth middleware to fix the token expiry check." },
+				{ type: "toolCall", id: "t1", name: toolName, arguments: toolArgs },
 			],
 		},
 	});
@@ -114,7 +121,9 @@ async function main() {
 	const finalText =
 		mode === "needs_input"
 			? "I updated the middleware. Which token expiry policy should I use, sliding or absolute?"
-			: "Done. Fixed the token expiry check in auth middleware and the tests pass.";
+			: mode === "github-refs"
+				? "Assigned issue #40 and opened https://github.com/zhuxixi/pi-agent-board/pull/45 — tests pass."
+				: "Done. Fixed the token expiry check in auth middleware and the tests pass.";
 
 	emit({ type: "turn_start" });
 	emit({
