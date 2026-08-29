@@ -588,7 +588,8 @@ export function extractCodeRefs(input, provider) {
 	});
 
 	// Rule 3: resolve pending create markers against subsequent evidence.
-	for (const marker of pendingCreates) {
+	for (let mi = 0; mi < pendingCreates.length; mi++) {
+		const marker = pendingCreates[mi];
 		const resolved = resolveCreate(marker, commands, assistantTexts, urlRules);
 		if (resolved) {
 			addCandidate(candidates, marker.kind, resolved.number, "action", "create-url", resolved.index);
@@ -597,8 +598,11 @@ export function extractCodeRefs(input, provider) {
 		// assistant message ("This PR closes #40") or in --body-file content
 		// that never appears in the command string — scan subsequent evidence
 		// for the back-link pattern as well (not just the command itself).
+		// The scan stops at the NEXT pr-create marker so an earlier create
+		// never absorbs a later PR's back-link.
 		if (marker.kind === "pr") {
-			const backlink = resolveBacklinkAfter(marker, commands, assistantTexts);
+			const nextPr = pendingCreates.slice(mi + 1).find((m) => m.kind === "pr");
+			const backlink = resolveBacklinkAfter(marker, commands, assistantTexts, nextPr?.index ?? Infinity);
 			if (backlink) addCandidate(candidates, "issue", backlink.number, "claim", "pr-backlink", backlink.index);
 		}
 	}
@@ -638,12 +642,14 @@ function applyPrBacklink(text, index, candidates) {
 /**
  * Find the first PR→issue back-link ("Closes #N" etc.) in evidence AFTER a
  * `pr create` marker — covers assistant messages and later commands alike.
+ * The scan stops before `stopBefore` (typically the next pr-create marker).
  * @param {{kind: "issue"|"pr", index: number}} marker
  * @param {Array<{command: string}>} commands
  * @param {string[]} assistantTexts
+ * @param {number} [stopBefore]
  */
-function resolveBacklinkAfter(marker, commands, assistantTexts) {
-	const total = commands.length + assistantTexts.length;
+function resolveBacklinkAfter(marker, commands, assistantTexts, stopBefore = Infinity) {
+	const total = Math.min(commands.length + assistantTexts.length, stopBefore);
 	for (let index = marker.index + 1; index < total; index++) {
 		const text = evidenceTextAt(index, commands, assistantTexts);
 		if (!text) continue;

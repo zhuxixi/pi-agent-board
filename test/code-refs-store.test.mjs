@@ -304,6 +304,40 @@ test("worktree path and git branch naming contribute issue claims", { skip: !git
 	}
 });
 
+test("partial re-trigger carries forward the untouched kind's earned ref", () => {
+	const root = freshRoot();
+	try {
+		const issueRef = {
+			kind: "issue",
+			number: 40,
+			strength: "claim",
+			confidence: "high",
+			source: "command",
+			url: "https://github.com/zhuxixi/pi-agent-board/issues/40",
+			lastIndex: 0,
+		};
+		const prRef = {
+			kind: "pr",
+			number: 45,
+			strength: "action",
+			confidence: "high",
+			source: "create-url",
+			url: "https://github.com/zhuxixi/pi-agent-board/pull/45",
+			lastIndex: 1,
+		};
+		writeCodeRefs(root, { version: 1, viewId: "v1", updatedAt: 1, provider: "github", issue: issueRef, pr: prRef, allRefs: [issueRef, prRef] });
+		// Follow-up run re-triggers only the issue kind; the earned PR must survive.
+		const ok = updateCodeRefsFromEvidence(root, "v1", { viewId: "v1", commands: [{ id: "c9", command: "gh issue comment 40 --body hi" }], assistantEvidence: [] }, { cwd: "/tmp" });
+		assert.equal(ok, true);
+		const after = readCodeRefs(root, "v1");
+		assert.equal(after.issue?.number, 40);
+		assert.equal(after.pr?.number, 45);
+		assert.ok(after.allRefs.some((r) => r.kind === "pr" && r.number === 45));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("empty extraction from non-ref evidence keeps an existing github.json", () => {
 	const root = freshRoot();
 	try {

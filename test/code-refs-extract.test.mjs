@@ -107,6 +107,46 @@ test("null host with a host-templated provider yields no url (no malformed link)
 	assert.equal(result.issue.url, null);
 });
 
+test("back-link between two pr creates belongs to the first create only", () => {
+	const result = extractCodeRefs(
+		{
+			commands: [
+				{ command: "gh pr create --title A" },
+				{ command: 'echo "closes #40"' },
+				{ command: "gh pr create --title B" },
+			],
+			assistantTexts: [],
+			worktreePath: null,
+			branch: null,
+			repoUrl: "owner/repo",
+			host: "github.com",
+		},
+		github()
+	);
+	assert.equal(result.issue.number, 40);
+	assert.equal(result.issue.source, "pr-backlink");
+	assert.equal(result.issue.lastIndex, 1); // between the two creates, attributed to A
+});
+
+test("second pr create absorbs only the back-link that follows it", () => {
+	const result = extractCodeRefs(
+		{
+			commands: [{ command: "gh issue comment 40 --body hi" }, { command: "gh pr create --title A" }, { command: "gh pr create --title B" }],
+			assistantTexts: ["PR B closes #60"],
+			worktreePath: null,
+			branch: null,
+			repoUrl: "owner/repo",
+			host: "github.com",
+		},
+		github()
+	);
+	// B's back-link (#60, claim) outranks the issue comment (#40, action).
+	assert.equal(result.issue.number, 60);
+	assert.equal(result.issue.strength, "claim");
+	assert.equal(result.issue.source, "pr-backlink");
+	assert.equal(result.issue.lastIndex, 3); // after create B, not absorbed by A
+});
+
 test("pr create back-link found in a later assistant message", () => {
 	const result = extractCodeRefs(
 		{

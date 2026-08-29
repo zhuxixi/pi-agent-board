@@ -184,12 +184,11 @@ export function updateCodeRefsFromEvidence(root, viewId, evidence, meta) {
 		const input = buildEngineInput(evidence, { worktreePath, branch, repoUrl, host });
 		const result = extractCodeRefs(input, provider);
 		const existing = readCodeRefs(root, viewId);
-		// An empty extraction must never clobber earned refs: job-runner resets
-		// view-level evidence at each run start, so a follow-up run whose events
-		// carry no ref signals would otherwise wipe the previous run's badge.
-		if (!result.issue && !result.pr && result.allRefs.length === 0 && (existing.issue || existing.pr)) {
-			return true;
-		}
+		// Carry forward earned refs per kind: job-runner resets view-level
+		// evidence at each run start, so a follow-up run whose events carry no
+		// signal for a kind must not null that kind's previously earned ref —
+		// absence of signal is not evidence of absence. (CR rounds 1-2)
+		const merged = mergeWithExisting(result, existing);
 		const next = {
 			version: 1,
 			viewId,
@@ -197,9 +196,9 @@ export function updateCodeRefsFromEvidence(root, viewId, evidence, meta) {
 			provider: result.provider,
 			issuePrefix: provider.issuePrefix,
 			prPrefix: provider.prPrefix,
-			issue: result.issue,
-			pr: result.pr,
-			allRefs: result.allRefs,
+			issue: merged.issue,
+			pr: merged.pr,
+			allRefs: merged.allRefs,
 		};
 		// Avoid churning the artifact (and its mtime) when the refs are unchanged.
 		if (contentOf(existing) === contentOf(next)) return true;
@@ -231,6 +230,28 @@ function contentOf(s) {
 		pr: s.pr,
 		allRefs: s.allRefs,
 	});
+}
+
+/**
+ * Merge a fresh extraction with the stored snapshot: a kind with no signal in
+ * the new extraction inherits the stored ref (per-kind carry-forward), and
+ * stored refs missing from the new allRefs are appended (deduped by
+ * kind+number, capped at 10).
+ * @param {import("./code-refs.mjs").CodeRefsResult} result
+ * @param {any} existing normalized snapshot
+ * @returns {{issue: any, pr: any, allRefs: any[]}}
+ */
+function mergeWithExisting(result, existing) {
+	const issue = result.issue ?? existing?.issue ?? null;
+	const pr = result.pr ?? existing?.pr ?? null;
+	const seen = new Set((result.allRefs ?? []).map((r) => `${r.kind}:${r.number}`));
+	const carried = [];
+	for (const r of [existing?.issue, existing?.pr, ...(Array.isArray(existing?.allRefs) ? existing.allRefs : [])]) {
+		if (!r || seen.has(`${r.kind}:${r.number}`)) continue;
+		seen.add(`${r.kind}:${r.number}`);
+		carried.push(r);
+	}
+	return { issue, pr, allRefs: [...(result.allRefs ?? []), ...carried].slice(0, 10) };
 }
 
 /** Last providers.json mtime per root for which a code_refs_config diagnostic was emitted. */
