@@ -304,6 +304,44 @@ test("worktree path and git branch naming contribute issue claims", { skip: !git
 	}
 });
 
+test("empty extraction from non-ref evidence keeps an existing github.json", () => {
+	const root = freshRoot();
+	try {
+		const ref = {
+			kind: "issue",
+			number: 40,
+			strength: "claim",
+			confidence: "high",
+			source: "command",
+			url: "https://github.com/zhuxixi/pi-agent-board/issues/40",
+			lastIndex: 0,
+		};
+		writeCodeRefs(root, { version: 1, viewId: "v1", updatedAt: 1, provider: "github", issue: ref, pr: null, allRefs: [ref] });
+		// A follow-up run's first events carry no ref signals (e.g. `echo hi`).
+		const ok = updateCodeRefsFromEvidence(root, "v1", { viewId: "v1", commands: [{ id: "c9", command: "echo hi" }], assistantEvidence: [] }, { cwd: "/tmp" });
+		assert.equal(ok, true);
+		const after = readCodeRefs(root, "v1");
+		assert.equal(after.issue?.number, 40);
+		assert.equal(after.issue?.strength, "claim");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("non-ref evidence with no existing artifact still writes an empty snapshot", () => {
+	const root = freshRoot();
+	try {
+		const ok = updateCodeRefsFromEvidence(root, "v1", { viewId: "v1", commands: [{ id: "c9", command: "echo hi" }], assistantEvidence: [] }, { cwd: "/tmp" });
+		assert.equal(ok, true);
+		const snap = readCodeRefs(root, "v1");
+		assert.equal(snap.issue, null);
+		assert.equal(snap.pr, null);
+		assert.deepEqual(snap.allRefs, []);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("empty evidence leaves an existing github.json untouched", () => {
 	const root = freshRoot();
 	try {

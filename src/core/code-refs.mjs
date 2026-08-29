@@ -593,6 +593,14 @@ export function extractCodeRefs(input, provider) {
 		if (resolved) {
 			addCandidate(candidates, marker.kind, resolved.number, "action", "create-url", resolved.index);
 		}
+		// Rule 4b: the issue back-link of a created PR may live in a later
+		// assistant message ("This PR closes #40") or in --body-file content
+		// that never appears in the command string — scan subsequent evidence
+		// for the back-link pattern as well (not just the command itself).
+		if (marker.kind === "pr") {
+			const backlink = resolveBacklinkAfter(marker, commands, assistantTexts);
+			if (backlink) addCandidate(candidates, "issue", backlink.number, "claim", "pr-backlink", backlink.index);
+		}
 	}
 
 	// Rule 5: worktree/branch naming (engine-builtin, not configurable).
@@ -625,6 +633,24 @@ export function extractCodeRefs(input, provider) {
 function applyPrBacklink(text, index, candidates) {
 	const m = PR_BACKLINK_RE.exec(text);
 	if (m) addCandidate(candidates, "issue", Number(m[1]), "claim", "pr-body", index);
+}
+
+/**
+ * Find the first PR→issue back-link ("Closes #N" etc.) in evidence AFTER a
+ * `pr create` marker — covers assistant messages and later commands alike.
+ * @param {{kind: "issue"|"pr", index: number}} marker
+ * @param {Array<{command: string}>} commands
+ * @param {string[]} assistantTexts
+ */
+function resolveBacklinkAfter(marker, commands, assistantTexts) {
+	const total = commands.length + assistantTexts.length;
+	for (let index = marker.index + 1; index < total; index++) {
+		const text = evidenceTextAt(index, commands, assistantTexts);
+		if (!text) continue;
+		const m = PR_BACKLINK_RE.exec(text);
+		if (m) return { number: Number(m[1]), index };
+	}
+	return null;
 }
 
 /**

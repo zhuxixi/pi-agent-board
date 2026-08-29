@@ -183,6 +183,13 @@ export function updateCodeRefsFromEvidence(root, viewId, evidence, meta) {
 		const branch = currentBranch(cwd);
 		const input = buildEngineInput(evidence, { worktreePath, branch, repoUrl, host });
 		const result = extractCodeRefs(input, provider);
+		const existing = readCodeRefs(root, viewId);
+		// An empty extraction must never clobber earned refs: job-runner resets
+		// view-level evidence at each run start, so a follow-up run whose events
+		// carry no ref signals would otherwise wipe the previous run's badge.
+		if (!result.issue && !result.pr && result.allRefs.length === 0 && (existing.issue || existing.pr)) {
+			return true;
+		}
 		const next = {
 			version: 1,
 			viewId,
@@ -195,7 +202,7 @@ export function updateCodeRefsFromEvidence(root, viewId, evidence, meta) {
 			allRefs: result.allRefs,
 		};
 		// Avoid churning the artifact (and its mtime) when the refs are unchanged.
-		if (contentOf(readCodeRefs(root, viewId)) === contentOf(next)) return true;
+		if (contentOf(existing) === contentOf(next)) return true;
 		writeCodeRefs(root, next);
 		return true;
 	} catch (e) {

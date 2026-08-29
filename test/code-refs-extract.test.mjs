@@ -107,6 +107,40 @@ test("null host with a host-templated provider yields no url (no malformed link)
 	assert.equal(result.issue.url, null);
 });
 
+test("pr create back-link found in a later assistant message", () => {
+	const result = extractCodeRefs(
+		{
+			commands: [{ command: "gh pr create --title t --body-file /tmp/body.md" }],
+			assistantTexts: ["Opened the PR. This PR closes #40."],
+			worktreePath: null,
+			branch: null,
+			repoUrl: "owner/repo",
+			host: "github.com",
+		},
+		github()
+	);
+	assert.equal(result.issue.number, 40);
+	assert.equal(result.issue.strength, "claim");
+	assert.equal(result.issue.source, "pr-backlink");
+	assert.equal(result.pr, null); // no URL anywhere — create stays unresolved
+});
+
+test("pr create with no back-link anywhere yields no issue ref", () => {
+	const result = extractCodeRefs(
+		{
+			commands: [{ command: "gh pr create --title t" }],
+			assistantTexts: ["Opened the PR, will link later."],
+			worktreePath: null,
+			branch: null,
+			repoUrl: "owner/repo",
+			host: "github.com",
+		},
+		github()
+	);
+	assert.equal(result.issue, null);
+	assert.equal(result.pr, null);
+});
+
 test("viewing 439/440/441 once each and commenting 453 twice", () => {
 	const result = extractCodeRefs(
 		{
