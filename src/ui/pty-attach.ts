@@ -268,7 +268,7 @@ export class PtyAttachComponent implements Component {
 		const bodyHeight = Math.max(1, height - 2);
 		let body: string[];
 		if (!this.attaching && this.receivedOutput) {
-			const projected = this.project(bodyHeight, width);
+			const projected = this.project(bodyHeight);
 			body = projected.lines;
 			while (body.length < bodyHeight) body.unshift("");
 		} else {
@@ -986,7 +986,7 @@ export class PtyAttachComponent implements Component {
 		});
 	}
 
-	private project(height: number, width: number): { lines: string[]; cursor: { row: number; col: number } | null } {
+	private project(height: number): { lines: string[]; cursor: { row: number; col: number } | null } {
 		const out: string[] = [];
 		const buf = this.term.buffer.active;
 		const selection = normalizeSelection(this.selection);
