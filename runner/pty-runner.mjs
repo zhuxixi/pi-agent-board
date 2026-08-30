@@ -65,6 +65,7 @@ function main() {
 	// child.onExit against clobbering the persisted "failed" state with an
 	// "exited" update (the handler kills the child, so its exit callback fires
 	// inside the 50ms flush window — CR round-1, issue #48).
+	let crashed = false;
 	/** @type {import("../src/core/types.mjs").HostStatus} */
 	let host = {
 		version: 1,
