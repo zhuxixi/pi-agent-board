@@ -3,7 +3,7 @@
 - **Date**: 2026-08-30
 - **Issue**: zhuxixi/pi-agent-board#8
 - **Type**: chore — zero behavior change (comments + signature trim only)
-- **Status**: draft, awaiting user approval
+- **Status**: approved and implemented (final review clean; see docs/superpowers/plans/2026-08-30-pty-attach-quality-debt.md)
 
 ## Background
 
@@ -81,8 +81,8 @@ interface stability concerns.
 
 1. `npm run typecheck` — clean.
 2. `npm test` — all pass (attach-related suites must stay green).
-3. `grep -n "catch {}" src/ui/pty-attach.ts` — still 9 hits, each immediately
-   preceded by a comment line.
+3. `grep -c "catch {}" src/ui/pty-attach.ts` — 0 (each expanded to a documented
+   3-line catch block).
 4. `grep -n "project(" src/ui/pty-attach.ts` — signature and call site both
    single-arg.
 5. Coverage thresholds unaffected (comments + signature trim don't move lines/funcs/branches).
