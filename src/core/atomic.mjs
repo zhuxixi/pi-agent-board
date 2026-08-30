@@ -16,9 +16,48 @@ import {
 } from "node:fs";
 import * as path from "node:path";
 
+/** Retry backoff (ms) for rename retries; index i is the delay after attempt i. */
+export const RENAME_RETRY_BACKOFF_MS = [10, 50, 250];
+/** Error codes that mean "transient sharing violation" — retryable on Windows. */
+export const RENAME_RETRY_ERROR_CODES = new Set(["EPERM", "EBUSY", "EACCES"]);
+
 /** @param {string} dir */
 export function ensureDir(dir) {
 	if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+}
+
+/**
+ * rename() with retries for Windows sharing-violation races.
+ *
+ * On Windows, libuv opens files without FILE_SHARE_DELETE, so replacing an
+ * existing target while any other process holds it open for reading throws
+ * EPERM/EBUSY/EACCES. The reader window is microseconds, so a few retries
+ * with a short backoff succeed almost always. Non-whitelisted errors
+ * (e.g. EISDIR) are configuration errors and throw immediately.
+ * @param {string} tmp
+ * @param {string} file
+ * @param {{ rename?: (a: string, b: string) => void, delays?: number[], errorCodes?: Set<string> }} [opts]
+ */
+export function renameWithRetry(tmp, file, opts = {}) {
+	const rename = opts.rename ?? renameSync;
+	const delays = opts.delays ?? RENAME_RETRY_BACKOFF_MS;
+	const errorCodes = opts.errorCodes ?? RENAME_RETRY_ERROR_CODES;
+	for (let attempt = 0; ; attempt++) {
+		try {
+			rename(tmp, file);
+			return;
+		} catch (err) {
+			const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+			if (!errorCodes.has(code) || attempt >= delays.length) {
+				// Exhausted or non-transient: leave no .tmp litter behind, then
+				// surface the original error so callers can degrade deliberately.
+				try { unlinkSync(tmp); } catch { /* best effort */ }
+				throw err;
+			}
+		}
+		// Synchronous sleep (Atomics.wait) — atomicWrite is a sync API.
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delays[attempt]);
+	}
 }
 
 /**
@@ -30,7 +69,7 @@ export function atomicWrite(file, data) {
 	ensureDir(path.dirname(file));
 	const tmp = `${file}.${process.pid}.${randomBytes(4).toString("hex")}.tmp`;
 	writeFileSync(tmp, data, "utf8");
-	renameSync(tmp, file);
+	renameWithRetry(tmp, file);
 }
 
 /**
