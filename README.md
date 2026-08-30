@@ -95,6 +95,153 @@ From the board:
 - Press `Enter`, `Right`, or `>` to attach to the real Pi session.
 - In PTY attach mode, press `Left` or `Ctrl+]` to return to the board.
 
+## Dashboard Workflow
+
+The dashboard has two input modes:
+
+- **Normal mode** owns dashboard shortcuts such as navigation, peek, attach, and filtering.
+- **INSERT mode** owns text editing. Press `i` before typing or pasting a task; `/` is literal while editing a prompt.
+
+When you submit a task, the **Start session** dialog lets you review:
+
+- `cwd`: an existing-directory picker with usage-ranked favorites, filesystem browsing, and Tab completion;
+- `model`: models available to Pi, including models scoped by the current directory's Pi settings;
+- `thinking`: a level supported by the selected model;
+- `action`: **start in background** or **start & attach**.
+
+Launch preferences are persisted and reused for later sessions. **Start & attach** requires PTY support; if PTY is unavailable, Agent Board launches the session in the background and shows a warning instead.
+
+Session actions are deliberately confirmation-aware:
+
+- `d` confirms moving an inactive session to **Done**. Manual completion is the default.
+- Press `Ctrl+X` twice quickly to archive/delete the selected row. Archiving removes the row from the board but preserves its underlying Pi session file.
+- `X` archives inactive rows in the selected state; live work is skipped.
+- `m` enters multi-select mode. Use `Space` to toggle rows, `a` to select all visible rows, `u` to clear the selection, `d` to mark inactive rows Done, or `Ctrl+X` to delete selected Done rows.
+
+## Views and Actions
+
+Shortcuts are scoped to the view where they are available:
+
+### Main list
+
+| Key | Action |
+| --- | --- |
+| `Up` / `Down` | Move the selection. |
+| `i` | Enter INSERT mode for a new task. |
+| `Enter` | Open Start session for a draft, or attach/resume when the input is empty. |
+| `Right` / `>` | Attach to the selected session. |
+| `Space` | Open Peek. |
+| `v` | Open the read-only transcript. |
+| `e` | Open Evidence / Diagnostics. |
+| `/` | Enter filter mode. |
+| `Ctrl+N` | Open a new-session dialog with a pre-filled prompt. |
+| `Ctrl+R` | Rename the selected session. |
+| `Ctrl+T` | Pin or unpin the selected session. |
+| `Ctrl+S` | Stop the selected active session. |
+| `d` | Confirm marking the selected inactive session Done. |
+| `Ctrl+X` twice quickly | Archive/delete the selected row. |
+| `X` | Delete inactive rows in the selected state. |
+| `m` | Enter multi-select mode. |
+| `!` | Open node-pty diagnostics and repair hints. |
+| `?` | Open the help overlay. |
+| `Esc` | Clear a draft, or exit when the input is empty. |
+
+### Peek
+
+Peek shows the selected session's summary, blocker or question, latest output, and available issue/PR references.
+
+| Key | Action |
+| --- | --- |
+| `r` or `Enter` | Enter reply mode and send a follow-up without attaching. |
+| `a`, `Right`, or `>` | Attach to the session. |
+| `v` | Open the read-only transcript. |
+| `e` | Open Evidence / Diagnostics. |
+| `Up` / `Down` | Move to the previous or next session. |
+| `Esc` | Return to the main list. |
+
+When a Pi question or questionnaire tool is pending, inline reply is rejected; attach to answer that interactive question in the real Pi session.
+
+### Transcript
+
+The `v` view is a read-only projection of the durable Pi session JSONL. It does not interrupt a running worker.
+
+| Key | Action |
+| --- | --- |
+| `Up` / `Down` | Scroll one line. |
+| `PageUp` / `PageDown` | Scroll one page. |
+| `Space` | Open Peek. |
+| `r` | Enter reply mode. |
+| `Enter` or `a` | Attach to the session. |
+| `e` | Open Evidence / Diagnostics. |
+| `d` | Confirm marking the inactive session Done. |
+| `Left` / `Esc` / `<` | Return to the main list. |
+
+### Evidence / Diagnostics
+
+The `e` view shows durable session evidence, including changed files, commands and their outcomes, command output previews, assistant evidence, errors, diagnostics, and artifact paths. Press `x` to clear diagnostics while preserving the evidence artifacts.
+
+| Key | Action |
+| --- | --- |
+| `Up` / `Down` | Scroll one line. |
+| `PageUp` / `PageDown` | Scroll one page. |
+| `r` | Enter reply mode. |
+| `v` | Open the read-only transcript. |
+| `Enter`, `a`, or `Right` | Attach to the session. |
+| `x` | Clear diagnostics; evidence is preserved. |
+| `Left` / `Esc` / `<` | Return to the main list. |
+
+### PTY attach
+
+PTY attach opens the real interactive Pi session. Use `Left` or `Ctrl+]` to detach and return to the board. While attached, `PageUp`, `PageDown`, `Home`, `End`, and the mouse wheel scroll local scrollback. Mouse drag or double-click selects and copies text, clicks open detected links, and middle-click paste is available on systems with the required X11 tooling.
+
+The attach surface can forward terminal clipboard and image/file passthrough sequences. These behaviors can be disabled individually in [Configuration](#configuration). Cold hosts may briefly show a loading/reconnect surface while their PTY becomes ready.
+
+## States, Grouping, and Filters
+
+Agent Board separates a session's semantic task state from whether a worker process is currently alive. An exited worker can therefore leave a durable row that is still resumable or attachable.
+
+| Display state | Meaning |
+| --- | --- |
+| **Queued** | A run has been scheduled but has not started processing. |
+| **Running** | The session is actively processing. |
+| **Needs answer** | The session is waiting for user input or an answer to a question. |
+| **Needs instructions** | The run ended without being marked complete and needs the next directive. |
+| **Done** | The user marked the inactive session complete; this is the default completion path. |
+| **Failed** | The worker or host ended with an error. |
+| **Stopped** | The user stopped the active work. |
+
+Rows are grouped by state. When a state contains sessions from multiple directories, rows are grouped by folder within that state. Pinned rows and folders come first, then creation order remains stable; activity does not reshuffle the list. New agent activity is marked unread with stronger row glyphs and header/footer counts. Replies sent while a session is busy enter a durable FIFO follow-up queue and are delivered when the session is ready; a `qN` badge shows queued follow-ups.
+
+Press `/` to enter filter mode. Filter tokens are case-insensitive and can be combined with free-text terms:
+
+```text
+s:running
+review:ready
+diag:stalled
+evidence:error
+queued:true
+steer:awaiting-approval
+```
+
+- `s:<state>` matches a state prefix, including display-label aliases such as `needs-answer`.
+- `review:ready` finds sessions with review-ready evidence.
+- `evidence:error` finds sessions whose evidence contains errors.
+- `queued:true` (also `yes` or `1`) finds sessions with queued follow-ups.
+- `steer:<state>` filters by a persisted steering state.
+- Bare words match name, summary, and working directory; multiple words use AND matching.
+
+`diag:stalled` can consume persisted stalled diagnostics, but the current runner does not provide a general provider-stall detector. It should not be read as a complete automatic stall-detection feature.
+
+## Evidence and Code References
+
+Evidence is collected locally from session events. Agent Board can extract issue and pull-request references from that evidence and show badges such as `#40` or `▸#45` on rows; Peek includes the provider, confidence, source, and URL when available. Built-in GitHub/GitLab-style providers are available, and an optional per-store `providers.json` can extend the provider rules. The `AGENT_BOARD_CODE_REFS=off` setting disables extraction.
+
+## Attach and Fallback Behavior
+
+When PTY support is healthy, Agent Board uses an interactive PTY host for attach and start-and-attach. If PTY support is unavailable, eligible managed sessions can still run in the background through the JSON runner; start-and-attach falls back to background launch with a warning. Adopted external foreground sessions require PTY to continue safely. Press `!` in the dashboard for diagnosis and repair hints.
+
+On Windows, PTY host control uses a named pipe and spawned child console windows are hidden. Terminal behavior can still vary between terminal emulators.
+
 ## Entry Points
 
 | Entry point | What it does |
