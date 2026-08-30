@@ -22,7 +22,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 /** Whether `git` is available on PATH (code-refs extraction shells out to it). */
 function gitAvailable() {
 	try {
-		execFileSync("git", ["--version"], { stdio: "ignore" });
+		execFileSync("git", ["--version"], { stdio: "ignore", windowsHide: true });
 		return true;
 	} catch {
 		return false;
@@ -32,8 +32,8 @@ function gitAvailable() {
 /** Temp git repo whose origin remote is github.com, so code-refs matches the github provider. */
 function makeGithubRepo() {
 	const dir = mkdtempSync(join(tmpdir(), "agentview-refs-repo-"));
-	execFileSync("git", ["-C", dir, "init", "-q"], { stdio: "ignore" });
-	execFileSync("git", ["-C", dir, "remote", "add", "origin", "https://github.com/zhuxixi/pi-agent-board.git"], { stdio: "ignore" });
+	execFileSync("git", ["-C", dir, "init", "-q"], { stdio: "ignore", windowsHide: true });
+	execFileSync("git", ["-C", dir, "remote", "add", "origin", "https://github.com/zhuxixi/pi-agent-board.git"], { stdio: "ignore", windowsHide: true });
 	return dir;
 }
 

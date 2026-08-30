@@ -12,6 +12,7 @@ export function gitRepoRoot(cwd) {
 		const out = execFileSync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], {
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "ignore"],
+			windowsHide: true,
 		});
 		const root = out.trim();
 		return root || null;
@@ -40,6 +41,7 @@ export function isDirty(repoRoot) {
 		const out = execFileSync("git", ["-C", repoRoot, "status", "--porcelain"], {
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "ignore"],
+			windowsHide: true,
 		});
 		return out.trim().length > 0;
 	} catch {
@@ -70,6 +72,7 @@ export function gitRemoteUrl(repoRoot) {
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "ignore"],
 			timeout: 2000,
+			windowsHide: true,
 		});
 		url = out.trim() || null;
 	} catch {
