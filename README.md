@@ -10,67 +10,99 @@
   | <a href="https://www.npmjs.com/package/@zhuxixi/pi-agent-board">npm</a>
 </p>
 
-Pi Agent Board is a full-screen TUI dashboard for [Pi](https://github.com/earendil-works/pi-mono). It lets you dispatch, monitor, peek/reply to, attach to, and clean up multiple background Pi sessions from one place.
+Pi Agent Board is a full-screen TUI dashboard for [Pi](https://github.com/earendil-works/pi-mono) that manages durable background Pi sessions. Use one global board to dispatch work across projects, watch progress, triage summaries and evidence, reply without opening a transcript, and attach to a real interactive session when hands-on work is needed.
 
-## Problems It Solves
+## What It Does
 
-- Run several Pi tasks at once without losing track of which are queued, running, needs answer, needs instructions, done, failed, or stopped.
-- Keep real Pi sessions durable and resumable after `/reload`, closing Pi, or restarting the terminal.
-- Check the latest output and answer follow-up questions without interrupting a running session.
-- Attach to the full interactive Pi session only when hands-on work is needed.
-- Manage work across multiple projects in one global board.
+- Run several Pi tasks at once without losing track of their current state.
+- Keep each task as a real, resumable Pi session that survives `/reload`, closing Pi, or restarting the terminal.
+- Triage the latest output, blockers, evidence, and diagnostics before opening a full transcript.
+- Reply to a session without attaching; replies sent while a session is busy are preserved for later delivery.
+- Fall back to a JSON runner for eligible background work when live PTY support is unavailable.
 
-## Install
+> **Write-safety note:** Worktree isolation is currently disabled. Multiple sessions in the same repository may run concurrently, so avoid overlapping writes or provide your own isolation.
 
-From npm:
+## Requirements
 
-```bash
-pi install npm:@zhuxixi/pi-agent-board
-pi /agent-board
-```
+- [Pi](https://github.com/earendil-works/pi-mono) installed and working.
+- Node.js 20 or newer.
+- Working Pi provider authentication for real model execution. Agent Board does not have a separate login or credential store.
+- PTY support from `node-pty` for live attach and **start & attach**. Background work can use a JSON-runner fallback when PTY support is unavailable.
 
-You can also start Pi normally and run `/agent-board`.
-
-Pi Agent Board requires Node 20+ and working Pi provider auth. If rows stay in `Running`, first confirm Pi can complete a one-shot model call:
+If rows remain in `Running`, first verify that Pi itself can complete a one-shot model call:
 
 ```bash
 pi --mode json -p --no-session "Reply with exactly: DONE"
 ```
 
-That command should produce an assistant reply and finish with an `agent_end` event.
+A healthy command emits an assistant reply, then an `agent_end` event, and exits. See [VERIFY.md](VERIFY.md) for the complete no-auth, provider-auth, and PTY checks.
 
-From a local checkout:
+## Install
+
+### Published package
+
+```bash
+pi install npm:@zhuxixi/pi-agent-board
+```
+
+Start Pi normally and run `/agent-board`, or use one of the startup entry points below.
+
+### Local checkout
 
 ```bash
 npm install
 pi install "$(pwd)"
-pi /agent-board
 ```
 
-For auto-discovery while developing:
+This installs the current checkout as a Pi package. Remove that path installation with:
+
+```bash
+pi remove "$(pwd)"
+```
+
+### Development auto-discovery
+
+To have Pi load the checkout directly while developing:
 
 ```bash
 ln -s "$(pwd)" ~/.pi/agent/extensions/agent-board
 pi
 ```
 
-Remove that symlink when you no longer want Pi to auto-load the checkout. If you installed by path, remove it with `pi remove "$(pwd)"`.
+Remove the symlink when you no longer want Pi to auto-load the checkout:
 
-## Use
+```bash
+rm ~/.pi/agent/extensions/agent-board
+```
 
-Open the board with `pi /agent-board` or `/agent-board` inside Pi.
+## Quick Start
 
-- Type a task in the bottom input, then press `enter`.
-- Confirm **Start session**, or adjust `cwd`, model, and thinking level first.
-- Watch rows move through `Queued`, `Running`, `Needs answer`, `Needs instructions`, `Done`, `Failed`, and `Stopped`.
-- Press `space` to peek at the selected row's summary, blocker, and latest output.
-- Press `r` to reply inline without attaching.
-- Press `enter`, `right`, or `>` to attach to the real Pi session.
-- Press `v` for a read-only live transcript.
-- Press `/` to filter by text or state, such as `s:running`.
-- Press `ctrl+r` rename, `ctrl+t` pin, `ctrl+s` stop, `d` mark done, `m` multi-select, `ctrl+x` delete/archive, `X` delete inactive rows in the selected state, and `?` for help.
+1. Open the board with `/agent-board` inside Pi.
+2. Press `i` to enter INSERT mode.
+3. Type a task and press `Enter`.
+4. In the **Start session** dialog, review or change the working directory (`cwd`), model, thinking level, and action.
+5. Press `Enter` on **Start session** to launch the task.
 
-Rows are stored under `~/.pi/agent/agent-board/` by default. Deleting a row archives it from the board; it does not remove the underlying Pi session file.
+The row starts in `Queued`, then moves through `Running` to a terminal state such as `Needs answer`, `Needs instructions`, `Done`, `Failed`, or `Stopped`.
+
+From the board:
+
+- Press `Space` to peek at the selected session's summary, blocker, and latest output.
+- In Peek, press `r` to reply without attaching.
+- Press `v` for a read-only transcript, or `e` for evidence and diagnostics.
+- Press `Enter`, `Right`, or `>` to attach to the real Pi session.
+- In PTY attach mode, press `Left` or `Ctrl+]` to return to the board.
+
+## Entry Points
+
+| Entry point | What it does |
+| --- | --- |
+| `/agent-board` | Opens the dashboard from an interactive Pi session. Use this command path to attach to managed sessions. |
+| `pi /agent-board` | Starts Pi by invoking the dashboard command. Quitting the standalone dashboard shuts down Pi instead of dropping into a normal chat session. |
+| `pi --agent-board` | Opens the dashboard through the extension startup flag. This startup path cannot attach to a managed session; use `/agent-board` from a normal Pi session for attach. |
+| `/bg [prompt]` | Adopts the current interactive Pi session into Agent Board. An optional prompt is added to its follow-up queue before the dashboard opens. |
+
+The board is global across projects by default. Rows are stored under `~/.pi/agent/agent-board/`; archiving a row removes it from the board but preserves the underlying Pi session file.
 
 ## Configuration
 
