@@ -66,6 +66,7 @@ Open the board with `pi /agent-board` or `/agent-board` inside Pi.
 - Press `space` to peek at the selected row's summary, blocker, and latest output.
 - Press `r` to reply inline without attaching.
 - Press `enter`, `right`, or `>` to attach to the real Pi session.
+- In an attached session, press `←` while the child input is empty to return to the board; `ctrl+]` remains available to the child Pi editor.
 - Press `v` for a read-only live transcript.
 - Press `/` to filter by text or state, such as `s:running`.
 - Press `ctrl+r` rename, `ctrl+t` pin, `ctrl+s` stop, `d` mark done, `m` multi-select, `ctrl+x` delete/archive, `X` delete inactive rows in the selected state, and `?` for help.

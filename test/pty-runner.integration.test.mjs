@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, statSync, mkdirSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -22,6 +22,34 @@ async function waitFor(predicate, timeoutMs = 3000) {
 		await new Promise((r) => setTimeout(r, 25));
 	}
 	throw new Error("timed out waiting");
+}
+
+function waitForExit(child, timeoutMs) {
+	if (!child || child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+	return new Promise((resolve) => {
+		let settled = false;
+		let timer;
+		const onExit = () => finish(true);
+		const finish = (exited) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			child.removeListener("exit", onExit);
+			resolve(exited);
+		};
+		timer = setTimeout(() => finish(false), timeoutMs);
+		child.once("exit", onExit);
+		if (child.exitCode !== null || child.signalCode !== null) finish(true);
+	});
+}
+
+async function stopRunner(runner) {
+	if (!runner || runner.exitCode !== null || runner.signalCode !== null) return;
+	try { runner.kill("SIGTERM"); } catch {}
+	if (!(await waitForExit(runner, 500)) && runner.exitCode === null && runner.signalCode === null) {
+		try { runner.kill("SIGKILL"); } catch {}
+		await waitForExit(runner, 500);
+	}
 }
 
 function send(socket, msg) {
@@ -83,8 +111,54 @@ test("pty-runner creates host socket, broadcasts output, forwards input, finaliz
 		assert.match(readFileSync(P.screenLogPath(root, "v1"), "utf8"), /fake pi ready/);
 		socket.destroy();
 	} finally {
-		try { runner?.kill("SIGTERM"); } catch {}
-		await new Promise((r) => setTimeout(r, 50));
+		await stopRunner(runner);
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("pty-runner applies an ordered restore resize before a detach packet", async () => {
+	const root = freshRoot();
+	let runner;
+	let socket;
+	try {
+		const meta = createView(root, { id: "detach1", name: "detach", cwd: process.cwd() });
+		const configPath = P.hostConfigPath(root, "detach1");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "detach1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			env: {},
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		await waitFor(() => existsSync(P.controlSocketPath(root, "detach1")) && readHost(root, "detach1")?.state === "alive");
+
+		socket = createConnection(P.controlSocketPath(root, "detach1"));
+		socket.on("error", () => {});
+		await once(socket, "connect");
+		// Send both packets in one write, matching PtyAttachComponent's
+		// restore -> detach sequence. The runner must process resize first,
+		// before ending the socket for detach.
+		socket.write(
+			JSON.stringify({ type: "resize", cols: 100, rows: 30 }) + "\n" +
+			JSON.stringify({ type: "detach" }) + "\n",
+		);
+		// host.json is the durable protocol-side observation. Do not wait for
+		// the client socket's close event: some Node/net versions keep the local
+		// close event pending while the peer has already ended its side.
+		await waitFor(() => readHost(root, "detach1")?.cols === 100 && readHost(root, "detach1")?.rows === 30);
+		assert.equal(readHost(root, "detach1").cols, 100);
+		assert.equal(readHost(root, "detach1").rows, 30);
+	} finally {
+		try { socket?.destroy(); } catch {}
+		await stopRunner(runner);
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
 });
@@ -114,8 +188,100 @@ test("pty-runner protects dash-prefixed initial prompts while keeping argv deliv
 		await waitFor(() => existsSync(P.controlSocketPath(root, "v1")) && readHost(root, "v1")?.state === "alive");
 		await waitFor(() => existsSync(capturePath) && readFileSync(capturePath, "utf8") === " - Create a ticket\n- Run the fix");
 	} finally {
-		try { runner?.kill("SIGTERM"); } catch {}
-		await new Promise((r) => setTimeout(r, 50));
+		await stopRunner(runner);
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("pty-runner server error routes through the child-aware shutdown", async () => {
+	const root = freshRoot();
+	let runner;
+	try {
+		const meta = createView(root, { id: "servererr1", name: "server error", cwd: process.cwd() });
+		const configPath = P.hostConfigPath(root, "servererr1");
+		const socketPath = P.controlSocketPath(root, "servererr1");
+		// A directory at the Unix socket path survives the runner's best-effort
+		// unlink and makes server.listen() emit EADDRINUSE right after spawn.
+		mkdirSync(socketPath);
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "servererr1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-ignore-term-pi.mjs")],
+			model: null,
+			tools: null,
+			env: {},
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		assert.equal(await waitForExit(runner, 7000), true, "runner must exit after server error cleanup");
+		assert.equal(runner.exitCode, 1);
+		// The failed listener must be recorded, and — the actual regression guard —
+		// the runner must have awaited the child's exit before process.exit:
+		// child.onExit is what clears childPid and flips state to "exited". The
+		// old server-error path exited synchronously, leaving state "failed"
+		// with childPid still set.
+		const host = readHost(root, "servererr1");
+		assert.match(host.error ?? "", /EADDRINUSE/);
+		assert.equal(host.childPid, null, "shutdown must observe the child exit before the runner exits");
+		assert.equal(host.state, "exited");
+	} finally {
+		await stopRunner(runner);
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("pty-runner shutdown escalates when the PTY child ignores SIGTERM", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	try {
+		const meta = createView(root, { id: "ignore1", name: "ignore", cwd: process.cwd() });
+		const configPath = P.hostConfigPath(root, "ignore1");
+		const childPidPath = join(root, "ignore-child.pid");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "ignore1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			// The shell trap sets SIG_IGN for TERM/HUP/INT BEFORE exec, and ignored
+			// dispositions survive exec — the child then ignores SIGTERM even while
+			// node is booting. The test waits for the child's PID file (written after
+			// boot) before signaling the runner, so the 4s SIGKILL escalation is the
+			// only way shutdown can complete.
+			piCommand: "sh",
+			piArgsPrefix: [
+				"-c",
+				`trap '' TERM HUP INT; exec ${JSON.stringify(process.execPath)} ${JSON.stringify(resolve("test-support/fake-ignore-term-pi.mjs"))}`,
+			],
+			model: null,
+			tools: null,
+			env: { FAKE_PTY_PID_PATH: childPidPath },
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		await waitFor(() => existsSync(childPidPath));
+		childPid = Number(readFileSync(childPidPath, "utf8"));
+		assert.ok(childPid > 0, "escalation fixture must wait for the booted PTY child");
+		const shutdownStartedAt = Date.now();
+		runner.kill("SIGTERM");
+		assert.equal(await waitForExit(runner, 7000), true, "runner must finish the escalated shutdown");
+		const shutdownElapsed = Date.now() - shutdownStartedAt;
+		assert.ok(
+			shutdownElapsed >= 3500,
+			`shutdown finished in ${shutdownElapsed}ms — a SIGTERM-immune child requires the ~4s SIGKILL escalation`,
+		);
+		assert.equal(runner.exitCode, 0);
+		assert.throws(() => process.kill(childPid, 0), "child must be gone after runner shutdown");
+	} finally {
+		try { if (childPid) process.kill(childPid, "SIGKILL"); } catch {}
+		await stopRunner(runner);
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
 });
@@ -169,7 +335,7 @@ test("pty-runner honors screenLogMaxBytes from host config", async () => {
 		assert.ok(size > 0 && size <= 2048, `screen.log should be compacted to <=2048 bytes, got ${size}`);
 		socket.end();
 	} finally {
-		try { runner?.kill(); } catch {}
+		await stopRunner(runner);
 		rmSync(root, { recursive: true, force: true });
 	}
 });

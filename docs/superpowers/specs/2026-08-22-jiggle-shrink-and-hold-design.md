@@ -1,5 +1,9 @@
 # Spec：attach jiggle 协议改造 — shrink-and-hold（issue #25）
 
+> **历史设计，部分内容已被 issue #42 superseded。** 当前实现保留 G1–G5，
+> 并在首帧快速 restore 后增加 G6 post-restore verify：900ms 内没有 clear
+> 时重新 shrink；attach detach 只使用空输入时的 `←`，`ctrl+]` 透传给 Pi。
+
 ## 日期
 2026-08-22
 

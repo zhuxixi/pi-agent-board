@@ -28,7 +28,7 @@ export interface PtyAttachOptions {
 const require = createRequire(import.meta.url);
 const { Terminal } = require("@xterm/headless") as { Terminal: new (opts: Record<string, unknown>) => XtermLike };
 
-const DETACH_KEYS = new Set(["\x1d"]); // ctrl+]
+
 const MOUSE_ENABLE = "\x1b[?1000h\x1b[?1002h\x1b[?1006h";
 const MOUSE_DISABLE = "\x1b[?1006l\x1b[?1002l\x1b[?1000l";
 const XTSHIFTESCAPE_SELECT = "\x1b[>0s";
@@ -39,6 +39,8 @@ const LOADING_TICK_MS = 120;
 const ATTACH_SETTLE_MS = 250;
 /** Hard cap on the attach transition so a silent session can't stall the banner. */
 const ATTACH_HARD_TIMEOUT_MS = 2500;
+/** Give ordered detach packets time to flush before using destroy as a fallback. */
+const GRACEFUL_SOCKET_CLOSE_MS = 1000;
 /** How many tail bytes of the screen log to replay on attach. Read from the file tail
  * (not the whole file) so multi-MB logs don't block startup; ~60KB covers the last
  * handful of screens, which is all a fresh attach needs. */
@@ -158,6 +160,7 @@ export class PtyAttachComponent implements Component {
 	private attaching = true;
 	private attachSettleTimer: ReturnType<typeof setTimeout> | null = null;
 	private attachHardTimeout: ReturnType<typeof setTimeout> | null = null;
+	private gracefulSocketCloseTimer: ReturnType<typeof setTimeout> | null = null;
 	// Force a single full-clear on the first paint so the prior session/dashboard can't
 	// ghost behind this overlay; every later paint uses the TUI's coalesced, throttled,
 	// differential renderer so wheel/output bursts don't each trigger a full repaint.
@@ -230,11 +233,7 @@ export class PtyAttachComponent implements Component {
 			this.send({ type: "input", data });
 			return;
 		}
-		if (
-			DETACH_KEYS.has(data) ||
-			matchesKey(data, Key.left) ||
-			matchesKey(data, Key.ctrl("]"))
-		) {
+		if (matchesKey(data, Key.left)) {
 			if (this.childInputLooksEmpty()) {
 				this.detach();
 				return;
@@ -265,7 +264,7 @@ export class PtyAttachComponent implements Component {
 		}
 		const header =
 			this.theme.fg("accent", this.theme.bold(` ${this.opts.title} `)) +
-			this.theme.fg("muted", `${this.status} · click opens links · dblclick/drag selects+copies · ← detach · ctrl+] detach`);
+			this.theme.fg("muted", `${this.status} · click opens links · dblclick/drag selects+copies · ← detach`);
 		return [clip(header, width), ...body.map((l) => clipTerminalLine(l, width)), this.theme.fg("dim", "─".repeat(width))];
 	}
 
@@ -281,7 +280,7 @@ export class PtyAttachComponent implements Component {
 		out.push(center(this.theme.fg("accent", this.theme.bold(title)), width));
 		out.push(center(this.theme.fg("muted", detail), width));
 		out.push("");
-		out.push(center(this.theme.fg("dim", "← or ctrl+] to detach"), width));
+		out.push(center(this.theme.fg("dim", "← to detach"), width));
 		while (out.length < height) out.push("");
 		return out.slice(0, height);
 	}
@@ -300,8 +299,12 @@ export class PtyAttachComponent implements Component {
 	}
 
 	private detach(): void {
+		// Restore a held PTY before ending the control socket. The runner closes
+		// the socket immediately after receiving detach, so sending detach first
+		// can drop the G3 restore resize (issue #42).
+		this.jiggleRetry.restoreAndStop();
 		this.send({ type: "detach" });
-		this.close();
+		this.close(true);
 		this.done({ action: "detached" });
 	}
 
@@ -322,7 +325,14 @@ export class PtyAttachComponent implements Component {
 		}
 		const socket = createConnection(this.opts.socketPath);
 		this.socket = socket;
+		// A partial protocol line left over from a failed socket would prefix the
+		// replacement connection's first line; start each socket with a clean buffer.
+		this.parserBuffer = "";
 		socket.on("connect", () => {
+			if (this.socket !== socket) {
+				try { socket.destroy(); } catch {}
+				return;
+			}
 			this.clearRetry();
 			this.connected = true;
 			this.status = "attached";
@@ -332,8 +342,14 @@ export class PtyAttachComponent implements Component {
 			this.scheduleRender();
 			this.startAttachSettle();
 		});
-		socket.on("data", (chunk) => this.onSocketData(chunk.toString("utf8")));
+		socket.on("data", (chunk) => {
+			if (this.socket !== socket) return;
+			this.onSocketData(chunk.toString("utf8"));
+		});
 		socket.on("close", () => {
+			// A failed socket can close after a replacement connection has already
+			// succeeded. Never let that stale event clear the replacement state.
+			if (this.socket !== socket) return;
 			this.socket = null;
 			this.connected = false;
 			if (!this.closed && this.status !== "host exited") {
@@ -343,8 +359,15 @@ export class PtyAttachComponent implements Component {
 			if (!this.closed) this.scheduleRender();
 		});
 		socket.on("error", (err) => {
+			// The error may belong to an old socket after reconnect. Dispose that
+			// socket, but do not alter the state of the current connection.
+			if (this.socket !== socket) {
+				try { socket.destroy(); } catch {}
+				return;
+			}
 			this.socket = null;
 			this.connected = false;
+			try { socket.destroy(); } catch {}
 			if (this.closed) return;
 			this.status = `waiting for host… ${err.message}`;
 			this.scheduleReconnect();
@@ -445,6 +468,12 @@ export class PtyAttachComponent implements Component {
 		if (!this.retryTimer) return;
 		clearTimeout(this.retryTimer);
 		this.retryTimer = null;
+	}
+
+	private clearGracefulSocketCloseTimer(): void {
+		if (!this.gracefulSocketCloseTimer) return;
+		clearTimeout(this.gracefulSocketCloseTimer);
+		this.gracefulSocketCloseTimer = null;
 	}
 
 	private enableMouseScroll(): void {
@@ -957,7 +986,13 @@ export class PtyAttachComponent implements Component {
 		return { lines: out.slice(-height), cursor };
 	}
 
-	private close(): void {
+	private close(gracefulSocket = false): void {
+		if (this.closed && !this.socket) {
+			// Already closed (e.g. dispose() after detach()); a pending graceful-close
+			// fallback timer stays armed on purpose — it self-clears on socket close
+			// or destroys the socket after the grace window.
+			return;
+		}
 		this.closed = true;
 		this.imeCoalesceUninstall?.();
 		this.jiggleRetry.restoreAndStop();
@@ -976,11 +1011,24 @@ export class PtyAttachComponent implements Component {
 			clearTimeout(this.attachHardTimeout);
 			this.attachHardTimeout = null;
 		}
-		try {
-			this.socket?.destroy();
-		} catch {}
+		this.clearGracefulSocketCloseTimer();
+		const socket = this.socket;
 		this.socket = null;
 		this.connected = false;
+		if (!socket) return;
+		if (!gracefulSocket) {
+			try { socket.destroy(); } catch {}
+			return;
+		}
+		// socket.end() preserves the ordering of the already-buffered restore and
+		// detach packets. destroy() would discard buffered writes under backpressure.
+		socket.once("close", () => this.clearGracefulSocketCloseTimer());
+		try { socket.end(); } catch {}
+		this.gracefulSocketCloseTimer = setTimeout(() => {
+			this.gracefulSocketCloseTimer = null;
+			try { socket.destroy(); } catch {}
+		}, GRACEFUL_SOCKET_CLOSE_MS);
+		this.gracefulSocketCloseTimer.unref?.();
 	}
 }
 

@@ -1,5 +1,9 @@
 # 解绑 attach 视图对 ctrl+g 的截获，让 ctrl+g 透传打开外部编辑器
 
+> **历史计划，快捷键结论已被 issue #42 superseded。** 当前 attach 只在子输入
+> 为空时用 `←` detach；`ctrl+g` 和 `ctrl+]` 都完整透传给 Pi。本文以下内容保留
+> 当时决策和实施记录，不再代表当前快捷键契约。
+
 ## Context（背景与动机）
 
 用户在 pi-agent-board 里 attach 一个 pi background session 后，按 `ctrl+g` 无法打开外部编辑器（nvim）。
@@ -8,7 +12,7 @@
 
 用户实际退出 attach 用的是**左方向键**，不需要 ctrl+g 当 detach 键。
 
-**目标**：让 ctrl+g 在 attach 视图里干净透传给子进程 pi，从而按 pi 默认的 `app.editor.external`（默认就是 ctrl+g）打开 nvim。退出 attach 仍可用 ← 或 ctrl+]，不受影响。
+**目标**：让 ctrl+g 在 attach 视图里干净透传给子进程 pi，从而按 pi 默认的 `app.editor.external`（默认就是 ctrl+g）打开 nvim。退出 attach 当时仍可用 ← 或 ctrl+]；后续 issue #42 的最终决策改为仅使用 ←，`ctrl+]` 完全透传给 Pi。
 
 ## Approach（方案）
 
@@ -17,7 +21,7 @@
 明确不做的事：
 - 不动 pi 本体、不创建 `~/.pi/agent/keybindings.json`；
 - 不动光标可见性（已在上一个 commit `95e20a6` 解决，本次改动不影响它）；
-- 不动 ctrl+] 和 ← 的 detach 行为。
+- 本历史计划不覆盖 issue #42 对 `ctrl+]` 的后续调整；当前 `ctrl+]` 不再 detach，完全透传给 Pi。
 
 ## Files to modify
 
@@ -80,7 +84,7 @@
 - 在 pi-agent-board 里 attach 一个 background session；
 - 按 `ctrl+g` → **应直接打开 nvim**（外部编辑器），不再退出 attach；
 - 按 `←`（左方向键）→ 仍能正常退出 attach 回到面板；
-- 按 `ctrl+]` → 仍能退出 attach（保留的另一个 detach 键）。
+- `ctrl+]` 的历史退出行为已被 issue #42 superseded；当前它应透传给 Pi。
 
 ## Notes
 

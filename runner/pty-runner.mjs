@@ -56,6 +56,13 @@ function main() {
 	let childPid = null;
 	let exitCode = null;
 	let stopping = false;
+	let shutdownStarted = false;
+	let shutdownExitCode = null;
+	let childExited = false;
+	let resolveChildExit;
+	const childExitPromise = new Promise((resolve) => {
+		resolveChildExit = resolve;
+	});
 	/** @type {import("../src/core/types.mjs").HostStatus} */
 	let host = {
 		version: 1,
@@ -130,18 +137,21 @@ function main() {
 		broadcast({ type: "output", data });
 	});
 	child.onExit((code) => {
+		childExited = true;
+		resolveChildExit?.();
 		exitCode = code ?? 0;
-		update({ state: stopping ? "exited" : "exited", endedAt: Date.now(), exitCode, childPid: null });
+		update({ state: "exited", endedAt: Date.now(), exitCode, childPid: null });
 		broadcast({ type: "exit", exitCode });
-		setTimeout(() => process.exit(exitCode ?? 0), 50).unref?.();
+		if (!shutdownStarted) setTimeout(() => process.exit(exitCode ?? 0), 50).unref?.();
 	});
 	child.onError((err) => {
 		update({ state: "failed", endedAt: Date.now(), exitCode: 1, error: err instanceof Error ? err.message : String(err) });
 		broadcast({ type: "error", message: host.error || "child error" });
-		setTimeout(() => process.exit(1), 50).unref?.();
+		void shutdown(1);
 	});
 
-	const server = createServer((socket) => {
+	let server;
+	server = createServer((socket) => {
 		clients.add(socket);
 		update({ attachedEver: true });
 		socket.write(JSON.stringify({ type: "hello", status: host }) + "\n");
@@ -163,8 +173,7 @@ function main() {
 	});
 	server.on("error", (err) => {
 		update({ state: "failed", endedAt: Date.now(), error: err instanceof Error ? err.message : String(err), exitCode: 1 });
-		try { child.kill("SIGTERM"); } catch {}
-		process.exit(1);
+		void shutdown(1);
 	});
 	server.listen(socketPath, () => update({ socketPath, state: "alive" }));
 
@@ -208,15 +217,46 @@ function main() {
 	}, HEARTBEAT_MS);
 	heartbeat.unref?.();
 
-	const shutdown = () => {
+	function waitForChildExit(timeoutMs) {
+		if (childExited) return Promise.resolve(true);
+		return new Promise((resolve) => {
+			let settled = false;
+			let timer;
+			const finish = (exited) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timer);
+				resolve(exited);
+			};
+			timer = setTimeout(() => finish(false), timeoutMs);
+			childExitPromise.then(() => finish(true));
+		});
+	}
+
+	async function shutdown(requestedExitCode = null) {
+		if (requestedExitCode !== null) shutdownExitCode = requestedExitCode;
+		if (shutdownStarted) return;
+		shutdownStarted = true;
 		stopping = true;
-		try { server.close(); } catch {}
+		try { server?.close(); } catch {}
 		try { if (existsSync(socketPath)) unlinkSync(socketPath); } catch {}
+		for (const client of clients) {
+			try { client.end(); } catch {}
+		}
 		try { child.kill("SIGTERM"); } catch {}
-		setTimeout(() => process.exit(0), 100).unref?.();
-	};
-	process.on("SIGTERM", shutdown);
-	process.on("SIGINT", shutdown);
+		if (!(await waitForChildExit(4000)) && !childExited) {
+			try { child.kill("SIGKILL"); } catch {}
+			if (!(await waitForChildExit(1000)) && !childExited) {
+				// The child abstraction has no portable liveness probe. Exit only
+				// after the escalation window so normal children are always awaited;
+				// an unkillable platform child is left to the OS.
+				process.exit(1);
+			}
+		}
+		process.exit(shutdownExitCode ?? exitCode ?? 0);
+	}
+	process.on("SIGTERM", () => { void shutdown(); });
+	process.on("SIGINT", () => { void shutdown(); });
 }
 
 function spawnInteractive(command, args, opts) {

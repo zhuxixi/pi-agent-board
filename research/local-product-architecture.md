@@ -87,7 +87,7 @@ Notable current product scope gaps:
 5. **Attach/detach**
    - Enter/arrow asks dashboard to attach. Running JSON-runner rows require confirmation/stop; live hosted rows attach directly (`src/ui/dashboard.ts` lines 977-999).
    - Command handler prefers existing PTY host, then `ensureHost()`, then `ctx.switchSession()` fallback (`src/commands/agent-board.ts` lines 145-205; `src/runtime/service.mjs` lines 462-492).
-   - `PtyAttachComponent` forwards most keyboard input to the child Pi and detaches on `←`, `ctrl+]`, or `ctrl+g` when the child input line appears empty (`src/ui/pty-attach.ts` lines 160-210, 260-311).
+   - `PtyAttachComponent` forwards most keyboard input to the child Pi and detaches on `←` when the child input line appears empty; `ctrl+]` and `ctrl+g` pass through to Pi's native editor actions (`src/ui/pty-attach.ts`).
 
 6. **Manage and clean up**
    - Rename/pin/stop/done/delete/batch actions happen in-place through service methods (`src/ui/dashboard.ts` lines 803-945; `src/runtime/service.mjs` lines 503-615).
