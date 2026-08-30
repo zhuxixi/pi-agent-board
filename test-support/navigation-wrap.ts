@@ -54,5 +54,12 @@ seq.push(dash.selectedId);
 dash.handleInput("\x1b[A"); // ↑ at first -> WRAP to ids[2]
 seq.push(dash.selectedId);
 
+// Peek mode: stepping down from the last row wraps to the first.
+dash.peekId = ids[2];
+dash.selectedId = ids[2];
+dash.mode = "peek";
+dash.handleInput("\x1b[B"); // ↓ at last in peek -> WRAP to ids[0]
+seq.push(dash.selectedId);
+
 dash.dispose();
 console.log(JSON.stringify({ ids, seq }));

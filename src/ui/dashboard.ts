@@ -1097,7 +1097,9 @@ export class DashboardComponent implements Component {
 		if (!this.peekId) return;
 		const idx = this.orderedIds.indexOf(this.peekId);
 		if (idx < 0) return;
-		const next = Math.max(0, Math.min(this.orderedIds.length - 1, idx + delta));
+		const len = this.orderedIds.length;
+		// Wrap around both ends, same as moveSelection().
+		const next = ((idx + delta) % len + len) % len;
 		this.peekId = this.orderedIds[next];
 		this.selectedId = this.peekId;
 	}

@@ -18,7 +18,7 @@ test("list arrow-key navigation wraps around at both ends (issue #52)", () => {
 	assert.equal(ids.length, 3, "probe must see 3 rows");
 	assert.deepEqual(
 		seq,
-		[ids[0], ids[1], ids[2], ids[0], ids[2]],
-		"down past the last row wraps to first; up past the first wraps to last",
+		[ids[0], ids[1], ids[2], ids[0], ids[2], ids[0]],
+		"list and peek navigation wrap around at both ends",
 	);
 });
