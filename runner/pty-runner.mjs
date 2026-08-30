@@ -61,6 +61,10 @@ function main() {
 	let child = null;
 	let exitCode = null;
 	let stopping = false;
+	// Set when the uncaughtException crash handler finalizes the host. Guards
+	// child.onExit against clobbering the persisted "failed" state with an
+	// "exited" update (the handler kills the child, so its exit callback fires
+	// inside the 50ms flush window — CR round-1, issue #48).
 	/** @type {import("../src/core/types.mjs").HostStatus} */
 	let host = {
 		version: 1,
@@ -126,6 +130,7 @@ function main() {
 				details: { stack: err instanceof Error ? err.stack : undefined },
 			});
 		} catch { /* best effort */ }
+		crashed = true;
 		host = finalizeHostCrash(config.root, config.viewId, host, err);
 		try {
 			broadcast({ type: "exit", exitCode: 1 });
@@ -177,8 +182,12 @@ function main() {
 	});
 	child.onExit((code) => {
 		exitCode = code ?? 0;
-		update({ state: stopping ? "exited" : "exited", endedAt: Date.now(), exitCode, childPid: null });
-		broadcast({ type: "exit", exitCode });
+		// After a crash the handler already persisted "failed" and broadcast
+		// exit; this callback must not overwrite that state.
+		if (!crashed) {
+			update({ state: stopping ? "exited" : "exited", endedAt: Date.now(), exitCode, childPid: null });
+			broadcast({ type: "exit", exitCode });
+		}
 		setTimeout(() => process.exit(exitCode ?? 0), 50).unref?.();
 	});
 	child.onError((err) => {
