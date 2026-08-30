@@ -11,7 +11,11 @@ import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { existsSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { appendLine, readJson } from "../src/core/atomic.mjs";
+import { appendDiagnostic } from "../src/core/diagnostics.mjs";
+import { finalizeHostCrash } from "../src/core/host-crash.mjs";
 import * as P from "../src/core/paths.mjs";
 import { appendBoundedScreenLog, reconcileScreenLog } from "../src/core/screen-log.mjs";
 import { encodePromptForCliArg } from "../src/core/prompt-transport.mjs";
@@ -75,7 +79,24 @@ function main() {
 		attachedClients: 0,
 		attachedEver: false,
 	};
-	const persist = () => writeHost(config.root, host);
+	/** Persist host.json. A transient failure (e.g. Windows rename EPERM racing a
+	 *  reader) must degrade, not kill the host: record a diagnostic and let the
+	 *  next heartbeat tick retry. Socket protocol is the attach main channel, so
+	 *  host.json being briefly stale is acceptable. */
+	const persist = () => {
+		try {
+			writeHost(config.root, host);
+		} catch (err) {
+			try {
+				appendDiagnostic(config.root, config.viewId, {
+					source: "runner",
+					level: "error",
+					code: "persist_error",
+					message: err instanceof Error ? err.message : String(err),
+				});
+			} catch { /* diagnostics must never kill the host either */ }
+		}
+	};
 	const broadcast = (msg) => {
 		const line = JSON.stringify(msg) + "\n";
 		for (const c of clients) c.write(line);
@@ -216,6 +237,29 @@ function main() {
 		killChild(child, childPid, "SIGTERM");
 		setTimeout(() => process.exit(0), 100).unref?.();
 	};
+	// Last-resort crash path: the runner is launched detached with stdio ignored,
+	// so an uncaught exception is otherwise completely silent — no host.json
+	// finalize, no exit message, and the attach view reconnects forever. Record
+	// diagnostics, finalize the host as failed, and broadcast exit so attached
+	// clients can leave the view instead of looping.
+	process.on("uncaughtException", (err) => {
+		process.removeAllListeners("uncaughtException");
+		try {
+			appendDiagnostic(config.root, config.viewId, {
+				source: "runner",
+				level: "error",
+				code: "runner_crash",
+				message: err instanceof Error ? err.message : String(err),
+				details: { stack: err instanceof Error ? err.stack : undefined },
+			});
+		} catch { /* best effort */ }
+		host = finalizeHostCrash(config.root, config.viewId, host, err);
+		try {
+			broadcast({ type: "exit", exitCode: 1 });
+		} catch { /* best effort */ }
+		try { if (child) killChild(child, childPid, "SIGTERM"); } catch { /* best effort */ }
+		process.exit(1);
+	});
 	process.on("SIGTERM", shutdown);
 	process.on("SIGINT", shutdown);
 }
@@ -323,7 +367,7 @@ function markRowFailed(root, viewId, message) {
 }
 
 function failEarly(message) {
-	try { appendLine("/tmp/pi-agent-board-pty-runner.err", message); } catch {}
+	try { appendLine(join(tmpdir(), "pi-agent-board-pty-runner.err"), message); } catch {}
 	process.stderr.write(`${message}\n`);
 	process.exit(2);
 }

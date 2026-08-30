@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, statSync, mkdirSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -7,6 +7,7 @@ import { once } from "node:events";
 import { spawn } from "node:child_process";
 import { test } from "node:test";
 import { atomicWriteJson } from "../src/core/atomic.mjs";
+import { readDiagnostics } from "../src/core/diagnostics.mjs";
 import * as P from "../src/core/paths.mjs";
 import { createView, readHost } from "../src/core/store.mjs";
 
@@ -41,6 +42,24 @@ function isAlive(pid) {
 	} catch {
 		return false;
 	}
+}
+
+/** Connect to the control socket, retrying until it binds. The runner binds the
+ *  socket only after the child spawns, and on Windows the pipe is not a filesystem
+ *  entry (existsSync can't gate it), so poll with real connect attempts. */
+async function connectWhenReady(socketPath, timeoutMs = 5000) {
+	const start = Date.now();
+	while (Date.now() - start < timeoutMs) {
+		const socket = createConnection(socketPath);
+		try {
+			await once(socket, "connect");
+			return socket;
+		} catch {
+			socket.destroy();
+			await new Promise((r) => setTimeout(r, 50));
+		}
+	}
+	throw new Error("timed out waiting for control socket");
 }
 
 let hasNodePty = true;
@@ -251,5 +270,59 @@ test("pty-runner honors screenLogMaxBytes from host config", async () => {
 	} finally {
 		try { runner?.kill(); } catch {}
 		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("pty-runner survives persistent host.json persist failures (EPERM-class)", async () => {
+	const root = freshRoot();
+	let runner;
+	try {
+		const meta = createView(root, { id: "v1", name: "persist-fail", cwd: process.cwd() });
+		// Occupy host.json with a DIRECTORY: rename(tmp, host.json) must fail on
+		// every attempt on every platform (EISDIR/EPERM), so every heartbeat
+		// persist fails — the runner must degrade instead of dying.
+		mkdirSync(P.hostPath(root, "v1"), { recursive: true });
+		const configPath = P.hostConfigPath(root, "v1");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "v1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" },
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		// hostReady() gates on host.json which can never be written here — gate on
+		// the runner process being alive, then poll-connect the control socket
+		// (the runner binds it only after the child spawns).
+		await waitFor(() => isAlive(runner.pid ?? -1));
+		const socket = await connectWhenReady(P.controlSocketPath(root, "v1"));
+		let buf = "";
+		const messages = [];
+		socket.on("data", (chunk) => {
+			buf += chunk.toString();
+			const lines = buf.split("\n");
+			buf = lines.pop() ?? "";
+			for (const line of lines) if (line.trim()) messages.push(JSON.parse(line));
+		});
+		send(socket, { type: "get_status" });
+		// The control protocol must keep working even though every host.json
+		// write fails (status is delivered over the socket, not the file).
+		await waitFor(() => messages.find((m) => m.type === "status"));
+		// Degradation is recorded in diagnostics; the runner is still alive.
+		await waitFor(() => readDiagnostics(root, "v1").some((d) => d.code === "persist_error"));
+		assert.ok(isAlive(runner.pid ?? -1), "runner must survive persist failures");
+		socket.destroy();
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		reapChild(root, "v1");
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
 });
