@@ -276,6 +276,7 @@ test("pty-runner honors screenLogMaxBytes from host config", async () => {
 test("pty-runner survives persistent host.json persist failures (EPERM-class)", async () => {
 	const root = freshRoot();
 	let runner;
+	let childPid = null;
 	try {
 		const meta = createView(root, { id: "v1", name: "persist-fail", cwd: process.cwd() });
 		// Occupy host.json with a DIRECTORY: rename(tmp, host.json) must fail on
@@ -315,12 +316,16 @@ test("pty-runner survives persistent host.json persist failures (EPERM-class)", 
 		// The control protocol must keep working even though every host.json
 		// write fails (status is delivered over the socket, not the file).
 		await waitFor(() => messages.find((m) => m.type === "status"));
+		// Capture the child pid from the socket status (host.json is occupied by
+		// a directory, so reapChild's readHost lookup is a no-op here).
+		childPid = messages.find((m) => m.type === "status")?.status?.childPid ?? null;
 		// Degradation is recorded in diagnostics; the runner is still alive.
 		await waitFor(() => readDiagnostics(root, "v1").some((d) => d.code === "persist_error"));
 		assert.ok(isAlive(runner.pid ?? -1), "runner must survive persist failures");
 		socket.destroy();
 	} finally {
 		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
 		reapChild(root, "v1");
 		await new Promise((r) => setTimeout(r, 50));
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });

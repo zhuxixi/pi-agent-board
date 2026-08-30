@@ -58,6 +58,7 @@ function main() {
 	/** @type {Set<import("node:net").Socket>} */
 	const clients = new Set();
 	let childPid = null;
+	let child = null;
 	let exitCode = null;
 	let stopping = false;
 	/** @type {import("../src/core/types.mjs").HostStatus} */
@@ -108,6 +109,31 @@ function main() {
 	};
 	persist();
 
+	// Last-resort crash path (registered early, before spawnInteractive, so any
+	// early synchronous failure is also covered): the runner is launched detached
+	// with stdio ignored, so an uncaught exception is otherwise completely silent —
+	// no host.json finalize, no exit message, and the attach view reconnects
+	// forever. Record diagnostics, finalize the host as failed, and broadcast exit
+	// so attached clients can leave the view instead of looping.
+	process.on("uncaughtException", (err) => {
+		process.removeAllListeners("uncaughtException");
+		try {
+			appendDiagnostic(config.root, config.viewId, {
+				source: "runner",
+				level: "error",
+				code: "runner_crash",
+				message: err instanceof Error ? err.message : String(err),
+				details: { stack: err instanceof Error ? err.stack : undefined },
+			});
+		} catch { /* best effort */ }
+		host = finalizeHostCrash(config.root, config.viewId, host, err);
+		try {
+			broadcast({ type: "exit", exitCode: 1 });
+		} catch { /* best effort */ }
+		try { if (child) killChild(child, childPid, "SIGTERM"); } catch { /* best effort */ }
+		setTimeout(() => process.exit(1), 50).unref?.();
+	});
+
 	const args = [...config.piArgsPrefix, "--session", config.sessionFile];
 	if (config.model) args.push("--model", config.model);
 	if (config.thinkingLevel) args.push("--thinking", config.thinkingLevel);
@@ -128,7 +154,6 @@ function main() {
 		AGENT_VIEW_HOSTED: "pty",
 	};
 
-	let child;
 	try {
 		child = spawnInteractive(config.piCommand, args, {
 			cwd: config.cwd,
@@ -237,29 +262,6 @@ function main() {
 		killChild(child, childPid, "SIGTERM");
 		setTimeout(() => process.exit(0), 100).unref?.();
 	};
-	// Last-resort crash path: the runner is launched detached with stdio ignored,
-	// so an uncaught exception is otherwise completely silent — no host.json
-	// finalize, no exit message, and the attach view reconnects forever. Record
-	// diagnostics, finalize the host as failed, and broadcast exit so attached
-	// clients can leave the view instead of looping.
-	process.on("uncaughtException", (err) => {
-		process.removeAllListeners("uncaughtException");
-		try {
-			appendDiagnostic(config.root, config.viewId, {
-				source: "runner",
-				level: "error",
-				code: "runner_crash",
-				message: err instanceof Error ? err.message : String(err),
-				details: { stack: err instanceof Error ? err.stack : undefined },
-			});
-		} catch { /* best effort */ }
-		host = finalizeHostCrash(config.root, config.viewId, host, err);
-		try {
-			broadcast({ type: "exit", exitCode: 1 });
-		} catch { /* best effort */ }
-		try { if (child) killChild(child, childPid, "SIGTERM"); } catch { /* best effort */ }
-		process.exit(1);
-	});
 	process.on("SIGTERM", shutdown);
 	process.on("SIGINT", shutdown);
 }

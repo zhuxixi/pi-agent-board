@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, readFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -52,6 +52,7 @@ test("renameWithRetry gives up after all attempts, cleans up tmp, rethrows", () 
 	const dir = freshDir();
 	try {
 		const tmpPath = join(dir, "gone.tmp");
+		writeFileSync(tmpPath, "x");
 		let calls = 0;
 		assert.throws(() => renameWithRetry(tmpPath, join(dir, "a"), {
 			rename: (tmp, file) => { calls += 1; const e = new Error("op not permitted"); e.code = "EPERM"; throw e; },

@@ -299,7 +299,7 @@ export class PtyAttachComponent implements Component {
 
 	private loadingDetail(elapsedSeconds: number): string {
 		if (this.status === "attached") return "Attached · waiting for the session to render…";
-		if (this.status.startsWith("error") || this.status === "host exited") return this.status;
+		if (this.status.startsWith("error") || this.status === "host exited" || this.status === "host not reachable") return this.status;
 		if (this.status === "disconnected") return `Reconnecting to the session host… ${elapsedSeconds}s`;
 		return `Starting the session host… ${elapsedSeconds}s`;
 	}
