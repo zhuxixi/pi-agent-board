@@ -33,6 +33,9 @@ export function launchRun(root, config, opts) {
 		detached: true,
 		stdio: "ignore",
 		env: process.env,
+		// Windows: detached children get their own console window unless
+		// suppressed (CREATE_NO_WINDOW; no-op on POSIX) — issue #49.
+		windowsHide: true,
 	});
 	child.unref();
 
@@ -61,6 +64,7 @@ export function launchHost(root, config, opts) {
 		detached: true,
 		stdio: "ignore",
 		env: process.env,
+		windowsHide: true,
 	});
 	child.unref();
 
@@ -85,6 +89,7 @@ export function launchTitle(root, config, opts) {
 		detached: true,
 		stdio: "ignore",
 		env: process.env,
+		windowsHide: true,
 	});
 	child.unref();
 
@@ -109,6 +114,7 @@ export function launchAutoState(root, config, opts) {
 		detached: true,
 		stdio: "ignore",
 		env: process.env,
+		windowsHide: true,
 	});
 	child.unref();
 
