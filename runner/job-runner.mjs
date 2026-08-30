@@ -103,8 +103,11 @@ function main() {
 		writeStatus(root, status);
 		writeRunEvidence(root, evidence);
 		writeEvidence(root, evidence);
-		updateCodeRefsFromEvidence(root, viewId, evidence, meta);
 		writeState(root, projectViewState(status, now, readState(root, viewId)));
+		// Best-effort code-refs extraction shells out to git and can take hundreds of
+		// ms; run it after the state write so endedAt-visible state converges first.
+		// The extraction only depends on evidence + git, never on state.json.
+		updateCodeRefsFromEvidence(root, viewId, evidence, meta);
 		dirty = false;
 	};
 
@@ -218,7 +221,7 @@ function main() {
 		if (applyHeuristicAutoState(config, status, evidence)) {
 			finalizeEvidence(evidence, status, Date.now());
 			status.evidenceSummary = summarizeEvidence(evidence);
-			persist(true);
+			persistUnlessManual(true);
 		}
 		maybeModelAutoState(config, status, evidence)
 			.then((changed) => {
@@ -275,6 +278,11 @@ function finalizeSteeringIfNeeded(config, status, evidence) {
 /** @param {import("../src/core/types.mjs").RunConfig} config @param {import("../src/core/types.mjs").RunStatus} status */
 function drainQueuedFollowUp(config, status) {
 	if (status.semanticState !== "idle" && status.semanticState !== "completed") return;
+	// A manual completion racing the exit chain must never be followed up: the
+	// user just finished this row, so don't launch a new run over it. The
+	// in-memory status may be stale (fresh-read guards skip classification), so
+	// check the authoritative state.json signal.
+	if (isManualCompletion(readState(config.root, config.viewId))) return;
 	if (config.kind === "plan" || config.kind === "plan_change") return;
 	const claimed = claimNextFollowUp(config.root, config.viewId);
 	if (!claimed.ok || !claimed.item) return;
@@ -358,6 +366,13 @@ function canAutoState(config, status, evidence) {
 
 function applyHeuristicAutoState(config, status, evidence) {
 	if (!canAutoState(config, status, evidence)) return false;
+	// Fresh read of state.json (not status.json): completeView writes the manual
+	// completion signal (semanticState "completed" + autoState null) to state.json
+	// and only clears autoState in status.json, so status.json can never carry
+	// the completed+null pair. If the user marked the row done while the worker
+	// was exiting, skip classification so the persist path can't clobber it.
+	const latestState = readState(config.root, config.viewId);
+	if (isManualCompletion(latestState)) return false;
 	const latest = latestEvidenceText(evidence) || status.latestAssistantPreview || status.summary || "";
 	const classification = heuristicAutoState(latest, { lastAgentActivityAt: status.lastAgentActivityAt ?? null });
 	const changed = applyAutoStateToStatus(status, classification, Date.now());
