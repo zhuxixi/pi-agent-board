@@ -246,7 +246,7 @@ function spawnInteractive(command, args, opts) {
 	}
 	if (!opts.allowPipeFallback) throw new Error("node-pty is unavailable");
 
-	const proc = spawn(command, args, { cwd: opts.cwd, env: opts.env, stdio: ["pipe", "pipe", "pipe"] });
+	const proc = spawn(command, args, { cwd: opts.cwd, env: opts.env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
 	return {
 		pid: proc.pid ?? null,
 		write: (s) => proc.stdin.write(s),
