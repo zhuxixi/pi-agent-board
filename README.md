@@ -35,7 +35,7 @@ If rows remain in `Running`, first verify that Pi itself can complete a one-shot
 pi --mode json -p --no-session "Reply with exactly: DONE"
 ```
 
-A healthy command emits an assistant reply, then an `agent_end` event, and exits. See [VERIFY.md](VERIFY.md) for the complete no-auth, provider-auth, and PTY checks.
+A healthy command emits an assistant `message_end`, then an `agent_end` event, and exits. See [VERIFY.md](VERIFY.md) for the complete no-auth, provider-auth, and PTY checks.
 
 ## Install
 
@@ -77,13 +77,15 @@ rm ~/.pi/agent/extensions/agent-board
 
 ## Quick Start
 
-1. Open the board with `/agent-board` inside Pi.
-2. Press `i` to enter INSERT mode.
-3. Type a task and press `Enter`.
-4. In the **Start session** dialog, review or change the working directory (`cwd`), model, thinking level, and action.
+Open the board with `/agent-board` inside Pi, then:
+
+1. Press `i` to enter INSERT mode.
+2. Type a task.
+3. Press `Enter` to open the **Start session** dialog.
+4. Review or change the working directory (`cwd`), model, thinking level, and action.
 5. Press `Enter` on **Start session** to launch the task.
 
-The row starts in `Queued`, then moves through `Running` to a terminal state such as `Needs answer`, `Needs instructions`, `Done`, `Failed`, or `Stopped`.
+With a draft in the input, `Enter` opens **Start session**; with an empty input, `Enter` attaches/resumes the selected session. The row starts in `Queued`, then moves through `Running` to a terminal state such as `Needs answer`, `Needs instructions`, `Done`, `Failed`, or `Stopped`.
 
 From the board:
 
@@ -157,7 +159,7 @@ Coverage is enforced by `c8` with thresholds configured in `.c8rc.json`
 (`test/ui-smoke.test.mjs`) that constructs and renders the real entrypoints;
 it is excluded from the coverage thresholds by design.
 
-Current baseline: 300+ tests, ~92% line coverage on the core modules.
+Run `npm run verify` locally before submitting changes; CI is the authoritative source for the current test and coverage results.
 
 ## Publish
 
