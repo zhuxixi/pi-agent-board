@@ -258,6 +258,10 @@ function main() {
 function finalizeSteeringIfNeeded(config, status, evidence) {
 	if (config.kind !== "plan" && config.kind !== "plan_change") return;
 	if (status.semanticState === "failed" || status.semanticState === "stopped") return;
+	// A manual completion racing the exit chain must not be resurrected for
+	// approval: the user already closed this row. Same signal as the other
+	// post-exit guards (completeView writes completed+autoState null to state.json).
+	if (isManualCompletion(readState(config.root, config.viewId))) return;
 	recordPlanReady(config.root, config.viewId, {
 		runId: config.runId,
 		planText: latestEvidenceText(evidence) || status.latestAssistantPreview || status.summary || "Plan ready",

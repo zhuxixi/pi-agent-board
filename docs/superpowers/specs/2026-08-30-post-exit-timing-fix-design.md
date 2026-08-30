@@ -31,9 +31,9 @@ fire and the post-exit heuristic classification (`in_progress`, since
 `maybeModelAutoState` has a fresh-read guard for this exact case;
 `applyHeuristicAutoState` does not.
 
-## Fix (minimal, two changes)
+## Fix (minimal, four changes in `runner/job-runner.mjs`)
 
-### Change 1 — persist order in `runner/job-runner.mjs`
+### Change 1 — persist order
 Move `writeState` before `updateCodeRefsFromEvidence` inside `persist()`:
 ```js
 writeStatus(root, status);
@@ -45,15 +45,28 @@ updateCodeRefsFromEvidence(root, viewId, evidence, meta);
 Semantics unchanged (code-refs extraction depends only on evidence + git).
 Verified experimentally: markCompleted assertion passes again.
 
-### Change 2 — fresh-read guard in `applyHeuristicAutoState`
-Align with `maybeModelAutoState`:
+### Change 2 — heuristic persist goes through persistUnlessManual
+In the close handler, the `applyHeuristicAutoState` branch's `persist(true)`
+becomes `persistUnlessManual(true)` so a manual completion racing the
+heuristic classification is not overwritten. `persistUnlessManual` checks
+`isManualCompletion(readState(...))` (state.json — the only place
+`completeView` writes the `completed` + `autoState: null` signal; it only
+clears autoState in status.json) before writing.
+
+### Change 3 — applyHeuristicAutoState manual-completion guard
+Skip classification when state.json shows a manual completion, so the
+in-memory status isn't mutated in a way a later drain/persist could replay
+over the user's verdict:
 ```js
-const fresh = readStatus(config.root, config.viewId, config.runId);
-if (fresh && isManualCompletion(fresh)) return false;
-if (fresh) Object.assign(status, fresh);
+const latestState = readState(config.root, config.viewId);
+if (isManualCompletion(latestState)) return false;
 ```
-Prevents post-exit classification from clobbering a user's manual completion.
-Needs experimental verification.
+
+### Change 4 — drainQueuedFollowUp / finalizeSteeringIfNeeded guards
+`drainQueuedFollowUp` (follow-up runs) and `finalizeSteeringIfNeeded`
+(plan approval resurrection) both early-return on
+`isManualCompletion(readState(...))` so the exit chain never starts new
+work or resurrects a row the user just manually completed.
 
 ## Non-goals
 - No changes to #44/#45 code (windowsHide / control socket)
