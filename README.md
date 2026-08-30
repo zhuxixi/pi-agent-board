@@ -253,64 +253,100 @@ On Windows, PTY host control uses a named pipe and spawned child console windows
 
 The board is global across projects by default. Rows are stored under `~/.pi/agent/agent-board/`; archiving a row removes it from the board but preserves the underlying Pi session file.
 
+## Persistence, Safety, and Limitations
+
+Agent Board stores its durable roster and per-session artifacts under `~/.pi/agent/agent-board/` by default. Set `AGENT_BOARD_ROOT` to use another location. The store includes the roster, launch preferences, per-session metadata and state, Pi session JSONL, run status/events, evidence, diagnostics, and (for PTY hosts) a replayable screen log.
+
+Rows and session history survive Pi reloads, Pi restarts, and worker exits. When the dashboard opens, it reconciles stale runner or host records and keeps resumable sessions visible. Archiving a row removes it from the board but does not delete its underlying Pi session file.
+
+> **Worktree isolation is currently disabled.** Agent Board does not automatically create or manage Git worktrees. Multiple sessions in the same repository may run concurrently, so avoid overlapping writes or provide your own isolation before starting parallel coding tasks.
+
+Other current limitations:
+
+- Agent Board runs locally; it does not provide cloud execution, multi-user coordination, or shared dashboards.
+- Real model output still depends on Pi provider authentication and network access.
+- The `--agent-board` startup path opens the dashboard but cannot attach to a managed session; use `/agent-board` from a normal Pi session for attach.
+- Pending Pi question or questionnaire tools must be answered in the attached interactive session; inline reply is rejected while one is pending.
+- PTY-dependent features require a working `node-pty` installation. Background work can use the JSON-runner fallback when PTY is unavailable, but start & attach then becomes background-only.
+
 ## Configuration
 
-Useful environment variables:
+Set these variables before starting Pi. Model-backed features fall back gracefully where noted, so disabling them does not prevent the core dashboard from working.
 
-| Variable | Use |
-| --- | --- |
-| `AGENT_BOARD_ROOT` | Store location. Defaults to `~/.pi/agent/agent-board/`. |
-| `AGENT_BOARD_AUTO_STATE=off` | Disable automatic terminal-state moves. |
-| `AGENT_BOARD_AUTO_STATE_MODEL=<model>` | Model for classifying finished turns. Defaults to `gpt-4o`; use `off` for heuristic-only. |
-| `AGENT_BOARD_AUTO_STATE_NO_DONE` | Disables automatic `completed` classification (default: enabled). Set to `0`/`false`/`off`/`no` to restore auto-done. |
-| `AGENT_BOARD_CODE_REFS=off` | Disable issue/PR badge extraction from session evidence. |
-| `AGENT_BOARD_SUMMARY_MODEL=<model>` | Model for short row summaries. Defaults to `gpt-4o`; use `off` to disable. |
-| `AGENT_BOARD_TITLE_MODEL=<model>` | Model for generated session titles. Defaults to `openai-codex/gpt-5.5`; use `off` to disable. |
-| `AGENT_BOARD_TITLE_THINKING_LEVEL=<level>` | Thinking level for title generation. Defaults to `low`; use `off` to omit it. |
-| `AGENT_BOARD_DISABLE_PTY=1` | Disable PTY attach mode. |
-| `AGENT_BOARD_IME_FIX=0` | Disable the IME cursor-rect coalescer (issue #28). The coalescer folds pi-tui's per-frame cursor-park writes into the frame's synchronized-output block so terminals report one stable IME cursor position per frame instead of two (candidate-window flicker in busy sessions). |
-| `AGENT_BOARD_FORCE_PTY=1` | Force PTY attach mode. |
-| `AGENT_BOARD_ATTACH_MOUSE=0` | Disable attach-view mouse handling and use terminal-native selection. |
-| `AGENT_BOARD_WHEEL_LINES=<1-50>` | Lines scrolled per mouse-wheel event in attach view. Defaults to `1`. |
+| Variable | Default / values | Purpose |
+| --- | --- | --- |
+| `AGENT_BOARD_ROOT` | `~/.pi/agent/agent-board/` | Override the durable store location. |
+| `AGENT_BOARD_AUTO_STATE` | enabled; `off` disables | Enable automatic terminal-state refinement after a turn. |
+| `AGENT_BOARD_AUTO_STATE_MODEL` | `gpt-4o`; `off` uses heuristics | Model for classifying the terminal state of a finished turn. |
+| `AGENT_BOARD_AUTO_STATE_NO_DONE` | unset = manual Done; `0`, `false`, `off`, or `no` restores auto-Done | Keep completion manual by default, or restore automatic `Done` classification. |
+| `AGENT_BOARD_SUMMARY_MODEL` | `gpt-4o`; `off` disables | Generate short row summaries. Heuristic summaries remain available as a fallback. |
+| `AGENT_BOARD_TITLE_MODEL` | `openai-codex/gpt-5.5`; `off` disables | Generate a short session title after dispatch. The initial slug remains if generation fails. |
+| `AGENT_BOARD_TITLE_THINKING_LEVEL` | `low`; `off` omits the option | Thinking level used by title generation. |
+| `AGENT_BOARD_CODE_REFS` | enabled; `off` disables | Extract issue/PR badges from session evidence. |
+| `AGENT_BOARD_DISABLE_PTY` | unset; `1` disables | Disable PTY host and attach mode. |
+| `AGENT_BOARD_FORCE_PTY` | unset; `1` forces the PTY path | Force the PTY availability path when diagnosing or controlling fallback behavior. |
+| `AGENT_BOARD_ATTACH_MOUSE` | enabled; `0`, `off`, or `false` disables | Disable attach-view mouse handling and use terminal-native selection instead. |
+| `AGENT_BOARD_ENABLE_MOUSE_SCROLL` | enabled; `0` disables | Compatibility switch to disable attach-view mouse scrolling. |
+| `AGENT_BOARD_WHEEL_LINES` | `1`, clamped to `1..50` | Lines scrolled per mouse-wheel event in attach view. |
+| `AGENT_BOARD_MAX_WARM_HOSTS` | `4`, clamped to `0..50` | Maximum number of idle PTY hosts retained for faster attach. |
+| `AGENT_BOARD_WARM_HOST_TTL_MS` | `600000` (10 minutes); `0` disables TTL eviction | How long an idle warm host may remain before it is evicted. |
+| `AGENT_BOARD_ATTACH_NATIVE_PASTE` | enabled; `0` disables | Disable X11 PRIMARY selection copy and middle-click paste integration. |
+| `AGENT_BOARD_FORWARD_OSC52` | enabled; `0` disables | Disable OSC 52 clipboard sequence forwarding from an attached session. |
+| `AGENT_BOARD_FORWARD_IMAGES` | enabled; `0` disables | Disable terminal image/file passthrough forwarding from an attached session. |
+| `AGENT_BOARD_IME_FIX` | enabled; `0` disables | Disable the attach-view IME cursor coalescer if your terminal has compatibility problems. |
 
-Legacy `AGENT_VIEW_*` variables are still honored for migration.
+Older `AGENT_VIEW_*` names are still read in selected compatibility paths. Prefer `AGENT_BOARD_*` for new setups. Internal child markers are managed by Agent Board and are not user settings.
 
-If the board reports `node-pty unavailable`, press `!` in the dashboard for diagnosis and fix steps.
+The `providers.json` file under the configured store root can extend the built-in issue/PR reference providers; see the [Evidence and Code References](#evidence-and-code-references) section for the feature overview.
 
-## Develop
+## Troubleshooting
+
+### Rows stay in `Running`
+
+First verify that Pi itself can complete a one-shot model call:
+
+```bash
+pi --mode json -p --no-session "Reply with exactly: DONE"
+```
+
+The command should emit an assistant reply, then an `agent_end` event, and exit. If it hangs before the assistant reply, fix Pi provider authentication or network access first. Agent Board cannot produce live model results until Pi works independently.
+
+### `node-pty unavailable`
+
+Press `!` in the dashboard to open the diagnostic panel and follow its repair hints. Common causes include a missing native `node-pty` binary, a Node/architecture mismatch, a missing or non-executable macOS `spawn-helper`, or macOS quarantine. You can temporarily set `AGENT_BOARD_DISABLE_PTY=1` to use background JSON-runner behavior where supported.
+
+### Attach is slow or keeps reconnecting
+
+A cold PTY host may briefly show a loading or reconnecting surface while it starts. Check the PTY status in the dashboard with `!`; stale hosts are diagnosed separately from active task workers. If the host never becomes healthy, repair `node-pty` or use background mode for eligible managed sessions.
+
+### Start & attach falls back to background
+
+Start & attach requires PTY support. When PTY is unavailable, the task is still dispatched in the background and the dashboard displays a warning. Repair PTY and retry attach from the normal `/agent-board` command path.
+
+### Inline reply is rejected
+
+A pending Pi question or questionnaire requires the real interactive session. Attach to the row and answer it there; ordinary replies can be sent from Peek and are queued while a session is busy.
+
+### Sessions in the same repository conflict
+
+Worktree isolation is not enabled. Stop overlapping writers, separate their working directories, or create and manage Git worktrees yourself before running concurrent coding tasks.
+
+See [VERIFY.md](VERIFY.md) for no-auth checks, extension loading checks, provider checks, persistence checks, and the manual dashboard flow.
+
+## Development
+
+For local development:
 
 ```bash
 npm install
-npm run typecheck
-npm test
-npm run test:coverage
-npm run pack:dry
-```
-
-Run all checks with:
-
-```bash
 npm run verify
 ```
 
-`npm run verify` runs typecheck, tests, coverage, and a dry npm pack.
+`npm run verify` runs typecheck, tests, coverage, and a package dry-run. The same checks run in CI on Node 22 and Node 24. See [VERIFY.md](VERIFY.md) for the full verification checklist and known environment-dependent limitations.
 
-### QA baseline
+## Publishing
 
-Every push and PR runs the same checks in CI (`.github/workflows/ci.yml`, Node 22 + 24),
-and `main` branch protection requires both CI checks to pass before merging.
-
-Coverage is enforced by `c8` with thresholds configured in `.c8rc.json`
-(lines ≥ 85%, functions ≥ 80%, branches ≥ 70%). The TS UI layer
-(`src/ui/*.ts`, `src/commands/*.ts`) is covered by a smoke test
-(`test/ui-smoke.test.mjs`) that constructs and renders the real entrypoints;
-it is excluded from the coverage thresholds by design.
-
-Run `npm run verify` locally before submitting changes; CI is the authoritative source for the current test and coverage results.
-
-## Publish
-
-Before publishing a new release, bump the package version, run verification, then publish:
+Before publishing a release, verify the package, bump the version, and publish it:
 
 ```bash
 npm run verify
@@ -318,12 +354,17 @@ npm version patch
 npm publish
 ```
 
-If the version is already bumped, skip `npm version patch`.
-
-Use `npm version minor` or `npm version major` instead when the release warrants it. After publish, users install with:
+Use `npm version minor` or `npm version major` when appropriate. If the version is already bumped, skip `npm version patch`. After publishing, users install the scoped package with:
 
 ```bash
 pi install npm:@zhuxixi/pi-agent-board
 ```
 
 The Pi package gallery uses the `pi.video` and `pi.image` URLs from `package.json`.
+
+## Further Reading
+
+- [Manual verification](VERIFY.md) — static checks, Pi loading, provider authentication, persistence, and dashboard flows.
+- [Product requirements](PRD.md) — original product scope and design context.
+- [Progress log](PROGRESS.md) — implementation checkpoints and known environment notes.
+- [Exploration notes](docs/EXPLORATION.md) — Pi API and integration research.
