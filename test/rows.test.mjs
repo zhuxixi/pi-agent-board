@@ -209,3 +209,22 @@ test("stateGlyph uses stronger variants for unread rows", () => {
 	assert.equal(stateGlyph("completed", false, false, true), "✔");
 	assert.equal(stateGlyph("idle", false, false, true), "●");
 });
+
+test("rowView marks staleHost when host.json says alive but the process is gone and the heartbeat is stale", () => {
+	const now = 1_000_000;
+	const base = row("a", "idle");
+	const host = { version: 1, viewId: "a", state: "alive", lastSeenAt: now - 60_000, runnerPid: 999999, childPid: null, socketPath: "/x", startedAt: now - 3_600_000, endedAt: null, exitCode: null, error: null, cols: 80, rows: 24, attachedClients: 0, attachedEver: true };
+	assert.equal(rowView({ ...base, host, hostAlive: false }, now).staleHost, true);
+});
+
+test("rowView does not mark staleHost for fresh heartbeats, terminal states, or live hosts", () => {
+	const now = 1_000_000;
+	const base = row("a", "idle");
+	const host = { version: 1, viewId: "a", state: "alive", lastSeenAt: now - 60_000, runnerPid: 999999, childPid: null, socketPath: "/x", startedAt: now - 3_600_000, endedAt: null, exitCode: null, error: null, cols: 80, rows: 24, attachedClients: 0, attachedEver: true };
+	const fresh = { ...host, lastSeenAt: now - 1_000 };
+	assert.equal(rowView({ ...base, host: fresh, hostAlive: false }, now).staleHost, false);
+	const exited = { ...host, state: "exited" };
+	assert.equal(rowView({ ...base, host: exited, hostAlive: false }, now).staleHost, false);
+	assert.equal(rowView({ ...base, host: fresh, hostAlive: true }, now).staleHost, false);
+	assert.equal(rowView({ ...base, host: null, hostAlive: false }, now).staleHost, false);
+});

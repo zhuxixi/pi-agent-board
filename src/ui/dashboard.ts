@@ -1362,7 +1362,7 @@ export class DashboardComponent implements Component {
 		const contentWidth = Math.max(20, width - indent);
 		const glyph = stateGlyph(rv.state, rv.alive, rv.hostAlive, rv.unread);
 		const marker = stageFg(rv.state, selected ? `›${glyph}` : ` ${glyph}`);
-		const statusBadges = `${rv.reviewReady ? "✓ " : ""}${rv.diagnosticStalled ? "⏳ " : ""}${rv.evidenceErrorCount || rv.diagnosticErrorCount ? "! " : ""}${rv.followUpCount ? `q${rv.followUpCount} ` : ""}${rv.steeringState && rv.steeringState !== "none" ? "π " : ""}`;
+		const statusBadges = `${rv.reviewReady ? "✓ " : ""}${rv.diagnosticStalled ? "⏳ " : ""}${rv.staleHost ? "⌁ " : ""}${rv.evidenceErrorCount || rv.diagnosticErrorCount ? "! " : ""}${rv.followUpCount ? `q${rv.followUpCount} ` : ""}${rv.steeringState && rv.steeringState !== "none" ? "π " : ""}`;
 		const refsBadge = rv.refsBadge ? (rv.refsLowConfidence ? t.fg("dim", rv.refsBadge) : rv.refsBadge) : "";
 		const badge = `${this.mode === "select" ? `${this.isSelectedForBatch(rv.id) ? "◉" : "○"} ` : ""}${rv.pinned ? "★ " : ""}${rv.worktree ? "⌥ " : ""}${statusBadges}${refsBadge ? `${refsBadge} ` : ""}`;
 		const ageRaw = ` ${rv.age}`;
