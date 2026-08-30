@@ -72,10 +72,10 @@ Inside pi:
 1. Type `/agent-board`, or start with `pi /agent-board` → the full-screen dashboard opens.
    - With `pi /agent-board`, quitting the dashboard exits Pi instead of dropping you into a normal chat session.
    - The startup path should feel cleaner than `/agent-board`: no normal Pi header/footer chrome and no dispatch notifications above the dashboard.
-2. Type a task in the bottom input (e.g. `list the files in this repo and summarize the README`), then press **Enter**.
+2. Press **i** to enter INSERT mode, then type a task in the bottom input (e.g. `list the files in this repo and summarize the README`) and press **Enter**.
    - A **Start session** dialog opens with **Start session** focused by default.
    - Press **Enter** again to launch immediately, or move with **↑/↓** to change **cwd**, **model**, or **thinking** first.
-   - A row appears and moves `Queued → Running → Done` (needs step 2 healthy).
+   - With automatic Done disabled by default, a successful run settles in **Needs instructions** until you review it and press **d** to confirm **Done**. Set `AGENT_BOARD_AUTO_STATE_NO_DONE=0` to restore automatic Done classification for this verification path.
 3. **space** = peek when the input is empty (summary, blocker, latest output); in peek **r** = reply, **a** = attach.
    **→** / **>** = open a full-screen live session view without interrupting; **←** / **<** returns.
 4. **enter** on an empty input = attach to the selected full session (confirms first if it's still running).
