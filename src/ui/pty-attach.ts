@@ -268,7 +268,7 @@ export class PtyAttachComponent implements Component {
 		const bodyHeight = Math.max(1, height - 2);
 		let body: string[];
 		if (!this.attaching && this.receivedOutput) {
-			const projected = this.project(bodyHeight, width);
+			const projected = this.project(bodyHeight);
 			body = projected.lines;
 			while (body.length < bodyHeight) body.unshift("");
 		} else {
@@ -481,7 +481,9 @@ export class PtyAttachComponent implements Component {
 		try {
 			this.tui.terminal.write(XTSHIFTESCAPE_SELECT);
 			this.tui.terminal.write(MOUSE_ENABLE);
-		} catch {}
+		} catch {
+			/* best-effort: some terminals reject these sequences; mouse reporting is optional */
+		}
 	}
 
 	private mouseScrollEnabled(): boolean {
@@ -507,7 +509,9 @@ export class PtyAttachComponent implements Component {
 	private disableMouseScroll(): void {
 		try {
 			this.tui.terminal.write(MOUSE_DISABLE);
-		} catch {}
+		} catch {
+			/* best-effort: terminal may already be gone at teardown */
+		}
 	}
 
 	private handleMouseInputChunk(events: Array<{ raw: string; mouse: { button: number; row: number; col: number; action: string } }>): boolean {
@@ -721,7 +725,9 @@ export class PtyAttachComponent implements Component {
 		if (seq) {
 			try {
 				this.tui.terminal.write(seq);
-			} catch {}
+			} catch {
+				/* best-effort: OSC52 clipboard support is optional */
+			}
 		}
 		// Also mirror the selection into the X11 PRIMARY selection so the rest of the
 		// desktop can middle-click-paste it — closes the loop with pastePrimarySelection().
@@ -742,7 +748,9 @@ export class PtyAttachComponent implements Component {
 			const timer = setTimeout(() => {
 				try {
 					child.kill("SIGKILL");
-				} catch {}
+				} catch {
+					/* the child may have already exited before the timeout fired */
+				}
 			}, 800);
 			child.stdout?.on("data", (chunk: Buffer) => {
 				out += chunk.toString("utf8");
@@ -752,7 +760,9 @@ export class PtyAttachComponent implements Component {
 				clearTimeout(timer);
 				if (!this.closed && out) this.send({ type: "input", data: out });
 			});
-		} catch {}
+		} catch {
+			/* silent no-op when xclip is absent — documented contract of this helper */
+		}
 	}
 
 	/** Write `text` to the X11 PRIMARY selection so other apps can middle-click-paste it. */
@@ -763,7 +773,9 @@ export class PtyAttachComponent implements Component {
 			child.stdin?.on("error", () => {});
 			child.on("error", () => {});
 			child.stdin?.end(text);
-		} catch {}
+		} catch {
+			/* silent no-op when xclip is absent */
+		}
 	}
 
 	private selectionText(): string {
@@ -792,6 +804,9 @@ export class PtyAttachComponent implements Component {
 	}
 
 	private currentSize(): { cols: number; rows: number } {
+		// SAFETY: duck-typed read — Pi TUI's Terminal type does not consistently expose
+		// cols/columns/rows across versions (see resizeIfNeeded below). Runtime
+		// fallbacks (120/24) keep this safe when the fields are absent.
 		const term = this.tui.terminal as unknown as { cols?: number; columns?: number; rows?: number } | undefined;
 		return {
 			cols: Math.max(20, term?.cols ?? term?.columns ?? 120),
@@ -921,7 +936,9 @@ export class PtyAttachComponent implements Component {
 		for (const seq of toWrite) {
 			try {
 				this.tui.terminal.write(seq);
-			} catch {}
+			} catch {
+				/* best-effort: forwarded sequences are enhancements, never critical */
+			}
 		}
 	}
 
@@ -948,7 +965,9 @@ export class PtyAttachComponent implements Component {
 			} finally {
 				closeSync(fd);
 			}
-		} catch {}
+		} catch {
+			/* best-effort: a missing or racing screen.log must not block attach */
+		}
 	}
 
 	private pushOutput(data: string, opts: { forwardProtocols?: boolean } = {}): void {
@@ -967,7 +986,7 @@ export class PtyAttachComponent implements Component {
 		});
 	}
 
-	private project(height: number, width: number): { lines: string[]; cursor: { row: number; col: number } | null } {
+	private project(height: number): { lines: string[]; cursor: { row: number; col: number } | null } {
 		const out: string[] = [];
 		const buf = this.term.buffer.active;
 		const selection = normalizeSelection(this.selection);
@@ -1007,7 +1026,9 @@ export class PtyAttachComponent implements Component {
 		}
 		try {
 			this.socket?.destroy();
-		} catch {}
+		} catch {
+			/* best-effort teardown: socket may already be destroyed */
+		}
 		this.socket = null;
 		this.connected = false;
 	}
