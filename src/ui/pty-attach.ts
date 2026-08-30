@@ -8,6 +8,7 @@ import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@
 import { isProbablyEmptyPiInputLine } from "../core/pty-input.mjs";
 import { findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
 import { createAttachOutputRenderScheduler, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
+import { evaluateAttachReconnect, shouldEscapeAttach } from "../core/pty-attach-reconnect.mjs";
 import { installImeCursorCoalesce } from "../core/ime-cursor-coalesce.mjs";
 import { createJiggleRetryController } from "../core/pty-attach-jiggle-controller.mjs";
 import { clampInt, parseMouseInputChunk, resolveWheelLines, scrollViewportTop, selectionDragScrollLines } from "../core/pty-scroll.mjs";
@@ -133,6 +134,13 @@ export class PtyAttachComponent implements Component {
 	private osc52Carry = "";
 	private passthroughCarry = "";
 	private readonly connectStartedAt = Date.now();
+	// Set once the first socket connect succeeds; drives the reconnect give-up
+	// policy (short window after a live session dies, long window during cold
+	// host start — see pty-attach-reconnect.mjs).
+	private everConnected = false;
+	// Timestamp of the first disconnect that started the current reconnect
+	// cycle; reset on every successful (re)connect.
+	private disconnectedAt: number | null = null;
 	// Lines scrolled per mouse-wheel event; configurable via $AGENT_BOARD_WHEEL_LINES.
 	private readonly mouseWheelLines = resolveWheelLines();
 	private readonly term: XtermLike;
@@ -235,7 +243,10 @@ export class PtyAttachComponent implements Component {
 			matchesKey(data, Key.left) ||
 			matchesKey(data, Key.ctrl("]"))
 		) {
-			if (this.childInputLooksEmpty()) {
+			// While the socket is down the key can never reach the child, so
+			// escape unconditionally — the view must always be exitable, even
+			// after the host crashes mid-output (issue #48).
+			if (shouldEscapeAttach(this.connected, this.childInputLooksEmpty())) {
 				this.detach();
 				return;
 			}
@@ -288,7 +299,7 @@ export class PtyAttachComponent implements Component {
 
 	private loadingDetail(elapsedSeconds: number): string {
 		if (this.status === "attached") return "Attached · waiting for the session to render…";
-		if (this.status.startsWith("error") || this.status === "host exited") return this.status;
+		if (this.status.startsWith("error") || this.status === "host exited" || this.status === "host not reachable") return this.status;
 		if (this.status === "disconnected") return `Reconnecting to the session host… ${elapsedSeconds}s`;
 		return `Starting the session host… ${elapsedSeconds}s`;
 	}
@@ -328,6 +339,8 @@ export class PtyAttachComponent implements Component {
 		socket.on("connect", () => {
 			this.clearRetry();
 			this.connected = true;
+			this.everConnected = true;
+			this.disconnectedAt = null;
 			this.status = "attached";
 			this.send({ type: "hello", clientId: `ui-${Date.now()}`, wantOutput: true });
 			this.jiggleRetry.start(this.cols, this.rows);
@@ -339,6 +352,7 @@ export class PtyAttachComponent implements Component {
 		socket.on("close", () => {
 			this.socket = null;
 			this.connected = false;
+			this.disconnectedAt ??= Date.now();
 			if (!this.closed && this.status !== "host exited") {
 				this.status = "disconnected";
 				this.scheduleReconnect();
@@ -348,6 +362,7 @@ export class PtyAttachComponent implements Component {
 		socket.on("error", (err) => {
 			this.socket = null;
 			this.connected = false;
+			this.disconnectedAt ??= Date.now();
 			if (this.closed) return;
 			this.status = `waiting for host… ${err.message}`;
 			this.scheduleReconnect();
@@ -368,6 +383,17 @@ export class PtyAttachComponent implements Component {
 
 	private scheduleReconnect(): void {
 		if (this.closed || this.retryTimer) return;
+		const verdict = evaluateAttachReconnect({
+			everConnected: this.everConnected,
+			disconnectedAt: this.disconnectedAt,
+			connectStartedAt: this.connectStartedAt,
+			now: Date.now(),
+		});
+		if (verdict.giveUp) {
+			this.status = verdict.status ?? "host exited";
+			this.scheduleRender();
+			return;
+		}
 		this.retryTimer = setTimeout(() => {
 			this.retryTimer = null;
 			this.connect();

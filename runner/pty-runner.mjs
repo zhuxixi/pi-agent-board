@@ -11,7 +11,11 @@ import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { existsSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { appendLine, readJson } from "../src/core/atomic.mjs";
+import { appendDiagnostic } from "../src/core/diagnostics.mjs";
+import { finalizeHostCrash } from "../src/core/host-crash.mjs";
 import * as P from "../src/core/paths.mjs";
 import { appendBoundedScreenLog, reconcileScreenLog } from "../src/core/screen-log.mjs";
 import { encodePromptForCliArg } from "../src/core/prompt-transport.mjs";
@@ -54,8 +58,14 @@ function main() {
 	/** @type {Set<import("node:net").Socket>} */
 	const clients = new Set();
 	let childPid = null;
+	let child = null;
 	let exitCode = null;
 	let stopping = false;
+	// Set when the uncaughtException crash handler finalizes the host. Guards
+	// child.onExit against clobbering the persisted "failed" state with an
+	// "exited" update (the handler kills the child, so its exit callback fires
+	// inside the 50ms flush window — CR round-1, issue #48).
+	let crashed = false;
 	/** @type {import("../src/core/types.mjs").HostStatus} */
 	let host = {
 		version: 1,
@@ -75,7 +85,24 @@ function main() {
 		attachedClients: 0,
 		attachedEver: false,
 	};
-	const persist = () => writeHost(config.root, host);
+	/** Persist host.json. A transient failure (e.g. Windows rename EPERM racing a
+	 *  reader) must degrade, not kill the host: record a diagnostic and let the
+	 *  next heartbeat tick retry. Socket protocol is the attach main channel, so
+	 *  host.json being briefly stale is acceptable. */
+	const persist = () => {
+		try {
+			writeHost(config.root, host);
+		} catch (err) {
+			try {
+				appendDiagnostic(config.root, config.viewId, {
+					source: "runner",
+					level: "error",
+					code: "persist_error",
+					message: err instanceof Error ? err.message : String(err),
+				});
+			} catch { /* diagnostics must never kill the host either */ }
+		}
+	};
 	const broadcast = (msg) => {
 		const line = JSON.stringify(msg) + "\n";
 		for (const c of clients) c.write(line);
@@ -86,6 +113,32 @@ function main() {
 		broadcast({ type: "status", status: host });
 	};
 	persist();
+
+	// Last-resort crash path (registered early, before spawnInteractive, so any
+	// early synchronous failure is also covered): the runner is launched detached
+	// with stdio ignored, so an uncaught exception is otherwise completely silent —
+	// no host.json finalize, no exit message, and the attach view reconnects
+	// forever. Record diagnostics, finalize the host as failed, and broadcast exit
+	// so attached clients can leave the view instead of looping.
+	process.on("uncaughtException", (err) => {
+		process.removeAllListeners("uncaughtException");
+		try {
+			appendDiagnostic(config.root, config.viewId, {
+				source: "runner",
+				level: "error",
+				code: "runner_crash",
+				message: err instanceof Error ? err.message : String(err),
+				details: { stack: err instanceof Error ? err.stack : undefined },
+			});
+		} catch { /* best effort */ }
+		crashed = true;
+		host = finalizeHostCrash(config.root, config.viewId, host, err);
+		try {
+			broadcast({ type: "exit", exitCode: 1 });
+		} catch { /* best effort */ }
+		try { if (child) killChild(child, childPid, "SIGTERM"); } catch { /* best effort */ }
+		setTimeout(() => process.exit(1), 50).unref?.();
+	});
 
 	const args = [...config.piArgsPrefix, "--session", config.sessionFile];
 	if (config.model) args.push("--model", config.model);
@@ -107,7 +160,6 @@ function main() {
 		AGENT_VIEW_HOSTED: "pty",
 	};
 
-	let child;
 	try {
 		child = spawnInteractive(config.piCommand, args, {
 			cwd: config.cwd,
@@ -131,8 +183,12 @@ function main() {
 	});
 	child.onExit((code) => {
 		exitCode = code ?? 0;
-		update({ state: stopping ? "exited" : "exited", endedAt: Date.now(), exitCode, childPid: null });
-		broadcast({ type: "exit", exitCode });
+		// After a crash the handler already persisted "failed" and broadcast
+		// exit; this callback must not overwrite that state.
+		if (!crashed) {
+			update({ state: stopping ? "exited" : "exited", endedAt: Date.now(), exitCode, childPid: null });
+			broadcast({ type: "exit", exitCode });
+		}
 		setTimeout(() => process.exit(exitCode ?? 0), 50).unref?.();
 	});
 	child.onError((err) => {
@@ -323,7 +379,7 @@ function markRowFailed(root, viewId, message) {
 }
 
 function failEarly(message) {
-	try { appendLine("/tmp/pi-agent-board-pty-runner.err", message); } catch {}
+	try { appendLine(join(tmpdir(), "pi-agent-board-pty-runner.err"), message); } catch {}
 	process.stderr.write(`${message}\n`);
 	process.exit(2);
 }
