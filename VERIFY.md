@@ -59,7 +59,7 @@ ln -s "$(pwd)" ~/.pi/agent/extensions/agent-board
 ```
 After publish, install with:
 ```bash
-pi install npm:pi-agent-board
+pi install npm:@zhuxixi/pi-agent-board
 ```
 Then start pi normally:
 ```bash
