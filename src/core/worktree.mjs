@@ -15,6 +15,7 @@ function git(repoRoot, args) {
 		const stdout = execFileSync("git", ["-C", repoRoot, ...args], {
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "pipe"],
+			windowsHide: true,
 		});
 		return { ok: true, stdout: stdout.trim(), error: null };
 	} catch (err) {
