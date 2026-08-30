@@ -18,7 +18,7 @@
 - `tsconfig.json` excludes `test/` and `test-support/` — no type casts needed in the probe script.
 - Do NOT touch the launch dialog pickers (`dashboard.ts` L539-547) — out of scope for this issue.
 - Commit per task with conventional commits; `git add <file>` per file, never `git add -A`.
-- `cur < 0` fallback semantics: `selectedId` not in list behaves as today (base index 0, so ↓ selects first, ↑ selects last).
+- `cur < 0` fallback semantics: out-of-list `selectedId` uses base index 0 — ↓ yields index 1 (second row, same as before); ↑ wraps to the last row (**changed** from the old clamp's first row — intentional, wrap-consistent, and effectively unreachable since `refresh()` keeps `selectedId` ∈ `orderedIds`).
 
 ---
 
