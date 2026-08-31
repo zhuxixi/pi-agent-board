@@ -58,13 +58,13 @@ Include Pi, Node.js 20+, working Pi provider authentication, and PTY support for
 
 ### Quick start and entry points
 
-Use a concrete five-step first-task flow: `i` INSERT mode → type task → `Enter` → Start session dialog → review cwd/model/thinking/action → `Enter` to launch. Explain Space Peek, `r` in Peek, `v`, `e`, attach with Enter/Right/`>`, and PTY detach with Left/Ctrl+` ]`.
+Use a concrete five-step first-task flow: `i` INSERT mode → type task → `Enter` to open the Start session dialog → review cwd/model/thinking/action → `Enter` on Start session to launch. Explain Space Peek, `r` in Peek, `v`, `e`, attach with Enter/Right/`>`, and that PTY detach with Left/Ctrl+`]` is gated by the child input line: it detaches on empty input, forwards the key while editing, and remains unconditional when disconnected.
 
 Document `/agent-board`, `pi /agent-board`, `pi --agent-board`, and `/bg [prompt]`, including that `--agent-board` startup cannot attach and normal `/agent-board` is required for attach.
 
 ### Dashboard and actions
 
-Explain Normal vs INSERT mode, draft-vs-empty `Enter`, Ctrl+N prefilled launch, cwd favorites/path completion, model/thinking/action fields, persisted launch preferences, and PTY-dependent start-and-attach fallback.
+Explain Normal vs INSERT mode, draft-vs-empty `Enter`, Ctrl+N entering INSERT mode with a pre-filled `hello` prompt (the next Enter opens the launch flow), cwd favorites/path completion, model/thinking/action fields, persisted launch preferences, and PTY-dependent start-and-attach fallback.
 
 Document exact destructive semantics: `d` confirms inactive Done; manual completion is default; Ctrl+X twice quickly archives; archive preserves the session file; X deletes inactive rows in the selected state; `m` batch selection supports Space/a/u/d/Ctrl+X.
 
@@ -80,7 +80,7 @@ Explain locally extracted issue/PR badges and optional per-root `providers.json`
 
 ### Attach and persistence
 
-Describe PTY attach, Left/Ctrl+`]` detach, PageUp/PageDown/Home/End/mouse wheel scrollback, link opening, drag/double-click copy, optional X11 middle-click paste, clipboard/image passthrough, cold-host loading/reconnect, warm host pool, and Windows named-pipe/hidden-console behavior without promising terminal-emulator parity.
+Describe PTY attach, conditional Left/Ctrl+`]` detach (empty child input detaches; edited input forwards the key; disconnected hosts can always be exited), PageUp/PageDown/Home/End/mouse wheel scrollback, link opening, drag/double-click copy, optional X11 middle-click paste, clipboard/image passthrough, cold-host loading/reconnect, warm host pool, and Windows named-pipe/hidden-console behavior without promising terminal-emulator parity.
 
 Explain PTY vs JSON fallback, adopted external-session PTY requirement, and `!` diagnostics. Document the default store at `~/.pi/agent/agent-board/`, high-level artifacts, persistence across reload/restart/worker exit, and stale-row reconciliation.
 

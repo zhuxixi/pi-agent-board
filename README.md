@@ -93,7 +93,7 @@ From the board:
 - In Peek, press `r` to reply without attaching.
 - Press `v` for a read-only transcript, or `e` for evidence and diagnostics.
 - Press `Enter`, `Right`, or `>` to attach to the real Pi session.
-- In PTY attach mode, press `Left` or `Ctrl+]` to return to the board.
+- In PTY attach mode, press `Left` or `Ctrl+]` on an empty child input line to return to the board. If you are editing text, these keys are forwarded to Pi; when the host is disconnected, detach is unconditional.
 
 ## Dashboard Workflow
 
@@ -134,7 +134,7 @@ Shortcuts are scoped to the view where they are available:
 | `v` | Open the read-only transcript. |
 | `e` | Open Evidence / Diagnostics. |
 | `/` | Enter filter mode. |
-| `Ctrl+N` | Open a new-session dialog with a pre-filled prompt. |
+| `Ctrl+N` | Enter INSERT mode with a pre-filled `hello` prompt; press `Enter` to open the Start session dialog. |
 | `Ctrl+R` | Rename the selected session. |
 | `Ctrl+T` | Pin or unpin the selected session. |
 | `Ctrl+S` | Stop the selected active session. |
@@ -152,7 +152,7 @@ Peek shows the selected session's summary, blocker or question, latest output, a
 
 | Key | Action |
 | --- | --- |
-| `r` or `Enter` | Enter reply mode and send a follow-up without attaching. |
+| `r` or `Enter` | Enter reply mode; type a follow-up and press `Enter` to send it without attaching. |
 | `a`, `Right`, or `>` | Attach to the session. |
 | `v` | Open the read-only transcript. |
 | `e` | Open Evidence / Diagnostics. |
@@ -192,7 +192,7 @@ The `e` view shows durable session evidence, including changed files, commands a
 
 ### PTY attach
 
-PTY attach opens the real interactive Pi session. Use `Left` or `Ctrl+]` to detach and return to the board. While attached, `PageUp`, `PageDown`, `Home`, `End`, and the mouse wheel scroll local scrollback. Mouse drag or double-click selects and copies text, clicks open detected links, and middle-click paste is available on systems with the required X11 tooling.
+PTY attach opens the real interactive Pi session. On an empty child input line, use `Left` or `Ctrl+]` to detach and return to the board; if you are editing text, these keys are forwarded to Pi, while a disconnected host can always be exited. While attached, `PageUp`, `PageDown`, `Home`, `End`, and the mouse wheel scroll local scrollback. Mouse drag or double-click selects and copies text, clicks open detected links, and middle-click paste is available on systems with the required X11 tooling.
 
 The attach surface can forward terminal clipboard and image/file passthrough sequences. These behaviors can be disabled individually in [Configuration](#configuration). Cold hosts may briefly show a loading/reconnect surface while their PTY becomes ready.
 
