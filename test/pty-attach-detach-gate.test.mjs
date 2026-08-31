@@ -16,7 +16,8 @@ test("attach detach gate: ctrl+] passes through, ← keeps its gate", () => {
 	});
 	const parsed = JSON.parse(out);
 	assert.equal(parsed.ctrlBracketPassesThrough, true, "ctrl+] must pass through to Pi unchanged");
-	assert.equal(parsed.leftStaysGatedOnNonEmptyLine, true, "← must stay gated when the input line looks non-empty");
+	assert.equal(parsed.leftStaysGatedOnNonEmptyLine, true, "← must stay gated while attached when the input line looks non-empty");
+	assert.equal(parsed.leftEscapesWhenDisconnected, true, "← must escape unconditionally while the socket is down (issue #48)");
 	assert.equal(parsed.leftDetachesOnEmptyInput, true, "← must still detach on an empty input line");
 	assert.equal(parsed.leftDetachRestoresBeforeGracefulEnd, true, "← must restore before graceful socket end");
 	assert.equal(parsed.minimumSizeAvoidsInvalidShrink, true, "minimum terminal size must avoid an invalid shrink");

@@ -71,12 +71,27 @@ const out: Record<string, boolean> = {};
 	attach.dispose();
 }
 
-// B. ← must NOT detach with a poisoned buffer (child may be mid-draft).
+// B. ← must NOT detach while attached with a poisoned buffer (child may be
+// mid-draft). The socket is pinned connected=true explicitly: when it is
+// down, issue #48 makes ← escape unconditionally instead (see B2).
 {
 	const { attach, sent, didDetach } = makeAttach();
 	await poisonCursorLine(attach);
+	(attach as unknown as { connected: boolean }).connected = true;
 	attach.handleInput("\x1b[D");
 	out.leftStaysGatedOnNonEmptyLine = !didDetach() && sent.length === 1 && sent[0].type === "input" && sent[0].data === "\x1b[D";
+	attach.dispose();
+}
+
+// B2. While the socket is down (issue #48) ← escapes unconditionally, even
+// with a poisoned buffer — the key can never reach the child, so the view
+// must remain exitable after a host crash mid-output.
+{
+	const { attach, didDetach } = makeAttach();
+	await poisonCursorLine(attach);
+	// connected stays false: the socket path never existed.
+	attach.handleInput("\x1b[D");
+	out.leftEscapesWhenDisconnected = didDetach();
 	attach.dispose();
 }
 
