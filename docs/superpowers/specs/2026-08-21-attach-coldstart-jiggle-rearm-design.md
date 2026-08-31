@@ -1,5 +1,9 @@
 # Spec：attach 冷启动双光标根治 — jiggle 重试链编排修复（issue #10）
 
+> **历史设计，已被 issue #25 的 shrink-and-hold 及 issue #42 的 G6
+> post-restore verify supersede。** 当前实现和测试以
+> `src/core/pty-attach-jiggle-controller.mjs` 为准。
+
 ## 日期
 2026-08-21（v2：评审后修订，补三项编排严谨性修正）
 

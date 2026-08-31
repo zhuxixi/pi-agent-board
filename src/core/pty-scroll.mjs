@@ -141,9 +141,10 @@ export function selectionDragScrollLines(row, bodyHeight) {
 }
 
 /**
- * Return a one-frame alternate PTY size that will force a hosted TUI to receive a
- * SIGWINCH/redraw before restoring the real size. This mirrors the user-visible
- * terminal zoom workaround without leaving the child at the wrong dimensions.
+ * Return a safe temporary PTY size for an attach jiggle hold. The attach controller
+ * keeps the child at this size until a clear or guard restores the original size;
+ * near the minimum supported dimensions, only one safe dimension is changed, and
+ * at 20x5 there is no valid alternate size.
  */
 export function resizeJiggleSize(cols, rows) {
 	const c = Math.max(1, Math.floor(cols));
