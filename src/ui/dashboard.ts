@@ -250,7 +250,9 @@ export class DashboardComponent implements Component {
 	private moveSelection(delta: number): void {
 		if (this.orderedIds.length === 0) return;
 		const cur = this.selectedId ? this.orderedIds.indexOf(this.selectedId) : 0;
-		const next = Math.max(0, Math.min(this.orderedIds.length - 1, (cur < 0 ? 0 : cur) + delta));
+		const len = this.orderedIds.length;
+		// Wrap around both ends: down past last -> first, up past first -> last.
+		const next = (((cur < 0 ? 0 : cur) + delta) % len + len) % len;
 		const nextId = this.orderedIds[next];
 		if (nextId === this.selectedId) return;
 		this.selectedId = nextId;
@@ -1095,7 +1097,9 @@ export class DashboardComponent implements Component {
 		if (!this.peekId) return;
 		const idx = this.orderedIds.indexOf(this.peekId);
 		if (idx < 0) return;
-		const next = Math.max(0, Math.min(this.orderedIds.length - 1, idx + delta));
+		const len = this.orderedIds.length;
+		// Wrap around both ends, same as moveSelection().
+		const next = ((idx + delta) % len + len) % len;
 		this.peekId = this.orderedIds[next];
 		this.selectedId = this.peekId;
 	}
@@ -1362,7 +1366,7 @@ export class DashboardComponent implements Component {
 		const contentWidth = Math.max(20, width - indent);
 		const glyph = stateGlyph(rv.state, rv.alive, rv.hostAlive, rv.unread);
 		const marker = stageFg(rv.state, selected ? `›${glyph}` : ` ${glyph}`);
-		const statusBadges = `${rv.reviewReady ? "✓ " : ""}${rv.diagnosticStalled ? "⏳ " : ""}${rv.evidenceErrorCount || rv.diagnosticErrorCount ? "! " : ""}${rv.followUpCount ? `q${rv.followUpCount} ` : ""}${rv.steeringState && rv.steeringState !== "none" ? "π " : ""}`;
+		const statusBadges = `${rv.reviewReady ? "✓ " : ""}${rv.diagnosticStalled ? "⏳ " : ""}${rv.staleHost ? "⌁ " : ""}${rv.evidenceErrorCount || rv.diagnosticErrorCount ? "! " : ""}${rv.followUpCount ? `q${rv.followUpCount} ` : ""}${rv.steeringState && rv.steeringState !== "none" ? "π " : ""}`;
 		const refsBadge = rv.refsBadge ? (rv.refsLowConfidence ? t.fg("dim", rv.refsBadge) : rv.refsBadge) : "";
 		const badge = `${this.mode === "select" ? `${this.isSelectedForBatch(rv.id) ? "◉" : "○"} ` : ""}${rv.pinned ? "★ " : ""}${rv.worktree ? "⌥ " : ""}${statusBadges}${refsBadge ? `${refsBadge} ` : ""}`;
 		const ageRaw = ` ${rv.age}`;

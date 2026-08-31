@@ -8,6 +8,7 @@ import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@
 import { isProbablyEmptyPiInputLine } from "../core/pty-input.mjs";
 import { findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
 import { createAttachOutputRenderScheduler, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
+import { evaluateAttachReconnect, shouldEscapeAttach } from "../core/pty-attach-reconnect.mjs";
 import { installImeCursorCoalesce } from "../core/ime-cursor-coalesce.mjs";
 import { createJiggleRetryController } from "../core/pty-attach-jiggle-controller.mjs";
 import { clampInt, parseMouseInputChunk, resolveWheelLines, scrollViewportTop, selectionDragScrollLines } from "../core/pty-scroll.mjs";
@@ -135,6 +136,13 @@ export class PtyAttachComponent implements Component {
 	private osc52Carry = "";
 	private passthroughCarry = "";
 	private readonly connectStartedAt = Date.now();
+	// Set once the first socket connect succeeds; drives the reconnect give-up
+	// policy (short window after a live session dies, long window during cold
+	// host start — see pty-attach-reconnect.mjs).
+	private everConnected = false;
+	// Timestamp of the first disconnect that started the current reconnect
+	// cycle; reset on every successful (re)connect.
+	private disconnectedAt: number | null = null;
 	// Lines scrolled per mouse-wheel event; configurable via $AGENT_BOARD_WHEEL_LINES.
 	private readonly mouseWheelLines = resolveWheelLines();
 	private readonly term: XtermLike;
@@ -234,7 +242,11 @@ export class PtyAttachComponent implements Component {
 			return;
 		}
 		if (matchesKey(data, Key.left)) {
-			if (this.childInputLooksEmpty()) {
+			// While the socket is down the key can never reach the child, so
+			// escape unconditionally — the view must always be exitable, even
+			// after the host crashes mid-output (issue #48). Note: ctrl+] is NOT
+			// a detach key — it passes through to Pi (tui.editor.jumpForward).
+			if (shouldEscapeAttach(this.connected, this.childInputLooksEmpty())) {
 				this.detach();
 				return;
 			}
@@ -256,7 +268,7 @@ export class PtyAttachComponent implements Component {
 		const bodyHeight = Math.max(1, height - 2);
 		let body: string[];
 		if (!this.attaching && this.receivedOutput) {
-			const projected = this.project(bodyHeight, width);
+			const projected = this.project(bodyHeight);
 			body = projected.lines;
 			while (body.length < bodyHeight) body.unshift("");
 		} else {
@@ -287,7 +299,7 @@ export class PtyAttachComponent implements Component {
 
 	private loadingDetail(elapsedSeconds: number): string {
 		if (this.status === "attached") return "Attached · waiting for the session to render…";
-		if (this.status.startsWith("error") || this.status === "host exited") return this.status;
+		if (this.status.startsWith("error") || this.status === "host exited" || this.status === "host not reachable") return this.status;
 		if (this.status === "disconnected") return `Reconnecting to the session host… ${elapsedSeconds}s`;
 		return `Starting the session host… ${elapsedSeconds}s`;
 	}
@@ -318,7 +330,10 @@ export class PtyAttachComponent implements Component {
 
 	private connect(): void {
 		if (this.closed || this.connected || this.socket) return;
-		if (!existsSync(this.opts.socketPath)) {
+		// On Windows the control socket is a named pipe — it never exists as a
+		// filesystem entry, so existsSync can't gate the connect; a missing pipe
+		// surfaces as an error event on the socket and retries via scheduleReconnect.
+		if (process.platform !== "win32" && !existsSync(this.opts.socketPath)) {
 			this.status = `starting host… ${Math.ceil((Date.now() - this.connectStartedAt) / 1000)}s`;
 			this.scheduleReconnect();
 			return;
@@ -335,6 +350,8 @@ export class PtyAttachComponent implements Component {
 			}
 			this.clearRetry();
 			this.connected = true;
+			this.everConnected = true;
+			this.disconnectedAt = null;
 			this.status = "attached";
 			this.send({ type: "hello", clientId: `ui-${Date.now()}`, wantOutput: true });
 			this.jiggleRetry.start(this.cols, this.rows);
@@ -352,6 +369,7 @@ export class PtyAttachComponent implements Component {
 			if (this.socket !== socket) return;
 			this.socket = null;
 			this.connected = false;
+			this.disconnectedAt ??= Date.now();
 			if (!this.closed && this.status !== "host exited") {
 				this.status = "disconnected";
 				this.scheduleReconnect();
@@ -368,6 +386,7 @@ export class PtyAttachComponent implements Component {
 			this.socket = null;
 			this.connected = false;
 			try { socket.destroy(); } catch {}
+			this.disconnectedAt ??= Date.now();
 			if (this.closed) return;
 			this.status = `waiting for host… ${err.message}`;
 			this.scheduleReconnect();
@@ -388,6 +407,17 @@ export class PtyAttachComponent implements Component {
 
 	private scheduleReconnect(): void {
 		if (this.closed || this.retryTimer) return;
+		const verdict = evaluateAttachReconnect({
+			everConnected: this.everConnected,
+			disconnectedAt: this.disconnectedAt,
+			connectStartedAt: this.connectStartedAt,
+			now: Date.now(),
+		});
+		if (verdict.giveUp) {
+			this.status = verdict.status ?? "host exited";
+			this.scheduleRender();
+			return;
+		}
 		this.retryTimer = setTimeout(() => {
 			this.retryTimer = null;
 			this.connect();
@@ -481,7 +511,9 @@ export class PtyAttachComponent implements Component {
 		try {
 			this.tui.terminal.write(XTSHIFTESCAPE_SELECT);
 			this.tui.terminal.write(MOUSE_ENABLE);
-		} catch {}
+		} catch {
+			/* best-effort: some terminals reject these sequences; mouse reporting is optional */
+		}
 	}
 
 	private mouseScrollEnabled(): boolean {
@@ -507,7 +539,9 @@ export class PtyAttachComponent implements Component {
 	private disableMouseScroll(): void {
 		try {
 			this.tui.terminal.write(MOUSE_DISABLE);
-		} catch {}
+		} catch {
+			/* best-effort: terminal may already be gone at teardown */
+		}
 	}
 
 	private handleMouseInputChunk(events: Array<{ raw: string; mouse: { button: number; row: number; col: number; action: string } }>): boolean {
@@ -721,7 +755,9 @@ export class PtyAttachComponent implements Component {
 		if (seq) {
 			try {
 				this.tui.terminal.write(seq);
-			} catch {}
+			} catch {
+				/* best-effort: OSC52 clipboard support is optional */
+			}
 		}
 		// Also mirror the selection into the X11 PRIMARY selection so the rest of the
 		// desktop can middle-click-paste it — closes the loop with pastePrimarySelection().
@@ -742,7 +778,9 @@ export class PtyAttachComponent implements Component {
 			const timer = setTimeout(() => {
 				try {
 					child.kill("SIGKILL");
-				} catch {}
+				} catch {
+					/* the child may have already exited before the timeout fired */
+				}
 			}, 800);
 			child.stdout?.on("data", (chunk: Buffer) => {
 				out += chunk.toString("utf8");
@@ -752,7 +790,9 @@ export class PtyAttachComponent implements Component {
 				clearTimeout(timer);
 				if (!this.closed && out) this.send({ type: "input", data: out });
 			});
-		} catch {}
+		} catch {
+			/* silent no-op when xclip is absent — documented contract of this helper */
+		}
 	}
 
 	/** Write `text` to the X11 PRIMARY selection so other apps can middle-click-paste it. */
@@ -763,7 +803,9 @@ export class PtyAttachComponent implements Component {
 			child.stdin?.on("error", () => {});
 			child.on("error", () => {});
 			child.stdin?.end(text);
-		} catch {}
+		} catch {
+			/* silent no-op when xclip is absent */
+		}
 	}
 
 	private selectionText(): string {
@@ -792,6 +834,9 @@ export class PtyAttachComponent implements Component {
 	}
 
 	private currentSize(): { cols: number; rows: number } {
+		// SAFETY: duck-typed read — Pi TUI's Terminal type does not consistently expose
+		// cols/columns/rows across versions (see resizeIfNeeded below). Runtime
+		// fallbacks (120/24) keep this safe when the fields are absent.
 		const term = this.tui.terminal as unknown as { cols?: number; columns?: number; rows?: number } | undefined;
 		return {
 			cols: Math.max(20, term?.cols ?? term?.columns ?? 120),
@@ -921,7 +966,9 @@ export class PtyAttachComponent implements Component {
 		for (const seq of toWrite) {
 			try {
 				this.tui.terminal.write(seq);
-			} catch {}
+			} catch {
+				/* best-effort: forwarded sequences are enhancements, never critical */
+			}
 		}
 	}
 
@@ -948,7 +995,9 @@ export class PtyAttachComponent implements Component {
 			} finally {
 				closeSync(fd);
 			}
-		} catch {}
+		} catch {
+			/* best-effort: a missing or racing screen.log must not block attach */
+		}
 	}
 
 	private pushOutput(data: string, opts: { forwardProtocols?: boolean } = {}): void {
@@ -967,7 +1016,7 @@ export class PtyAttachComponent implements Component {
 		});
 	}
 
-	private project(height: number, width: number): { lines: string[]; cursor: { row: number; col: number } | null } {
+	private project(height: number): { lines: string[]; cursor: { row: number; col: number } | null } {
 		const out: string[] = [];
 		const buf = this.term.buffer.active;
 		const selection = normalizeSelection(this.selection);

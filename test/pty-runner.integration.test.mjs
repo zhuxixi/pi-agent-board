@@ -7,6 +7,7 @@ import { once } from "node:events";
 import { spawn } from "node:child_process";
 import { test } from "node:test";
 import { atomicWriteJson } from "../src/core/atomic.mjs";
+import { readDiagnostics } from "../src/core/diagnostics.mjs";
 import * as P from "../src/core/paths.mjs";
 import { createView, readHost } from "../src/core/store.mjs";
 
@@ -22,6 +23,50 @@ async function waitFor(predicate, timeoutMs = 3000) {
 		await new Promise((r) => setTimeout(r, 25));
 	}
 	throw new Error("timed out waiting");
+}
+
+/** Host is usable once the runner reports the socket bound and the child pid is recorded.
+ *  Deliberately avoids existsSync(socketPath): on Windows the socket is a named pipe,
+ *  which never exists as a filesystem entry. Also requires the runner process to be
+ *  alive, so a runner that fails at listen (and exits) never satisfies the gate. */
+function hostReady(root, viewId) {
+	const host = readHost(root, viewId);
+	if (!host || host.state !== "alive" || !host.socketPath || !host.childPid) return false;
+	return isAlive(host.runnerPid);
+}
+
+function isAlive(pid) {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Connect to the control socket, retrying until it binds. The runner binds the
+ *  socket only after the child spawns, and on Windows the pipe is not a filesystem
+ *  entry (existsSync can't gate it), so poll with real connect attempts. */
+async function connectWhenReady(socketPath, timeoutMs = 5000) {
+	const start = Date.now();
+	while (Date.now() - start < timeoutMs) {
+		const socket = createConnection(socketPath);
+		try {
+			await once(socket, "connect");
+			return socket;
+		} catch {
+			socket.destroy();
+			await new Promise((r) => setTimeout(r, 50));
+		}
+	}
+	throw new Error("timed out waiting for control socket");
+}
+
+let hasNodePty = true;
+try {
+	await import("node-pty");
+} catch {
+	hasNodePty = false;
 }
 
 function waitForExit(child, timeoutMs) {
@@ -52,8 +97,17 @@ async function stopRunner(runner) {
 	}
 }
 
+
 function send(socket, msg) {
 	socket.write(JSON.stringify(msg) + "\n");
+}
+
+/** Best-effort reap of the hosted child after a hard runner kill (Windows). */
+function reapChild(root, viewId) {
+	try {
+		const pid = readHost(root, viewId)?.childPid;
+		if (pid) process.kill(pid, "SIGKILL");
+	} catch {}
 }
 
 test("pty-runner creates host socket, broadcasts output, forwards input, finalizes", async () => {
@@ -77,7 +131,7 @@ test("pty-runner creates host socket, broadcasts output, forwards input, finaliz
 			rows: 24,
 		});
 		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
-		await waitFor(() => existsSync(P.controlSocketPath(root, "v1")) && readHost(root, "v1")?.state === "alive");
+		await waitFor(() => hostReady(root, "v1"));
 
 		const socket = createConnection(P.controlSocketPath(root, "v1"));
 		await once(socket, "connect");
@@ -111,7 +165,41 @@ test("pty-runner creates host socket, broadcasts output, forwards input, finaliz
 		assert.match(readFileSync(P.screenLogPath(root, "v1"), "utf8"), /fake pi ready/);
 		socket.destroy();
 	} finally {
-		await stopRunner(runner);
+		try { runner?.kill("SIGTERM"); } catch {}
+		reapChild(root, "v1");
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("pty-runner protects dash-prefixed initial prompts while keeping argv delivery", async () => {
+	const root = freshRoot();
+	let runner;
+	try {
+		const meta = createView(root, { id: "v1", name: "pty", cwd: process.cwd() });
+		const capturePath = join(root, "argv-prompt.txt");
+		const configPath = P.hostConfigPath(root, "v1");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "v1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: "- Create a ticket\n- Run the fix",
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1", FAKE_PTY_ARGV_CAPTURE_PATH: capturePath },
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		await waitFor(() => hostReady(root, "v1"));
+		await waitFor(() => existsSync(capturePath) && readFileSync(capturePath, "utf8") === " - Create a ticket\n- Run the fix");
+	} finally {
+		try { runner?.kill("SIGTERM"); } catch {}
+		reapChild(root, "v1");
+		await new Promise((r) => setTimeout(r, 50));
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
 });
@@ -158,36 +246,6 @@ test("pty-runner applies an ordered restore resize before a detach packet", asyn
 		assert.equal(readHost(root, "detach1").rows, 30);
 	} finally {
 		try { socket?.destroy(); } catch {}
-		await stopRunner(runner);
-		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
-	}
-});
-
-test("pty-runner protects dash-prefixed initial prompts while keeping argv delivery", async () => {
-	const root = freshRoot();
-	let runner;
-	try {
-		const meta = createView(root, { id: "v1", name: "pty", cwd: process.cwd() });
-		const capturePath = join(root, "argv-prompt.txt");
-		const configPath = P.hostConfigPath(root, "v1");
-		atomicWriteJson(configPath, {
-			root,
-			viewId: "v1",
-			sessionFile: meta.sessionFile,
-			cwd: process.cwd(),
-			initialPrompt: "- Create a ticket\n- Run the fix",
-			piCommand: process.execPath,
-			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
-			model: null,
-			tools: null,
-			env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1", FAKE_PTY_ARGV_CAPTURE_PATH: capturePath },
-			cols: 80,
-			rows: 24,
-		});
-		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
-		await waitFor(() => existsSync(P.controlSocketPath(root, "v1")) && readHost(root, "v1")?.state === "alive");
-		await waitFor(() => existsSync(capturePath) && readFileSync(capturePath, "utf8") === " - Create a ticket\n- Run the fix");
-	} finally {
 		await stopRunner(runner);
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
@@ -286,6 +344,50 @@ test("pty-runner shutdown escalates when the PTY child ignores SIGTERM", async (
 	}
 });
 
+test("pty-runner terminates its child when the runner is stopped", { skip: !hasNodePty }, async () => {
+	const root = freshRoot();
+	let runner;
+	try {
+		const meta = createView(root, { id: "v1", name: "pty-kill", cwd: process.cwd() });
+		const configPath = P.hostConfigPath(root, "v1");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "v1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			// No AGENT_BOARD_ALLOW_PIPE_FALLBACK: exercise the node-pty path whose
+			// kill() throws "Signals not supported on windows" — the runner must
+			// fall back to terminating the child directly.
+			env: {},
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		await waitFor(() => hostReady(root, "v1"));
+		const childPid = readHost(root, "v1")?.childPid;
+		assert.ok(childPid, "child pid recorded");
+		assert.ok(isAlive(childPid), "child alive before stop");
+		// Use the control protocol (the panel stop path) rather than killing the
+		// runner process: on Windows process.kill("SIGTERM") is TerminateProcess
+		// and would skip the runner's shutdown handler entirely.
+		const socket = createConnection(P.controlSocketPath(root, "v1"));
+		await once(socket, "connect");
+		send(socket, { type: "terminate" });
+		await waitFor(() => !isAlive(childPid), 5000);
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		const pid = readHost(root, "v1")?.childPid;
+		if (pid) { try { process.kill(pid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
 test("pty-runner honors screenLogMaxBytes from host config", async () => {
 	const root = freshRoot();
 	let runner;
@@ -335,7 +437,66 @@ test("pty-runner honors screenLogMaxBytes from host config", async () => {
 		assert.ok(size > 0 && size <= 2048, `screen.log should be compacted to <=2048 bytes, got ${size}`);
 		socket.end();
 	} finally {
-		await stopRunner(runner);
+		try { runner?.kill(); } catch {}
 		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("pty-runner survives persistent host.json persist failures (EPERM-class)", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid = null;
+	try {
+		const meta = createView(root, { id: "v1", name: "persist-fail", cwd: process.cwd() });
+		// Occupy host.json with a DIRECTORY: rename(tmp, host.json) must fail on
+		// every attempt on every platform (EISDIR/EPERM), so every heartbeat
+		// persist fails — the runner must degrade instead of dying.
+		mkdirSync(P.hostPath(root, "v1"), { recursive: true });
+		const configPath = P.hostConfigPath(root, "v1");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "v1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" },
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		// hostReady() gates on host.json which can never be written here — gate on
+		// the runner process being alive, then poll-connect the control socket
+		// (the runner binds it only after the child spawns).
+		await waitFor(() => isAlive(runner.pid ?? -1));
+		const socket = await connectWhenReady(P.controlSocketPath(root, "v1"));
+		let buf = "";
+		const messages = [];
+		socket.on("data", (chunk) => {
+			buf += chunk.toString();
+			const lines = buf.split("\n");
+			buf = lines.pop() ?? "";
+			for (const line of lines) if (line.trim()) messages.push(JSON.parse(line));
+		});
+		send(socket, { type: "get_status" });
+		// The control protocol must keep working even though every host.json
+		// write fails (status is delivered over the socket, not the file).
+		await waitFor(() => messages.find((m) => m.type === "status"));
+		// Capture the child pid from the socket status (host.json is occupied by
+		// a directory, so reapChild's readHost lookup is a no-op here).
+		childPid = messages.find((m) => m.type === "status")?.status?.childPid ?? null;
+		// Degradation is recorded in diagnostics; the runner is still alive.
+		await waitFor(() => readDiagnostics(root, "v1").some((d) => d.code === "persist_error"));
+		assert.ok(isAlive(runner.pid ?? -1), "runner must survive persist failures");
+		socket.destroy();
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		reapChild(root, "v1");
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
 });

@@ -11,6 +11,13 @@ import { GROUP_LABELS, GROUP_ORDER, SEMANTIC_STATES } from "./types.mjs";
 /** @typedef {import("./types.mjs").SemanticState} SemanticState */
 
 /**
+ * Host heartbeat staleness threshold (ms). The pty-runner writes host.json on a
+ * 1 Hz heartbeat; when a crashed runner leaves host.json stuck on "alive", the
+ * heartbeat goes stale within seconds (issue #48 L4).
+ */
+const STALE_HOST_MS = 10_000;
+
+/**
  * @typedef {Object} RowView
  * @property {string} id
  * @property {string} name
@@ -24,6 +31,8 @@ import { GROUP_LABELS, GROUP_ORDER, SEMANTIC_STATES } from "./types.mjs";
  * @property {SemanticState} state
  * @property {boolean} alive
  * @property {boolean} hostAlive
+ * @property {boolean} staleHost True when host.json claims alive but the runner
+ *   process is gone and the heartbeat is stale (display-only crash marker).
  * @property {boolean} needsInput
  * @property {boolean} hasError
  * @property {boolean} worktree
@@ -119,6 +128,18 @@ export function rowView(row, now) {
 	const lastVisitedAt = row.state?.lastVisitedAt ?? null;
 	const lastAgentActivityAt = row.state?.lastAgentActivityAt ?? null;
 	const refs = codeRefsBadge(row.codeRefs);
+	// Host-lost display marker (issue #48 L4): host.json still claims "alive"
+	// but the runner process is gone and the 1 Hz heartbeat went stale — the
+	// crash path leaves exactly this fingerprint (no exit message, no
+	// reconcile). Display-only; state.json is deliberately untouched.
+	const host = row.host;
+	const staleHost = Boolean(
+		host &&
+			host.state === "alive" &&
+			!row.hostAlive &&
+			typeof host.lastSeenAt === "number" &&
+			now - host.lastSeenAt > STALE_HOST_MS,
+	);
 	return {
 		id: row.meta.id,
 		name: row.meta.name,
@@ -132,6 +153,7 @@ export function rowView(row, now) {
 		state,
 		alive: Boolean(row.alive),
 		hostAlive: Boolean(row.hostAlive),
+		staleHost,
 		needsInput: state === "needs_input",
 		hasError: state === "failed",
 		worktree,

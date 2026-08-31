@@ -11,7 +11,11 @@ import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
 import { existsSync, unlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { appendLine, readJson } from "../src/core/atomic.mjs";
+import { appendDiagnostic } from "../src/core/diagnostics.mjs";
+import { finalizeHostCrash } from "../src/core/host-crash.mjs";
 import * as P from "../src/core/paths.mjs";
 import { appendBoundedScreenLog, reconcileScreenLog } from "../src/core/screen-log.mjs";
 import { encodePromptForCliArg } from "../src/core/prompt-transport.mjs";
@@ -54,8 +58,8 @@ function main() {
 	/** @type {Set<import("node:net").Socket>} */
 	const clients = new Set();
 	let childPid = null;
+	let child = null;
 	let exitCode = null;
-	let stopping = false;
 	let shutdownStarted = false;
 	let shutdownExitCode = null;
 	let childExited = false;
@@ -63,6 +67,11 @@ function main() {
 	const childExitPromise = new Promise((resolve) => {
 		resolveChildExit = resolve;
 	});
+	// Set when the uncaughtException crash handler finalizes the host. Guards
+	// child.onExit against clobbering the persisted "failed" state with an
+	// "exited" update (the handler kills the child, so its exit callback fires
+	// inside the 50ms flush window — CR round-1, issue #48).
+	let crashed = false;
 	/** @type {import("../src/core/types.mjs").HostStatus} */
 	let host = {
 		version: 1,
@@ -82,7 +91,24 @@ function main() {
 		attachedClients: 0,
 		attachedEver: false,
 	};
-	const persist = () => writeHost(config.root, host);
+	/** Persist host.json. A transient failure (e.g. Windows rename EPERM racing a
+	 *  reader) must degrade, not kill the host: record a diagnostic and let the
+	 *  next heartbeat tick retry. Socket protocol is the attach main channel, so
+	 *  host.json being briefly stale is acceptable. */
+	const persist = () => {
+		try {
+			writeHost(config.root, host);
+		} catch (err) {
+			try {
+				appendDiagnostic(config.root, config.viewId, {
+					source: "runner",
+					level: "error",
+					code: "persist_error",
+					message: err instanceof Error ? err.message : String(err),
+				});
+			} catch { /* diagnostics must never kill the host either */ }
+		}
+	};
 	const broadcast = (msg) => {
 		const line = JSON.stringify(msg) + "\n";
 		for (const c of clients) c.write(line);
@@ -93,6 +119,32 @@ function main() {
 		broadcast({ type: "status", status: host });
 	};
 	persist();
+
+	// Last-resort crash path (registered early, before spawnInteractive, so any
+	// early synchronous failure is also covered): the runner is launched detached
+	// with stdio ignored, so an uncaught exception is otherwise completely silent —
+	// no host.json finalize, no exit message, and the attach view reconnects
+	// forever. Record diagnostics, finalize the host as failed, and broadcast exit
+	// so attached clients can leave the view instead of looping.
+	process.on("uncaughtException", (err) => {
+		process.removeAllListeners("uncaughtException");
+		try {
+			appendDiagnostic(config.root, config.viewId, {
+				source: "runner",
+				level: "error",
+				code: "runner_crash",
+				message: err instanceof Error ? err.message : String(err),
+				details: { stack: err instanceof Error ? err.stack : undefined },
+			});
+		} catch { /* best effort */ }
+		crashed = true;
+		host = finalizeHostCrash(config.root, config.viewId, host, err);
+		try {
+			broadcast({ type: "exit", exitCode: 1 });
+		} catch { /* best effort */ }
+		try { if (child) killChild(child, childPid, "SIGTERM"); } catch { /* best effort */ }
+		setTimeout(() => process.exit(1), 50).unref?.();
+	});
 
 	const args = [...config.piArgsPrefix, "--session", config.sessionFile];
 	if (config.model) args.push("--model", config.model);
@@ -114,7 +166,6 @@ function main() {
 		AGENT_VIEW_HOSTED: "pty",
 	};
 
-	let child;
 	try {
 		child = spawnInteractive(config.piCommand, args, {
 			cwd: config.cwd,
@@ -130,7 +181,7 @@ function main() {
 		process.exit(1);
 	}
 	childPid = child.pid ?? null;
-	update({ childPid, state: "alive" });
+	update({ childPid });
 
 	child.onData((data) => {
 		screenLogBytes = appendBoundedScreenLog(screenLog, data, screenLogBytes, screenLogLimits);
@@ -140,8 +191,12 @@ function main() {
 		childExited = true;
 		resolveChildExit?.();
 		exitCode = code ?? 0;
-		update({ state: "exited", endedAt: Date.now(), exitCode, childPid: null });
-		broadcast({ type: "exit", exitCode });
+		// After a crash the handler already persisted "failed" and broadcast
+		// exit; this callback must not overwrite that state.
+		if (!crashed) {
+			update({ state: "exited", endedAt: Date.now(), exitCode, childPid: null });
+			broadcast({ type: "exit", exitCode });
+		}
 		if (!shutdownStarted) setTimeout(() => process.exit(exitCode ?? 0), 50).unref?.();
 	});
 	child.onError((err) => {
@@ -198,11 +253,11 @@ function main() {
 			case "interrupt":
 				child.write("\x1b");
 				break;
-			case "terminate":
-				stopping = true;
-				child.kill("SIGTERM");
-				setTimeout(() => child.kill("SIGKILL"), 4000).unref?.();
+			case "terminate": {
+				killChild(child, childPid, "SIGTERM");
+				setTimeout(() => killChild(child, childPid, "SIGKILL"), 4000).unref?.();
 				break;
+			}
 			case "detach":
 				socket.end();
 				break;
@@ -237,15 +292,14 @@ function main() {
 		if (requestedExitCode !== null) shutdownExitCode = requestedExitCode;
 		if (shutdownStarted) return;
 		shutdownStarted = true;
-		stopping = true;
 		try { server?.close(); } catch {}
 		try { if (existsSync(socketPath)) unlinkSync(socketPath); } catch {}
 		for (const client of clients) {
 			try { client.end(); } catch {}
 		}
-		try { child.kill("SIGTERM"); } catch {}
+		killChild(child, childPid, "SIGTERM");
 		if (!(await waitForChildExit(4000)) && !childExited) {
-			try { child.kill("SIGKILL"); } catch {}
+			killChild(child, childPid, "SIGKILL");
 			if (!(await waitForChildExit(1000)) && !childExited) {
 				// The child abstraction has no portable liveness probe. Exit only
 				// after the escalation window so normal children are always awaited;
@@ -285,7 +339,7 @@ function spawnInteractive(command, args, opts) {
 	}
 	if (!opts.allowPipeFallback) throw new Error("node-pty is unavailable");
 
-	const proc = spawn(command, args, { cwd: opts.cwd, env: opts.env, stdio: ["pipe", "pipe", "pipe"] });
+	const proc = spawn(command, args, { cwd: opts.cwd, env: opts.env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
 	return {
 		pid: proc.pid ?? null,
 		write: (s) => proc.stdin.write(s),
@@ -302,6 +356,26 @@ function spawnInteractive(command, args, opts) {
 
 function send(socket, msg) {
 	socket.write(JSON.stringify(msg) + "\n");
+}
+
+/**
+ * Terminate the hosted child on all platforms. node-pty's kill() throws
+ * "Signals not supported on windows", so on win32 we TerminateProcess via
+ * process.kill; on unix keep the graceful SIGTERM/SIGKILL path through the pty.
+ * @param {{ kill: (signal: string) => void }} child
+ * @param {number|null} pid
+ * @param {"SIGTERM"|"SIGKILL"} [signal]
+ */
+function killChild(child, pid, signal = "SIGTERM") {
+	if (process.platform === "win32") {
+		if (pid) {
+			try {
+				process.kill(pid, "SIGKILL");
+				return;
+			} catch {}
+		}
+	}
+	try { child.kill(signal); } catch {}
 }
 
 function clampInt(value, min, max, fallback) {
@@ -342,7 +416,7 @@ function markRowFailed(root, viewId, message) {
 }
 
 function failEarly(message) {
-	try { appendLine("/tmp/pi-agent-board-pty-runner.err", message); } catch {}
+	try { appendLine(join(tmpdir(), "pi-agent-board-pty-runner.err"), message); } catch {}
 	process.stderr.write(`${message}\n`);
 	process.exit(2);
 }
