@@ -19,6 +19,9 @@ test("attach detach gate: ctrl+] passes through, ← keeps its gate", () => {
 	assert.equal(parsed.leftStaysGatedOnNonEmptyLine, true, "← must stay gated while attached when the input line looks non-empty");
 	assert.equal(parsed.leftEscapesWhenDisconnected, true, "← must escape unconditionally while the socket is down (issue #48)");
 	assert.equal(parsed.leftDetachesOnEmptyInput, true, "← must still detach on an empty input line");
+	assert.equal(parsed.leftEscapesOnGarbledBuffer, true, "← must escape on a garbled replay buffer with no recoverable editor line");
+	assert.equal(parsed.leftDetachesWhenCursorOffEmptyInputLine, true, "← must detach when the editor line is empty even if the cursor sits on a working line");
+	assert.equal(parsed.leftDetachesOnEmptyInputWithoutFakeCursor, true, "← must detach when an empty editor line renders no fake cursor");
 	assert.equal(parsed.leftDetachRestoresBeforeGracefulEnd, true, "← must restore before graceful socket end");
 	assert.equal(parsed.minimumSizeAvoidsInvalidShrink, true, "minimum terminal size must avoid an invalid shrink");
 	assert.equal(parsed.staleSocketEventsDoNotClearCurrent, true, "stale socket events must not clear a replacement connection");

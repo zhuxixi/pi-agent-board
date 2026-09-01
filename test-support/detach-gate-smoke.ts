@@ -1,10 +1,14 @@
-// Detach-gate regression harness (issue #42): construct PtyAttachComponent with
-// a fake TUI, poison the headless buffer so the cursor line looks like a
-// non-empty prompt (the stale/garbled state a failed attach jiggle leaves
-// behind), then verify:
+// Detach-gate regression harness (issues #42/#48/#66): construct
+// PtyAttachComponent with a fake TUI, feed it Pi-like buffer states (fake
+// cursor, garbled replay, streaming working line), then verify:
 //   A. ctrl+] passes through as Pi's native editor shortcut.
-//   B. ← stays gated: NOT detached while the input line looks non-empty.
+//   B. ← stays gated: NOT detached while the editor line carries a draft.
+//   B1. ← escapes on a garbled buffer with no recoverable editor line.
+//   B2. ← escapes unconditionally while disconnected (issue #48).
+//   B3. ← detaches when the editor line is empty but the cursor is elsewhere.
 //   C. ← still detaches on a genuinely empty prompt line.
+//   D. ← detach restores the held PTY size before a graceful socket end.
+//   E. ← detaches on an empty editor line that renders no fake cursor.
 // Run via `node --experimental-transform-types` (TS parameter properties).
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
@@ -38,16 +42,17 @@ function makeAttach() {
 	};
 }
 
+async function writeToTerm(attach: PtyAttachComponent, data: string): Promise<void> {
+	await new Promise<void>((resolve) => {
+		(attach as unknown as { term: { write: (d: string, cb: () => void) => void } }).term.write(data, resolve);
+	});
+	(attach as unknown as { receivedOutput: boolean }).receivedOutput = true;
+}
+
 async function poisonCursorLine(attach: PtyAttachComponent): Promise<void> {
 	// Write junk so the xterm cursor sits on a line that is NOT an empty pi
 	// prompt — mimics the stale replay buffer of a failed attach jiggle.
-	await new Promise<void>((resolve) => {
-		(attach as unknown as { term: { write: (d: string, cb: () => void) => void } }).term.write(
-			"chat content\r\n────── ◊◊ ──────",
-			resolve,
-		);
-	});
-	(attach as unknown as { receivedOutput: boolean }).receivedOutput = true;
+	await writeToTerm(attach, "chat content\r\n────── ◊◊ ──────");
 }
 
 async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<boolean> {
@@ -71,15 +76,43 @@ const out: Record<string, boolean> = {};
 	attach.dispose();
 }
 
-// B. ← must NOT detach while attached with a poisoned buffer (child may be
-// mid-draft). The socket is pinned connected=true explicitly: when it is
-// down, issue #48 makes ← escape unconditionally instead (see B2).
+// B. ← must NOT detach while attached with a draft in the editor line (child
+// is mid-draft and ← is also the editor's cursor-left key). The draft line
+// carries Pi's inverse-video fake cursor (ESC[7m).
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat content\r\n> \x1b[7m草\x1b[27m稿");
+	(attach as unknown as { connected: boolean }).connected = true;
+	attach.handleInput("\x1b[D");
+	out.leftStaysGatedOnNonEmptyLine = !didDetach() && sent.length === 1 && sent[0].type === "input" && sent[0].data === "\x1b[D";
+	attach.dispose();
+}
+
+// B1. The garbled replay buffer (`────── ◊◊ ──────`) carries no inverse fake
+// cursor and no prompt glyph, so no editor line is recoverable — the escape
+// fallback treats the input as empty and ← must detach rather than trap the
+// user. The socket is pinned connected=true explicitly: when it is down,
+// issue #48 makes ← escape unconditionally instead (see B2).
 {
 	const { attach, sent, didDetach } = makeAttach();
 	await poisonCursorLine(attach);
 	(attach as unknown as { connected: boolean }).connected = true;
 	attach.handleInput("\x1b[D");
-	out.leftStaysGatedOnNonEmptyLine = !didDetach() && sent.length === 1 && sent[0].type === "input" && sent[0].data === "\x1b[D";
+	out.leftEscapesOnGarbledBuffer = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	attach.dispose();
+}
+
+// B3. The streaming case from issue #66: the editor line is empty (bottom of
+// the buffer, with its fake cursor) but the terminal cursor rests on the
+// working line because Pi's differential frames only repaint the changed
+// line. The gate must be judged from the fake-cursor line, not the cursor.
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat content\r\n> \x1b[7m \x1b[27m");
+	await writeToTerm(attach, "\x1b[3;1H⠙ Working...");
+	(attach as unknown as { connected: boolean }).connected = true;
+	attach.handleInput("\x1b[D");
+	out.leftDetachesWhenCursorOffEmptyInputLine = didDetach() && sent.length === 1 && sent[0].type === "detach";
 	attach.dispose();
 }
 
@@ -138,7 +171,20 @@ const out: Record<string, boolean> = {};
 	attach.dispose();
 }
 
-// E. A terminal at the minimum supported size must not emit a shrink that the
+// E. Empty input line rendered WITHOUT a fake cursor: no inverse cell and no
+// glyph anywhere, and the terminal cursor sits on a non-empty output line.
+// Falls through to the escape fallback — treat as empty, detach.
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat content\r\n");
+	await writeToTerm(attach, "\x1b[1;1H"); // park the cursor on the non-empty line
+	(attach as unknown as { connected: boolean }).connected = true;
+	attach.handleInput("\x1b[D");
+	out.leftDetachesOnEmptyInputWithoutFakeCursor = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	attach.dispose();
+}
+
+// E2. A terminal at the minimum supported size must not emit a shrink that the
 // runner immediately clamps back, because that is not a real width delta.
 {
 	const { attach } = makeAttach();
@@ -154,7 +200,13 @@ const out: Record<string, boolean> = {};
 
 async function runStaleSocketIdentityScenario(): Promise<boolean> {
 	const root = mkdtempSync(join(tmpdir(), "agentview-socket-identity-"));
-	const socketPath = join(root, "control.sock");
+	// Windows has no unix-domain sockets: net.listen(path) treats the path as
+	// a named pipe, which must use the \\.\pipe\ prefix (a plain temp path
+	// fails with EACCES). Keep a random suffix so parallel runs cannot collide.
+	const suffix = root.split(/[\\/]/).pop() ?? String(Date.now());
+	const socketPath = process.platform === "win32"
+		? `\\\\.\\pipe\\agentview-socket-identity-${suffix}`
+		: join(root, "control.sock");
 	const server = createServer();
 	const serverSockets: Array<import("node:net").Socket> = [];
 	server.on("connection", (socket) => serverSockets.push(socket));
