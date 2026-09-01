@@ -58,7 +58,7 @@ Include Pi, Node.js 20+, working Pi provider authentication, and PTY support for
 
 ### Quick start and entry points
 
-Use a concrete five-step first-task flow: `i` INSERT mode → type task → `Enter` to open the Start session dialog → review cwd/model/thinking/action → `Enter` on Start session to launch. Explain Space Peek, `r` in Peek, `v`, `e`, attach with Enter/Right/`>`, and that PTY detach with Left/Ctrl+`]` is gated by the child input line: it detaches on empty input, forwards the key while editing, and remains unconditional when disconnected.
+Use a concrete five-step first-task flow: `i` INSERT mode → type task → `Enter` to open the Start session dialog → review cwd/model/thinking/action → `Enter` on Start session to launch. Explain Space Peek, `r` in Peek, `v`, `e`, attach with Enter/Right/`>`, and that PTY detach with `Left` is gated by the child input line: it detaches on empty input, is forwarded while editing, and remains unconditional when disconnected. `Ctrl+]` is not a detach key — it is passed through to the child Pi editor.
 
 Document `/agent-board`, `pi /agent-board`, `pi --agent-board`, and `/bg [prompt]`, including that `--agent-board` startup cannot attach and normal `/agent-board` is required for attach.
 
@@ -80,7 +80,7 @@ Explain locally extracted issue/PR badges and optional per-root `providers.json`
 
 ### Attach and persistence
 
-Describe PTY attach, conditional Left/Ctrl+`]` detach (empty child input detaches; edited input forwards the key; disconnected hosts can always be exited), PageUp/PageDown/Home/End/mouse wheel scrollback, link opening, drag/double-click copy, optional X11 middle-click paste, clipboard/image passthrough, cold-host loading/reconnect, warm host pool, and Windows named-pipe/hidden-console behavior without promising terminal-emulator parity.
+Describe PTY attach, conditional `Left` detach (empty child input detaches; edited input forwards the key; disconnected hosts can always be exited), `Ctrl+]` passthrough to the child Pi editor, PageUp/PageDown/Home/End/mouse wheel scrollback, link opening, drag/double-click copy, optional X11 middle-click paste, clipboard/image passthrough, cold-host loading/reconnect, warm host pool, and Windows named-pipe/hidden-console behavior without promising terminal-emulator parity.
 
 Explain PTY vs JSON fallback, adopted external-session PTY requirement, and `!` diagnostics. Document the default store at `~/.pi/agent/agent-board/`, high-level artifacts, persistence across reload/restart/worker exit, and stale-row reconciliation.
 

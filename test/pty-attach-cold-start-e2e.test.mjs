@@ -52,13 +52,34 @@ function spawnRunner(root, viewId, piArgsPrefix, env = {}) {
 	return runner;
 }
 
-function cleanup(root, runner, socket) {
+function waitForExit(child, timeoutMs) {
+	if (!child || child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
+	return new Promise((resolve) => {
+		let settled = false;
+		const onExit = () => finish(true);
+		const timer = setTimeout(() => finish(false), timeoutMs);
+		const finish = (exited) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			child.removeListener("exit", onExit);
+			resolve(exited);
+		};
+		child.once("exit", onExit);
+	});
+}
+
+async function cleanup(root, runner, socket, controller) {
+	try { controller?.restoreAndStop(); } catch {}
 	try { socket?.end(); } catch {}
-	// Give the runner a beat to tear down before removing the tmpdir.
-	setTimeout(() => {
-		try { runner?.kill("SIGTERM"); } catch {}
-		rmSync(root, { recursive: true, force: true });
-	}, 80);
+	if (runner && runner.exitCode === null && runner.signalCode === null) {
+		try { runner.kill("SIGTERM"); } catch {}
+		if (!(await waitForExit(runner, 250)) && runner.exitCode === null && runner.signalCode === null) {
+			try { runner.kill("SIGKILL"); } catch {}
+			await waitForExit(runner, 250);
+		}
+	}
+	rmSync(root, { recursive: true, force: true });
 }
 
 // Hold-protocol cold-start heal (issue #25): the attach shrinks the child PTY
@@ -78,6 +99,7 @@ test(
 		const root = mkdtempSync(join(tmpdir(), "agentview-hold-"));
 		let runner;
 		let socket;
+		let controller;
 		const t0 = Date.now();
 		try {
 			runner = spawnRunner(root, "cold1", [resolve("test-support/fake-coldstart-tui-pi.mjs")], {
@@ -86,6 +108,7 @@ test(
 			await waitFor(() => existsSync(P.controlSocketPath(root, "cold1")) && readHost(root, "cold1")?.state === "alive");
 
 			socket = createConnection(P.controlSocketPath(root, "cold1"));
+			socket.on("error", () => {});
 			await once(socket, "connect");
 
 			let frameAt = null;
@@ -93,7 +116,7 @@ test(
 			// Record every resize the controller sends so we can assert the
 			// restore (original size) actually went out.
 			const resizes = [];
-			const controller = createJiggleRetryController({
+			controller = createJiggleRetryController({
 				sendResize: (cols, rows) => {
 					resizes.push([cols, rows]);
 					send(socket, { type: "resize", cols, rows });
@@ -146,9 +169,8 @@ test(
 				const h = readHost(root, "cold1");
 				return h?.cols === 196 && h?.rows === 39;
 			}, 10000);
-			controller.restoreAndStop();
 		} finally {
-			cleanup(root, runner, socket);
+			await cleanup(root, runner, socket, controller);
 		}
 	},
 );
@@ -163,15 +185,17 @@ test(
 		const root = mkdtempSync(join(tmpdir(), "agentview-shell-"));
 		let runner;
 		let socket;
+		let controller;
 		try {
 			runner = spawnRunner(root, "shell1", [resolve("test-support/fake-pty-pi.mjs")]);
 			await waitFor(() => existsSync(P.controlSocketPath(root, "shell1")) && readHost(root, "shell1")?.state === "alive");
 
 			socket = createConnection(P.controlSocketPath(root, "shell1"));
+			socket.on("error", () => {});
 			await once(socket, "connect");
 
 			const resizes = [];
-			const controller = createJiggleRetryController({
+			controller = createJiggleRetryController({
 				sendResize: (cols, rows) => {
 					resizes.push([cols, rows]);
 					send(socket, { type: "resize", cols, rows });
@@ -204,9 +228,8 @@ test(
 			const s = controller.getState();
 			assert.equal(s.held, false, "hold must be released after G1 restore");
 			assert.equal(s.tuiFrameSeen, false);
-			controller.restoreAndStop();
 		} finally {
-			cleanup(root, runner, socket);
+			await cleanup(root, runner, socket, controller);
 		}
 	},
 );
@@ -224,6 +247,7 @@ test(
 		const root = mkdtempSync(join(tmpdir(), "agentview-holdslow-"));
 		let runner;
 		let socket;
+		let controller;
 		const t0 = Date.now();
 		try {
 			runner = spawnRunner(root, "slow1", [resolve("test-support/fake-coldstart-tui-pi.mjs")], {
@@ -232,12 +256,13 @@ test(
 			await waitFor(() => existsSync(P.controlSocketPath(root, "slow1")) && readHost(root, "slow1")?.state === "alive");
 
 			socket = createConnection(P.controlSocketPath(root, "slow1"));
+			socket.on("error", () => {});
 			await once(socket, "connect");
 
 			let frameAt = null;
 			let clearAt = null;
 			const resizes = [];
-			const controller = createJiggleRetryController({
+			controller = createJiggleRetryController({
 				sendResize: (cols, rows) => {
 					resizes.push([cols, rows]);
 					send(socket, { type: "resize", cols, rows });
@@ -287,9 +312,8 @@ test(
 				const h = readHost(root, "slow1");
 				return h?.cols === 196 && h?.rows === 39;
 			}, 10000);
-			controller.restoreAndStop();
 		} finally {
-			cleanup(root, runner, socket);
+			await cleanup(root, runner, socket, controller);
 		}
 	},
 );

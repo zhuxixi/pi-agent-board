@@ -23,6 +23,19 @@ Status legend: ☐ todo · ◐ in progress · ☑ done
 
 ## Checkpoint log
 
+### CP5 — 2026-08-30 — hot attach self-heal + safe detach ordering (issue #42)
+- Added G6 post-restore verification: if a hot session's in-flight differential frame makes
+  shrink+restore collapse to a net-zero resize, the controller re-shrinks after 900ms without
+  a clear; the retry budget remains bounded and G1–G5 behavior is preserved.
+- Restored Pi editor key compatibility: `ctrl+]` passes through to `tui.editor.jumpForward`;
+  only `←` on an empty child input detaches.
+- Fixed G3 ordering so a held PTY is restored before the runner receives `detach` and closes
+  the control socket.
+- Added hot-session PTY E2E, delayed-clear, external-resize, detach-order, minimum-size, socket-identity,
+  and failure-teardown coverage. Final pre-PR verification: `npm run verify` passed with 409/409 tests;
+  coverage 93.03% lines / 77.35% branches / 90.55% functions; pack dry-run clean. The SIGKILL escalation
+  path is proven by the ~4.1s shutdown-escalation test (SIGTERM-immune child via `trap`+`exec`).
+
 ### CP4 — 2026-05-31 — fast non-live attach via warm PTY hosts
 - Non-live attach now uses the same Agent Board PTY host path as live sessions. `ctx.switchSession`
   remains only as a no-PTY fallback, with a fullscreen switching overlay so the previously
@@ -33,12 +46,14 @@ Status legend: ☐ todo · ◐ in progress · ☑ done
   socket until the host is ready.
 - Kept completed hosts warm instead of terminating them immediately. Warm pool defaults:
   `AGENT_BOARD_MAX_WARM_HOSTS=4`, `AGENT_BOARD_WARM_HOST_TTL_MS=600000`.
-- Fixed PTY detach flow: `ctrl+]`, `ctrl+g`, or `←` from a live attach returns to the dashboard
-  loop instead of revealing the original session where `/agent-board` was invoked.
+- Fixed PTY detach flow: `←` from an empty child input returns to the dashboard loop instead of
+  revealing the original session where `/agent-board` was invoked. `ctrl+]` and `ctrl+g` pass
+  through to the hosted Pi editor's native shortcuts.
 - Added internal scrollback controls for PTY attach surfaces: mouse wheel, `pgup` / `pgdn`,
   `home`, `end`. Scrolling uses an agent-board-owned absolute viewport and clamps at top/bottom
   so fast wheel events cannot wrap back to the bottom. Normal arrow keys still pass through.
-- Verification: `npm run typecheck` clean; `npm test` 55/55 green.
+- Historical verification: `npm run typecheck` clean; `npm test` 55/55 green at the time of CP4.
+  Later checkpoints supersede this count.
 
 ### CP3 — 2026-05-30 — standalone-ish dashboard UX
 - Added a full-screen **session view** inside `/agent-board`: **v** opens the selected row's

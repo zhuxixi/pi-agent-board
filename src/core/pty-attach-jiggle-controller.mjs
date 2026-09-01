@@ -2,10 +2,12 @@
  * Injectable orchestration for the attach shrink-and-hold jiggle protocol.
  *
  * Replaces the pulse-pair jiggle (shrink → 200ms → restore) with a
- * shrink-and-hold protocol: on connect we resize the child PTY down one
- * column/row and KEEP it there until the child's own rendering proves it
- * observed the width change (a full clear, \x1b[2J, which pi-tui emits from
- * fullRender(true) whenever widthChanged fires). Because there is no
+ * shrink-and-hold protocol: on connect we resize the child PTY to a safe
+ * alternate size and KEEP it there until the child's own rendering proves it
+ * observed the size change (a full clear, \x1b[2J, which pi-tui emits from
+ * fullRender(true) whenever widthChanged fires). At normal sizes the alternate
+ * size is one column/row smaller; near the minimum it changes only a safe
+ * dimension, and at 20x5 no jiggle is attempted. Because there is no
  * "restore" that can cancel the shrink before a clear is seen, event-loop
  * coalescing on either side (outer dashboard timers or the child's
  * SIGWINCH/render throttle) can no longer collapse a jiggle into a
@@ -27,10 +29,19 @@
  *   G4 notifyExternalResize() — a real user resize cancels the hold and
  *      adopts the new size.
  *   G5 start() restores any previous hold before arming a new one (reconnect).
+ *   G6 post-restore verify (issue #42): the frameStart fast path restores the
+ *      hold on the FIRST frame, which may predate the shrink — if the restore
+ *      then collapses both resizes into a net-zero change at the child, the
+ *      child renders nothing and never clears. While a frame has been seen
+ *      and no clear followed, each backoff tick re-arms the shrink (which
+ *      lands alone and cannot collapse), bounded by the same retry budget.
  *
  * If pi-tui ever drops the 2026h sequence, re-arm degrades to G1: the PTY
- * is restored within 6s — still better than the pre-#10 behavior.
+ * is restored within 6s — still better than the pre-#10 behavior. At the
+ * minimum supported PTY size (20x5), jiggle is disabled because the runner's
+ * clamp leaves no valid alternate size.
  */
+import { resizeJiggleSize } from "./pty-scroll.mjs";
 import {
 	advanceRetry,
 	createJiggleRetryState,
@@ -41,6 +52,13 @@ import {
 
 /** Restore the held (shrunk) child PTY when no TUI frame arrives this long. */
 const NO_FRAME_RESTORE_MS = 6000;
+/**
+ * Grace window after the frameStart fast-path restore before the chain may
+ * re-poke (issue #42). A healthy child proves the restore landed with a
+ * fullRender clear within a few hundred ms even on large screens; without the
+ * grace a slow-but-healthy clear would trigger a pointless re-shrink flicker.
+ */
+const POST_RESTORE_VERIFY_MS = 900;
 
 /**
  * @typedef {Object} JiggleRetryControllerDeps
@@ -64,6 +82,8 @@ export function createJiggleRetryController(deps) {
 	/** @type {[number, number]} */
 	let originalCols = 0;
 	let originalRows = 0;
+	/** The safe alternate size used while a jiggle hold is active, or null when unsupported. */
+	let holdSize = null;
 	/** @type {unknown | null} */
 	let chainTimer = null;
 	/** @type {unknown | null} */
@@ -98,10 +118,31 @@ export function createJiggleRetryController(deps) {
 	}
 
 	/**
-	 * Backoff chain is a pure countdown under the hold protocol: firing a
-	 * retry schedules the next backoff (no pulse is sent — the shrink is
-	 * already held). When the budget runs out, G2 restores the size.
+	 * One chain tick: advance the backoff budget, then re-arm the hold if the
+	 * child has a renderer (a TUI frame was seen) but no clear ever proved the
+	 * last size delta landed and the hold is currently inactive (issue #42:
+	 * the frameStart fast-path restore can race the shrink into a net-zero
+	 * size change at the child — its throttled renderer reads back the
+	 * original size and stays silent forever — so a clear-less restore must
+	 * be followed by a fresh shrink, which lands alone and cannot collapse).
+	 * Children that never rendered a frame (shells, cold boots) keep the old
+	 * pure-countdown behavior and are handled by G1/G2 only.
 	 */
+	function tickChain() {
+		chainTimer = null;
+		state = advanceRetry(state);
+		ensureHold();
+		if (state.clearDetected || state.stopped) return;
+		scheduleNextRetry();
+	}
+
+	function ensureHold() {
+		if (!tuiFrameSeen || held || state.clearDetected || state.stopped || !holdSize) return;
+		sendResize(holdSize.cols, holdSize.rows);
+		held = true;
+		restored = false;
+	}
+
 	function scheduleNextRetry() {
 		const delay = nextRetryDelay(state);
 		if (delay === null) {
@@ -109,11 +150,7 @@ export function createJiggleRetryController(deps) {
 			restoreIfHeld(); // G2
 			return;
 		}
-		chainTimer = setTimeoutFn(() => {
-			chainTimer = null;
-			state = advanceRetry(state);
-			scheduleNextRetry();
-		}, delay);
+		chainTimer = setTimeoutFn(tickChain, delay);
 	}
 
 	function armG1() {
@@ -142,8 +179,18 @@ export function createJiggleRetryController(deps) {
 		tuiFrameSeen = false;
 		originalCols = cols;
 		originalRows = rows;
+		holdSize = resizeJiggleSize(cols, rows);
 		sendResize(cols, rows);
-		sendResize(cols - 1, rows - 1);
+		if (!holdSize) {
+			// The runner clamps below 20x5, so a smaller request would be a
+			// net-zero resize and cannot trigger a redraw. Leave the child at the
+			// requested original size and disable this attach's jiggle chain.
+			state = stopRetry(state);
+			held = false;
+			restored = true;
+			return;
+		}
+		sendResize(holdSize.cols, holdSize.rows);
 		held = true;
 		restored = false;
 		armG1();
@@ -176,14 +223,20 @@ export function createJiggleRetryController(deps) {
 			clearG1Timer();
 			if (held) {
 				restoreIfHeld(); // fast path: child is rendering, width delta now lands
+				// …unless that frame was in flight BEFORE the shrink and the restore
+				// collapses both into a net-zero change at the child (issue #42).
+				// Restart the chain on the post-restore grace window: no clear within
+				// POST_RESTORE_VERIFY_MS → tickChain re-arms the hold (ensureHold).
+				clearChainTimer();
+				chainTimer = setTimeoutFn(tickChain, POST_RESTORE_VERIFY_MS);
 			} else {
 				// Slow boot: G1 released the hold before the TUI came up, so the
 				// child baselined at the original size. Re-arm a fresh hold — its
 				// next frame then sees a width delta and fullRenders. Guards: the
 				// clear path (primary) and G2 budget exhaustion (chain still
 				// ticking). G1 is NOT re-armed: frames are now flowing.
-				sendResize(originalCols - 1, originalRows - 1);
-				held = true;
+				if (holdSize) sendResize(holdSize.cols, holdSize.rows);
+				held = holdSize !== null;
 				restored = false;
 			}
 		}
@@ -212,6 +265,7 @@ export function createJiggleRetryController(deps) {
 		restored = false;
 		originalCols = cols;
 		originalRows = rows;
+		holdSize = null;
 		state = stopRetry(state);
 	}
 
@@ -220,6 +274,6 @@ export function createJiggleRetryController(deps) {
 		feed,
 		restoreAndStop,
 		notifyExternalResize,
-		getState: () => ({ ...state, held, tuiFrameSeen, originalCols, originalRows }),
+		getState: () => ({ ...state, held, tuiFrameSeen, originalCols, originalRows, holdSize }),
 	};
 }

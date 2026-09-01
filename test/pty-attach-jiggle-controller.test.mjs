@@ -88,13 +88,17 @@ test("G1 cancelled once a frame arrives (no double restore)", () => {
 test("G2: backoff budget exhausted without clear restores original size", () => {
 	const { controller, scheduler, resizes } = makeController();
 	controller.start(170, 36);
-	controller.feed("\x1b[?2026h frame"); // re-arm restores, cancels G1
-	const before = resizes.length;
-	// 排干全部退避计时器（无脉冲 fire 均为推进）
+	controller.feed("\x1b[?2026h frame"); // fast path restores, cancels G1
+	// 排干全部退避计时器：第一个 tick（还原后的验证窗口）发现无 clear 且 hold
+	// 已塌陷 → 重新 shrink 再戳一次（issue #42）；后续 tick 因 hold 在位而空转，
+	// 预算耗尽时 G2 还原原始尺寸。
 	for (let i = 0; i < 8; i++) scheduler.fireNext();
 	assert.equal(controller.getState().stopped, true);
-	// hold 已在 re-arm 时恢复，G2 无需再发（幂等）
-	assert.equal(resizes.length, before);
+	assert.deepEqual(
+		resizes,
+		[[170, 36], [169, 35], [170, 36], [169, 35], [170, 36]],
+		"start pair → fast-path restore → re-poke shrink → G2 restore",
+	);
 });
 
 test("G2 without any frame: budget exhausted restores", () => {
@@ -175,13 +179,115 @@ test("no re-arm probe after chain exhausted (stopped)", () => {
 	assert.equal(controller.getState().held, false);
 });
 
-test("full G1 window passes while frames keep arriving → held restored by G2 only", () => {
+test("frames keep arriving without a clear → chain re-pokes, exhaustion restores", () => {
 	const { controller, scheduler, resizes } = makeController();
 	controller.start(170, 36);
-	controller.feed("\x1b[?2026h frame"); // restores once
-	const before = resizes.length;
-	// 无全清的持续输出
+	controller.feed("\x1b[?2026h frame"); // fast path restores once
+	// 持续的无 clear 差分帧（热 session 净零塌陷后的沉默，issue #42）：链必须在
+	// 验证窗口后重新 shrink 再戳一次；预算耗尽时停留在原始尺寸。
 	for (let i = 0; i < 8; i++) scheduler.fireNext();
-	assert.equal(resizes.length, before, "no extra resizes");
+	assert.deepEqual(
+		resizes,
+		[[170, 36], [169, 35], [170, 36], [169, 35], [170, 36]],
+		"clear-less fast-path restore must be followed by exactly one re-poke shrink",
+	);
 	assert.equal(controller.getState().stopped, true);
+	assert.equal(controller.getState().held, false);
+});
+
+test("issue #42: fast-path restore without a following clear re-arms the hold, next clear heals", () => {
+	const { controller, scheduler, resizes } = makeController();
+	controller.start(196, 39);
+	assert.deepEqual(resizes, [[196, 39], [195, 38]]);
+	// 热 session 的在途差分帧（无 clear）误触快速通道 → 还原；子进程把
+	// shrink+restore 合并成净零 → 沉默。
+	controller.feed("\x1b[?2026hstatus tick\x1b[?2026l");
+	assert.deepEqual(resizes.at(-1), [196, 39], "fast path restores on first frame");
+	assert.equal(controller.getState().held, false);
+	// 还原后的验证窗口到期：无 clear → 重新 shrink 再戳一次（单独落地，无法塌陷）。
+	scheduler.fireNext();
+	assert.deepEqual(resizes.at(-1), [195, 38], "verify window without a clear re-shrinks");
+	assert.equal(controller.getState().held, true);
+	// 子进程这回真的看到宽度差 → fullRender → clear → 还原并彻底停止。
+	controller.feed("\x1b[?2026h\x1b[2J\x1b[H\x1b[3Jfull repaint");
+	assert.deepEqual(resizes.at(-1), [196, 39], "clear after the re-poke restores");
+	const s = controller.getState();
+	assert.equal(s.held, false);
+	assert.equal(s.clearDetected, true);
+	assert.equal(s.stopped, true);
+	assert.equal(scheduler.timers.size, 0, "no timers left after the heal");
+});
+
+test("issue #42: healthy session — clear within the grace window → zero extra resizes", () => {
+	const { controller, scheduler, resizes } = makeController();
+	controller.start(196, 39);
+	controller.feed("\x1b[?2026h frame start");
+	controller.feed("rest of frame \x1b[2J\x1b[H\x1b[3J full repaint");
+	const count = resizes.length;
+	for (let i = 0; i < 16 && scheduler.timers.size; i++) scheduler.fireNext();
+	assert.equal(resizes.length, count, "no re-poke once the clear landed (no flicker on healthy sessions)");
+	assert.equal(controller.getState().stopped, true);
+});
+
+test("issue #42: no-frame child (shell) — chain ticks never re-shrink, G1/G2 semantics unchanged", () => {
+	const { controller, scheduler, resizes } = makeController();
+	controller.start(170, 36);
+	// 从未见过 TUI 帧：G1 在 6s 还原；退避链 tick 全部空转（ensureHold 被
+	// !tuiFrameSeen 挡住）；预算耗尽后 restoreIfHeld 幂等 no-op。
+	for (let i = 0; i < 16 && scheduler.timers.size; i++) scheduler.fireNext();
+	assert.deepEqual(
+		resizes,
+		[[170, 36], [169, 35], [170, 36]],
+		"shell child: exactly one restore (G1), no re-shrinks",
+	);
+	assert.equal(controller.getState().stopped, true);
+	assert.equal(controller.getState().held, false);
+});
+
+test("issue #42: clear after the 900ms verify window still heals after one extra re-poke", () => {
+	const { controller, scheduler, resizes } = makeController();
+	controller.start(196, 39);
+	controller.feed("\x1b[?2026h frame start");
+	assert.deepEqual(resizes, [[196, 39], [195, 38], [196, 39]]);
+
+	// Model a healthy but delayed fullRender: the clear arrives after the
+	// post-restore grace window, so G6 is allowed to re-poke once.
+	scheduler.fireNext();
+	assert.deepEqual(resizes, [[196, 39], [195, 38], [196, 39], [195, 38]]);
+	assert.equal(controller.getState().held, true);
+
+	controller.feed("late fullRender \x1b[2J");
+	assert.deepEqual(resizes.at(-1), [196, 39]);
+	assert.equal(controller.getState().clearDetected, true);
+	assert.equal(controller.getState().stopped, true);
+	assert.equal(scheduler.timers.size, 0, "late clear must cancel the remaining retry timer");
+});
+
+test("issue #42: external resize during post-restore verify cancels G6 without rewriting the new size", () => {
+	const { controller, scheduler, resizes } = makeController();
+	controller.start(196, 39);
+	controller.feed("\x1b[?2026h frame start");
+	const beforeExternalResize = resizes.length;
+	assert.equal(scheduler.timers.size, 1, "post-restore verify timer is armed");
+
+	controller.notifyExternalResize(220, 50);
+	assert.equal(scheduler.timers.size, 0, "G4 must cancel the post-restore verify timer");
+	assert.equal(controller.getState().stopped, true);
+	assert.equal(controller.getState().originalCols, 220);
+	assert.equal(controller.getState().originalRows, 50);
+
+	// No stale verify callback may re-shrink after the external resize. A
+	// later clear is inert because G4 stopped the controller.
+	assert.equal(resizes.length, beforeExternalResize);
+	controller.feed("late \x1b[2J");
+	assert.equal(resizes.length, beforeExternalResize);
+});
+
+test("issue #42: minimum PTY size skips an invalid shrink", () => {
+	const { controller, scheduler, resizes } = makeController();
+	controller.start(20, 5);
+	assert.deepEqual(resizes, [[20, 5]], "do not send 19x4, which the runner clamps back to 20x5");
+	assert.equal(controller.getState().held, false);
+	assert.equal(controller.getState().stopped, true);
+	assert.equal(scheduler.timers.size, 0);
 });

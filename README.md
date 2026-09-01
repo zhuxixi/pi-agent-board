@@ -93,7 +93,7 @@ From the board:
 - In Peek, press `r` to reply without attaching.
 - Press `v` for a read-only transcript, or `e` for evidence and diagnostics.
 - Press `Enter`, `Right`, or `>` to attach to the real Pi session.
-- In PTY attach mode, press `Left` or `Ctrl+]` on an empty child input line to return to the board. If you are editing text, these keys are forwarded to Pi; when the host is disconnected, detach is unconditional.
+- In PTY attach mode, press `Left` on an empty child input line to return to the board. `Ctrl+]` is not a detach key — it is passed through to the child Pi editor. When the host is disconnected, `Left` always exits.
 
 ## Dashboard Workflow
 
@@ -192,7 +192,7 @@ The `e` view shows durable session evidence, including changed files, commands a
 
 ### PTY attach
 
-PTY attach opens the real interactive Pi session. On an empty child input line, use `Left` or `Ctrl+]` to detach and return to the board; if you are editing text, these keys are forwarded to Pi, while a disconnected host can always be exited. While attached, `PageUp`, `PageDown`, `Home`, `End`, and the mouse wheel scroll local scrollback. Mouse drag or double-click selects and copies text, clicks open detected links, and middle-click paste is available on systems with the required X11 tooling.
+PTY attach opens the real interactive Pi session. On an empty child input line, use `Left` to detach and return to the board; while you are editing text, `Left` is forwarded to the Pi editor, and a disconnected host can always be exited with `Left`. `Ctrl+]` is not a detach key — it is passed through to the child Pi editor. While attached, `PageUp`, `PageDown`, `Home`, `End`, and the mouse wheel scroll local scrollback. Mouse drag or double-click selects and copies text, clicks open detected links, and middle-click paste is available on systems with the required X11 tooling.
 
 The attach surface can forward terminal clipboard and image/file passthrough sequences. These behaviors can be disabled individually in [Configuration](#configuration). Cold hosts may briefly show a loading/reconnect surface while their PTY becomes ready.
 

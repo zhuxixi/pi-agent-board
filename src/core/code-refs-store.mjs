@@ -141,6 +141,9 @@ function currentBranch(cwd) {
 			encoding: "utf8",
 			stdio: ["ignore", "pipe", "ignore"],
 			timeout: 2000,
+			// Windows: no console window when spawned from a console-less worker
+			// (issue #49 follow-up — these git spawns created visible WT windows).
+			windowsHide: true,
 		});
 		branch = out.trim() || null;
 	} catch {

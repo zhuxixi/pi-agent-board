@@ -280,9 +280,9 @@ Runner → client:
 {"type":"error","message":"..."}
 ```
 
-For attach, the parent sends raw input bytes through `input`. The only intercepted key should be the detach chord.
+For attach, the parent sends raw input bytes through `input`. The attach surface intercepts only `←` when the child input line appears empty; all other keys, including Pi's native `ctrl+]` editor shortcut, pass through to the child.
 
-Recommended detach chord for spike: `ctrl+]`, because it is already an editor jump key but less commonly needed than arrows/escape/enter. Make it configurable later.
+The detach chord is `←` because it is already the board navigation key and preserves Pi editor keybindings.
 
 ## 6. Attach UI design
 
@@ -560,7 +560,7 @@ MVP live attach is accepted when:
 | child Pi extension recursion | medium | `AGENT_BOARD_CHILD=1`; skip dashboard auto-open/footer in child |
 | host liveness conflated with agent activity | high | add `host.json`; separate `hostAlive` from `row.alive` |
 | worktree safety too conservative with idle hosts | low/medium | conservative MVP, later refine with activity state |
-| detach chord conflicts with Pi keybindings | low | configurable later; start with `ctrl+]` |
+| `←` is also a child-editor cursor key | low | detach only when the child input line appears empty; keep all other editor shortcuts, including `ctrl+]`, pass-through |
 | terminal images/OSC links not perfect in virtual renderer | medium | document limitation; raw takeover/core API if needed |
 
 ## 13. Confidence
