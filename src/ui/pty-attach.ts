@@ -5,7 +5,7 @@ import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import type { Component, KeybindingsManager, TUI } from "@earendil-works/pi-tui";
 import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { isProbablyEmptyPiInputLine } from "../core/pty-input.mjs";
+import { isProbablyEmptyPiInputLine, isProbablyPiInputLine } from "../core/pty-input.mjs";
 import { findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
 import { createAttachOutputRenderScheduler, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
 import { evaluateAttachReconnect, shouldEscapeAttach } from "../core/pty-attach-reconnect.mjs";
@@ -320,12 +320,49 @@ export class PtyAttachComponent implements Component {
 		this.done({ action: "detached" });
 	}
 
+	/** Bottom-most line whose cells include an inverse-video cell — Pi renders
+	 * its editor cursor as an inverse "fake cursor" (`ESC[7m`), and the cell
+	 * persists in the buffer even while streaming differential frames skip
+	 * repainting the editor line. */
+	private findLastInverseCellLine(active: {
+		baseY: number;
+		length: number;
+		getLine(index: number): BufferLineLike | undefined;
+	}): number | null {
+		for (let y = active.baseY + active.length - 1; y >= active.baseY; y--) {
+			const line = active.getLine(y);
+			if (!line) continue;
+			for (let x = 0; x < line.length; x++) {
+				if (line.getCell(x)?.isInverse()) return y;
+			}
+		}
+		return null;
+	}
+
 	private childInputLooksEmpty(): boolean {
 		if (!this.receivedOutput) return true;
 		const active = this.term.buffer.active;
-		if (typeof active.cursorY !== "number") return false;
-		const line = active.getLine(active.baseY + active.cursorY)?.translateToString(true) ?? "";
-		return isProbablyEmptyPiInputLine(line);
+		// The terminal cursor is not a reliable anchor for the editor line:
+		// while Pi streams output (or right after attach) the cursor rests on
+		// working/output lines, never the input line, so a genuinely empty
+		// editor was misread as non-empty and ← stopped detaching (issue #66).
+		// Pi's editor line always carries an inverse-video fake-cursor cell,
+		// so anchor on that instead.
+		const fakeCursorLine = this.findLastInverseCellLine(active);
+		if (fakeCursorLine !== null) {
+			const line = active.getLine(fakeCursorLine)?.translateToString(true) ?? "";
+			return isProbablyEmptyPiInputLine(line);
+		}
+		// Fallback: Pi variants that render no fake cursor — look for a
+		// prompt-glyph line.
+		for (let y = active.baseY + active.length - 1; y >= active.baseY; y--) {
+			const line = active.getLine(y)?.translateToString(true) ?? "";
+			if (isProbablyPiInputLine(line)) return isProbablyEmptyPiInputLine(line);
+		}
+		// No editor line recoverable (e.g. a garbled replay buffer): treat the
+		// input as empty — ← is the only detach key left on the attach surface,
+		// so it must always escape rather than trap the user.
+		return true;
 	}
 
 	private connect(): void {

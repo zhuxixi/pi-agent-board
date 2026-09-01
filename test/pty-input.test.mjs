@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isProbablyEmptyPiInputLine } from "../src/core/pty-input.mjs";
+import { isProbablyEmptyPiInputLine, isProbablyPiInputLine } from "../src/core/pty-input.mjs";
 
 test("isProbablyEmptyPiInputLine accepts empty Pi prompt lines", () => {
 	assert.equal(isProbablyEmptyPiInputLine("› "), true);
@@ -12,4 +12,18 @@ test("isProbablyEmptyPiInputLine rejects prompt lines containing draft text", ()
 	assert.equal(isProbablyEmptyPiInputLine("› hello"), false);
 	assert.equal(isProbablyEmptyPiInputLine("  ┃ edit me"), false);
 	assert.equal(isProbablyEmptyPiInputLine("  │ second line"), false);
+});
+
+test("isProbablyPiInputLine recognizes Pi prompt / continuation lines", () => {
+	assert.equal(isProbablyPiInputLine("> "), true);
+	assert.equal(isProbablyPiInputLine("  ┃ edit me"), true);
+	assert.equal(isProbablyPiInputLine("  │ second line"), true);
+	assert.equal(isProbablyPiInputLine("› draft"), true);
+});
+
+test("isProbablyPiInputLine rejects content lines and empty lines", () => {
+	assert.equal(isProbablyPiInputLine("chat content"), false);
+	assert.equal(isProbablyPiInputLine("────── ◊◊ ──────"), false);
+	assert.equal(isProbablyPiInputLine(""), false);
+	assert.equal(isProbablyPiInputLine("   "), false);
 });
