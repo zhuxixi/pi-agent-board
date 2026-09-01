@@ -9,6 +9,7 @@
 //   C. ← still detaches on a genuinely empty prompt line.
 //   D. ← detach restores the held PTY size before a graceful socket end.
 //   E. ← detaches on an empty editor line that renders no fake cursor.
+//   F. ← detaches via the glyph fallback when a glyph line renders without a fake cursor.
 // Run via `node --experimental-transform-types` (TS parameter properties).
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
@@ -181,6 +182,19 @@ const out: Record<string, boolean> = {};
 	(attach as unknown as { connected: boolean }).connected = true;
 	attach.handleInput("\x1b[D");
 	out.leftDetachesOnEmptyInputWithoutFakeCursor = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	attach.dispose();
+}
+
+// F. Prompt-glyph line rendered WITHOUT an inverse fake cursor (a Pi variant
+// that skips the fake cursor): tier-2 glyph fallback must find the editor
+// line and detach on the empty `> ` prompt.
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat content\r\n> ");
+	await writeToTerm(attach, "\x1b[1;1H"); // park the cursor on the non-empty line
+	(attach as unknown as { connected: boolean }).connected = true;
+	attach.handleInput("\x1b[D");
+	out.leftDetachesOnGlyphLineWithoutFakeCursor = didDetach() && sent.length === 1 && sent[0].type === "detach";
 	attach.dispose();
 }
 
