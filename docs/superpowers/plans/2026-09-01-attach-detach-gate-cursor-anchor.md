@@ -139,11 +139,13 @@ In `test-support/detach-gate-smoke.ts`:
 	attach.dispose();
 }
 
-// E. Empty input line rendered WITHOUT a fake cursor (no inverse cell, no
-// glyph): falls through to the escape fallback — treat as empty, detach.
+// E. Empty input line rendered WITHOUT a fake cursor: no inverse cell and no
+// glyph anywhere, and the terminal cursor sits on a non-empty output line.
+// Falls through to the escape fallback — treat as empty, detach.
 {
 	const { attach, sent, didDetach } = makeAttach();
 	await writeToTerm(attach, "chat content\r\n");
+	await writeToTerm(attach, "\x1b[1;1H"); // park the cursor on the non-empty line
 	(attach as unknown as { connected: boolean }).connected = true;
 	attach.handleInput("\x1b[D");
 	out.leftDetachesOnEmptyInputWithoutFakeCursor = didDetach() && sent.length === 0;
