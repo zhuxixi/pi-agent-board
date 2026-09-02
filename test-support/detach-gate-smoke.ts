@@ -199,10 +199,11 @@ const out: Record<string, boolean> = {};
 }
 
 // H. The pushed editor state is authoritative over the render heuristic: the
-// buffer looks non-empty (garbled line) but the child reports empty → ← detach.
+// buffer holds a draft-looking line (heuristic would forward ←) but the
+// child reports empty → ← detach.
 {
 	const { attach, sent, didDetach } = makeAttach();
-	await writeToTerm(attach, "chat content\r\n────── ◊◊ ──────");
+	await writeToTerm(attach, "chat content\r\n> \x1b[7m草\x1b[27m稿");
 	(attach as unknown as { onSocketData: (t: string) => void }).onSocketData(JSON.stringify({ type: "editor_state", empty: true }) + "\n");
 	(attach as unknown as { connected: boolean }).connected = true;
 	attach.handleInput("\x1b[D");
