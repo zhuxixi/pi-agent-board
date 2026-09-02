@@ -47,7 +47,7 @@ attach 面板（pty-attach.ts）
 - 连接策略：runner **先 spawn 子 pi 后 listen** → 初始连接带重试（退避 1s→2s→…封顶 5s，永久重试）；断开后同样重连
 - 轮询：`setInterval(100ms)` 读 `getEditorText()`，`text !== lastText` 才发送（dedupe，避免常发）
 - 生命周期：session_start 启动、进程退出自然回收；`stop()` 供测试
-- 依赖注入设计（可测性，§5）：`createEditorStateReporter({ getEditorText, connect, intervalMs, now, log })` → `{ start, stop }`；生产接线在 index.ts
+- 依赖注入设计（可测性，§5）：`createEditorStateReporter({ getEditorText, connect, intervalMs = 100, scheduler = defaultScheduler })` → `{ start, stop }`；`scheduler = { interval(fn, ms), timeout(fn, ms), clear(handle) }`（默认 setInterval/setTimeout 包装）；生产接线在 index.ts
 
 ### 2.3 runner 改动（`runner/pty-runner.mjs`）
 
@@ -85,7 +85,7 @@ attach 面板（pty-attach.ts）
 
 | 单元 | 位置 | 职责 | 测试边界 |
 |------|------|------|----------|
-| `createEditorStateReporter({getEditorText, connect, intervalMs, now})` | src/core/editor-state-reporter.mjs | 轮询、变化 dedupe、断线重连退避、stop | 依赖全注入；fake connect/getEditorText/手动推进时钟 → 断言 send 序列与时机；不碰真实 socket/interval |
+| `createEditorStateReporter({getEditorText, connect, intervalMs, scheduler})` | src/core/editor-state-reporter.mjs | 轮询、变化 dedupe、断线重连退避、stop | 依赖全注入（scheduler 为 {interval, timeout, clear} 手动时钟）；fake connect/getEditorText/scheduler → 断言 send 序列与时机；不碰真实 socket/interval |
 | `resolveEditorEmpty(editorEmpty, heuristic)` | src/core/pty-input.mjs | 判定优先级 | 纯函数：4 种输入组合 → boolean |
 | runner `editor_state` case + hello 字段 | runner/pty-runner.mjs | 缓存、broadcast、复位 | 现有 integration harness（pty-runner.integration.test.mjs 模式）：注入 client line → 断言 broadcast 与 hello 载荷 |
 | attach `editorEmpty` 缓存 + 判定 | src/ui/pty-attach.ts | 消息 case、字段、← 判定 | detach-gate-smoke 场景 H（editor_state 消息 + 草稿 buffer → detach）；场景 I（草稿 + editor_state:false → 转发） |
