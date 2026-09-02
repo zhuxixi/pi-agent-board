@@ -91,6 +91,28 @@ test("pr-body back-link is case-insensitive (Closes #40)", () => {
 	assert.equal(result.issue.source, "pr-body");
 });
 
+test("pr create body back-link word boundaries and number guard (issue #65)", () => {
+	const run = (body) =>
+		extractCodeRefs(
+			{
+				commands: [{ command: `gh pr create --title t --body "${body}"` }],
+				assistantTexts: [],
+				worktreePath: null,
+				branch: null,
+				repoUrl: "owner/repo",
+				host: "github.com",
+			},
+			github()
+		);
+	// Embedded-keyword prose must not match.
+	assert.equal(run("prefix #1 disclose #2 unresolved #3").issue, null);
+	// 8-digit numbers are rejected wholesale, not truncated to 7 digits.
+	assert.equal(run("closes #12345678").issue, null);
+	// Canonical and legacy forms keep working.
+	assert.equal(run("fixes issue #40").issue?.number, 40);
+	assert.equal(run("fixes issue #40").issue?.source, "pr-body");
+});
+
 test("null host with a host-templated provider yields no url (no malformed link)", () => {
 	const result = extractCodeRefs(
 		{

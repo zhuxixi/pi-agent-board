@@ -506,8 +506,43 @@ const REF_CONFIDENCE = { claim: "high", action: "high", view: "medium", mention:
 
 /** URL rules carry a `/issues/`, `/pull/`, or `/merge_requests/` path segment. */
 const URL_RULE_RE = /issues\/|pull\/|merge_requests\//;
-/** `closes #N` / `fixes #N` / `issue #N` back-link inside a `pr create` body. */
-const PR_BACKLINK_RE = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|issue)\s+#(\d{1,7})/i;
+/**
+ * Back-link inside an explicit `pr create` command body: closing keywords
+ * (optionally followed by "issue") or the legacy bare `issue #N` form.
+ * Word boundaries keep embedded keywords (prefix/disclose/unresolved) out;
+ * `(?!\w)` rejects longer numbers instead of truncating them to 7 digits.
+ */
+const PR_CREATE_BACKLINK_RE =
+	/\b(?:(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s+(?:issue\s+)?|issue\s+)#(\d{1,7})(?!\w)/i;
+/**
+ * Back-link in later assistant evidence: canonical closing-keyword syntax
+ * only (`closes #N` etc.). A bare `issue #N` mention — e.g. a code-review
+ * report's finding number — never matches here (issue #65).
+ */
+const PR_FOLLOWUP_BACKLINK_RE =
+	/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s+#(\d{1,7})(?!\w)/i;
+
+/**
+ * Match a PR→issue back-link in the text of an explicit `pr create` command
+ * (closing keywords or the legacy bare `issue #N` body form).
+ * @param {string} text
+ * @returns {number|null}
+ */
+function matchPrCreateBacklink(text) {
+	const m = PR_CREATE_BACKLINK_RE.exec(text);
+	return m ? Number(m[1]) : null;
+}
+
+/**
+ * Match a PR→issue back-link in later assistant evidence — canonical
+ * closing-keyword syntax only, never a bare `issue #N` (issue #65).
+ * @param {string} text
+ * @returns {number|null}
+ */
+function matchPrFollowupBacklink(text) {
+	const m = PR_FOLLOWUP_BACKLINK_RE.exec(text);
+	return m ? Number(m[1]) : null;
+}
 /** `issue-<N>-...` worktree/branch naming convention (engine-builtin). */
 const WORKTREE_RE = /(?:^|[/\\])issue-(\d{1,7})(?:-|$)/;
 /** Bare `#N` mentions. */
@@ -635,8 +670,8 @@ export function extractCodeRefs(input, provider) {
  * @param {Array<{kind: "issue"|"pr", number: number, strength: string, source: string, lastIndex: number}>} candidates
  */
 function applyPrBacklink(text, index, candidates) {
-	const m = PR_BACKLINK_RE.exec(text);
-	if (m) addCandidate(candidates, "issue", Number(m[1]), "claim", "pr-body", index);
+	const number = matchPrCreateBacklink(text);
+	if (number !== null) addCandidate(candidates, "issue", number, "claim", "pr-body", index);
 }
 
 /**
@@ -653,8 +688,8 @@ function resolveBacklinkAfter(marker, commands, assistantTexts, stopBefore = Inf
 	for (let index = marker.index + 1; index < total; index++) {
 		const text = evidenceTextAt(index, commands, assistantTexts);
 		if (!text) continue;
-		const m = PR_BACKLINK_RE.exec(text);
-		if (m) return { number: Number(m[1]), index };
+		const number = matchPrFollowupBacklink(text);
+		if (number !== null) return { number, index };
 	}
 	return null;
 }
