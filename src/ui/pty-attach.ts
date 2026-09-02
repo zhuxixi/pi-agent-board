@@ -5,7 +5,7 @@ import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import type { Component, KeybindingsManager, TUI } from "@earendil-works/pi-tui";
 import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { isProbablyEmptyPiInputLine, isProbablyPiInputLine } from "../core/pty-input.mjs";
+import { isProbablyEmptyPiInputLine, isProbablyPiInputLine, resolveEditorEmpty } from "../core/pty-input.mjs";
 import { findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
 import { createAttachOutputRenderScheduler, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
 import { evaluateAttachReconnect, shouldEscapeAttach } from "../core/pty-attach-reconnect.mjs";
@@ -158,6 +158,9 @@ export class PtyAttachComponent implements Component {
 	private pendingClickTimer: ReturnType<typeof setTimeout> | null = null;
 	private lastClickPoint: MousePoint | null = null;
 	private lastClickAt = 0;
+	/** Authoritative editor emptiness pushed by the child Pi extension via the
+	 * control socket (issue #68). null = unknown — fall back to the heuristic. */
+	private editorEmpty: boolean | null = null;
 	// Whether any PTY output (live or replayed) has been shown yet. Until then we paint a
 	// loading banner instead of an empty buffer so a slow (cold) host start doesn't leave
 	// the previous screen visible.
@@ -246,7 +249,7 @@ export class PtyAttachComponent implements Component {
 			// escape unconditionally — the view must always be exitable, even
 			// after the host crashes mid-output (issue #48). Note: ctrl+] is NOT
 			// a detach key — it passes through to Pi (tui.editor.jumpForward).
-			if (shouldEscapeAttach(this.connected, this.childInputLooksEmpty())) {
+			if (shouldEscapeAttach(this.connected, resolveEditorEmpty(this.editorEmpty, this.childInputLooksEmpty()))) {
 				this.detach();
 				return;
 			}
@@ -975,8 +978,12 @@ export class PtyAttachComponent implements Component {
 					this.checkClearSequence(msg.data);
 					continue;
 				}
-				if (msg.type === "hello" || msg.type === "status") this.status = "attached";
-				else if (msg.type === "exit") {
+				if (msg.type === "hello" || msg.type === "status") {
+					this.status = "attached";
+					if (msg.type === "hello" && typeof msg.editorEmpty === "boolean") this.editorEmpty = msg.editorEmpty;
+				} else if (msg.type === "editor_state") {
+					this.editorEmpty = typeof msg.empty === "boolean" ? msg.empty : null;
+				} else if (msg.type === "exit") {
 					this.status = "host exited";
 					this.done({ action: "closed", exitCode: msg.exitCode ?? null });
 				} else if (msg.type === "error") this.status = `error: ${msg.message ?? "host error"}`;
