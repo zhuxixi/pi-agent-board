@@ -500,3 +500,78 @@ test("pty-runner survives persistent host.json persist failures (EPERM-class)", 
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
 });
+
+test("pty-runner routes editor_state between clients, seeds hello, resets on exit", async () => {
+	const root = freshRoot();
+	let runner;
+	try {
+		const meta = createView(root, { id: "v1", name: "editor-state", cwd: process.cwd() });
+		const configPath = P.hostConfigPath(root, "v1");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "v1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" },
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		await waitFor(() => hostReady(root, "v1"));
+
+		const readMessages = (socket) => {
+			let buf = "";
+			const messages = [];
+			socket.on("data", (chunk) => {
+				buf += chunk.toString();
+				const lines = buf.split("\n");
+				buf = lines.pop() ?? "";
+				for (const line of lines) if (line.trim()) messages.push(JSON.parse(line));
+			});
+			return messages;
+		};
+
+		const client1 = createConnection(P.controlSocketPath(root, "v1"));
+		await once(client1, "connect");
+		const messages1 = readMessages(client1);
+		send(client1, { type: "hello" });
+		await waitFor(() => messages1.find((m) => m.type === "hello"));
+
+		// A second client must receive the pushed state as a broadcast.
+		const client2 = createConnection(P.controlSocketPath(root, "v1"));
+		await once(client2, "connect");
+		const messages2 = readMessages(client2);
+		send(client1, { type: "editor_state", empty: false });
+		await waitFor(() => messages2.find((m) => m.type === "editor_state"));
+		assert.equal(messages2.find((m) => m.type === "editor_state").empty, false);
+
+		// A client connecting afterwards gets the current state seeded in hello.
+		const client3 = createConnection(P.controlSocketPath(root, "v1"));
+		await once(client3, "connect");
+		const messages3 = readMessages(client3);
+		send(client3, { type: "hello" });
+		// The runner also sends an unsolicited hello on connect (no editorEmpty);
+		// the seeded value arrives on the response to our explicit hello.
+		await waitFor(() => messages3.find((m) => m.type === "hello" && "editorEmpty" in m));
+		assert.equal(messages3.find((m) => m.type === "hello" && "editorEmpty" in m).editorEmpty, false);
+
+		// Child exit resets the state to null and broadcasts it.
+		send(client1, { type: "input", data: "exit\r" });
+		await waitFor(() => messages2.find((m) => m.type === "editor_state" && m.empty === null));
+		await waitFor(() => readHost(root, "v1")?.endedAt);
+
+		client1.destroy();
+		client2.destroy();
+		client3.destroy();
+	} finally {
+		await stopRunner(runner);
+		reapChild(root, "v1");
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
