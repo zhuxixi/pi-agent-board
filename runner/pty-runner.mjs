@@ -72,6 +72,9 @@ function main() {
 	// "exited" update (the handler kills the child, so its exit callback fires
 	// inside the 50ms flush window — CR round-1, issue #48).
 	let crashed = false;
+	/** Authoritative child editor emptiness, pushed by the child Pi extension
+	 * (issue #68). null = unknown (extension missing / not yet reported). */
+	let editorEmpty = null;
 	/** @type {import("../src/core/types.mjs").HostStatus} */
 	let host = {
 		version: 1,
@@ -195,6 +198,8 @@ function main() {
 		// exit; this callback must not overwrite that state.
 		if (!crashed) {
 			update({ state: "exited", endedAt: Date.now(), exitCode, childPid: null });
+			editorEmpty = null;
+			broadcast({ type: "editor_state", empty: null });
 			broadcast({ type: "exit", exitCode });
 		}
 		if (!shutdownStarted) setTimeout(() => process.exit(exitCode ?? 0), 50).unref?.();
@@ -238,7 +243,7 @@ function main() {
 		try { msg = JSON.parse(line); } catch { return send(socket, { type: "error", message: "invalid json" }); }
 		switch (msg.type) {
 			case "hello":
-				send(socket, { type: "hello", status: host });
+				send(socket, { type: "hello", status: host, editorEmpty });
 				break;
 			case "input":
 				if (typeof msg.data === "string") child.write(msg.data);
@@ -264,6 +269,11 @@ function main() {
 			case "get_status":
 				send(socket, { type: "status", status: host });
 				break;
+			case "editor_state": {
+				editorEmpty = typeof msg.empty === "boolean" ? msg.empty : null;
+				broadcast({ type: "editor_state", empty: editorEmpty });
+				break;
+			}
 		}
 	}
 
