@@ -980,7 +980,7 @@ export class PtyAttachComponent implements Component {
 				}
 				if (msg.type === "hello" || msg.type === "status") {
 					this.status = "attached";
-					if (msg.type === "hello" && typeof msg.editorEmpty === "boolean") this.editorEmpty = msg.editorEmpty;
+					if (msg.type === "hello") this.editorEmpty = typeof msg.editorEmpty === "boolean" ? msg.editorEmpty : null;
 				} else if (msg.type === "editor_state") {
 					this.editorEmpty = typeof msg.empty === "boolean" ? msg.empty : null;
 				} else if (msg.type === "exit") {
