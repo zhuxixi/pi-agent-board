@@ -555,8 +555,9 @@ test("pty-runner routes editor_state between clients, seeds hello, resets on exi
 		await once(client3, "connect");
 		const messages3 = readMessages(client3);
 		send(client3, { type: "hello" });
-		// The runner also sends an unsolicited hello on connect (no editorEmpty);
-		// the seeded value arrives on the response to our explicit hello.
+		// The runner also sends an unsolicited hello on connect (now with the
+		// current editorEmpty seeded too); both it and the explicit-hello reply
+		// carry the seeded value, so the finder matches either.
 		await waitFor(() => messages3.find((m) => m.type === "hello" && "editorEmpty" in m));
 		assert.equal(messages3.find((m) => m.type === "hello" && "editorEmpty" in m).editorEmpty, false);
 

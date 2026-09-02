@@ -214,7 +214,7 @@ function main() {
 	server = createServer((socket) => {
 		clients.add(socket);
 		update({ attachedEver: true });
-		socket.write(JSON.stringify({ type: "hello", status: host }) + "\n");
+		socket.write(JSON.stringify({ type: "hello", status: host, editorEmpty }) + "\n");
 		let buffer = "";
 		socket.on("data", (chunk) => {
 			buffer += chunk.toString("utf8");

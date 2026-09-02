@@ -6,8 +6,8 @@
 /** @typedef {{ write(jsonLine: string): void; on?(event: "close" | "error", fn: () => void): void }} SocketLike */
 
 const defaultScheduler = {
-	interval(fn, ms) { return setInterval(fn, ms); },
-	timeout(fn, ms) { return setTimeout(fn, ms); },
+	interval(fn, ms) { const h = setInterval(fn, ms); h.unref?.(); return h; },
+	timeout(fn, ms) { const h = setTimeout(fn, ms); h.unref?.(); return h; },
 	clear(handle) { clearInterval(handle); clearTimeout(handle); },
 };
 
