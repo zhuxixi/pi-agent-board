@@ -32,3 +32,16 @@ export function isProbablyPiInputLine(line) {
 	const withoutLeftPadding = String(line || "").replace(/^[\s\u00a0]+/u, "");
 	return withoutLeftPadding.length > 0 && PROMPT_GLYPHS.includes(withoutLeftPadding[0]);
 }
+
+/**
+ * Resolve the ← detach gate's emptiness signal: when the child Pi pushes its
+ * authoritative editor state (boolean), it wins; when it is unknown (null/
+ * undefined — child extension missing or socket never connected), fall back
+ * to the render heuristic.
+ * @param {boolean | null | undefined} editorEmpty
+ * @param {boolean} heuristic
+ * @returns {boolean}
+ */
+export function resolveEditorEmpty(editorEmpty, heuristic) {
+	return editorEmpty === null || editorEmpty === undefined ? heuristic : editorEmpty;
+}

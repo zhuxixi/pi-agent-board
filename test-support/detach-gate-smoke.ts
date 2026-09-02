@@ -198,6 +198,47 @@ const out: Record<string, boolean> = {};
 	attach.dispose();
 }
 
+// H. The pushed editor state is authoritative over the render heuristic: the
+// buffer holds a draft-looking line (heuristic would forward ←) but the
+// child reports empty → ← detach.
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat content\r\n> \x1b[7m草\x1b[27m稿");
+	(attach as unknown as { onSocketData: (t: string) => void }).onSocketData(JSON.stringify({ type: "editor_state", empty: true }) + "\n");
+	(attach as unknown as { connected: boolean }).connected = true;
+	attach.handleInput("\x1b[D");
+	out.leftEditorStateOverridesHeuristicEmpty = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	attach.dispose();
+}
+
+// I. The pushed editor state is authoritative the other way: the heuristic
+// would say "empty" (nothing in the buffer), but the child reports a draft →
+// ← is forwarded (editor protection), NOT detach.
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat content\r\n");
+	(attach as unknown as { onSocketData: (t: string) => void }).onSocketData(JSON.stringify({ type: "editor_state", empty: false }) + "\n");
+	(attach as unknown as { connected: boolean }).connected = true;
+	attach.handleInput("\x1b[D");
+	out.leftEditorStateBlocksDetachOnDraft = !didDetach() && sent.length === 1 && sent[0].type === "input" && sent[0].data === "\x1b[D";
+	attach.dispose();
+}
+
+// J. A hello carrying null editorEmpty (fresh runner after a crash) resets a
+// stale cached draft state — the gate falls back to the heuristic instead of
+// mis-detaching. The heuristic sees a draft (fake cursor on a glyph line) →
+// ← forwarded.
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat content\r\n> \x1b[7m草\x1b[27m稿");
+	(attach as unknown as { onSocketData: (t: string) => void }).onSocketData(JSON.stringify({ type: "editor_state", empty: true }) + "\n");
+	(attach as unknown as { onSocketData: (t: string) => void }).onSocketData(JSON.stringify({ type: "hello", editorEmpty: null }) + "\n");
+	(attach as unknown as { connected: boolean }).connected = true;
+	attach.handleInput("\x1b[D");
+	out.leftHelloNullResetsStaleEditorState = !didDetach() && sent.length === 1 && sent[0].type === "input" && sent[0].data === "\x1b[D";
+	attach.dispose();
+}
+
 // E2. A terminal at the minimum supported size must not emit a shrink that the
 // runner immediately clamps back, because that is not a real width delta.
 {
