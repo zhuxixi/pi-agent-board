@@ -6,9 +6,10 @@
  * the count of sessions needing attention. See docs/EXPLORATION.md for the design.
  */
 import { fileURLToPath } from "node:url";
+import { createConnection } from "node:net";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resolvePiInvocation } from "./core/invocation.mjs";
-import { defaultRoot } from "./core/paths.mjs";
+import { controlSocketPathFor, defaultRoot } from "./core/paths.mjs";
 import { listRows } from "./core/store.mjs";
 import { createService } from "./runtime/service.mjs";
 import { openDashboard, registerAgentBoardCommand } from "./commands/agent-board.js";
@@ -18,6 +19,8 @@ const RUNNER_SCRIPT = fileURLToPath(new URL("../runner/job-runner.mjs", import.m
 const PTY_RUNNER_SCRIPT = fileURLToPath(new URL("../runner/pty-runner.mjs", import.meta.url));
 const TITLE_RUNNER_SCRIPT = fileURLToPath(new URL("../runner/title-runner.mjs", import.meta.url));
 const AUTO_STATE_RUNNER_SCRIPT = fileURLToPath(new URL("../runner/state-runner.mjs", import.meta.url));
+
+let hostedEditorReporter: { start(): void; stop(): void } | null = null;
 
 export default function piAgentBoard(pi: ExtensionAPI): void {
 	const root = defaultRoot();
@@ -71,6 +74,14 @@ export default function piAgentBoard(pi: ExtensionAPI): void {
 	};
 
 	pi.on("session_start", async (event, ctx) => {
+		if (isHostedChild && !hostedEditorReporter && typeof ctx.ui?.getEditorText === "function" && hostedViewId) {
+			const { createEditorStateReporter } = await import("./core/editor-state-reporter.mjs");
+			hostedEditorReporter = createEditorStateReporter({
+				getEditorText: () => ctx.ui.getEditorText(),
+				connect: () => createConnection(controlSocketPathFor(process.platform as "win32" | "linux" | "darwin", root, hostedViewId)),
+			});
+			hostedEditorReporter.start();
+		}
 		updateStatus(ctx);
 		if (event.reason === "startup" && !isHostedChild && pi.getFlag("agent-board") === true && ctx.hasUI) {
 			const service = createService({ root, runnerScript: RUNNER_SCRIPT, ptyRunnerScript: PTY_RUNNER_SCRIPT, titleRunnerScript: TITLE_RUNNER_SCRIPT, autoStateRunnerScript: AUTO_STATE_RUNNER_SCRIPT, piCommand, piArgsPrefix, defaultCwd: ctx.cwd });
