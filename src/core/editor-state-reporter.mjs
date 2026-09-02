@@ -34,12 +34,19 @@ export function createEditorStateReporter({ getEditorText, connect, intervalMs =
 		if (pollTimer !== null) { scheduler.clear(pollTimer); pollTimer = null; }
 		const s = socket;
 		socket = null;
-		if (s?.on) { try { s.on("close", () => {}); s.on("error", () => {}); } catch { /* already torn down */ } }
+		try { s?.destroy?.(); } catch { /* already torn down */ }
+		try { s?.removeAllListeners?.(); } catch { /* already torn down */ }
 	}
 
 	function poll() {
 		if (stopped || !socket) return;
-		const text = getEditorText();
+		let text;
+		try {
+			text = getEditorText();
+		} catch {
+			return;
+		}
+		text = typeof text === "string" ? text : "";
 		if (text !== lastText) {
 			lastText = text;
 			send({ type: "editor_state", empty: text.length === 0 });
@@ -70,10 +77,12 @@ export function createEditorStateReporter({ getEditorText, connect, intervalMs =
 			return;
 		}
 		socket = s;
-		backoffMs = 1000;
+		s?.resume?.();
+		s?.unref?.();
+		s?.on?.("data", () => {}); // consume and discard broadcast traffic
+		s?.on?.("connect", () => { if (socket === s) { backoffMs = 1000; startPolling(); } });
 		s?.on?.("close", () => { if (socket === s) scheduleReconnect(); });
 		s?.on?.("error", () => { if (socket === s) scheduleReconnect(); });
-		startPolling();
 	}
 
 	function start() {
