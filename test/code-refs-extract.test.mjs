@@ -113,6 +113,26 @@ test("pr create body back-link word boundaries and number guard (issue #65)", ()
 	assert.equal(run("fixes issue #40").issue?.source, "pr-body");
 });
 
+test("follow-up evidence rejects bare issue mentions (issue #65)", () => {
+	const result = extractCodeRefs(
+		{
+			commands: [{ command: "gh pr create --title t" }],
+			assistantTexts: ["review report flags issue #40 and fixes issue #41"],
+			worktreePath: null,
+			branch: null,
+			repoUrl: "owner/repo",
+			host: "github.com",
+		},
+		github()
+	);
+	// The follow-up matcher accepts canonical closing syntax only: a bare
+	// `issue #40` mention and the non-canonical `fixes issue #41` form must
+	// never become a pr-backlink claim. (Each bare number appears exactly
+	// once, so the mention fallback stays silent too.)
+	assert.equal(result.issue, null);
+	assert.ok(!result.allRefs.some((r) => r.source === "pr-backlink"));
+});
+
 test("null host with a host-templated provider yields no url (no malformed link)", () => {
 	const result = extractCodeRefs(
 		{
