@@ -149,7 +149,7 @@ test("null host with a host-templated provider yields no url (no malformed link)
 	assert.equal(result.issue.url, null);
 });
 
-test("back-link between two pr creates belongs to the first create only", () => {
+test("echo back-link command between two pr creates is ignored (issue #65)", () => {
 	const result = extractCodeRefs(
 		{
 			commands: [
@@ -165,12 +165,12 @@ test("back-link between two pr creates belongs to the first create only", () => 
 		},
 		github()
 	);
-	assert.equal(result.issue.number, 40);
-	assert.equal(result.issue.source, "pr-backlink");
-	assert.equal(result.issue.lastIndex, 1); // between the two creates, attributed to A
+	// Later commands are never scanned as PR back-links, and two PR creates
+	// disable the assistant scan — so nothing is extracted here.
+	assert.equal(result.issue, null);
 });
 
-test("second pr create absorbs only the back-link that follows it", () => {
+test("assistant back-link with two pr creates produces no pr-backlink (issue #65)", () => {
 	const result = extractCodeRefs(
 		{
 			commands: [{ command: "gh issue comment 40 --body hi" }, { command: "gh pr create --title A" }, { command: "gh pr create --title B" }],
@@ -182,11 +182,12 @@ test("second pr create absorbs only the back-link that follows it", () => {
 		},
 		github()
 	);
-	// B's back-link (#60, claim) outranks the issue comment (#40, action).
-	assert.equal(result.issue.number, 60);
-	assert.equal(result.issue.strength, "claim");
-	assert.equal(result.issue.source, "pr-backlink");
-	assert.equal(result.issue.lastIndex, 3); // after create B, not absorbed by A
+	// Ambiguous attribution (two PR creates) → assistant scan skipped; the
+	// issue falls back to the plain command action, never a guessed PR link.
+	assert.equal(result.issue?.number, 40);
+	assert.equal(result.issue?.strength, "action");
+	assert.equal(result.issue?.source, "command");
+	assert.ok(!result.allRefs.some((r) => r.source === "pr-backlink"));
 });
 
 test("pr create back-link found in a later assistant message", () => {
@@ -413,4 +414,82 @@ test("user rule foo(\\d*) matching foo yields no ref (non-positive number guard)
 	assert.equal(result.issue, null);
 	assert.equal(result.pr, null);
 	assert.deepEqual(result.allRefs, []);
+});
+
+test("issue 65 regression: CR-report finding numbers never become pr-backlinks", () => {
+	const result = extractCodeRefs(
+		{
+			commands: [{ command: 'gh pr create --title fix --body "Closes #19"' }],
+			assistantTexts: [
+				"CR 报告：本轮仅验证上轮 issue #1（no-pushback）",
+				"pushback verdict for issue #1",
+			],
+			worktreePath: "/repo/.pi/worktrees/issue-19-fix-thing",
+			branch: null,
+			repoUrl: "owner/repo",
+			host: "github.com",
+		},
+		github()
+	);
+	assert.equal(result.issue?.number, 19);
+	assert.ok(!result.allRefs.some((r) => r.kind === "issue" && r.number === 1));
+});
+
+test("later assistant bare issue mentions and non-canonical forms are not pr back-links", () => {
+	const result = extractCodeRefs(
+		{
+			commands: [{ command: "gh pr create --title t" }],
+			assistantTexts: [
+				"Progress note: 上轮 issue #1 已验证",
+				"pushback verdict for issue #1, plus prefix #2 disclose #3",
+			],
+			worktreePath: null,
+			branch: null,
+			repoUrl: "owner/repo",
+			host: "github.com",
+		},
+		github()
+	);
+	assert.equal(result.issue, null);
+	assert.ok(!result.allRefs.some((r) => r.source === "pr-backlink"));
+});
+
+test("later close/comment/echo commands are not promoted to pr back-links", () => {
+	const result = extractCodeRefs(
+		{
+			commands: [
+				{ command: 'gh pr create --title t --body "Closes #19"' },
+				{ command: "gh issue close #21" },
+				{ command: 'gh pr comment 20 --body "fixes #21"' },
+				{ command: 'echo "closes #21"' },
+			],
+			assistantTexts: [],
+			worktreePath: null,
+			branch: null,
+			repoUrl: "owner/repo",
+			host: "github.com",
+		},
+		github()
+	);
+	assert.equal(result.issue?.number, 19);
+	assert.ok(!result.allRefs.some((r) => r.source === "pr-backlink"));
+	// #21 keeps its own plain command-action semantics (not a PR back-link).
+	const ref21 = result.allRefs.find((r) => r.kind === "issue" && r.number === 21);
+	assert.equal(ref21?.source, "command");
+});
+
+test("follow-up back-link still found in later assistant message with a single pr create", () => {
+	const result = extractCodeRefs(
+		{
+			commands: [{ command: "gh pr create --title t --body-file /tmp/body.md" }],
+			assistantTexts: ["Opened the PR. This PR closes #40."],
+			worktreePath: null,
+			branch: null,
+			repoUrl: "owner/repo",
+			host: "github.com",
+		},
+		github()
+	);
+	assert.equal(result.issue?.number, 40);
+	assert.equal(result.issue?.source, "pr-backlink");
 });
