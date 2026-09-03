@@ -506,8 +506,43 @@ const REF_CONFIDENCE = { claim: "high", action: "high", view: "medium", mention:
 
 /** URL rules carry a `/issues/`, `/pull/`, or `/merge_requests/` path segment. */
 const URL_RULE_RE = /issues\/|pull\/|merge_requests\//;
-/** `closes #N` / `fixes #N` / `issue #N` back-link inside a `pr create` body. */
-const PR_BACKLINK_RE = /(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?|issue)\s+#(\d{1,7})/i;
+/**
+ * Back-link inside an explicit `pr create` command body: closing keywords
+ * (optionally followed by "issue") or the legacy bare `issue #N` form.
+ * Word boundaries keep embedded keywords (prefix/disclose/unresolved) out;
+ * `(?!\w)` rejects longer numbers instead of truncating them to 7 digits.
+ */
+const PR_CREATE_BACKLINK_RE =
+	/\b(?:(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s+(?:issue\s+)?|issue\s+)#(\d{1,7})(?!\w)/i;
+/**
+ * Back-link in later assistant evidence: canonical closing-keyword syntax
+ * only (`closes #N` etc.). A bare `issue #N` mention — e.g. a code-review
+ * report's finding number — never matches here (issue #65).
+ */
+const PR_FOLLOWUP_BACKLINK_RE =
+	/\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b\s+#(\d{1,7})(?!\w)/i;
+
+/**
+ * Match a PR→issue back-link in the text of an explicit `pr create` command
+ * (closing keywords or the legacy bare `issue #N` body form).
+ * @param {string} text
+ * @returns {number|null}
+ */
+function matchPrCreateBacklink(text) {
+	const m = PR_CREATE_BACKLINK_RE.exec(text);
+	return m ? Number(m[1]) : null;
+}
+
+/**
+ * Match a PR→issue back-link in later assistant evidence — canonical
+ * closing-keyword syntax only, never a bare `issue #N` (issue #65).
+ * @param {string} text
+ * @returns {number|null}
+ */
+function matchPrFollowupBacklink(text) {
+	const m = PR_FOLLOWUP_BACKLINK_RE.exec(text);
+	return m ? Number(m[1]) : null;
+}
 /** `issue-<N>-...` worktree/branch naming convention (engine-builtin). */
 const WORKTREE_RE = /(?:^|[/\\])issue-(\d{1,7})(?:-|$)/;
 /** Bare `#N` mentions. */
@@ -588,23 +623,25 @@ export function extractCodeRefs(input, provider) {
 	});
 
 	// Rule 3: resolve pending create markers against subsequent evidence.
-	for (let mi = 0; mi < pendingCreates.length; mi++) {
-		const marker = pendingCreates[mi];
+	for (const marker of pendingCreates) {
 		const resolved = resolveCreate(marker, commands, assistantTexts, urlRules);
 		if (resolved) {
 			addCandidate(candidates, marker.kind, resolved.number, "action", "create-url", resolved.index);
 		}
-		// Rule 4b: the issue back-link of a created PR may live in a later
-		// assistant message ("This PR closes #40") or in --body-file content
-		// that never appears in the command string — scan subsequent evidence
-		// for the back-link pattern as well (not just the command itself).
-		// The scan stops at the NEXT pr-create marker so an earlier create
-		// never absorbs a later PR's back-link.
-		if (marker.kind === "pr") {
-			const nextPr = pendingCreates.slice(mi + 1).find((m) => m.kind === "pr");
-			const backlink = resolveBacklinkAfter(marker, commands, assistantTexts, nextPr?.index ?? Infinity);
-			if (backlink) addCandidate(candidates, "issue", backlink.number, "claim", "pr-backlink", backlink.index);
-		}
+	}
+	// Rule 4b: the issue back-link of a created PR may live in a later
+	// assistant message ("This PR closes #40") or in --body-file content that
+	// never appears in the command string. The flattened evidence input keeps
+	// no interleaving timestamps, so a follow-up back-link can be attributed
+	// only when exactly one distinct PR-create command exists; with zero or
+	// multiple PR creates the assistant scan is skipped rather than guessing.
+	// Later commands are never scanned: `gh issue close #N` or
+	// `gh pr comment ... fixes #N` are their own signals, not this PR's
+	// back-link (issue #65).
+	const prCreateIndexes = new Set(pendingCreates.filter((m) => m.kind === "pr").map((m) => m.index));
+	if (prCreateIndexes.size === 1) {
+		const backlink = resolveBacklinkAfter(assistantTexts, commands.length);
+		if (backlink) addCandidate(candidates, "issue", backlink.number, "claim", "pr-backlink", backlink.index);
 	}
 
 	// Rule 5: worktree/branch naming (engine-builtin, not configurable).
@@ -635,26 +672,26 @@ export function extractCodeRefs(input, provider) {
  * @param {Array<{kind: "issue"|"pr", number: number, strength: string, source: string, lastIndex: number}>} candidates
  */
 function applyPrBacklink(text, index, candidates) {
-	const m = PR_BACKLINK_RE.exec(text);
-	if (m) addCandidate(candidates, "issue", Number(m[1]), "claim", "pr-body", index);
+	const number = matchPrCreateBacklink(text);
+	if (number !== null) addCandidate(candidates, "issue", number, "claim", "pr-body", index);
 }
 
 /**
- * Find the first PR→issue back-link ("Closes #N" etc.) in evidence AFTER a
- * `pr create` marker — covers assistant messages and later commands alike.
- * The scan stops before `stopBefore` (typically the next pr-create marker).
- * @param {{kind: "issue"|"pr", index: number}} marker
- * @param {Array<{command: string}>} commands
+ * Find the first PR→issue back-link in later assistant texts — canonical
+ * closing-keyword syntax only ("Closes #N" etc., see
+ * PR_FOLLOWUP_BACKLINK_RE). Commands are never scanned. `baseIndex` (the
+ * command count) keeps the existing ordering contract; it is not a real
+ * timestamp.
  * @param {string[]} assistantTexts
- * @param {number} [stopBefore]
+ * @param {number} baseIndex
+ * @returns {{number: number, index: number}|null}
  */
-function resolveBacklinkAfter(marker, commands, assistantTexts, stopBefore = Infinity) {
-	const total = Math.min(commands.length + assistantTexts.length, stopBefore);
-	for (let index = marker.index + 1; index < total; index++) {
-		const text = evidenceTextAt(index, commands, assistantTexts);
-		if (!text) continue;
-		const m = PR_BACKLINK_RE.exec(text);
-		if (m) return { number: Number(m[1]), index };
+function resolveBacklinkAfter(assistantTexts, baseIndex) {
+	for (let i = 0; i < assistantTexts.length; i++) {
+		const text = assistantTexts[i];
+		if (typeof text !== "string" || !text) continue;
+		const number = matchPrFollowupBacklink(text);
+		if (number !== null) return { number, index: baseIndex + i };
 	}
 	return null;
 }

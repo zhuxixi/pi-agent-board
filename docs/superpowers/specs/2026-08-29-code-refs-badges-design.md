@@ -63,7 +63,7 @@ repo.mjs remoteHost()（带缓存）──────────────�
 |---|---|---|
 | claim（最强） | 认领命令：provider 规则里 `strength: "claim"` 的命令模式（GitHub 内置：`gh issue edit N --add-assignee`） | commands 正则 |
 | claim | worktree 命名：`issue-<N>-<slug>`（issue-driven 工作流强制规范） | worktreePath / branch 结构化解析（非正则配置，引擎内置） |
-| claim | PR 回链：`gh pr create` 的 body/后续文本中的 `issue #N` / `Closes #N`（同时定 issue + PR 两个值） | commands + assistantTexts |
+| claim | PR 回链（按证据上下文拆分，issue #65）：`gh pr create` body 中的 `Closes #N` / `fixes issue #N` / 兼容裸 `issue #N`；后续 assistant 文本仅认 canonical `Closes/Fixes/Resolves #N`（带单词边界与 7 位编号边界）；仅在恰好一个 PR create 命令时扫描 assistant，后续 command 不参与回链 | create 命令自身 + assistantTexts |
 | action（强） | `issue comment/edit/close N`、`pr checkout/view/merge N`、`pr create`（编号从 outputUrl 或后续 URL 反查，见 D4 限制） | commands 正则 |
 | view（中） | `issue view N` / `pr view N` | commands 正则，要求频次 ≥2，取最近一次 |
 | mention（弱，兜底） | 裸 `#N` | assistantTexts，要求频次显著最高（≥3 且 ≥ 第二名的 2 倍） |
