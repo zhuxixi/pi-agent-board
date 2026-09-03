@@ -338,6 +338,62 @@ test("partial re-trigger carries forward the untouched kind's earned ref", () =>
 	}
 });
 
+test("CR-report finding numbers never surface as issue refs through the store hook (issue #65)", { skip: !gitAvailable() }, () => {
+	const root = freshRoot();
+	const repo = makeRepo();
+	try {
+		const evidence = {
+			viewId: "v1",
+			commands: [{ id: "c1", command: 'gh pr create --title fix --body "Closes #19"' }],
+			assistantEvidence: [
+				{ at: 1, text: "CR 报告：本轮仅验证上轮 issue #1（no-pushback）" },
+				{ at: 2, text: "pushback verdict for issue #1" },
+			],
+		};
+		assert.equal(updateCodeRefsFromEvidence(root, "v1", evidence, { cwd: repo, repoRoot: repo, worktreePath: "issue-19-fix-thing" }), true);
+		const snap = readCodeRefs(root, "v1");
+		assert.equal(snap.provider, "github");
+		assert.equal(snap.issue?.number, 19);
+		assert.equal(snap.issue?.source, "pr-body");
+		assert.ok(!snap.allRefs.some((r) => r.kind === "issue" && r.number === 1));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+		rmSync(repo, { recursive: true, force: true });
+	}
+});
+
+test("pre-existing stale pr-backlink ref is not retroactively cleaned (issue #65 non-goal)", { skip: !gitAvailable() }, () => {
+	const root = freshRoot();
+	const repo = makeRepo();
+	try {
+		const stale = {
+			kind: "issue",
+			number: 1,
+			strength: "claim",
+			confidence: "high",
+			source: "pr-backlink",
+			url: null,
+			lastIndex: 3,
+		};
+		writeCodeRefs(root, { version: 1, viewId: "v1", updatedAt: 1, provider: "github", issue: stale, pr: null, allRefs: [stale] });
+		const evidence = {
+			viewId: "v1",
+			commands: [{ id: "c1", command: 'gh pr create --title fix --body "Closes #19"' }],
+			assistantEvidence: [],
+		};
+		assert.equal(updateCodeRefsFromEvidence(root, "v1", evidence, { cwd: repo, repoRoot: repo }), true);
+		const after = readCodeRefs(root, "v1");
+		// Fresh extraction wins the badge...
+		assert.equal(after.issue?.number, 19);
+		// ...but the historical stale ref carries forward (documented non-goal:
+		// no retroactive artifact cleanup in this issue).
+		assert.ok(after.allRefs.some((r) => r.kind === "issue" && r.number === 1));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+		rmSync(repo, { recursive: true, force: true });
+	}
+});
+
 test("empty extraction from non-ref evidence keeps an existing github.json", () => {
 	const root = freshRoot();
 	try {
