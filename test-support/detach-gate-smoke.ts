@@ -239,6 +239,37 @@ const out: Record<string, boolean> = {};
 	attach.dispose();
 }
 
+// K1. Issue #69 real-world shape: zero inverse cells anywhere in the buffer,
+// the chat area carries a markdown table row (`│ … │`) and a quote line
+// (`> …`) that isProbablyPiInputLine misreads as a draft-bearing input line,
+// and editor_state never arrives (editorEmpty stays null — child without the
+// reporter). tier-2 must skip content glyph lines and ← must detach: the
+// gate philosophy is "never trap the user" (issues #42/#48).
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat content\r\n│ Issue #778 │ open │\r\n> quote line\r\n");
+	(attach as unknown as { connected: boolean }).connected = true;
+	attach.handleInput("\x1b[D");
+	out.leftDetachesOnTableRowsWithoutFakeCursor = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	attach.dispose();
+}
+
+// K2. The deliberate flip side of K1 — pair with scenario B: the SAME draft
+// shape (`> draft`) is gated when the fake cursor is present (tier-1, scenario
+// B) but detaches when the buffer carries no inverse cells (tier-2 fallback
+// cannot tell a real draft from a table row; a spurious detach beats a trapped
+// user, and detach never loses the draft — the child session keeps running).
+// This pins the intentional loss of fallback draft protection (issue #69);
+// restoring it needs the mid-term dock-structure anchor, not a revert.
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat content\r\n> draft\r\n");
+	(attach as unknown as { connected: boolean }).connected = true;
+	attach.handleInput("\x1b[D");
+	out.leftDetachesOnContentGlyphFallback = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	attach.dispose();
+}
+
 // E2. A terminal at the minimum supported size must not emit a shrink that the
 // runner immediately clamps back, because that is not a real width delta.
 {
