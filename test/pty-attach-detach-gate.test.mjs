@@ -26,6 +26,8 @@ test("attach detach gate: ctrl+] passes through, ← keeps its gate", () => {
 	assert.equal(parsed.leftEditorStateOverridesHeuristicEmpty, true, "← must detach when editor_state says empty even if the buffer looks non-empty");
 	assert.equal(parsed.leftEditorStateBlocksDetachOnDraft, true, "← must be forwarded when editor_state reports a draft even if the buffer looks empty");
 	assert.equal(parsed.leftHelloNullResetsStaleEditorState, true, "← must fall back to the heuristic when a hello resets a stale editor_state cache to null");
+	assert.equal(parsed.leftDetachesOnTableRowsWithoutFakeCursor, true, "← must detach when a zero-inverse buffer holds only table/quote glyph lines and editor_state is unknown (issue #69)");
+	assert.equal(parsed.leftDetachesOnContentGlyphFallback, true, "← must detach on a content glyph line in the no-fake-cursor fallback — spurious detach beats trapping (issue #69)");
 	assert.equal(parsed.leftDetachRestoresBeforeGracefulEnd, true, "← must restore before graceful socket end");
 	assert.equal(parsed.minimumSizeAvoidsInvalidShrink, true, "minimum terminal size must avoid an invalid shrink");
 	assert.equal(parsed.staleSocketEventsDoNotClearCurrent, true, "stale socket events must not clear a replacement connection");

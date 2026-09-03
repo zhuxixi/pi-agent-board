@@ -356,11 +356,15 @@ export class PtyAttachComponent implements Component {
 			const line = active.getLine(fakeCursorLine)?.translateToString(true) ?? "";
 			return isProbablyEmptyPiInputLine(line);
 		}
-		// Fallback: Pi variants that render no fake cursor — look for a
-		// prompt-glyph line.
+		// Fallback: Pi variants that render no fake cursor — look for an EMPTY
+		// prompt-glyph line. Only an empty glyph line proves an empty editor:
+		// content glyph lines (markdown table rows `│ … │`, quotes `> …`, or a
+		// real draft in a no-fake-cursor Pi variant) cannot be told apart, and
+		// trapping the user is worse than a spurious detach (issue #69) — skip
+		// them and keep scanning; the loop-end escape below stays authoritative.
 		for (let y = active.baseY + active.length - 1; y >= active.baseY; y--) {
 			const line = active.getLine(y)?.translateToString(true) ?? "";
-			if (isProbablyPiInputLine(line)) return isProbablyEmptyPiInputLine(line);
+			if (isProbablyPiInputLine(line) && isProbablyEmptyPiInputLine(line)) return true;
 		}
 		// No editor line recoverable (e.g. a garbled replay buffer): treat the
 		// input as empty — ← is the only detach key left on the attach surface,
