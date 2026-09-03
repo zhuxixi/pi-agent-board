@@ -4,8 +4,10 @@ import {
 	builtinProviders,
 	extractCodeRefs,
 	genericFallbackProvider,
+	mergeProviders,
 	parseRemoteHost,
 	parseRemotePath,
+	validateProvider,
 } from "../src/core/code-refs.mjs";
 
 const github = () => builtinProviders()[0];
@@ -442,6 +444,8 @@ test("later assistant bare issue mentions and non-canonical forms are not pr bac
 			assistantTexts: [
 				"Progress note: 上轮 issue #1 已验证",
 				"pushback verdict for issue #1, plus prefix #2 disclose #3",
+				// 8-digit numbers are rejected wholesale on the follow-up side too.
+				"PR closes #12345678",
 			],
 			worktreePath: null,
 			branch: null,
@@ -452,6 +456,49 @@ test("later assistant bare issue mentions and non-canonical forms are not pr bac
 	);
 	assert.equal(result.issue, null);
 	assert.ok(!result.allRefs.some((r) => r.source === "pr-backlink"));
+});
+
+test("zero pr creates: canonical assistant closing text is never a back-link (issue #65)", () => {
+	const result = extractCodeRefs(
+		{
+			commands: [],
+			assistantTexts: ["closes #40"],
+			worktreePath: null,
+			branch: null,
+			repoUrl: "owner/repo",
+			host: "github.com",
+		},
+		github()
+	);
+	// With no PR create marker there is nothing to attribute the text to, and
+	// a single mention stays below the mention-fallback threshold.
+	assert.equal(result.issue, null);
+	assert.ok(!result.allRefs.some((r) => r.source === "pr-backlink"));
+});
+
+test("user rule duplicating the builtin pr create rule still opens the follow-up scan (issue #65)", () => {
+	const userProvider = validateProvider({
+		name: "github",
+		hosts: ["github.com"],
+		rules: [{ pattern: "gh\\s+pr\\s+create\\b", kind: "pr", strength: "action", numberFrom: "outputUrl" }],
+	}).provider;
+	const merged = mergeProviders(builtinProviders(), [userProvider]);
+	const result = extractCodeRefs(
+		{
+			commands: [{ command: "gh pr create --title t" }],
+			assistantTexts: ["This PR closes #40."],
+			worktreePath: null,
+			branch: null,
+			repoUrl: "owner/repo",
+			host: "github.com",
+		},
+		merged[0]
+	);
+	// Both the user rule and the builtin rule match the same command, pushing
+	// two create markers with one index — the Set must count them once so the
+	// assistant back-link scan still runs instead of seeing "multiple PRs".
+	assert.equal(result.issue?.number, 40);
+	assert.equal(result.issue?.source, "pr-backlink");
 });
 
 test("later close/comment/echo commands are not promoted to pr back-links", () => {
