@@ -33,7 +33,9 @@ export function isAgentBusy(row) {
  * graceMs exempts freshly started hosts (attach handoff race: ensureHost has
  * started a host but the client has not connected yet).
  * TTL eviction runs first; survivors over maxWarm are evicted oldest-first by
- * idleSince (state.lastActivityAt ?? host.startedAt ?? meta.updatedAt).
+ * idleSince = max(state.lastActivityAt, host.startedAt) || meta.updatedAt (host-level
+ * idle counts from host start, so a stale lastActivityAt from a previous host
+ * incarnation never makes a fresh host look idle longer than it has been up).
  *
  * @param {Array<import("./store.mjs").Row>} rows
  * @param {{ now: number, maxWarm: number, ttlMs: number, graceMs?: number, keepViewId?: string|null }} o
