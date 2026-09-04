@@ -402,32 +402,28 @@ export function createService(opts) {
 	}
 
 	/**
-	 * Keep a small warm pool of idle PTY hosts for fast session switching.
-	 * Busy hosts and attached hosts are never evicted.
+	 * Evict idle warm PTY hosts past TTL / over the warm pool cap.
+	 * Idle = host alive, not agent-busy, no attached clients.
+	 * Called lazily from dispatch/ensureHost (keepViewId = the view being used)
+	 * and periodically / on shutdown by the warm-host sweeper (issue #75).
 	 * @param {{ keepViewId?: string|null }} [pruneOpts]
 	 */
 	function pruneWarmHosts(pruneOpts = {}) {
 		const maxWarm = envInt("AGENT_BOARD_MAX_WARM_HOSTS", 4, 0, 50, "AGENT_VIEW_MAX_WARM_HOSTS");
 		const ttlMs = envInt("AGENT_BOARD_WARM_HOST_TTL_MS", 10 * 60 * 1000, 0, 24 * 60 * 60 * 1000, "AGENT_VIEW_WARM_HOST_TTL_MS");
 		if (maxWarm === 0 && ttlMs === 0) return;
-		const now = Date.now();
-		const idleHosts = listRows(root)
-			.filter((r) => r.meta.id !== pruneOpts.keepViewId)
-			.filter((r) => r.hostAlive && !isAgentBusy(r) && (r.host?.attachedClients ?? 0) === 0);
-
-		for (const row of idleHosts) {
-			const idleSince = row.state?.lastActivityAt ?? row.host?.startedAt ?? row.meta.updatedAt;
-			if (ttlMs > 0 && now - idleSince > ttlMs) sendHostMessage(row, { type: "terminate" });
+		const graceMs = envInt("AGENT_BOARD_WARM_HOST_GRACE_MS", 30 * 1000, 0, 24 * 60 * 60 * 1000, "AGENT_VIEW_WARM_HOST_GRACE_MS");
+		const { ttlEvicted, excessEvicted } = selectIdleHostsToEvict(listRows(root), {
+			now: Date.now(),
+			maxWarm,
+			ttlMs,
+			graceMs,
+			keepViewId: pruneOpts.keepViewId ?? null,
+		});
+		for (const viewId of [...ttlEvicted, ...excessEvicted]) {
+			const row = loadRow(root, viewId);
+			if (row?.hostAlive) sendHostMessage(row, { type: "terminate" });
 		}
-
-		const survivors = idleHosts
-			.filter((r) => {
-				const idleSince = r.state?.lastActivityAt ?? r.host?.startedAt ?? r.meta.updatedAt;
-				return !(ttlMs > 0 && now - idleSince > ttlMs);
-			})
-			.sort((a, b) => (a.state?.lastActivityAt ?? a.host?.startedAt ?? 0) - (b.state?.lastActivityAt ?? b.host?.startedAt ?? 0));
-		const excess = Math.max(0, survivors.length - maxWarm);
-		for (const row of survivors.slice(0, excess)) sendHostMessage(row, { type: "terminate" });
 	}
 
 	/** @param {import("../core/types.mjs").FollowUpKind|import("../core/types.mjs").RunKind|string} kind */
@@ -1092,10 +1088,17 @@ export function createService(opts) {
 		row(viewId) {
 			return loadRow(root, viewId);
 		},
+
+		/**
+		 * Evict idle warm PTY hosts (TTL / warm-pool cap). Safe to call anytime:
+		 * busy and attached hosts are never touched.
+		 * @param {{ keepViewId?: string|null }} [pruneOpts]
+		 */
+		pruneWarmHosts(pruneOpts = {}) {
+			pruneWarmHosts(pruneOpts);
+		},
 	};
 }
-
-
 
 /** @param {import("../core/types.mjs").ViewMeta} meta */
 function isExternalSession(meta) {
@@ -1166,7 +1169,7 @@ function ptyHostAvailability(opts = {}) {
 	return ptySpawnSupported(opts);
 }
 
-function envInt(name, fallback, min, max, legacyName) {
+export function envInt(name, fallback, min, max, legacyName) {
 	const raw = process.env[name] ?? (legacyName ? process.env[legacyName] : undefined);
 	if (raw === undefined || raw === "") return fallback;
 	const n = Number(raw);
