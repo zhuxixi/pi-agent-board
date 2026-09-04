@@ -1,5 +1,5 @@
 /** Review evidence extraction and persistence helpers. */
-import { assistantText, classifyCommand, toolFileOperation, truncate } from "./heuristics.mjs";
+import { assistantText, classifyCommand, toolFileOperation, toolResultText, truncate } from "./heuristics.mjs";
 import { atomicWriteJson, readJson } from "./atomic.mjs";
 import * as P from "./paths.mjs";
 
@@ -195,7 +195,7 @@ export function reduceEvidence(snapshot, event, now = Date.now()) {
 				command: event.args?.command ?? "",
 				status: event.isError ? "failed" : "passed",
 				exitCode: event.isError ? 1 : 0,
-				outputPreview: truncate(String(event.result ?? ""), 500),
+				outputPreview: truncate(toolResultText(event.result), 500),
 			});
 			changed = true;
 		}
