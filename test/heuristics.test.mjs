@@ -7,6 +7,7 @@ import {
 	firstSentence,
 	relativeTime,
 	toolPath,
+	toolResultText,
 	toolSummary,
 	truncate,
 } from "../src/core/heuristics.mjs";
@@ -79,4 +80,36 @@ test("relativeTime buckets", () => {
 	assert.equal(relativeTime(now - 120_000, now), "2m");
 	assert.equal(relativeTime(now - 3 * 3600_000, now), "3h");
 	assert.equal(relativeTime(now - 2 * 86400_000, now), "2d");
+});
+
+test("toolResultText extracts text blocks from AgentToolResult", () => {
+	const result = {
+		content: [
+			{ type: "text", text: "line1" },
+			{ type: "image", data: "AAAA", mimeType: "image/png" },
+			{ type: "text", text: "line2" },
+		],
+		details: { fullOutputPath: "/tmp/pi-bash-x.log" },
+	};
+	assert.equal(toolResultText(result), "line1\nline2");
+});
+
+test("toolResultText returns empty string for image-only content", () => {
+	assert.equal(toolResultText({ content: [{ type: "image", data: "AAAA", mimeType: "image/png" }] }), "");
+});
+
+test("toolResultText returns empty string for object without content array", () => {
+	assert.equal(toolResultText({ details: {} }), "");
+	assert.equal(toolResultText({}), "");
+});
+
+test("toolResultText passes through plain strings (legacy events)", () => {
+	assert.equal(toolResultText("ok"), "ok");
+});
+
+test("toolResultText handles nullish and scalar inputs", () => {
+	assert.equal(toolResultText(null), "");
+	assert.equal(toolResultText(undefined), "");
+	assert.equal(toolResultText(42), "42");
+	assert.equal(toolResultText(true), "true");
 });
