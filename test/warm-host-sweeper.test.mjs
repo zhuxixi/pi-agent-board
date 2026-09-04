@@ -89,3 +89,72 @@ test("isAgentBusy 语义保持", () => {
 	assert.equal(isAgentBusy(idleRow("x", { alive: true, state: { semanticState: "working", processState: "alive", pendingQuestions: [] } })), true);
 	assert.equal(isAgentBusy(idleRow("x", { alive: true, state: { semanticState: "idle", processState: "alive", pendingQuestions: ["q"] } })), true);
 });
+
+import { attachWarmHostSweeper, createWarmHostSweeper } from "../src/core/warm-host-sweeper.mjs";
+
+const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
+
+test("A5: createWarmHostSweeper 周期触发 sweep；stop 后不再触发；sweepNow 立即执行", async () => {
+	let calls = 0;
+	const sweeper = createWarmHostSweeper({ sweep: () => { calls += 1; }, intervalMs: 20 });
+	sweeper.start();
+	await sleepMs(75); // ≥3 个周期
+	assert.ok(calls >= 2, `expected >=2 periodic sweeps, got ${calls}`);
+	sweeper.stop();
+	const after = calls;
+	await sleepMs(50);
+	assert.equal(calls, after, "stop 后不得再触发");
+	sweeper.sweepNow();
+	assert.equal(calls, after + 1);
+});
+
+test("A5: intervalMs<=0 时 start 不启周期，sweepNow 仍可用", async () => {
+	let calls = 0;
+	const sweeper = createWarmHostSweeper({ sweep: () => { calls += 1; }, intervalMs: 0 });
+	sweeper.start();
+	await sleepMs(40);
+	assert.equal(calls, 0);
+	sweeper.sweepNow();
+	assert.equal(calls, 1);
+});
+
+test("A5: start 幂等（重复 start 不叠加定时器）", async () => {
+	let calls = 0;
+	const sweeper = createWarmHostSweeper({ sweep: () => { calls += 1; }, intervalMs: 20 });
+	sweeper.start();
+	sweeper.start();
+	await sleepMs(60);
+	assert.ok(calls >= 1);
+	sweeper.stop();
+});
+
+test("A6(接线): 非 child：启动即 sweep 一次 + 注册 session_shutdown；shutdown 触发 sweepNow+stop", async () => {
+	const events = {};
+	const fakePi = { on: (ev, fn) => { events[ev] = fn; } };
+	let sweeps = 0;
+	const attached = attachWarmHostSweeper(fakePi, {
+		isHostedChild: false,
+		sweep: () => { sweeps += 1; },
+		intervalMs: 0, // 关周期，只验启动与 shutdown 语义
+	});
+	assert.equal(sweeps, 1, "启动即 sweep 一次");
+	assert.equal(typeof events.session_shutdown, "function", "注册了 session_shutdown");
+	events.session_shutdown();
+	assert.equal(sweeps, 2, "shutdown 时 sweepNow");
+	attached.dispose();
+});
+
+test("A6(接线): child：完全 no-op（不 sweep、不注册、active=false）", () => {
+	const events = {};
+	const fakePi = { on: (ev, fn) => { events[ev] = fn; } };
+	let sweeps = 0;
+	const attached = attachWarmHostSweeper(fakePi, {
+		isHostedChild: true,
+		sweep: () => { sweeps += 1; },
+		intervalMs: 1000,
+	});
+	assert.equal(attached.active, false);
+	assert.equal(sweeps, 0);
+	assert.equal(events.session_shutdown, undefined);
+	attached.dispose();
+});

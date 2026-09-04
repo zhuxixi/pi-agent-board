@@ -63,3 +63,74 @@ export function selectIdleHostsToEvict(rows, { now, maxWarm, ttlMs, graceMs = 0,
 	const excess = Math.max(0, survivors.length - maxWarm);
 	return { ttlEvicted, excessEvicted: survivors.slice(0, excess).map((it) => it.id) };
 }
+
+/**
+ * Periodic sweeper for warm hosts. The interval timer is unref'd so it never
+ * holds the host pi's event loop open on exit. intervalMs <= 0 disables the
+ * periodic part; sweepNow() always works.
+ *
+ * stop() only stops the periodic timer: sweepNow() stays available afterwards
+ * (the lifecycle wiring calls sweepNow() again on shutdown/dispose). start()
+ * is idempotent and may restart the timer after a stop.
+ * @param {{ sweep: () => void, intervalMs: number }} o
+ */
+export function createWarmHostSweeper({ sweep, intervalMs }) {
+	let timer = null;
+	return {
+		active: true,
+		start() {
+			if (timer !== null) return;
+			if (intervalMs > 0) {
+				timer = setInterval(() => {
+					try { sweep(); } catch { /* best-effort */ }
+				}, intervalMs);
+				if (typeof timer.unref === "function") timer.unref();
+			}
+		},
+		sweepNow() {
+			try { sweep(); } catch { /* best-effort */ }
+		},
+		stop() {
+			if (timer !== null) {
+				clearInterval(timer);
+				timer = null;
+			}
+		},
+	};
+}
+
+/**
+ * Wire the sweeper to a host pi extension lifetime: sweep once on attach
+ * (reclaims hosts leaked by a previous host that died without cleanup), run
+ * periodically, and sweep again on session_shutdown (host pi exiting or the
+ * extension instance being reloaded for a session switch).
+ *
+ * Child pi processes (AGENT_BOARD_CHILD=1 / AGENT_VIEW_CHILD=1) must never
+ * sweep: they share the same board root and would terminate their own runner
+ * (suicide chain). They get a strict no-op.
+ *
+ * @param {{ on?: (event: string, fn: () => void) => unknown }} pi
+ * @param {{ isHostedChild: boolean, sweep: () => void, intervalMs: number }} o
+ */
+export function attachWarmHostSweeper(pi, { isHostedChild, sweep, intervalMs }) {
+	if (isHostedChild) {
+		return { active: false, dispose() {} };
+	}
+	const sweeper = createWarmHostSweeper({ sweep, intervalMs });
+	let disposed = false;
+	const onShutdown = () => {
+		sweeper.sweepNow();
+		sweeper.stop();
+	};
+	pi.on?.("session_shutdown", onShutdown);
+	sweeper.start();
+	sweeper.sweepNow(); // 回收上一个宿主（可能非正常退出）遗留的 warm hosts
+	return {
+		active: true,
+		dispose() {
+			if (disposed) return;
+			disposed = true;
+			onShutdown();
+		},
+	};
+}
