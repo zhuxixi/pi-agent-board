@@ -41,6 +41,7 @@ import {
 } from "../core/store.mjs";
 import { diagnoseNodePtyFailure, ensureNodePtySpawnHelperExecutable, nodePtyFallbackMessage, probeNodePtyEnvironment } from "../core/pty-support.mjs";
 import { normalizeScreenLogMaxBytes, pruneScreenLogs } from "../core/screen-log-gc.mjs";
+import { hasPendingQuestions, isAgentBusy, selectIdleHostsToEvict } from "../core/warm-host-sweeper.mjs";
 
 /** @typedef {import("../core/types.mjs").RunKind} RunKind */
 
@@ -1094,16 +1095,7 @@ export function createService(opts) {
 	};
 }
 
-/** @param {import("../core/store.mjs").Row} row */
-function hasPendingQuestions(row) {
-	return Array.isArray(row.state?.pendingQuestions) && row.state.pendingQuestions.length > 0;
-}
 
-/** @param {import("../core/store.mjs").Row} row */
-function isAgentBusy(row) {
-	const st = row.state?.semanticState;
-	return Boolean(row.alive && (st === "queued" || st === "working" || hasPendingQuestions(row)));
-}
 
 /** @param {import("../core/types.mjs").ViewMeta} meta */
 function isExternalSession(meta) {
