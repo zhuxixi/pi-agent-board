@@ -11,7 +11,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { resolvePiInvocation } from "./core/invocation.mjs";
 import { controlSocketPathFor, defaultRoot } from "./core/paths.mjs";
 import { listRows } from "./core/store.mjs";
-import { createService } from "./runtime/service.mjs";
+import { createService, envInt } from "./runtime/service.mjs";
+import { attachWarmHostSweeper } from "./core/warm-host-sweeper.mjs";
 import { openDashboard, registerAgentBoardCommand } from "./commands/agent-board.js";
 import { registerBgCommand } from "./commands/bg.js";
 
@@ -39,6 +40,28 @@ export default function piAgentBoard(pi: ExtensionAPI): void {
 		piArgsPrefix,
 		getThinkingLevel: () => pi.getThinkingLevel(),
 	};
+
+	// Warm-host reclaim (issue #75): idle PTY hosts must not leak forever after
+	// detach. Sweep once now (reclaims hosts orphaned by a previous host pi that
+	// exited without cleanup), then periodically; sweep again on shutdown.
+	// Child pi processes skip entirely (they share the board root and would
+	// terminate their own runner). serviceForContext is defined before the attach
+	// call because the sweeper sweeps synchronously on attach and the sweep
+	// closure references it (no TDZ).
+	const serviceForContext = () =>
+		createService({ root, runnerScript: RUNNER_SCRIPT, ptyRunnerScript: PTY_RUNNER_SCRIPT, titleRunnerScript: TITLE_RUNNER_SCRIPT, autoStateRunnerScript: AUTO_STATE_RUNNER_SCRIPT, piCommand, piArgsPrefix, defaultCwd: process.cwd() });
+	attachWarmHostSweeper(pi, {
+		isHostedChild,
+		sweep: () => {
+			try {
+				serviceForContext().pruneWarmHosts();
+			} catch {
+				/* best-effort: never break the session over a sweep */
+			}
+		},
+		intervalMs: envInt("AGENT_BOARD_SWEEP_INTERVAL_MS", 60_000, 0, 24 * 60 * 60 * 1000, "AGENT_VIEW_SWEEP_INTERVAL_MS"),
+	});
+
 	registerAgentBoardCommand(pi, commandOpts);
 	registerBgCommand(pi, commandOpts);
 	pi.registerFlag("agent-board", {

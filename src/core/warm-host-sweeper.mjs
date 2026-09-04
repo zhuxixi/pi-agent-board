@@ -109,7 +109,10 @@ export function createWarmHostSweeper({ sweep, intervalMs }) {
  * sweep: they share the same board root and would terminate their own runner
  * (suicide chain). They get a strict no-op.
  *
- * @param {{ on?: (event: string, fn: () => void) => unknown }} pi
+ * @param {{ on?: (event: any, fn: () => void) => any }} pi — any, not a narrower
+ *   string-keyed signature: pi's ExtensionAPI.on is a union of literal event-name
+ *   overloads and would otherwise fail structural assignment from TypeScript
+ *   callers (contravariant parameter check).
  * @param {{ isHostedChild: boolean, sweep: () => void, intervalMs: number }} o
  */
 export function attachWarmHostSweeper(pi, { isHostedChild, sweep, intervalMs }) {
