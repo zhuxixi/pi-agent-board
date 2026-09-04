@@ -120,8 +120,10 @@ export function attachWarmHostSweeper(pi, { isHostedChild, sweep, intervalMs }) 
 		return { active: false, dispose() {} };
 	}
 	const sweeper = createWarmHostSweeper({ sweep, intervalMs });
-	let disposed = false;
+	let shutdown = false;
 	const onShutdown = () => {
+		if (shutdown) return;
+		shutdown = true;
 		sweeper.sweepNow();
 		sweeper.stop();
 	};
@@ -131,8 +133,6 @@ export function attachWarmHostSweeper(pi, { isHostedChild, sweep, intervalMs }) 
 	return {
 		active: true,
 		dispose() {
-			if (disposed) return;
-			disposed = true;
 			onShutdown();
 		},
 	};

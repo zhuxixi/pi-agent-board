@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isAgentBusy, selectIdleHostsToEvict } from "../src/core/warm-host-sweeper.mjs";
+import { attachWarmHostSweeper, createWarmHostSweeper, isAgentBusy, selectIdleHostsToEvict } from "../src/core/warm-host-sweeper.mjs";
 
 // ---- rows fixture helpers（内存构造，不触盘）----
 const NOW = 1_800_000_000_000;
@@ -77,7 +77,7 @@ test("A4: maxWarm 超额淘汰最旧 survivors（idleSince 升序）", () => {
 	assert.deepEqual(r.excessEvicted, ["old"]);
 });
 
-test("A4: maxWarm=0 且 ttlMs=0 返回空（整体禁用语义在调用方；此处按传入参数执行）", () => {
+test("A4: maxWarm=0 且 ttlMs=0 时按参数执行（全部超额淘汰；整体禁用语义在调用方）", () => {
 	// 纯函数无早退：ttlMs=0 不走 ttl（保持原逻辑 ttlMs>0 条件），maxWarm=0 → 全淘汰
 	const r = selectIdleHostsToEvict([idleRow("v1")], opts({ maxWarm: 0, ttlMs: 0 }));
 	assert.deepEqual(r.ttlEvicted, []);
@@ -90,7 +90,7 @@ test("isAgentBusy 语义保持", () => {
 	assert.equal(isAgentBusy(idleRow("x", { alive: true, state: { semanticState: "idle", processState: "alive", pendingQuestions: ["q"] } })), true);
 });
 
-import { attachWarmHostSweeper, createWarmHostSweeper } from "../src/core/warm-host-sweeper.mjs";
+
 
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -106,6 +106,22 @@ test("A5: createWarmHostSweeper 周期触发 sweep；stop 后不再触发；swee
 	assert.equal(calls, after, "stop 后不得再触发");
 	sweeper.sweepNow();
 	assert.equal(calls, after + 1);
+});
+
+test("A5: stop 后 start 可恢复周期触发（模块注释声明的重启语义）", async () => {
+	let calls = 0;
+	const sweeper = createWarmHostSweeper({ sweep: () => { calls += 1; }, intervalMs: 20 });
+	sweeper.start();
+	await sleepMs(50);
+	assert.ok(calls >= 1, "start 后应有周期触发");
+	sweeper.stop();
+	const afterStop = calls;
+	await sleepMs(40);
+	assert.equal(calls, afterStop, "stop 后停");
+	sweeper.start();
+	await sleepMs(50);
+	assert.ok(calls > afterStop, "再次 start 后恢复周期触发");
+	sweeper.stop();
 });
 
 test("A5: intervalMs<=0 时 start 不启周期，sweepNow 仍可用", async () => {

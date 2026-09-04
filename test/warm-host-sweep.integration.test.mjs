@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -46,6 +46,8 @@ async function captureHostSocket(root, viewId) {
 	return { server, received };
 }
 
+const closeServer = (s) => new Promise((resolve) => s.close(resolve));
+
 const waitFor = async (pred, timeoutMs = 3000) => {
 	const start = Date.now();
 	while (Date.now() - start < timeoutMs) {
@@ -75,7 +77,7 @@ function idleView(root, id) {
 	writeHostPid(root, id, process.pid);
 }
 
-test("A6: 周期/手动 sweep 后 idle host 收到 terminate、busy host 不收", async () => {
+test("A6: 手动 sweep 后 idle host 收到 terminate（busy 由独立测试覆盖）", async () => {
 	const root = freshRoot();
 	const oldTtl = process.env.AGENT_BOARD_WARM_HOST_TTL_MS;
 	const oldGrace = process.env.AGENT_BOARD_WARM_HOST_GRACE_MS;
@@ -88,7 +90,7 @@ test("A6: 周期/手动 sweep 后 idle host 收到 terminate、busy host 不收"
 		svc.pruneWarmHosts();
 		const got = await waitFor(() => received.some((m) => m.type === "terminate"));
 		assert.equal(got, true, "idle host 应收到 terminate");
-		server.close();
+		await closeServer(server);
 	} finally {
 		if (oldTtl === undefined) delete process.env.AGENT_BOARD_WARM_HOST_TTL_MS;
 		else process.env.AGENT_BOARD_WARM_HOST_TTL_MS = oldTtl;
@@ -120,7 +122,7 @@ test("A6: busy host 不被 sweep 触碰", async () => {
 		svc.pruneWarmHosts();
 		await new Promise((r) => setTimeout(r, 200));
 		assert.equal(received.some((m) => m.type === "terminate"), false, "busy host 不得收 terminate");
-		server.close();
+		await closeServer(server);
 	} finally {
 		if (oldTtl === undefined) delete process.env.AGENT_BOARD_WARM_HOST_TTL_MS;
 		else process.env.AGENT_BOARD_WARM_HOST_TTL_MS = oldTtl;
@@ -135,8 +137,8 @@ test("A7: session_shutdown 触发 sweepNow（lifecycle 接线端到端）", asyn
 	process.env.AGENT_BOARD_WARM_HOST_TTL_MS = "1";
 	process.env.AGENT_BOARD_WARM_HOST_GRACE_MS = "0";
 	try {
-		idleView(root, "idle1");
-		const { server, received } = await captureHostSocket(root, "idle1");
+		idleView(root, "idle2");
+		const { server, received } = await captureHostSocket(root, "idle2");
 		const events = {};
 		const fakePi = { on: (ev, fn) => { events[ev] = fn; } };
 		const svc = makeService(root);
@@ -153,7 +155,7 @@ test("A7: session_shutdown 触发 sweepNow（lifecycle 接线端到端）", asyn
 		const got2 = await waitFor(() => received.some((m) => m.type === "terminate"));
 		assert.equal(got2, true, "shutdown sweep 应再次发 terminate");
 		attached.dispose();
-		server.close();
+		await closeServer(server);
 	} finally {
 		if (oldTtl === undefined) delete process.env.AGENT_BOARD_WARM_HOST_TTL_MS;
 		else process.env.AGENT_BOARD_WARM_HOST_TTL_MS = oldTtl;

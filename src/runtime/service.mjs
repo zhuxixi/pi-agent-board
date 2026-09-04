@@ -1095,6 +1095,7 @@ export function createService(opts) {
 		 * @param {{ keepViewId?: string|null }} [pruneOpts]
 		 */
 		pruneWarmHosts(pruneOpts = {}) {
+			// Delegates to the createService-closure pruneWarmHosts (same name; NOT recursive).
 			pruneWarmHosts(pruneOpts);
 		},
 	};
