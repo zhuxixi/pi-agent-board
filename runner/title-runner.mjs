@@ -45,7 +45,7 @@ async function maybeGenerateTitle(config) {
 function runOneShot(command, args, timeoutMs = 20000) {
 	return new Promise((resolve) => {
 		let out = "";
-		const child = spawn(command, args, { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+		const child = spawn(command, args, { stdio: ["ignore", "pipe", "ignore"], windowsHide: true, env: { ...process.env, AGENT_BOARD_NO_SWEEP: "1" } });
 		let buf = "";
 		child.stdout.on("data", (c) => {
 			buf += c.toString();
