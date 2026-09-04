@@ -40,6 +40,9 @@ export function isAgentBusy(row) {
  * @returns {{ ttlEvicted: string[], excessEvicted: string[] }} viewIds, ttl group first
  */
 export function selectIdleHostsToEvict(rows, { now, maxWarm, ttlMs, graceMs = 0, keepViewId = null }) {
+	// Both-zero = eviction disabled entirely. Callers (service.pruneWarmHosts)
+	// may additionally early-return for the same reason.
+	if (maxWarm === 0 && ttlMs === 0) return { ttlEvicted: [], excessEvicted: [] };
 	const idle = [];
 	for (const row of rows) {
 		if (keepViewId != null && row.meta.id === keepViewId) continue;
@@ -48,7 +51,10 @@ export function selectIdleHostsToEvict(rows, { now, maxWarm, ttlMs, graceMs = 0,
 		if ((row.host?.attachedClients ?? 0) !== 0) continue;
 		const startedAt = row.host?.startedAt;
 		if (graceMs > 0 && startedAt != null && now - startedAt < graceMs) continue;
-		const idleSince = row.state?.lastActivityAt ?? startedAt ?? row.meta.updatedAt;
+		// Host-level idle counts from host start: a stale lastActivityAt from a
+		// previous host incarnation must not make a freshly prewarmed host look
+		// idle for longer than it has actually been up (issue #75 review #1).
+		const idleSince = Math.max(row.state?.lastActivityAt ?? 0, startedAt ?? 0) || row.meta.updatedAt;
 		idle.push({ id: row.meta.id, idleSince });
 	}
 	const ttlEvicted = [];
@@ -116,7 +122,10 @@ export function createWarmHostSweeper({ sweep, intervalMs }) {
  * @param {{ isHostedChild: boolean, sweep: () => void, intervalMs: number }} o
  */
 export function attachWarmHostSweeper(pi, { isHostedChild, sweep, intervalMs }) {
-	if (isHostedChild) {
+	// Child pi processes and board-spawned non-host workers must never sweep:
+	// children would terminate their own runner (suicide chain); workers
+	// (job/state runners set AGENT_BOARD_NO_SWEEP=1) would churn the shared root.
+	if (isHostedChild || process.env.AGENT_BOARD_NO_SWEEP === "1") {
 		return { active: false, dispose() {} };
 	}
 	const sweeper = createWarmHostSweeper({ sweep, intervalMs });

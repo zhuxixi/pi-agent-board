@@ -79,6 +79,9 @@ function sanitizedEnv() {
 	delete env.AGENT_VIEW_VIEW_ID;
 	delete env.AGENT_BOARD_HOSTED;
 	delete env.AGENT_VIEW_HOSTED;
+	// Board-spawned classifier workers must not arm the warm-host sweeper
+	// (they share the board root with real hosts).
+	env.AGENT_BOARD_NO_SWEEP = "1";
 	return env;
 }
 

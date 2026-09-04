@@ -421,8 +421,16 @@ export function createService(opts) {
 			keepViewId: pruneOpts.keepViewId ?? null,
 		});
 		for (const viewId of [...ttlEvicted, ...excessEvicted]) {
+			// Re-verify against fresh state before terminating: the selection ran
+			// on a listRows snapshot, and the host may have been dispatched (busy)
+			// or attached (attachedClients > 0) since. Never kill a busy/attached
+			// host; graceMs also re-checked in case the host was just restarted.
 			const row = loadRow(root, viewId);
-			if (row?.hostAlive) sendHostMessage(row, { type: "terminate" });
+			if (!row?.hostAlive) continue;
+			if (isAgentBusy(row)) continue;
+			if ((row.host?.attachedClients ?? 0) !== 0) continue;
+			if (graceMs > 0 && row.host?.startedAt != null && Date.now() - row.host.startedAt < graceMs) continue;
+			sendHostMessage(row, { type: "terminate" });
 		}
 	}
 

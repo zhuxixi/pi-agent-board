@@ -50,11 +50,16 @@ export default function piAgentBoard(pi: ExtensionAPI): void {
 	// closure references it (no TDZ).
 	const serviceForContext = () =>
 		createService({ root, runnerScript: RUNNER_SCRIPT, ptyRunnerScript: PTY_RUNNER_SCRIPT, titleRunnerScript: TITLE_RUNNER_SCRIPT, autoStateRunnerScript: AUTO_STATE_RUNNER_SCRIPT, piCommand, piArgsPrefix, defaultCwd: process.cwd() });
+	let sweepService: ReturnType<typeof createService> | null = null;
 	attachWarmHostSweeper(pi, {
 		isHostedChild,
 		sweep: () => {
 			try {
-				serviceForContext().pruneWarmHosts();
+				// Reuse one service instance per extension lifetime: createService
+				// schedules a screen-log GC on construction, so per-tick creation
+				// would turn an event-driven cost into a timed one.
+				sweepService ??= serviceForContext();
+				sweepService.pruneWarmHosts();
 			} catch {
 				/* best-effort: never break the session over a sweep */
 			}

@@ -57,11 +57,23 @@ test("A2: hostAlive=false 不淘汰", () => {
 	assert.deepEqual(r.ttlEvicted, []);
 });
 
-test("A3: graceMs 豁免窗口内（startedAt 距今 < grace）不淘汰；窗口外淘汰", () => {
+test("A3: graceMs 豁免窗口内不淘汰；host 启动 120s 且无新活动时按 startedAt 计 idle 仍不超 TTL", () => {
 	const fresh = idleRow("v1", { host: { state: "alive", attachedClients: 0, startedAt: NOW - 5_000, runnerPid: 9999 } });
 	assert.deepEqual(selectIdleHostsToEvict([fresh], opts()).ttlEvicted, []);
+	// startedAt 120s 前、lastActivityAt 默认 1h 前（旧 host 残留）：F2 后
+	// idleSince 钳制到 startedAt → 120s < ttl 600s → 不淘汰
 	const aged = idleRow("v1", { host: { state: "alive", attachedClients: 0, startedAt: NOW - 120_000, runnerPid: 9999 } });
-	assert.deepEqual(selectIdleHostsToEvict([aged], opts()).ttlEvicted, ["v1"]);
+	assert.deepEqual(selectIdleHostsToEvict([aged], opts()).ttlEvicted, []);
+});
+
+test("F2: idleSince 钳制——陈旧 lastActivityAt 不压过新鲜 startedAt（prewarm 击穿防护）", () => {
+	// host 5 分钟前启动；lastActivityAt 是 2 小时前旧 host 的残留
+	const r = selectIdleHostsToEvict(
+		[idleRow("v1", { state: { semanticState: "completed", processState: "exited", lastActivityAt: NOW - 7200_000, pendingQuestions: [] }, host: { state: "alive", attachedClients: 0, startedAt: NOW - 300_000, runnerPid: 9999 } })],
+		opts({ ttlMs: 600_000 }),
+	);
+	// idleSince = NOW-300s → 300s < ttl 600s → 不淘汰
+	assert.deepEqual(r.ttlEvicted, []);
 });
 
 test("A3: startedAt 缺失时不做 grace 豁免（按 ttl 判）", () => {
@@ -77,9 +89,15 @@ test("A4: maxWarm 超额淘汰最旧 survivors（idleSince 升序）", () => {
 	assert.deepEqual(r.excessEvicted, ["old"]);
 });
 
-test("A4: maxWarm=0 且 ttlMs=0 时按参数执行（全部超额淘汰；整体禁用语义在调用方）", () => {
-	// 纯函数无早退：ttlMs=0 不走 ttl（保持原逻辑 ttlMs>0 条件），maxWarm=0 → 全淘汰
+test("A4: maxWarm=0 且 ttlMs=0 时整体禁用（函数内守卫 + 调用方早退双保险）", () => {
+	// 纯函数自身守卫 both-zero：不淘汰任何 host（与模块注释自洽）
 	const r = selectIdleHostsToEvict([idleRow("v1")], opts({ maxWarm: 0, ttlMs: 0 }));
+	assert.deepEqual(r.ttlEvicted, []);
+	assert.deepEqual(r.excessEvicted, []);
+});
+
+test("A4: maxWarm=0 且 ttlMs>0 时全部超额淘汰（ttl 分支仍按 ttl 走）", () => {
+	const r = selectIdleHostsToEvict([idleRow("v1", { state: { semanticState: "completed", processState: "exited", lastActivityAt: NOW - 60_000, pendingQuestions: [] } })], opts({ maxWarm: 0 }));
 	assert.deepEqual(r.ttlEvicted, []);
 	assert.deepEqual(r.excessEvicted, ["v1"]);
 });
@@ -173,4 +191,22 @@ test("A6(接线): child：完全 no-op（不 sweep、不注册、active=false）
 	assert.equal(sweeps, 0);
 	assert.equal(events.session_shutdown, undefined);
 	attached.dispose();
+});
+
+test("F5: AGENT_BOARD_NO_SWEEP=1 时 no-op（board worker 不 sweep）", () => {
+	const events = {};
+	const fakePi = { on: (ev, fn) => { events[ev] = fn; } };
+	let sweeps = 0;
+	const prev = process.env.AGENT_BOARD_NO_SWEEP;
+	process.env.AGENT_BOARD_NO_SWEEP = "1";
+	try {
+		const attached = attachWarmHostSweeper(fakePi, { isHostedChild: false, sweep: () => { sweeps += 1; }, intervalMs: 1000 });
+		assert.equal(attached.active, false);
+		assert.equal(sweeps, 0);
+		assert.equal(events.session_shutdown, undefined);
+		attached.dispose();
+	} finally {
+		if (prev === undefined) delete process.env.AGENT_BOARD_NO_SWEEP;
+		else process.env.AGENT_BOARD_NO_SWEEP = prev;
+	}
 });

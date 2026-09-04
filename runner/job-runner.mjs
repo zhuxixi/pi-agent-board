@@ -86,7 +86,7 @@ function main() {
 		cwd: config.cwd,
 		stdio: ["ignore", "pipe", "pipe"],
 		windowsHide: true,
-		env: process.env,
+		env: { ...process.env, AGENT_BOARD_NO_SWEEP: "1" },
 	});
 
 	status.pid = worker.pid ?? null;
