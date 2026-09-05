@@ -4,12 +4,13 @@
  * safety rule. Pure node + core modules; the Pi-coupled bits (attach, dialogs) live in
  * the command handler. The pi invocation + runner path are injected (resolved in index.ts).
  */
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { createConnection } from "node:net";
 import { resolve } from "node:path";
 import { applyAutoStateToStatus, autoStateEnabled, heuristicAutoState } from "../core/auto-state.mjs";
-import { appendLine } from "../core/atomic.mjs";
+import { appendLine, removeFile } from "../core/atomic.mjs";
 import { finalizeRun, projectViewState, reduceEvent } from "../core/events.mjs";
 import { clearDiagnostics, appendDiagnostic, tailDiagnostics } from "../core/diagnostics.mjs";
 import { emptyEvidenceSnapshot, finalizeEvidence, readEvidence, reduceEvidence, summarizeEvidence, writeEvidence } from "../core/evidence.mjs";
@@ -22,18 +23,21 @@ import { firstSentence, truncate } from "../core/heuristics.mjs";
 import { newRunId, newViewId, slugifyTask } from "../core/ids.mjs";
 import { launchAutoState as launchAutoStateProcess, launchHost as launchHostProcess, launchRun, launchTitle as launchTitleProcess } from "../core/launch.mjs";
 import { gitRepoRoot } from "../core/repo.mjs";
-import { killProcess } from "../core/pid.mjs";
+import { isAlive, killProcess } from "../core/pid.mjs";
+import { acquireOwnedViewLock, tryAcquireOwnedViewLock } from "../core/locks.mjs";
+import { canReplaceHost } from "../core/host-coordination.mjs";
 import * as P from "../core/paths.mjs";
 import {
+	claimHost,
 	createView,
 	listRows,
 	loadRow,
+	readHost,
 	readLaunchPrefs,
 	readPid,
 	readState,
 	readStatus,
-	writeHost,
-	writeHostPid,
+	updateOwnedHost,
 	writeLaunchPrefs,
 	writeMeta,
 	writeState,
@@ -44,6 +48,11 @@ import { normalizeScreenLogMaxBytes, pruneScreenLogs } from "../core/screen-log-
 import { hasPendingQuestions, isAgentBusy, selectIdleHostsToEvict } from "../core/warm-host-sweeper.mjs";
 
 /** @typedef {import("../core/types.mjs").RunKind} RunKind */
+
+/** A fresh `starting` claim is a normal cold start for this long — never an orphan (issue #70). */
+export const HOST_START_GRACE_MS = 10_000;
+/** Bounded wait for the per-view host-start lease on explicit user actions (dispatch/reply). */
+export const HOST_START_LOCK_WAIT_MS = 500;
 
 /**
  * @param {{
@@ -61,6 +70,10 @@ import { hasPendingQuestions, isAgentBusy, selectIdleHostsToEvict } from "../cor
  *   launchAutoState?: typeof launchAutoStateProcess,
  *   ptySupport?: (opts?: { refresh?: boolean, maxAgeMs?: number }) => { ok: boolean, reason?: string|null, issue?: any },
  *   pruneScreenLogs?: typeof pruneScreenLogs,
+ *   randomId?: () => string,
+ *   now?: () => number,
+ *   acquireLock?: typeof acquireOwnedViewLock,
+ *   tryAcquireLock?: typeof tryAcquireOwnedViewLock,
  * }} opts
  */
 export function createService(opts) {
@@ -72,6 +85,10 @@ export function createService(opts) {
 	const ptySupport = opts.ptySupport ?? ptyHostAvailability;
 	const ptyRunnerScript = opts.ptyRunnerScript ?? opts.runnerScript;
 	const titleRunnerScript = opts.titleRunnerScript ?? null;
+	const randomIdImpl = opts.randomId ?? (() => randomBytes(16).toString("hex"));
+	const nowImpl = opts.now ?? Date.now;
+	const acquireLockImpl = opts.acquireLock ?? acquireOwnedViewLock;
+	const tryAcquireLockImpl = opts.tryAcquireLock ?? tryAcquireOwnedViewLock;
 
 	const pruneScreenLogsImpl = opts.pruneScreenLogs ?? pruneScreenLogs;
 	// Reclaim replay logs of long-ended views on dashboard startup. Deferred via
@@ -122,12 +139,60 @@ export function createService(opts) {
 	}
 
 	/**
-	 * Launch a durable interactive PTY host for a view.
+	 * Launch a durable interactive PTY host for a view — two-phase claim protocol
+	 * (issue #70). Everything (claim → spawn → runnerPid merge) happens while the
+	 * caller holds the per-view `host-start` lease, so concurrent service processes
+	 * can never stack a second host on top of a live claim.
 	 * @param {import("../core/types.mjs").ViewMeta} meta
 	 * @param {string|null} initialPrompt
-	 * @returns {{ pid: number|null }}
+	 * @returns {{ ok: true, status: "started"|"pending"|"reused", pid: number|null, socketPath: string|null, instanceId: string|null } | { ok: false, error: string, fallbackReason?: string }}
 	 */
 	function launchHost(meta, initialPrompt, launchOpts = {}) {
+		let lease;
+		try {
+			lease = acquireLockImpl(root, meta.id, "host-start", { waitMs: HOST_START_LOCK_WAIT_MS, identity: serviceIdentity() });
+		} catch {
+			// Another process is mid-launch (or the lease is unreclaimable). Never
+			// stack a second spawn on top — surface whatever it owns as pending.
+			const existing = readHost(root, meta.id);
+			return pendingLaunchResult(existing);
+		}
+		try {
+			return startHostUnderLease(meta, initialPrompt, launchOpts);
+		} finally {
+			try { lease.release(); } catch { /* best effort */ }
+		}
+	}
+
+	/** @param {import("../core/types.mjs").HostStatus|null} host */
+	function pendingLaunchResult(host) {
+		return { ok: true, status: "pending", pid: null, socketPath: host?.socketPath ?? null, instanceId: host?.instanceId ?? null };
+	}
+
+	/**
+	 * Claim → spawn → merge flow. The CALLER must already hold the `host-start`
+	 * lease; this function never acquires or releases it.
+	 * @param {import("../core/types.mjs").ViewMeta} meta
+	 * @param {string|null} initialPrompt
+	 * @returns {ReturnType<typeof launchHost>}
+	 */
+	function startHostUnderLease(meta, initialPrompt, launchOpts = {}) {
+		const existing = readHost(root, meta.id);
+		if (existing && (existing.state === "starting" || existing.state === "alive" || existing.state === "stopping")) {
+			// An active claim already exists — reuse it, never a second spawn.
+			return existing.state === "alive"
+				? { ok: true, status: "reused", pid: null, socketPath: existing.socketPath ?? null, instanceId: existing.instanceId ?? null }
+				: pendingLaunchResult(existing);
+		}
+		// No record is trivially replaceable; a terminal record only when nothing
+		// it names can still be alive (conservative: a live pid is "unknown" and blocks).
+		if (existing && !canReplaceHost(observeHostForReplace(existing))) {
+			return pendingLaunchResult(existing);
+		}
+
+		const instanceId = randomIdImpl();
+		const configPath = P.hostConfigPathFor(root, meta.id, instanceId);
+		const socketPath = P.hostEndpointPathFor(process.platform, root, meta.id, instanceId);
 		/** @type {import("../core/types.mjs").HostConfig} */
 		const config = {
 			root,
@@ -144,30 +209,44 @@ export function createService(opts) {
 			cols: Number(process.env.COLUMNS || 120),
 			rows: Number(process.env.LINES || 36),
 			screenLogMaxBytes: normalizeScreenLogMaxBytes(readLaunchPrefs(root).screenLogMaxSize),
-		};
-		const socketPath = P.controlSocketPath(root, meta.id);
-		const { pid } = launchHostImpl(root, config, { runnerScript: ptyRunnerScript });
-		writeHost(root, {
-			version: 1,
-			viewId: meta.id,
-			mode: "pty",
-			runnerPid: pid,
-			childPid: null,
+			instanceId,
+			configPath,
 			socketPath,
-			state: "starting",
-			startedAt: Date.now(),
-			lastSeenAt: Date.now(),
-			endedAt: null,
-			exitCode: null,
-			error: null,
+		};
+		const claimIdentity = serviceIdentity();
+		const claimed = claimHost(root, {
+			viewId: meta.id,
+			instanceId,
+			configPath,
+			socketPath,
+			claimAt: nowImpl(),
+			claimPid: process.pid,
+			claimIdentity,
 			cols: config.cols,
 			rows: config.rows,
-			attachedClients: 0,
 		});
-		writeHostPid(root, meta.id, pid);
-		appendDiagnostic(root, meta.id, { source: "service", code: "launch_host", message: "PTY host launched", details: { pid, hasInitialPrompt: Boolean(initialPrompt) } });
+		if (!claimed.claimed) {
+			// Lost the host-meta race: another launch owns the claim now.
+			return pendingLaunchResult(claimed.host);
+		}
+
+		let pid = null;
+		let spawnError = null;
+		try {
+			({ pid } = launchHostImpl(root, config, { runnerScript: ptyRunnerScript }));
+		} catch (err) {
+			spawnError = err instanceof Error ? err.message : String(err);
+		}
+		if (pid == null) {
+			const message = spawnError ?? "PTY host runner failed to spawn";
+			updateOwnedHost(root, meta.id, instanceId, (h) => ({ ...h, state: "failed", endedAt: nowImpl(), exitCode: 1, error: message }));
+			removeFile(configPath);
+			return { ok: false, error: message, fallbackReason: message };
+		}
+		updateOwnedHost(root, meta.id, instanceId, (h) => ({ ...h, runnerPid: pid, runnerSpawnedAt: nowImpl() }));
+		appendDiagnostic(root, meta.id, { source: "service", code: "launch_host", message: "PTY host launched", details: { pid, instanceId, hasInitialPrompt: Boolean(initialPrompt) } });
 		if (launchOpts.markQueued !== false) markQueued(meta.id, null);
-		return { pid, socketPath };
+		return { ok: true, status: "started", pid, socketPath, instanceId };
 	}
 
 	/**
@@ -495,17 +574,30 @@ export function createService(opts) {
 			}
 			const pty = ptySupport({ refresh: true });
 			let runId = null;
-			if (pty.ok) launchHost(row.meta, prompt);
-			else {
-				if (isExternalSession(row.meta)) {
+			let hostMode = "pty";
+			if (!pty.ok) hostMode = "json-runner";
+			if (pty.ok) {
+				const launched = launchHost(row.meta, prompt);
+				if (launched.ok && launched.status !== "started") {
+					// An existing claim owns the view; the item stays queued and retries
+					// after that host becomes ready (issue #70 prompt-not-lost invariant).
 					releaseFollowUp(root, viewId, item.id);
-					appendDiagnostic(root, viewId, { source: "queue", level: "warn", code: "follow_up_waiting_for_pty", message: "Adopted session follow-up is waiting for PTY support", details: {} });
-					return { ok: false, error: "PTY is required to drain adopted session follow-ups safely" };
+					return { ok: true, pending: true };
 				}
+				if (!launched.ok) hostMode = "json-runner";
+			}
+			if (hostMode === "json-runner" && isExternalSession(row.meta)) {
+				// Adopted (external) sessions must never continue via the json runner —
+				// only a PTY host can resume them safely (pre-existing guard).
+				releaseFollowUp(root, viewId, item.id);
+				appendDiagnostic(root, viewId, { source: "queue", level: "warn", code: "follow_up_waiting_for_pty", message: "Adopted session follow-up is waiting for PTY support", details: {} });
+				return { ok: false, error: "PTY is required to drain adopted session follow-ups safely" };
+			}
+			if (hostMode === "json-runner") {
 				runId = launchForView(row.meta, prompt, runKindForFollowUp(item)).runId;
 			}
 			completeFollowUp(root, viewId, item.id, { runId });
-			appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_started", message: "Queued follow-up started", details: { kind: item.kind, hostMode: pty.ok ? "pty" : "json-runner" } });
+			appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_started", message: "Queued follow-up started", details: { kind: item.kind, hostMode } });
 			return { ok: true, started: true, item };
 		} catch (err) {
 			releaseFollowUp(root, viewId, item.id);
@@ -614,14 +706,35 @@ export function createService(opts) {
 				writeCapable,
 			});
 			const pty = ptySupport({ refresh: true });
-			if (pty.ok) launchHost(meta, prompt);
-			else launchForView(meta, prompt, "dispatch");
+			let hostMode = "json-runner";
+			let fallbackReason;
+			let queued;
+			if (pty.ok) {
+				const launched = launchHost(meta, prompt);
+				if (launched.ok) {
+					hostMode = "pty";
+					if (launched.status !== "started") {
+						// An existing claim owns the prompt now; keep it durably queued
+						// instead of dropping it (issue #70 prompt-not-lost invariant).
+						const q = enqueueFollowUp(root, id, prompt, { kind: "reply", delivery: "auto", source: "user" });
+						if (!q.ok) return q;
+						queued = true;
+					}
+				} else {
+					fallbackReason = launched.fallbackReason ?? launched.error;
+					launchForView(meta, prompt, "dispatch");
+				}
+			} else {
+				fallbackReason = nodePtyFallbackMessage(pty);
+				launchForView(meta, prompt, "dispatch");
+			}
 			queueGeneratedTitle(meta, prompt);
 			return {
 				ok: true,
 				viewId: id,
-				hostMode: pty.ok ? "pty" : "json-runner",
-				fallbackReason: pty.ok ? undefined : nodePtyFallbackMessage(pty),
+				hostMode,
+				...(queued ? { queued: true } : {}),
+				...(hostMode === "json-runner" ? { fallbackReason } : {}),
 			};
 		},
 
@@ -647,12 +760,34 @@ export function createService(opts) {
 			if (row.hostAlive) return sendHostMessage(row, { type: "input", data: `${prompt}\r` });
 			if (row.alive) return { ok: false, error: "A run is already active for this session" };
 			const pty = ptySupport({ refresh: true });
-			if (pty.ok) launchHost(row.meta, prompt);
-			else {
+			let hostMode = null;
+			let fallbackReason;
+			if (pty.ok) {
+				const launched = launchHost(row.meta, prompt);
+				if (launched.ok) {
+					if (launched.status !== "started") {
+						// The existing claim will consume the prompt later — keep it queued
+						// instead of dropping it (issue #70 prompt-not-lost invariant).
+						const q = enqueueFollowUp(root, viewId, prompt, { kind, delivery: "auto", source: "user" });
+						if (q.ok) {
+							appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_queued", message: "Follow-up queued", details: { kind, queuedCount: q.summary?.queuedCount } });
+							return { ok: true, queued: true, summary: q.summary };
+						}
+						return q;
+					}
+					hostMode = "pty";
+				} else {
+					fallbackReason = launched.fallbackReason ?? launched.error;
+				}
+			} else {
+				fallbackReason = nodePtyFallbackMessage(pty);
+			}
+			if (!hostMode) {
 				if (isExternalSession(row.meta)) return { ok: false, error: "PTY is required to continue an adopted foreground session safely" };
 				launchForView(row.meta, prompt, runKindForKind(kind));
+				hostMode = "json-runner";
 			}
-			return { ok: true, hostMode: pty.ok ? "pty" : "json-runner", fallbackReason: pty.ok ? undefined : nodePtyFallbackMessage(pty) };
+			return { ok: true, hostMode, ...(hostMode === "json-runner" ? { fallbackReason } : {}) };
 		},
 
 		/**
@@ -680,14 +815,19 @@ export function createService(opts) {
 
 		/**
 		 * Ensure there is an interactive PTY host for this session. Used for fast attach
-		 * and dashboard prewarm. Starting an idle host must not alter task state.
+		 * and dashboard prewarm. Idempotent (issue #70): an existing active claim — even
+		 * a fresh `starting` one with no runner pid yet — is surfaced as `pending`, never
+		 * replaced or double-spawned. Real socket health is the attach resolver's job
+		 * (Task 12); this path never probes, kills, or spawns past an active claim.
 		 * @param {string} viewId
-		 * @returns {{ ok: boolean, socketPath?: string, started?: boolean, error?: string, fallbackReason?: string }}
+		 * @returns {{ ok: boolean, pending?: boolean, started?: boolean, socketPath?: string|null, instanceId?: string|null, error?: string, fallbackReason?: string }}
 		 */
 		ensureHost(viewId) {
 			const row = loadRow(root, viewId);
 			if (!row) return { ok: false, error: "Unknown session" };
-			if (row.hostAlive && row.host?.socketPath) return { ok: true, socketPath: row.host.socketPath, started: false };
+			if (row.hostActive) {
+				return { ok: true, pending: true, socketPath: row.host?.socketPath ?? null, instanceId: row.host?.instanceId ?? null };
+			}
 
 			// Default probe semantics: success is cached for the process lifetime and a
 			// failed probe retries on a short TTL. Forcing refresh here would spawn a
@@ -697,9 +837,25 @@ export function createService(opts) {
 			if (isAgentBusy(row)) return { ok: false, error: "A non-live background run is active for this session" };
 			if (!existsSync(row.meta.sessionFile)) return { ok: false, error: "Session file isn't ready yet" };
 
-			const launched = launchHost(row.meta, null, { markQueued: false });
-			pruneWarmHosts({ keepViewId: viewId });
-			return { ok: true, socketPath: launched.socketPath, started: true };
+			const lock = tryAcquireLockImpl(root, viewId, "host-start", { identity: serviceIdentity() });
+			if (!lock.acquired) {
+				// Someone else (another board/service process) is mid-launch — its claim
+				// will appear on disk; treat that as an in-flight start, not a failure.
+				return { ok: true, pending: true, socketPath: null, instanceId: null };
+			}
+			try {
+				const host = readHost(root, viewId);
+				if (host && (host.state === "starting" || host.state === "alive" || host.state === "stopping")) {
+					return { ok: true, pending: true, socketPath: host.socketPath ?? null, instanceId: host.instanceId ?? null };
+				}
+				const res = startHostUnderLease(row.meta, null, { markQueued: false });
+				if (res.ok && res.status === "started") pruneWarmHosts({ keepViewId: viewId });
+				return res.ok
+					? { ok: true, started: res.status === "started", pending: res.status !== "started", socketPath: res.socketPath, instanceId: res.instanceId }
+					: res;
+			} finally {
+				try { lock.lease.release(); } catch { /* best effort */ }
+			}
 		},
 
 		/** @param {string} viewId */
@@ -1138,6 +1294,47 @@ function compactSummary(text) {
 	if (!cleaned) return "Done";
 	const first = firstSentence(cleaned);
 	return truncate(first.length >= 12 ? first : cleaned, 80);
+}
+
+/** POSIX process start token — /proc/<pid>/stat field 22 (starttime). Mirrors the
+ *  runner's captureStartToken (issue #70) so both sides publish comparable
+ *  identities; null on failure or non-Linux platforms. Task 11 may promote this
+ *  to a shared module when identity-aware observation lands. */
+function readProcStartToken(pid) {
+	if (process.platform !== "linux" || !pid) return null;
+	try {
+		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+		// comm (field 2) may contain spaces and parens — fields resume AFTER the
+		// last ')'. fields[0] is state (field 3) → starttime (field 22) is [19].
+		const afterComm = stat.slice(stat.lastIndexOf(")") + 1).trimStart();
+		return afterComm.split(/\s+/)[19] ?? null;
+	} catch {
+		return null;
+	}
+}
+
+/** Launch-time identity this service process stamps on leases and claims. */
+function serviceIdentity() {
+	return { pid: process.pid, startToken: readProcStartToken(process.pid) };
+}
+
+/** Conservative pre-identity observation (issue #70 Task 10): a recorded pid that
+ *  is still alive is always `unknown` — never safe to release; not recorded or
+ *  provably gone is `dead`. Task 11 replaces this with identity-aware observation. */
+function conservativeObservation(pid) {
+	if (pid == null) return "dead";
+	return isAlive(pid) ? "unknown" : "dead";
+}
+
+/** @param {import("../core/types.mjs").HostStatus|null} host */
+function observeHostForReplace(host) {
+	return {
+		host,
+		runnerObservation: conservativeObservation(host?.runnerPid ?? null),
+		childObservation: conservativeObservation(host?.childPid ?? null),
+		claimObservation: conservativeObservation(host?.claimPid ?? null),
+		launchLeaseActive: false,
+	};
 }
 
 /**

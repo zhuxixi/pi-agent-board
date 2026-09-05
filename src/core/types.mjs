@@ -226,6 +226,9 @@ export const GROUP_LABELS = {
  * @property {number} cols
  * @property {number} rows
  * @property {number|null} screenLogMaxBytes per-view screen.log write cap; null = runner default
+ * @property {string|null} [instanceId] Owner/fencing token for this host launch (issue #70).
+ * @property {string|null} [configPath] Per-instance config file path; each launch owns its own so concurrent launches never share a config.
+ * @property {string|null} [socketPath] Per-instance control endpoint the spawned runner must bind.
  */
 
 /**
