@@ -965,8 +965,14 @@ export function createService(opts) {
 		}
 	}
 
-	/** @param {string} viewId */
-	function drainNextFollowUp(viewId) {
+	/**
+	 * Claim the next queued follow-up and deliver it. Host-path delivery is
+	 * async: the item is only completed on input_ack; any failure releases it
+	 * back to queued for a later retry (issue #70 A13).
+	 * @param {string} viewId
+	 * @returns {Promise<{ ok: boolean, error?: string, sent?: boolean, started?: boolean, pending?: boolean, item?: any }>}
+	 */
+	async function drainNextFollowUp(viewId) {
 		const row = loadRow(root, viewId);
 		if (!row) return { ok: false, error: "Unknown session" };
 		if (!canAutoDrain(row)) return { ok: false, error: "Session is not ready to drain queued follow-ups" };
@@ -976,15 +982,19 @@ export function createService(opts) {
 		const prompt = promptForFollowUp(viewId, item);
 		try {
 			if (item.kind === "plan_approval") markExecutingApprovedPlan(root, viewId);
-			if (row.hostAlive) {
-				const sent = sendHostMessage(row, { type: "input", data: `${prompt}\r` });
-				if (!sent.ok) {
-					releaseFollowUp(root, viewId, item.id);
-					return sent;
+			if (row.hostActive) {
+				const socketPath = row.host?.socketPath;
+				const sent = socketPath
+					? await sendHostInput(socketPath, `${prompt}\r`, { requestId: item.id })
+					: { ok: false, error: "No host socket", retryable: true };
+				if (sent.ok) {
+					completeFollowUp(root, viewId, item.id);
+					appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_sent", message: "Queued follow-up sent to live host", details: { kind: item.kind } });
+					return { ok: true, sent: true, item };
 				}
-				completeFollowUp(root, viewId, item.id);
-				appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_sent", message: "Queued follow-up sent to live host", details: { kind: item.kind } });
-				return { ok: true, sent: true, item };
+				releaseFollowUp(root, viewId, item.id);
+				appendDiagnostic(root, viewId, { source: "queue", level: "warn", code: "follow_up_send_failed", message: "Queued follow-up could not be delivered to the host", details: { kind: item.kind, error: sent.error ?? "unknown", retryable: sent.retryable !== false } });
+				return { ok: true, pending: true, item };
 			}
 			const pty = ptySupport({ refresh: true });
 			let runId = null;
@@ -1064,7 +1074,10 @@ export function createService(opts) {
 			updateCodeRefsFromEvidence(root, row.meta.id, evidence, row.meta);
 			writeForegroundState(row, status);
 			pruneWarmHosts({ keepViewId: row.meta.id });
-			drainNextFollowUp(row.meta.id);
+			// Async delivery (ack-gated, issue #70 A13): fire-and-forget here — the
+			// queue item's own state records the outcome, ordering is preserved by
+			// the queue lock, and requestId dedup makes late retries harmless.
+			void drainNextFollowUp(row.meta.id);
 			return true;
 		}
 
@@ -1153,12 +1166,15 @@ export function createService(opts) {
 		},
 
 		/**
-		 * Append a reply to an existing session by launching a new run. Blocks if a run is live.
+		 * Append a reply to an existing session. Host-path delivery is
+		 * ack-gated: the prompt is first persisted as a follow-up item, then
+		 * attempted over the control socket; only input_ack completes the item,
+		 * anything else leaves it queued for the drain loop (issue #70 A13).
 		 * @param {string} viewId
 		 * @param {string} text
-		 * @returns {{ ok: boolean, error?: string, hostMode?: "pty"|"json-runner", fallbackReason?: string }}
+		 * @returns {Promise<{ ok: boolean, error?: string, queued?: boolean, sent?: boolean, summary?: any, hostMode?: "pty"|"json-runner", fallbackReason?: string }>}
 		 */
-		reply(viewId, text, replyOpts = {}) {
+		async reply(viewId, text, replyOpts = {}) {
 			const prompt = String(text || "").trim();
 			if (!prompt) return { ok: false, error: "Empty reply" };
 			const row = loadRow(root, viewId);
@@ -1171,7 +1187,25 @@ export function createService(opts) {
 				if (queued.ok) appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_queued", message: "Follow-up queued", details: { kind, queuedCount: queued.summary?.queuedCount } });
 				return queued.ok ? { ok: true, queued: true, summary: queued.summary } : queued;
 			}
-			if (row.hostAlive) return sendHostMessage(row, { type: "input", data: `${prompt}\r` });
+			if (row.hostActive) {
+				// Durable queue-first delivery: the item id is the requestId, so a
+				// lost ack after a child write de-dupes on retry instead of duplicating.
+				const queued = enqueueFollowUp(root, viewId, prompt, { kind, delivery: "auto", source: "user" });
+				if (!queued.ok) return queued;
+				appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_queued", message: "Follow-up queued", details: { kind, queuedCount: queued.summary?.queuedCount } });
+				const socketPath = row.host?.socketPath;
+				const sent = socketPath
+					? await sendHostInput(socketPath, `${prompt}\r`, { requestId: queued.item.id })
+					: { ok: false, error: "No host socket", retryable: true };
+				if (sent.ok) {
+					completeFollowUp(root, viewId, queued.item.id);
+					appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_sent", message: "Queued follow-up sent to live host", details: { kind } });
+					return { ok: true, sent: true, item: queued.item };
+				}
+				// Not an error: starting host, busy socket or lost ack — the drain
+				// loop retries once the host acks (issue #70 prompt-not-lost).
+				return { ok: true, queued: true, summary: queued.summary };
+			}
 			if (row.alive) return { ok: false, error: "A run is already active for this session" };
 			const pty = ptySupport({ refresh: true });
 			let hostMode = null;
@@ -1424,11 +1458,12 @@ export function createService(opts) {
 			return { queue, summary: summarizeFollowUpQueue(queue) };
 		},
 
+		/** Async (ack-gated) since issue #70 A13; see the internal implementation above. @param {string} viewId */
 		drainNextFollowUp(viewId) {
 			return drainNextFollowUp(viewId);
 		},
 
-		requestPlan(viewId, text = "") {
+		async requestPlan(viewId, text = "") {
 			const row = loadRow(root, viewId);
 			if (!row) return { ok: false, error: "Unknown session" };
 			requestPlanState(root, viewId, { note: text || null });
@@ -1436,7 +1471,7 @@ export function createService(opts) {
 			return this.reply(viewId, buildPlanRequestPrompt(text), { delivery: "now", kind: "plan_request" });
 		},
 
-		approvePlan(viewId) {
+		async approvePlan(viewId) {
 			const row = loadRow(root, viewId);
 			const state = readSteering(root, viewId);
 			const approved = approvePlanState(root, viewId);
@@ -1446,7 +1481,7 @@ export function createService(opts) {
 			return this.reply(viewId, buildApprovePlanPrompt(state.planText), { delivery: "now", kind: "plan_approval" });
 		},
 
-		requestPlanChanges(viewId, feedback) {
+		async requestPlanChanges(viewId, feedback) {
 			const row = loadRow(root, viewId);
 			const state = readSteering(root, viewId);
 			const changed = requestPlanChangesState(root, viewId, feedback);
@@ -1587,8 +1622,10 @@ export function createService(opts) {
 			}
 			for (const row of listRows(root)) {
 				if ((row.state?.followUps?.queuedCount ?? 0) > 0 && canAutoDrain(row)) {
-					const drained = drainNextFollowUp(row.meta.id);
-					if (drained.ok) fixed += 1;
+				// Delivery is ack-gated and async now (issue #70 A13); the queue
+				// item state, not this counter, records the outcome.
+				void drainNextFollowUp(row.meta.id);
+				fixed += 1;
 				}
 			}
 			return fixed;
@@ -1808,6 +1845,92 @@ function sendHostMessage(row, message) {
 	} catch (err) {
 		return { ok: false, error: err instanceof Error ? err.message : String(err) };
 	}
+}
+
+/**
+ * Default window service waits for the runner's input_ack before treating a
+ * host input as undelivered (issue #70 A13).
+ */
+const HOST_INPUT_ACK_TIMEOUT_MS = 2_000;
+
+/**
+ * Send one input line to a host control socket and wait for the runner's
+ * input_ack (issue #70 A13). Fire-and-forget "connected" no longer counts as
+ * delivered: only `{type:"input_ack", requestId}` does.
+ *
+ * Delivery contract is durable at-least-once, coordinated through the queue
+ * item id used as requestId:
+ * - If an ack is lost AFTER the runner wrote the child, a re-send with the
+ *   same requestId hits the runner's dedup table and re-acks without a second
+ *   child write.
+ * - If the host instance restarted, the new instance never saw the requestId
+ *   and writes the prompt once.
+ * Legacy (pre-instanceId) runners ignore requestId and never ack: this helper
+ * then times out and reports a retryable failure, leaving the prompt queued —
+ * legacy hosts are attach-only by spec, so queued prompts surface on attach.
+ * Never rejects: every failure resolves `{ok:false, error, retryable:true}`.
+ * @param {string} socketPath
+ * @param {string} text
+ * @param {{ requestId?: string|null, timeoutMs?: number, connect?: (path: string) => import("node:net").Socket }} [opts]
+ * @returns {Promise<{ ok: boolean, error?: string, retryable?: boolean }>}
+ */
+export function sendHostInput(socketPath, text, opts = {}) {
+	const requestId = opts.requestId ?? null;
+	const timeoutMs = opts.timeoutMs ?? HOST_INPUT_ACK_TIMEOUT_MS;
+	const connect = opts.connect ?? createConnection;
+	return new Promise((resolve) => {
+		let settled = false;
+		let buffer = "";
+		/** @type {import("node:net").Socket|null} */
+		let socket = null;
+		const finish = (result) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			try { socket?.destroy(); } catch { /* best effort */ }
+			resolve(result);
+		};
+		const timer = setTimeout(() => finish({ ok: false, error: "timeout", retryable: true }), timeoutMs);
+		timer.unref?.();
+		try {
+			socket = connect(socketPath);
+		} catch (err) {
+			finish({ ok: false, error: err instanceof Error ? err.message : String(err), retryable: true });
+			return;
+		}
+		socket.on("connect", () => {
+			try {
+				socket.write(JSON.stringify({ type: "input", requestId, data: text }) + "\n");
+			} catch (err) {
+				finish({ ok: false, error: err instanceof Error ? err.message : String(err), retryable: true });
+			}
+		});
+		socket.on("data", (chunk) => {
+			buffer += chunk.toString("utf8");
+			const lines = buffer.split("\n");
+			buffer = lines.pop() ?? "";
+			for (const line of lines) {
+				if (!line.trim()) continue;
+				let msg;
+				try { msg = JSON.parse(line); } catch { continue; }
+				if (msg?.type === "input_ack" && (requestId == null || msg.requestId === requestId)) {
+					finish({ ok: true });
+					return;
+				}
+				if (msg?.type === "error") {
+					// e.g. {type:"error", code:"host_starting", requestId} while the child boots.
+					finish({ ok: false, error: msg.code ?? msg.message ?? "host_error", retryable: true });
+					return;
+				}
+				// hello/status/output lines are ignored — keep waiting for the ack.
+			}
+		});
+		socket.on("error", (err) => {
+			const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+			finish({ ok: false, error: code ?? (err instanceof Error ? err.message : String(err)), retryable: true });
+		});
+		socket.on("close", () => finish({ ok: false, error: "socket_closed", retryable: true }));
+	});
 }
 
 let cachedPtySupport;

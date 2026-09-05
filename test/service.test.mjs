@@ -435,7 +435,7 @@ test("lock contention yields pending without spawn", () => {
 	}
 });
 
-test("reply with a pending host enqueues the prompt instead of dropping it", () => {
+test("reply with a pending host enqueues the prompt instead of dropping it", async () => {
 	const root = freshRoot();
 	const oldForce = process.env.AGENT_BOARD_FORCE_PTY;
 	try {
@@ -449,7 +449,7 @@ test("reply with a pending host enqueues the prompt instead of dropping it", () 
 				return { pid: process.pid, configPath: "/no/host-config.json" };
 			},
 		});
-		const res = svc.reply("v1", "hello");
+		const res = await svc.reply("v1", "hello");
 		assert.equal(res.ok, true);
 		assert.equal(res.queued, true);
 		assert.equal(launches, 0, "pending claim must not spawn a second host");
@@ -518,7 +518,7 @@ test("syncForegroundEvent marks a managed attached session working when user inp
 	}
 });
 
-test("syncHostedEvent persists interactive questions and resets them on new input", () => {
+test("syncHostedEvent persists interactive questions and resets them on new input", async () => {
 	const root = freshRoot();
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
@@ -536,7 +536,7 @@ test("syncHostedEvent persists interactive questions and resets them on new inpu
 		assert.equal(waiting.question, "Choose a mode?");
 		assert.deepEqual(waiting.pendingQuestions, [{ toolCallId: "q1", question: "Choose a mode?" }]);
 		assert.equal(svc.markCompleted("v1").ok, false);
-		assert.deepEqual(svc.reply("v1", "safe"), { ok: false, error: "Attach to answer the pending question" });
+		assert.deepEqual(await svc.reply("v1", "safe"), { ok: false, error: "Attach to answer the pending question" });
 
 		assert.equal(svc.syncHostedEvent("v1", { type: "input", text: "safe" }), true);
 		const resumed = readState(root, "v1");
@@ -712,7 +712,7 @@ test("archiveMany archives explicit completed rows and skips live ones", () => {
 	}
 });
 
-test("busy replies queue and drain when idle", () => {
+test("busy replies queue and drain when idle", async () => {
 	const root = freshRoot();
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
@@ -728,7 +728,7 @@ test("busy replies queue and drain when idle", () => {
 				return { pid: null, configPath: "/no/config.json" };
 			},
 		});
-		const queued = svc.reply("v1", "next step");
+		const queued = await svc.reply("v1", "next step");
 		assert.equal(queued.ok, true);
 		assert.equal(queued.queued, true);
 		assert.equal(svc.followUps("v1").summary.queuedCount, 1);
@@ -737,7 +737,7 @@ test("busy replies queue and drain when idle", () => {
 		idle.semanticState = "idle";
 		idle.processState = "exited";
 		writeState(root, idle);
-		const drained = svc.drainNextFollowUp("v1");
+		const drained = await svc.drainNextFollowUp("v1");
 		assert.equal(drained.ok, true);
 		assert.equal(launched.length, 1);
 		assert.equal(launched[0].prompt, "next step");
@@ -789,7 +789,7 @@ test("reconcile does not drain queued follow-ups after failed terminal state", (
 	}
 });
 
-test("busy steering actions queue raw steering payloads", () => {
+test("busy steering actions queue raw steering payloads", async () => {
 	const root = freshRoot();
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
@@ -798,7 +798,7 @@ test("busy steering actions queue raw steering payloads", () => {
 		st.processState = "alive";
 		writeState(root, st);
 		const svc = service(root);
-		const res = svc.requestPlan("v1", "make a plan");
+		const res = await svc.requestPlan("v1", "make a plan");
 		assert.equal(res.ok, true);
 		const queue = svc.followUps("v1").queue;
 		assert.equal(queue.items[0].kind, "plan_request");
@@ -809,7 +809,7 @@ test("busy steering actions queue raw steering payloads", () => {
 	}
 });
 
-test("idle non-PTY plan request launches with plan run kind", () => {
+test("idle non-PTY plan request launches with plan run kind", async () => {
 	const root = freshRoot();
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
@@ -825,7 +825,7 @@ test("idle non-PTY plan request launches with plan run kind", () => {
 				return { pid: null, configPath: "/no/config.json" };
 			},
 		});
-		const res = svc.requestPlan("v1", "make a plan");
+		const res = await svc.requestPlan("v1", "make a plan");
 		assert.equal(res.ok, true);
 		assert.equal(launched.length, 1);
 		assert.equal(launched[0].kind, "plan");
@@ -893,7 +893,7 @@ test("reconcile finalizes host-backed row when PTY host exits without agent_end"
 	}
 });
 
-test("adopted external session does not fall back to JSON runner when PTY is unavailable", () => {
+test("adopted external session does not fall back to JSON runner when PTY is unavailable", async () => {
 	const root = freshRoot();
 	try {
 		const sessionFile = join(root, "external-current.jsonl");
@@ -906,7 +906,7 @@ test("adopted external session does not fall back to JSON runner when PTY is una
 			},
 		});
 		const adopted = svc.adoptSession({ sessionFile, cwd: "/r", name: "current" });
-		const res = svc.reply(adopted.viewId, "continue", { delivery: "now" });
+		const res = await svc.reply(adopted.viewId, "continue", { delivery: "now" });
 		assert.equal(res.ok, false);
 		assert.match(res.error, /PTY is required/);
 		assert.equal(launched.length, 0);

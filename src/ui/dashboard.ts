@@ -792,7 +792,8 @@ export class DashboardComponent implements Component {
 			case "rename":
 				return this.submitRename();
 			case "reply":
-				return this.submitReply();
+				void this.submitReply();
+				return;
 			case "list":
 			case "dispatch":
 				return this.input.trim() ? this.openLaunchDialog() : this.attachSelected();
@@ -866,7 +867,7 @@ export class DashboardComponent implements Component {
 		this.refresh();
 	}
 
-	private submitReply(): void {
+	private async submitReply(): Promise<void> {
 		const text = this.input.trim();
 		const row = this.selectedRow();
 		if (!text || !row) {
@@ -874,7 +875,9 @@ export class DashboardComponent implements Component {
 			this.setInput("");
 			return;
 		}
-		const res = this.deps.service.reply(row.meta.id, text);
+		// reply() is async since issue #70 A13 (ack-gated host delivery); the
+		// result (sent vs queued) only shapes the notice.
+		const res = await this.deps.service.reply(row.meta.id, text);
 		if (!res.ok) this.notice(res.error ?? "Reply failed", "error");
 		else if (res.hostMode === "json-runner") this.notice(`Reply sent with non-live fallback: ${res.fallbackReason ?? "PTY unavailable"}`, "warn");
 		else this.notice("Reply sent", "info");
