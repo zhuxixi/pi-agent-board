@@ -545,19 +545,10 @@ async function ownedMain(config) {
 		process.removeAllListeners("uncaughtException");
 		const message = err instanceof Error ? err.message : String(err);
 		diag("runner_crash", message, { stack: err instanceof Error ? err.stack : undefined });
-		// Crash finalize is owner-fenced: a superseded owner must not clobber the
-		// replacement's record (the legacy finalizeHostCrash writes wholesale).
-		if (claimedRecord && isOwnerNow()) {
-			ownedUpdate((cur) => ({
-				...cur,
-				state: "failed",
-				endedAt: Date.now(),
-				exitCode: 1,
-				error: message,
-				childPid: null,
-				readyAt: null,
-			}));
-		}
+		// Crash finalize is owner-fenced via the expected-instance path in
+		// finalizeHostCrash: a superseded owner must not clobber the replacement's
+		// record (it records host_crash_owner_changed instead of writing).
+		host = finalizeHostCrash(config.root, config.viewId, host, err, { expectedInstanceId: config.instanceId });
 		finish("crash", 1);
 	});
 
