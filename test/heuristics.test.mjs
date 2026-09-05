@@ -79,10 +79,13 @@ test("truncate adds ellipsis", () => {
 test("truncate never splits a surrogate pair", () => {
 	// Cut point lands between the high and low surrogate of 👍: back off.
 	assert.equal(truncate("a👍b", 3), "a…");
-	// Long string whose 80-unit cut lands inside the emoji (issue #39 repro shape).
+	// Long string whose cut lands inside the emoji (issue #39 repro shape):
+	// units: 59 x + 10 CJK/punct + 👍(2) at idx 69-70; n=71 → end=70, the kept
+	// slice ends on the high surrogate — must back off, not split the pair.
 	const s = "x".repeat(59) + "完成 — LGTM " + "👍" + "y".repeat(10);
-	const out = truncate(s, 80);
+	const out = truncate(s, 71);
 	assert.ok(!/[\uD800-\uDBFF]$/.test(out.replace(/…$/, "")), "no trailing lone high surrogate before ellipsis");
+	assert.ok(out.endsWith("…") && out.length <= 71, "output within unit budget");
 	// The pair survives whole when it fits the budget.
 	assert.equal(truncate("👍", 2), "👍");
 	assert.equal(truncate("a👍", 3), "a👍");
