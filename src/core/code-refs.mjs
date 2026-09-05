@@ -545,8 +545,16 @@ function matchPrFollowupBacklink(text) {
 }
 /** `issue-<N>-...` worktree/branch naming convention (engine-builtin). */
 const WORKTREE_RE = /(?:^|[/\\])issue-(\d{1,7})(?:-|$)/;
-/** Bare `#N` mentions. */
-const MENTION_RE = /#(\d{1,7})/g;
+/**
+ * Bare `#N` mentions. The lookbehind rejects a preceding `#` (markdown
+ * headings, `##N` typos) or word character (`a#1`) — those are not issue
+ * references (issue #61).
+ */
+const MENTION_RE = /(?<![#\w])#(\d{1,7})/g;
+/** Inline code span (single-line) — excluded from mention counting. */
+const INLINE_CODE_SPAN_RE = /`[^`\n]*`/g;
+/** Explicit PR-context tokens immediately before a `#N` match. */
+const PR_CONTEXT_RE = /(?:^|\W)(?:pr|pull|mr|merge)s?(?:\W|$)/i;
 
 /** Worktree/branch naming is session metadata, treated as before the transcript. */
 const WORKTREE_INDEX = -1;
@@ -771,7 +779,14 @@ function mentionFallback(assistantTexts, baseIndex) {
 	for (let i = start; i < assistantTexts.length; i++) {
 		const text = assistantTexts[i];
 		if (typeof text !== "string") continue;
-		for (const m of text.matchAll(MENTION_RE)) {
+		// Doc examples inside inline code spans are not real references; strip
+		// them before counting (issue #61).
+		const stripped = text.replace(INLINE_CODE_SPAN_RE, " ");
+		for (const m of stripped.matchAll(MENTION_RE)) {
+			// `monitor pr #N` is explicitly PR context: do not count it toward
+			// the issue fallback (issue #61).
+			const before = stripped.slice(Math.max(0, m.index - 16), m.index);
+			if (PR_CONTEXT_RE.test(before)) continue;
 			const n = Number(m[1]);
 			counts.set(n, (counts.get(n) ?? 0) + 1);
 			lastIndex.set(n, baseIndex + i);

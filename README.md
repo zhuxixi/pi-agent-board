@@ -236,6 +236,26 @@ steer:awaiting-approval
 
 Evidence is collected locally from session events. Agent Board can extract issue and pull-request references from that evidence and show badges such as `#40` or `▸#45` on rows; Peek includes the provider, confidence, source, and URL when available. Built-in GitHub/GitLab-style providers are available, and an optional per-store `providers.json` can extend the provider rules. The `AGENT_BOARD_CODE_REFS=off` setting disables extraction.
 
+For internal code platforms (non-github/gitlab hosts) or custom CLIs, add a per-store `providers.json` so claim/action rules exist and sessions stop depending on the low-confidence mention fallback. Example — an internal CLI (`acli`) with claim-strength issue rules:
+
+```json
+{
+  "providers": [
+    {
+      "name": "acode",
+      "hosts": ["acode.internal.example.com"],
+      "rules": [
+        { "pattern": "acli\\s+issue\\s+update\\s+#?(\\d+)(?=[\\s\\S]*--assignee)", "kind": "issue", "strength": "claim" },
+        { "pattern": "acli\\s+issue\\s+(?:note|comment|close)\\s+#?(\\d+)", "kind": "issue", "strength": "action" },
+        { "pattern": "acli\\s+issue\\s+(?:show|view)\\s+#?(\\d+)", "kind": "issue", "strength": "view" }
+      ]
+    }
+  ]
+}
+```
+
+`hosts` matches the repo's remote host; rules follow the same `pattern`/`kind`/`strength` shape as the built-in `gh`/`glab` tables (`strength`: `claim` > `action` > `view`), and the `#N` capture group supplies the number. Validation errors from a broken file surface in the diagnostics panel and never break extraction — an invalid file is simply ignored.
+
 ## Attach and Fallback Behavior
 
 When PTY support is healthy, Agent Board uses an interactive PTY host for attach and start-and-attach. If PTY support is unavailable, eligible managed sessions can still run in the background through the JSON runner; start-and-attach falls back to background launch with a warning. Adopted external foreground sessions require PTY to continue safely. Press `!` in the dashboard for diagnosis and repair hints.
