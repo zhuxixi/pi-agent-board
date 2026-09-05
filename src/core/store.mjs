@@ -177,6 +177,8 @@ function mtime(dir) {
  * @property {ViewState|null} state
  * @property {boolean} alive  Whether the row's current run pid/foreground activity is alive.
  * @property {boolean} hostAlive Whether a PTY host/socket is alive and attachable.
+ * @property {boolean} hostActive Whether an unreplaced host claim exists (starting/alive/stopping).
+ * @property {boolean} hostReady Whether the host claims readiness (alive + readyAt); metadata hint only.
  * @property {HostStatus|null} host
  * @property {import("./types.mjs").ReviewSummary} [review]
  * @property {import("./types.mjs").DiagnosticSummary} [diagnostics]

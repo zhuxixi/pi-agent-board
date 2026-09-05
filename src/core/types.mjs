@@ -6,7 +6,7 @@
 /** Semantic (task) state of a row. @typedef {"queued"|"working"|"needs_input"|"idle"|"completed"|"failed"|"stopped"} SemanticState */
 /** Process/liveness state. @typedef {"alive"|"exited"} ProcessState */
 /** PTY host mode. @typedef {"json-runner"|"pty"} HostMode */
-/** PTY host liveness. @typedef {"starting"|"alive"|"exited"|"failed"} HostState */
+/** PTY host liveness. @typedef {"starting"|"alive"|"stopping"|"exited"|"failed"} HostState */
 /** How a run was kicked off. @typedef {"dispatch"|"reply"|"plan"|"plan_change"|"plan_approval"} RunKind */
 /** Worktree isolation mode for a row. @typedef {"off"|"worktree"} WorktreeMode */
 /** Diagnostic severity. @typedef {"info"|"warn"|"error"} DiagnosticLevel */
@@ -141,6 +141,19 @@ export const GROUP_LABELS = {
  * @property {number} rows
  * @property {number} attachedClients
  * @property {boolean} [attachedEver] Whether any client attached to this host.
+ * @property {string|null} [instanceId] Owner/fencing token for this host launch (issue #70).
+ * @property {string|null} [configPath] Per-instance config file this host was launched with.
+ * @property {number|null} [claimAt] When the provisional claim was written (epoch ms).
+ * @property {number|null} [claimPid] PID of the service process that wrote the claim.
+ * @property {{pid:number,startToken:string|null}|null} [claimIdentity] Launch-time identity of the claiming service process.
+ * @property {{pid:number,startToken:string|null}|null} [runnerIdentity] Stable identity of the runner process.
+ * @property {number|null} [runnerSpawnedAt] When the runner spawn was confirmed (null = not yet spawned).
+ * @property {{pid:number,startToken:string|null}|null} [childIdentity] Stable identity of the child Pi process.
+ * @property {number|null} [childSpawnedAt] When the child spawn was confirmed (null = not yet spawned).
+ * @property {number|null} [readyAt] Set only after endpoint bind + child creation; alive implies readyAt != null.
+ * @property {number|null} [stopRequestedAt] When a revoke was requested via the host record.
+ * @property {string|null} [revokeToken] Random token written by requestHostStop to fence duplicate revokes.
+ * @property {string|null} [stopReason] Human-readable reason recorded with the revoke.
  */
 
 /**
