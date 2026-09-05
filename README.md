@@ -319,6 +319,20 @@ Press `!` in the dashboard to open the diagnostic panel and follow its repair hi
 
 A cold PTY host may briefly show a loading or reconnecting surface while it starts. Check the PTY status in the dashboard with `!`; stale hosts are diagnosed separately from active task workers. If the host never becomes healthy, repair `node-pty` or use background mode for eligible managed sessions.
 
+### IME candidate window is stuck at the window edge (Windows WezTerm)
+
+On Windows WezTerm with a WSL2 backend, the IME candidate window may stay pinned to the right edge instead of following the text cursor in an attached session. Windows WezTerm only tracks the IME candidate position from the visible hardware cursor, and Pi hides the hardware cursor by default — the block cursor you see in the editor is drawn content, not the hardware cursor. Linux terminals are not affected.
+
+Make the hardware cursor visible, either way:
+
+```bash
+export PI_HARDWARE_CURSOR=1    # machine-local, e.g. ~/.zshrc.local
+```
+
+or set `"showHardwareCursor": true` in Pi's `settings.json` (syncs across machines if the config is version-controlled; harmless on Linux).
+
+Trade-off: the real terminal cursor becomes visible inside the TUI. This is cosmetic only.
+
 ### Start & attach falls back to background
 
 Start & attach requires PTY support. When PTY is unavailable, the task is still dispatched in the background and the dashboard displays a warning. Repair PTY and retry attach from the normal `/agent-board` command path.
