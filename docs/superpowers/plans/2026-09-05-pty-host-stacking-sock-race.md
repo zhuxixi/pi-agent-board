@@ -522,7 +522,7 @@ test("finalizeHostCrash refuses to overwrite a superseded instance", () => {
   - `createService` opts 新增注入点：`randomId?: () => string`（默认 crypto randomBytes）、`now?: () => number`、`acquireLock?: typeof acquireOwnedViewLock`、`tryAcquireLock?: typeof tryAcquireOwnedViewLock`（测试可注入争用）。
   - `ensureHost(viewId)` 按 spec §8.1：hostActive → `{ok:true, pending:true, socketPath, instanceId}`；否则 `tryAcquireLock(host-start)` → 争用 `{ok:true, pending:true}` → 锁内重读 + claim + spawn；返回补 `instanceId`。
   - `dispatch/reply/drainNextFollowUp` 适配三态返回：`pending/reused` 且带 prompt → `enqueueFollowUp(root, viewId, prompt, {kind, delivery:"auto", source:"user"})` 并返回 `{ok:true, queued:true}`；只有 started 才走原 `markQueued` 语义。
-  - `pruneWarmHosts`/`archiveView`/`terminateHost` 的 `sendHostMessage({type:"terminate"})` 改为调用 Task 11 的 `requestHostStop`（先占位接口，Task 11 实现后接线；本任务保留 sendHostMessage 调用但加 TODO 注释禁止——不，改为本任务直接串联 Task 11 的顺序：先 Task 11 再改这些调用点，见任务依赖说明）。
+  - `pruneWarmHosts`/`archiveView`/`terminateHost` 的 terminate 语义改接 Task 11 的 `requestHostStop`——接线放在 Task 11 完成时做（见下方任务依赖说明）；本任务不改动这三处调用点。
 
 **任务依赖说明：** Task 10 与 Task 11 强耦合（停止语义），实现顺序固定 10→11→12；Task 10 的测试只覆盖 launch/ensure/pending 语义，不测 stop。
 
