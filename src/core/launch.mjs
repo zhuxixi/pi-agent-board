@@ -55,7 +55,9 @@ export function launchRun(root, config, opts) {
  * @returns {{ pid: number|null, configPath: string }}
  */
 export function launchHost(root, config, opts) {
-	const configPath = P.hostConfigPath(root, config.viewId);
+	// Instance-specific config path wins when present (issue #70: concurrent
+	// launches must not share the fixed host-config.json); legacy callers keep it.
+	const configPath = config.configPath ?? P.hostConfigPath(root, config.viewId);
 	atomicWriteJson(configPath, config);
 
 	const node = opts.node ?? resolveNode();

@@ -57,6 +57,39 @@ test("launchHost spawns a detached runner and persists the host config", async (
 	}
 });
 
+test("launchHost honors the instance-specific config path when provided", async () => {
+	const root = freshRoot();
+	try {
+		const configPath = P.hostConfigPathFor(root, "view_inst", "inst-1");
+		const config = {
+			root,
+			viewId: "view_inst",
+			sessionFile: "/tmp/sessions/view_inst.jsonl",
+			cwd: root,
+			initialPrompt: "hello",
+			piCommand: process.execPath,
+			piArgsPrefix: [],
+			model: null,
+			thinkingLevel: null,
+			tools: null,
+			env: {},
+			cols: 80,
+			rows: 24,
+			configPath,
+		};
+		const res = launchHost(root, config, { runnerScript: FAKE_PI });
+		assert.ok(res.pid);
+		assert.equal(res.configPath, configPath);
+		const persisted = await waitFor(() => (existsSync(configPath) ? readFileSync(configPath, "utf8") : null));
+		assert.ok(persisted, "instance host config must be written");
+		assert.equal(JSON.parse(persisted).initialPrompt, "hello");
+		// The launch must not also touch the legacy fixed config path.
+		assert.equal(existsSync(P.hostConfigPath(root, "view_inst")), false);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("launchTitle persists the title config with the injected node", async () => {
 	const root = freshRoot();
 	try {
