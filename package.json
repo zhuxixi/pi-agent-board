@@ -6,17 +6,18 @@
 	"main": "./index.ts",
 	"exports": "./index.ts",
 	"files": [
-		"index.ts",
-		"src",
-		"scripts",
-		"runner",
+		"CHANGELOG.md",
+		"IMPLEMENTATION_PLAN.md",
+		"LICENSE",
+		"PRD.md",
+		"PROGRESS.md",
 		"README.md",
 		"VERIFY.md",
-		"LICENSE",
 		"docs",
-		"PRD.md",
-		"IMPLEMENTATION_PLAN.md",
-		"PROGRESS.md"
+		"index.ts",
+		"runner",
+		"scripts",
+		"src"
 	],
 	"keywords": [
 		"pi-package",

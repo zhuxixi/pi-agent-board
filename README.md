@@ -392,7 +392,7 @@ npm version patch                  # bumps package.json, commits, and tags vX.Y.
 npm publish
 ```
 
-Use `minor`/`major` in both the changelog and `npm version` steps when appropriate. The changelog is generated from conventional commits since the last `vX.Y.Z` tag (`scripts/release_helper.mjs`, ported from the jfox release flow); review the preview before committing. The `verify` step guards against PRs merged after the changelog was generated — rerun it after any late merge and re-run `npm run changelog -- <bump>` if it reports missing PRs. Release notes for the GitHub Release are the top CHANGELOG section. After publishing, users install the scoped package with:
+Use `minor`/`major` in both the changelog and `npm version` steps when appropriate. The changelog is generated from conventional commits since the last `vX.Y.Z` tag (`scripts/release_helper.mjs`, ported from the jfox release flow); review the preview before committing. The `verify` step guards against PRs merged after the changelog was generated — rerun it after any late merge and, after removing the stale top section, re-run `npm run changelog -- <bump>` if it reports missing PRs (apply refuses when the section already exists — remove the stale section first). Release notes for the GitHub Release are the top CHANGELOG section. After publishing, users install the scoped package with:
 
 ```bash
 pi install npm:@zhuxixi/pi-agent-board

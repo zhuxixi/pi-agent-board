@@ -149,6 +149,18 @@ export function verifyFrom({ lines, changelogText }) {
 }
 
 /**
+ * Whether the CHANGELOG already has a section for this exact version
+ * (apply idempotency guard — a re-apply must not duplicate the heading).
+ * @param {string} existing
+ * @param {string} version
+ * @returns {boolean}
+ */
+export function hasSection(existing, version) {
+	const escaped = version.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return new RegExp(`^##\\s*\\[${escaped}]`, "m").test(String(existing ?? ""));
+}
+
+/**
  * Insert a rendered section above the first existing `## ` heading (or append
  * after the header when none exists yet).
  * @param {string} existing
@@ -247,6 +259,9 @@ function main(argv) {
 	};
 	if (!dryRun) {
 		const existing = existsSync(CHANGELOG_MD) ? readFileSync(CHANGELOG_MD, "utf8") : "# Changelog\n";
+		if (hasSection(existing, version)) {
+			throw new Error(`CHANGELOG.md already has a [${version}] section; remove the stale section before re-applying`);
+		}
 		writeFileSync(CHANGELOG_MD, insertSection(existing, changelogPreview));
 		result.files_modified = ["CHANGELOG.md"];
 	}

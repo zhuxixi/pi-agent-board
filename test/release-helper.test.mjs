@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
+	hasSection,
 	changelogTopPrs,
 	functionalLines,
 	generateChangelog,
@@ -134,6 +135,14 @@ test("nextVersion compares component-wise and rejects non-increasing versions", 
 	assert.throws(() => nextVersion("0.5.2", "0.5.2"), /not greater/);
 	assert.throws(() => nextVersion("0.5.1", "0.5.2"), /not greater/);
 	assert.throws(() => nextVersion("bogus", "0.5.2"), /invalid version/);
+});
+
+test("hasSection detects an existing version section (apply idempotency guard, CR round 1)", () => {
+	const existing = "# Changelog\n\n## [0.5.3] - 2026-09-06\n\n- x (#78)\n";
+	assert.equal(hasSection(existing, "0.5.3"), true);
+	assert.equal(hasSection(existing, "0.5.4"), false);
+	assert.equal(hasSection("# Changelog\n", "0.5.3"), false);
+	assert.equal(hasSection("## [0.5.30]", "0.5.3"), false, "prefix must not match a longer version");
 });
 
 test("CLI --dry-run previews the next section without touching CHANGELOG.md (issue #64 A1)", () => {
