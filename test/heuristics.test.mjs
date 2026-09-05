@@ -72,6 +72,29 @@ test("baseName", () => {
 test("truncate adds ellipsis", () => {
 	assert.equal(truncate("hello", 10), "hello");
 	assert.equal(truncate("hello world", 5), "hell…");
+	// CJK BMP chars are 1 UTF-16 unit each: unit-budget semantics unchanged.
+	assert.equal(truncate("一二三四五六", 5), "一二三四…");
+});
+
+test("truncate never splits a surrogate pair", () => {
+	// Cut point lands between the high and low surrogate of 👍: back off.
+	assert.equal(truncate("a👍b", 3), "a…");
+	// Long string whose cut lands inside the emoji (issue #39 repro shape):
+	// units: 59 x + 10 CJK/punct + 👍(2) at idx 69-70; n=71 → end=70, the kept
+	// slice ends on the high surrogate — must back off, not split the pair.
+	const s = "x".repeat(59) + "完成 — LGTM " + "👍" + "y".repeat(10);
+	const out = truncate(s, 71);
+	assert.ok(!/[\uD800-\uDBFF]$/.test(out.replace(/…$/, "")), "no trailing lone high surrogate before ellipsis");
+	assert.ok(out.endsWith("…") && out.length <= 71, "output within unit budget");
+	// The pair survives whole when it fits the budget.
+	assert.equal(truncate("👍", 2), "👍");
+	assert.equal(truncate("a👍", 3), "a👍");
+});
+
+test("truncate strips lone surrogates from input", () => {
+	assert.equal(truncate("ab\ud83d", 10), "ab"); // lone high surrogate, short path
+	assert.equal(truncate("ab\ud83dcd", 4), "ab…"); // lone high surrogate, truncated path
+	assert.equal(truncate("\udc4dab", 10), "ab"); // lone low surrogate, short path
 });
 
 test("relativeTime buckets", () => {
