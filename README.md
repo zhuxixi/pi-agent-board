@@ -380,15 +380,24 @@ npm run verify
 
 ## Publishing
 
-Before publishing a release, verify the package, bump the version, and publish it:
+Before publishing a release, verify the package, bump the version, generate the changelog, and publish it:
 
 ```bash
 npm run verify
 npm version patch
+npm run changelog -- patch   # preview with --dry-run first; inserts the section into CHANGELOG.md
 npm publish
 ```
 
-Use `npm version minor` or `npm version major` when appropriate. If the version is already bumped, skip `npm version patch`. After publishing, users install the scoped package with:
+Use `npm version minor`/`major` and the matching `npm run changelog -- minor|major` when appropriate. If the version is already bumped, skip `npm version`. The changelog is generated from conventional commits since the last `vX.Y.Z` tag (`scripts/release_helper.mjs`, ported from the jfox release flow); review the preview before committing CHANGELOG.md together with the version bump.
+
+Before creating the GitHub Release, guard against PRs merged after the changelog was generated:
+
+```bash
+node scripts/release_helper.mjs verify   # exits 1 with a missing PR list when the changelog has drifted
+```
+
+Release notes for the GitHub Release are the top CHANGELOG section. After publishing, users install the scoped package with:
 
 ```bash
 pi install npm:@zhuxixi/pi-agent-board
