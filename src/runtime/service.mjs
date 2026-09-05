@@ -10,7 +10,7 @@ import { createRequire } from "node:module";
 import { createConnection } from "node:net";
 import { resolve } from "node:path";
 import { applyAutoStateToStatus, autoStateEnabled, heuristicAutoState } from "../core/auto-state.mjs";
-import { appendLine, removeFile } from "../core/atomic.mjs";
+import { appendLine, atomicWriteJson, removeFile } from "../core/atomic.mjs";
 import { finalizeRun, projectViewState, reduceEvent } from "../core/events.mjs";
 import { clearDiagnostics, appendDiagnostic, tailDiagnostics } from "../core/diagnostics.mjs";
 import { emptyEvidenceSnapshot, finalizeEvidence, readEvidence, reduceEvidence, summarizeEvidence, writeEvidence } from "../core/evidence.mjs";
@@ -26,6 +26,7 @@ import { gitRepoRoot } from "../core/repo.mjs";
 import { isAlive, killProcess } from "../core/pid.mjs";
 import { acquireOwnedViewLock, tryAcquireOwnedViewLock } from "../core/locks.mjs";
 import { canReplaceHost } from "../core/host-coordination.mjs";
+import { probeHost } from "../core/host-probe.mjs";
 import * as P from "../core/paths.mjs";
 import {
 	claimHost,
@@ -57,6 +58,10 @@ export const HOST_START_LOCK_WAIT_MS = 500;
 export const HOST_RECOVERY_GRACE_MS = 5_000;
 /** Poll cadence while waiting out a host recovery window. */
 const HOST_RECOVERY_POLL_MS = 150;
+/** Poll cadence between attach-resolver probes / retries (issue #70 Task 12). */
+const HOST_PROBE_RETRY_MS = 150;
+/** Default wall-clock budget for one attach resolution (issue #70 Task 12). */
+const ATTACH_RESOLVE_TIMEOUT_MS = 120_000;
 
 /**
  * @param {{
@@ -80,6 +85,8 @@ const HOST_RECOVERY_POLL_MS = 150;
  *   tryAcquireLock?: typeof tryAcquireOwnedViewLock,
  *   observeProcess?: (identity: {pid: number, startToken: string|null}|null) => "not_started"|"dead"|"owned"|"foreign"|"unknown",
  *   signalOwnedProcess?: (identity: {pid: number, startToken: string|null}, signal: string) => void,
+ *   probeHostFn?: typeof probeHost,
+ *   sleepFn?: (ms: number) => Promise<void>,
  * }} opts
  */
 export function createService(opts) {
@@ -99,6 +106,14 @@ export function createService(opts) {
 	// only signal after observeProcess returned "owned" for that exact identity.
 	const observeProcessImpl = opts.observeProcess ?? defaultObserveProcess;
 	const signalOwnedProcessImpl = opts.signalOwnedProcess ?? defaultSignalOwnedProcess;
+	// Attach-resolver dependencies (issue #70 Task 12): a real socket probe and an
+	// awaitable sleep. The resolver runs on the UI thread, so its waits MUST go
+	// through sleepFn (never a blocking acquire / Atomics.wait).
+	const probeHostImpl = opts.probeHostFn ?? probeHost;
+	const sleepFnImpl = opts.sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+	// In-flight attach resolutions, keyed by viewId: concurrent resolver calls for
+	// the same view share one promise (issue #70 Task 12).
+	const inflightAttachResolvers = new Map();
 
 	const pruneScreenLogsImpl = opts.pruneScreenLogs ?? pruneScreenLogs;
 	// Reclaim replay logs of long-ended views on dashboard startup. Deferred via
@@ -686,6 +701,232 @@ export function createService(opts) {
 		}
 	}
 
+	/**
+	 * ensureHost implementation (issue #70 Task 10 + Task 12 adopt branch).
+	 * @param {string} viewId
+	 * @returns {{ ok: boolean, pending?: boolean, started?: boolean, socketPath?: string|null, instanceId?: string|null, error?: string, fallbackReason?: string }}
+	 */
+	function ensureHostImpl(viewId) {
+		const row = loadRow(root, viewId);
+		if (!row) return { ok: false, error: "Unknown session" };
+		const host = row.host ?? null;
+		// Adopt-and-spawn (issue #70 Task 12): a `starting` claim whose runner was never
+		// spawned (the launcher crashed between claim and spawn, or recoverHost claimed
+		// a replacement without spawning) would pend forever. Take it over when the
+		// claim is provably stale, its claimer is gone, or it is THIS process's own
+		// claim (recoverHost's fresh claim — no other launcher can be mid-transaction
+		// for it). Fresh foreign claims stay untouched: their launcher may legitimately
+		// be between claim and spawn inside the grace window.
+		if (host?.state === "starting" && host.runnerSpawnedAt == null && host.instanceId != null) {
+			const claimStale = nowImpl() - (host.claimAt ?? 0) > HOST_START_GRACE_MS;
+			const claimerGone = !isAlive(host.claimPid ?? null);
+			if (claimStale || claimerGone) return adoptClaimedHost(viewId, row.meta, host);
+		}
+		if (row.hostActive) {
+			return { ok: true, pending: true, socketPath: row.host?.socketPath ?? null, instanceId: row.host?.instanceId ?? null };
+		}
+
+		// Default probe semantics: success is cached for the process lifetime and a
+		// failed probe retries on a short TTL. Forcing refresh here would spawn a
+		// probe process on every keypress-driven prewarm when PTY support is broken.
+		const pty = ptySupport();
+		if (!pty.ok) return { ok: false, error: "PTY unavailable", fallbackReason: nodePtyFallbackMessage(pty) };
+		if (isAgentBusy(row)) return { ok: false, error: "A non-live background run is active for this session" };
+		if (!existsSync(row.meta.sessionFile)) return { ok: false, error: "Session file isn't ready yet" };
+
+		const lock = tryAcquireLockImpl(root, viewId, "host-start", { identity: serviceIdentity() });
+		if (!lock.acquired) {
+			// Someone else (another board/service process) is mid-launch — its claim
+			// will appear on disk; treat that as an in-flight start, not a failure.
+			return { ok: true, pending: true, socketPath: null, instanceId: null };
+		}
+		try {
+			const inner = readHost(root, viewId);
+			if (inner && (inner.state === "starting" || inner.state === "alive" || inner.state === "stopping")) {
+				return { ok: true, pending: true, socketPath: inner.socketPath ?? null, instanceId: inner.instanceId ?? null };
+			}
+			const res = startHostUnderLease(row.meta, null, { markQueued: false });
+			if (res.ok && res.status === "started") pruneWarmHosts({ keepViewId: viewId });
+			return res.ok
+				? { ok: true, started: res.status === "started", pending: res.status !== "started", socketPath: res.socketPath, instanceId: res.instanceId }
+				: res;
+		} finally {
+			try { lock.lease.release(); } catch { /* best effort */ }
+		}
+	}
+
+	/**
+	 * Finish an abandoned host claim: spawn its runner under the `host-start` lease
+	 * (issue #70 Task 12). The claim's config was never written (the claimer died
+	 * before spawn, or recoverHost claims without writing one — Task 11 rider a), so
+	 * it is rebuilt from the view meta here. A failed spawn marks the claim failed
+	 * fenced (clearing the dead claimer's fields) so the next ensure can claim anew.
+	 * @param {string} viewId
+	 * @param {import("../core/types.mjs").ViewMeta} meta
+	 * @param {import("../core/types.mjs").HostStatus} host
+	 */
+	function adoptClaimedHost(viewId, meta, host) {
+		const instanceId = host.instanceId;
+		const lock = tryAcquireLockImpl(root, viewId, "host-start", { identity: serviceIdentity() });
+		if (!lock.acquired) {
+			// Another adopter/spawner is mid-transaction — its result lands on disk.
+			return { ok: true, pending: true, socketPath: host.socketPath ?? null, instanceId };
+		}
+		try {
+			const current = readHost(root, viewId);
+			if (!current || current.instanceId !== instanceId || current.state !== "starting" || current.runnerSpawnedAt != null) {
+				// The record moved on (adopted elsewhere, revoked, or replaced) — surface it.
+				return { ok: true, pending: true, socketPath: current?.socketPath ?? host.socketPath ?? null, instanceId: current?.instanceId ?? instanceId };
+			}
+			const configPath = current.configPath ?? P.hostConfigPathFor(root, viewId, instanceId);
+			const socketPath = current.socketPath ?? P.hostEndpointPathFor(process.platform, root, viewId, instanceId);
+			/** @type {import("../core/types.mjs").HostConfig} */
+			const config = {
+				root,
+				viewId,
+				sessionFile: meta.sessionFile,
+				cwd: meta.cwd,
+				initialPrompt: null,
+				piCommand: opts.piCommand,
+				piArgsPrefix: opts.piArgsPrefix,
+				model: meta.defaultModel ?? null,
+				thinkingLevel: meta.defaultThinking ?? null,
+				tools: null,
+				env: {},
+				cols: current.cols || 120,
+				rows: current.rows || 36,
+				screenLogMaxBytes: normalizeScreenLogMaxBytes(readLaunchPrefs(root).screenLogMaxSize),
+				instanceId,
+				configPath,
+				socketPath,
+			};
+			if (!existsSync(configPath)) atomicWriteJson(configPath, config);
+			let pid = null;
+			let spawnError = null;
+			try {
+				({ pid } = launchHostImpl(root, config, { runnerScript: ptyRunnerScript }));
+			} catch (err) {
+				spawnError = err instanceof Error ? err.message : String(err);
+			}
+			if (pid == null) {
+				const message = spawnError ?? "PTY host runner failed to spawn (adopted claim)";
+				// Clear the dead claimer's fields so canReplaceHost sees the claim as
+				// ended — a retry (fresh ensure) must not pend on a gone claimer pid.
+				updateOwnedHost(root, viewId, instanceId, (h) => ({ ...h, state: "failed", endedAt: nowImpl(), exitCode: 1, error: message, claimPid: null, claimIdentity: null }));
+				removeFile(configPath);
+				return { ok: true, pending: true, socketPath: null, instanceId };
+			}
+			updateOwnedHost(root, viewId, instanceId, (h) => ({ ...h, runnerPid: pid, runnerSpawnedAt: nowImpl() }));
+			appendDiagnostic(root, viewId, { source: "service", code: "host_adopted", message: "Abandoned host claim adopted; runner spawned", details: { pid, instanceId } });
+			return { ok: true, started: true, socketPath, instanceId };
+		} finally {
+			try { lock.lease.release(); } catch { /* best effort */ }
+		}
+	}
+
+	/**
+	 * The single attach authority (issue #70 Task 12): resolves a view to a PTY
+	 * target via REAL socket probes, waiting out cold starts, adopting abandoned
+	 * claims, and running one bounded recovery per invocation. Never downgrades to
+	 * `session` while a host claim is active. All waits go through sleepFn — the
+	 * resolver runs on the UI thread and must never block on a lock.
+	 * @param {string} viewId
+	 * @param {number} timeoutMs
+	 * @returns {Promise<{kind:"pty",socketPath:string|null,sessionFile:string,instanceId:string|null}|{kind:"session",sessionFile:string}|{kind:"pending",sessionFile:string,reason:string}|{kind:"missing"}>}
+	 */
+	async function resolveAttachTargetInner(viewId, timeoutMs) {
+		const deadline = nowImpl() + timeoutMs;
+		let ensured = false;
+		let adopted = false;
+		let recovered = false;
+		/** @param {string} reason @param {string} sessionFile */
+		const pending = (sessionFile, reason) => ({ kind: "pending", sessionFile, reason });
+		for (;;) {
+			const row = loadRow(root, viewId);
+			if (!row) return { kind: "missing" };
+			const sessionFile = row.meta.sessionFile;
+			if (nowImpl() >= deadline) return pending(sessionFile, "host start timed out");
+			const host = row.host ?? null;
+
+			// No active claim: live JSON runners pend (no parallel PTY child); otherwise
+			// ensure exactly one host start per invocation, then fall through to probing.
+			if (!host || !row.hostActive) {
+				if (isAgentBusy(row)) return pending(sessionFile, "background run active");
+				if (!ensured) {
+					ensured = true;
+					const res = ensureHostImpl(viewId);
+					if (!res.ok) {
+						if (res.fallbackReason != null) {
+							// PTY unavailable and nothing active — safe to fall back to session attach.
+							const fresh = loadRow(root, viewId);
+							return fresh && !fresh.hostActive ? { kind: "session", sessionFile: fresh.meta.sessionFile } : pending(sessionFile, res.error ?? "host ensure failed");
+						}
+						return pending(sessionFile, res.error ?? "host ensure failed");
+					}
+				}
+				await sleepFnImpl(HOST_PROBE_RETRY_MS);
+				continue;
+			}
+
+			// A revoke is already in flight — wait it out; never revoke twice.
+			if (host.state === "stopping") {
+				await sleepFnImpl(HOST_PROBE_RETRY_MS);
+				continue;
+			}
+
+			const legacy = host.instanceId == null;
+			const withinGrace = host.state === "starting" && (legacy || nowImpl() - (host.claimAt ?? 0) < HOST_START_GRACE_MS);
+			const probe = await probeHostImpl(host.socketPath ?? "", { expectedViewId: viewId, expectedInstanceId: host.instanceId ?? null });
+			if (probe.classification === "ready") {
+				return { kind: "pty", socketPath: host.socketPath ?? null, sessionFile, instanceId: host.instanceId ?? null };
+			}
+
+			if (host.state === "starting") {
+				// Gap-closer: a claim whose runner was never spawned (recovery claim or an
+				// abandoned launch) is adopted once past grace — fresh claims, even this
+			// process's own (recoverHost's replacement), wait out the grace window like
+			// any launcher mid-transaction (contract §6).
+				if (!legacy && host.runnerSpawnedAt == null && probe.classification === "missing" && !withinGrace && !adopted) {
+					adopted = true;
+					ensureHostImpl(viewId);
+					await sleepFnImpl(HOST_PROBE_RETRY_MS);
+					continue;
+				}
+				if (withinGrace || legacy) {
+					// Normal cold start (or a legacy starting host — legacy is never recovered,
+				// spec §10.1): wait out the grace window.
+					await sleepFnImpl(HOST_PROBE_RETRY_MS);
+					continue;
+				}
+			} else if (probe.classification === "starting" || probe.classification === "occupied") {
+				// Alive record, mid-transition or a foreign listener — wait, don't touch.
+				await sleepFnImpl(HOST_PROBE_RETRY_MS);
+				continue;
+			} else if (legacy) {
+				return pending(sessionFile, "legacy host unreachable — manual restart needed");
+			}
+
+			// Unhealthy new-protocol host past grace: one bounded recovery per invocation.
+			if (!recovered) {
+				recovered = true;
+				try {
+					const rec = await recoverHost(viewId, /** @type {string} */ (host.instanceId));
+					if (!rec.ok && rec.error === "recovery_pending") {
+						return pending(sessionFile, "recovery_pending: host identity unverifiable");
+					}
+					// recovered / busy_retry_later / already_recovered — loop and re-evaluate.
+					await sleepFnImpl(HOST_PROBE_RETRY_MS);
+					continue;
+				} catch {
+					// recoverHost rethrows non-ESRCH signal failures (Task 11 rider b) — never
+					// guess at process state; surface as pending for the next attempt.
+					return pending(sessionFile, "recovery signal failed");
+				}
+			}
+			await sleepFnImpl(HOST_PROBE_RETRY_MS);
+		}
+	}
+
 	/** @param {import("../core/types.mjs").FollowUpKind|import("../core/types.mjs").RunKind|string} kind */
 	function runKindForKind(kind) {
 		switch (kind) {
@@ -1007,49 +1248,36 @@ export function createService(opts) {
 		recoverHost,
 
 		/**
-		 * Ensure there is an interactive PTY host for this session. Used for fast attach
-		 * and dashboard prewarm. Idempotent (issue #70): an existing active claim — even
-		 * a fresh `starting` one with no runner pid yet — is surfaced as `pending`, never
-		 * replaced or double-spawned. Real socket health is the attach resolver's job
-		 * (Task 12); this path never probes, kills, or spawns past an active claim.
+		 * The single async attach authority (issue #70 Task 12): real-probes the
+		 * current claim, waits out cold starts, adopts abandoned claims, and runs one
+		 * bounded recovery per invocation. Concurrent calls for the same view share
+		 * one in-flight promise. `attachTarget()` remains a pure sync hint.
 		 * @param {string} viewId
-		 * @returns {{ ok: boolean, pending?: boolean, started?: boolean, socketPath?: string|null, instanceId?: string|null, error?: string, fallbackReason?: string }}
+		 * @param {{ timeoutMs?: number }} [resolveOpts]
+		 * @returns {Promise<{kind:"pty",socketPath:string|null,sessionFile:string,instanceId:string|null}|{kind:"session",sessionFile:string}|{kind:"pending",sessionFile:string,reason:string}|{kind:"missing"}>}
 		 */
-		ensureHost(viewId) {
-			const row = loadRow(root, viewId);
-			if (!row) return { ok: false, error: "Unknown session" };
-			if (row.hostActive) {
-				return { ok: true, pending: true, socketPath: row.host?.socketPath ?? null, instanceId: row.host?.instanceId ?? null };
-			}
-
-			// Default probe semantics: success is cached for the process lifetime and a
-			// failed probe retries on a short TTL. Forcing refresh here would spawn a
-			// probe process on every keypress-driven prewarm when PTY support is broken.
-			const pty = ptySupport();
-			if (!pty.ok) return { ok: false, error: "PTY unavailable", fallbackReason: nodePtyFallbackMessage(pty) };
-			if (isAgentBusy(row)) return { ok: false, error: "A non-live background run is active for this session" };
-			if (!existsSync(row.meta.sessionFile)) return { ok: false, error: "Session file isn't ready yet" };
-
-			const lock = tryAcquireLockImpl(root, viewId, "host-start", { identity: serviceIdentity() });
-			if (!lock.acquired) {
-				// Someone else (another board/service process) is mid-launch — its claim
-				// will appear on disk; treat that as an in-flight start, not a failure.
-				return { ok: true, pending: true, socketPath: null, instanceId: null };
-			}
-			try {
-				const host = readHost(root, viewId);
-				if (host && (host.state === "starting" || host.state === "alive" || host.state === "stopping")) {
-					return { ok: true, pending: true, socketPath: host.socketPath ?? null, instanceId: host.instanceId ?? null };
-				}
-				const res = startHostUnderLease(row.meta, null, { markQueued: false });
-				if (res.ok && res.status === "started") pruneWarmHosts({ keepViewId: viewId });
-				return res.ok
-					? { ok: true, started: res.status === "started", pending: res.status !== "started", socketPath: res.socketPath, instanceId: res.instanceId }
-					: res;
-			} finally {
-				try { lock.lease.release(); } catch { /* best effort */ }
-			}
+		async resolveAttachTarget(viewId, resolveOpts = {}) {
+			const existing = inflightAttachResolvers.get(viewId);
+			if (existing) return existing;
+			const run = resolveAttachTargetInner(viewId, resolveOpts.timeoutMs ?? ATTACH_RESOLVE_TIMEOUT_MS)
+				.finally(() => { inflightAttachResolvers.delete(viewId); });
+			inflightAttachResolvers.set(viewId, run);
+			return run;
 		},
+
+	/**
+	 * Ensure there is an interactive PTY host for this session. Used for fast attach
+	 * and dashboard prewarm. Idempotent (issue #70): an existing active claim — even
+	 * a fresh `starting` one with no runner pid yet — is surfaced as `pending`, never
+	 * replaced or double-spawned; a provably abandoned claim is adopted and spawned
+	 * (Task 12) instead of pending forever. Real socket health is the attach
+	 * resolver's job; this path never probes, kills, or spawns past an active claim.
+	 * @param {string} viewId
+	 * @returns {{ ok: boolean, pending?: boolean, started?: boolean, socketPath?: string|null, instanceId?: string|null, error?: string, fallbackReason?: string }}
+	 */
+	ensureHost(viewId) {
+		return ensureHostImpl(viewId);
+	},
 
 		/** @param {string} viewId */
 		prewarmHost(viewId) {
