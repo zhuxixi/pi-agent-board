@@ -35,6 +35,8 @@ try {
 }
 
 const HEARTBEAT_MS = 1000;
+/** Service-input ack dedup bound (issue #70 Task 8): requestId → true, FIFO evict. */
+const HOST_ACK_DEDUP_MAX = 1000;
 /** Max time an owned runner waits to take the per-view host-start lease (issue #70). */
 const HOST_RUNNER_LOCK_WAIT_MS = 5_000;
 
@@ -387,6 +389,12 @@ async function ownedMain(config) {
 	let startTouchTimer = null;
 	let heartbeatTimer = null;
 	let server = null;
+	/** Service-input ack dedup: requestId → true. FIFO-capped at
+	 *  HOST_ACK_DEDUP_MAX. Interactive UI keystrokes (no requestId) bypass it. */
+	const ackedRequestIds = new Map();
+	/** Last {cols, rows} held while the child does not exist yet; applied when
+	 *  ready is published (issue #70 §6.3 starting protocol). */
+	let cachedResize = null;
 
 	const diag = (code, message, details) => {
 		try {
@@ -555,9 +563,9 @@ async function ownedMain(config) {
 
 	// 1. Take the per-view host-start lease — the launch transaction boundary.
 	try {
-		startLease = acquireOwnedViewLock(config.root, config.viewId, "host-start", {
+	startLease = acquireOwnedViewLock(config.root, config.viewId, "host-start", {
 			waitMs: HOST_RUNNER_LOCK_WAIT_MS,
-			identity: { pid: process.pid, startToken: null },
+			identity: { pid: process.pid, startToken: captureStartToken(process.pid) },
 		});
 	} catch (err) {
 		diag("host_start_lock_timeout", err instanceof Error ? err.message : String(err));
@@ -658,6 +666,13 @@ async function ownedMain(config) {
 	claimedRecord = true;
 	broadcast({ type: "status", status: host });
 
+	// Test seam (issue #70 Task 8): a config-level delay between publishing the
+	// runner identity and spawning the child creates a REAL starting window
+	// (endpoint accepting, child null) so the starting protocol is testable.
+	// Only host configs written by tests set this env; the service never does.
+	const spawnDelayMs = Number(config.env?.AGENT_BOARD_TEST_SPAWN_DELAY_MS || 0);
+	if (spawnDelayMs > 0) await new Promise((r) => { setTimeout(r, spawnDelayMs).unref?.(); });
+
 	// 5. Spawn the child — only after the endpoint is bound and owned.
 	const args = [...config.piArgsPrefix, "--session", config.sessionFile];
 	if (config.model) args.push("--model", config.model);
@@ -728,6 +743,22 @@ async function ownedMain(config) {
 	}
 	broadcast({ type: "status", status: host });
 
+	// A starting-window resize cannot be applied at spawn-return nor at first
+	// output: the child node process is still bootstrapping and a SIGWINCH
+	// landing in that window is silently lost (pending-signal race, observed
+	// empirically). Defer the apply until the child has had time to finish
+	// bootstrapping; one-shot, best-effort, superseded by any newer direct
+	// resize (which clears the cache).
+	if (cachedResize) {
+		const applyHeld = setTimeout(() => {
+			if (!cachedResize || !child || shutdownStarted) return;
+			try { child.resize(cachedResize.cols, cachedResize.rows); } catch { /* best effort */ }
+			notifyChildResize(childPid);
+			cachedResize = null;
+		}, 500);
+		applyHeld.unref?.();
+	}
+
 	// 7. Launch transaction complete — hand the start lease back.
 	releaseStartLease();
 
@@ -747,9 +778,10 @@ async function ownedMain(config) {
 	}, HEARTBEAT_MS);
 	heartbeatTimer.unref?.();
 
-	/** Client commands. Child-null guards are minimal by design here; the full
-	 *  starting-protocol semantics (host_starting errors, resize hold, input
-	 *  ack) land in Task 8. */
+	/** Client commands with the starting protocol (issue #70 §6.3): while the
+	 *  child does not exist, service inputs answer host_starting, resizes are
+	 *  held, and interactive keystrokes are dropped safely; once ready,
+	 *  requestId-tagged inputs ack with an in-process dedup table. */
 	function handleClientLine(line, socket) {
 		if (!line.trim()) return;
 		let msg;
@@ -758,13 +790,39 @@ async function ownedMain(config) {
 			case "hello":
 				send(socket, { type: "hello", status: host, editorEmpty });
 				break;
-			case "input":
-				if (typeof msg.data === "string" && child) child.write(msg.data);
+			case "input": {
+				if (typeof msg.data !== "string") break;
+				if (typeof msg.requestId !== "string" || !msg.requestId) {
+					// Interactive UI keystrokes: fire-and-forget, no ack protocol.
+					if (child) child.write(msg.data);
+					break;
+				}
+				if (!child) {
+					send(socket, { type: "error", code: "host_starting", requestId: msg.requestId });
+					break;
+				}
+				if (ackedRequestIds.has(msg.requestId)) {
+					send(socket, { type: "input_ack", requestId: msg.requestId });
+					break;
+				}
+				child.write(msg.data);
+				ackedRequestIds.set(msg.requestId, true);
+				if (ackedRequestIds.size > HOST_ACK_DEDUP_MAX) {
+					ackedRequestIds.delete(ackedRequestIds.keys().next().value);
+				}
+				send(socket, { type: "input_ack", requestId: msg.requestId });
 				break;
+			}
 			case "resize": {
 				const cols = clampInt(msg.cols, 20, 300, host.cols);
 				const rows = clampInt(msg.rows, 5, 120, host.rows);
-				if (child) child.resize(cols, rows);
+				if (child) {
+					child.resize(cols, rows);
+					notifyChildResize(childPid);
+					cachedResize = null;
+				} else {
+					cachedResize = { cols, rows };
+				}
 				ownedUpdate((cur) => ({ ...cur, cols, rows }));
 				break;
 			}
@@ -772,7 +830,7 @@ async function ownedMain(config) {
 				if (child) child.write("\x1b");
 				break;
 			case "terminate":
-				// Single exit path: finishHost carries the SIGTERM→→4s→SIGKILL ladder,
+				// Single exit path: finishHost carries the SIGTERM→4s→SIGKILL ladder,
 				// so a SIGTERM-immune child still terminates within a bounded window.
 				finish("terminated", 0);
 				break;
@@ -854,6 +912,21 @@ function killChild(child, pid, signal = "SIGTERM") {
 		}
 	}
 	try { child.kill(signal); } catch {}
+}
+
+/**
+ * node-pty's TIOCSWINSZ updates the kernel tty size, but the automatic
+ * SIGWINCH to the pty's foreground group is NOT reliably delivered when the
+ * runner itself is a detached session (empirically verified on Linux: the
+ * child's kernel size is correct, its signal handler never fires, and a
+ * direct kill delivers instantly). Real TUI children poll or handle SIGWINCH
+ * — an explicit best-effort signal is harmless for them and makes resize
+ * deterministic for every child. POSIX only.
+ * @param {number|null} pid
+ */
+function notifyChildResize(pid) {
+	if (process.platform === "win32" || !pid) return;
+	try { process.kill(pid, "SIGWINCH"); } catch { /* best effort */ }
 }
 
 function clampInt(value, min, max, fallback) {

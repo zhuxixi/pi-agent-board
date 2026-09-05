@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { atomicWriteJson } from "../src/core/atomic.mjs";
 import { readDiagnostics } from "../src/core/diagnostics.mjs";
 import * as P from "../src/core/paths.mjs";
-import { claimHost, createView, readHost, writeHost } from "../src/core/store.mjs";
+import { claimHost, createView, readHost, updateOwnedHost, writeHost } from "../src/core/store.mjs";
 
 function freshRoot() {
 	return mkdtempSync(join(tmpdir(), "agentview-pty-"));
@@ -868,6 +868,177 @@ test("owned runner publishes proc start tokens for runner and child identities (
 		assert.match(String(host.childIdentity?.startToken), /^\d+$/, "childIdentity.startToken from /proc");
 		assert.equal(host.childIdentity?.pid, childPid);
 	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+// ---- new-protocol starting protocol + input ack + revoke (issue #70 Task 8) ----
+
+/** Collect parsed JSONL messages from a control socket into an array. */
+function messageCollector(socket) {
+	const messages = [];
+	let buf = "";
+	socket.on("data", (chunk) => {
+		buf += chunk.toString();
+		const lines = buf.split("\n");
+		buf = lines.pop() ?? "";
+		for (const line of lines) if (line.trim()) messages.push(JSON.parse(line));
+	});
+	return messages;
+}
+
+const waitForMessage = async (messages, predicate, timeoutMs = 5000) => {
+	await waitFor(() => messages.some(predicate), timeoutMs);
+	return messages.find(predicate);
+};
+
+test("input before child ready gets host_starting; after ready gets input_ack; duplicate requestId is deduped", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	let socket;
+	let socketPath;
+	try {
+		({ runner, socketPath } = await launchOwnedRunner(root, "v1", "i1", {
+			config: { env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1", AGENT_BOARD_TEST_SPAWN_DELAY_MS: "800" } },
+		}));
+		// The spawn delay creates a real starting window: endpoint bound, identity
+		// published, child still null, host.json still `starting`.
+		await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "starting" && h?.runnerPid === runner.pid && existsSync(socketPath) ? h : false;
+		});
+		socket = createConnection(socketPath);
+		socket.on("error", () => {});
+		await once(socket, "connect");
+		const messages = messageCollector(socket);
+
+		// 1) Service input during the starting window: error with the requestId echoed.
+		send(socket, { type: "input", requestId: "r1", data: "never-echoed" });
+		const starting = await waitForMessage(messages, (m) => m.type === "error" && m.code === "host_starting");
+		assert.equal(starting.requestId, "r1");
+
+		// 2) Wait for ready, then the same requestId delivers and acks.
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.readyAt != null && h?.childPid ? h : false;
+		});
+		childPid = host.childPid;
+		send(socket, { type: "input", requestId: "r1", data: "dedup-me\r" });
+		const ack1 = await waitForMessage(messages, (m) => m.type === "input_ack" && m.requestId === "r1");
+		assert.ok(ack1, "first delivery acks");
+
+		// 3) Duplicate requestId: ack again, but the child must NOT receive a second write.
+		send(socket, { type: "input", requestId: "r1", data: "dedup-me\r" });
+		const acks = await waitFor(() => messages.filter((m) => m.type === "input_ack" && m.requestId === "r1").length >= 2);
+		assert.ok(acks, "duplicate requestId re-acks");
+		await waitForMessage(messages, (m) => m.type === "output" && m.data?.includes("echo:dedup-me"));
+		const echoCount = messages
+			.filter((m) => m.type === "output")
+			.map((m) => String(m.data))
+			.join("")
+			.split("echo:dedup-me").length - 1;
+		assert.equal(echoCount, 1, `child must receive the data exactly once (got ${echoCount} child echoes; bare pty line-discipline echo excluded)`);
+		assert.equal(
+			messages.filter((m) => m.type === "output").some((m) => String(m.data).includes("never-echoed")),
+			false,
+			"starting-window input must never reach the child",
+		);
+
+		// 4) Interactive keys (no requestId) still pass through after ready.
+		send(socket, { type: "input", data: "exit\r" });
+		assert.equal(await waitForExit(runner, 5000), true, "runner exits after child exit");
+		await waitFor(() => readHost(root, "v1")?.state === "exited");
+	} finally {
+		try { socket?.destroy(); } catch {}
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("revoke via host.json stopRequestedAt triggers controlled shutdown", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	let socketPath;
+	try {
+		({ runner, socketPath } = await launchOwnedRunner(root, "v1", "i1"));
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.readyAt != null && h?.childPid ? h : false;
+		});
+		childPid = host.childPid;
+		const revoked = updateOwnedHost(root, "v1", "i1", (cur) => ({
+			...cur,
+			state: "stopping",
+			stopRequestedAt: Date.now(),
+			revokeToken: "t-test",
+		}));
+		assert.equal(revoked.updated, true, "revoke write must be owner-fenced-in");
+		// Heartbeat ticks every 1s; revoke must land well inside 2.5s.
+		assert.equal(await waitForExit(runner, 2500), true, "runner exits after revoke");
+		await waitFor(() => readHost(root, "v1")?.state === "exited");
+		const final = readHost(root, "v1");
+		assert.equal(final.state, "exited");
+		assert.equal(final.stopReason, "revoked");
+		assert.ok(!isAlive(childPid), "revoke must take the child down");
+		await waitFor(() => !existsSync(socketPath), 2500);
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("resize before child ready is cached and applied when ready is published", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	let socket;
+	let socketPath;
+	try {
+		({ runner, socketPath } = await launchOwnedRunner(root, "v1", "i1", {
+			config: {
+				piArgsPrefix: [resolve("test-support/fake-slow-start-pi.mjs")],
+				env: { AGENT_BOARD_TEST_SPAWN_DELAY_MS: "800" },
+			},
+		}));
+		await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "starting" && h?.runnerPid === runner.pid && existsSync(socketPath) ? h : false;
+		});
+		socket = createConnection(socketPath);
+		socket.on("error", () => {});
+		await once(socket, "connect");
+		const messages = messageCollector(socket);
+
+		// Resize lands while the child does not exist yet.
+		send(socket, { type: "resize", cols: 100, rows: 30 });
+		await waitFor(() => readHost(root, "v1")?.cols === 100);
+
+		// Once ready, the cached resize is applied to the child: the fixture
+		// reports its pty size on SIGWINCH.
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.readyAt != null && h?.childPid ? h : false;
+		});
+		childPid = host.childPid;
+		const size = await waitForMessage(messages, (m) => m.type === "output" && m.data?.includes("size:"), 8000);
+		assert.match(String(size.data), /size:100x30/, "cached resize applied to the child at ready");
+
+		// Child still fully functional after the apply.
+		send(socket, { type: "input", data: "still-alive\r" });
+		await waitForMessage(messages, (m) => m.type === "output" && m.data?.includes("echo:still-alive"));
+		send(socket, { type: "input", data: "exit\r" });
+		assert.equal(await waitForExit(runner, 5000), true);
+	} finally {
+		try { socket?.destroy(); } catch {}
 		try { runner?.kill("SIGKILL"); } catch {}
 		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
 		await new Promise((r) => setTimeout(r, 50));
