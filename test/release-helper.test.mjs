@@ -8,11 +8,22 @@ import {
 	functionalLines,
 	generateChangelog,
 	insertSection,
+	nextVersion,
 	parseCommitLines,
 	verifyFrom,
 } from "../scripts/release_helper.mjs";
 
 const scriptPath = fileURLToPath(new URL("../scripts/release_helper.mjs", import.meta.url));
+const repoRoot = fileURLToPath(new URL("..", import.meta.url));
+
+/** Current version from package.json, and its next patch — dynamic so these
+ * tests survive future releases (review finding: hardcoded 0.5.2/0.5.3
+ * would fail on the first release run under this process). */
+function currentAndNextPatch() {
+	const current = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
+	const [a, b, c] = current.split(".").map(Number);
+	return { current, next: `${a}.${b}.${c + 1}` };
+}
 
 test("parseCommitLines parses conventional subjects with scope, bang, and PR", () => {
 	const entries = parseCommitLines([
@@ -116,34 +127,47 @@ test("insertSection prepends above existing sections and after a bare header", (
 	assert.ok(stub.includes("## [0.6.0]"));
 });
 
+test("nextVersion compares component-wise and rejects non-increasing versions", () => {
+	assert.equal(nextVersion("0.10.0", "0.5.2"), "0.10.0");
+	assert.equal(nextVersion("10.0.0", "9.9.9"), "10.0.0");
+	assert.equal(nextVersion("0.5.3", "0.5.2"), "0.5.3");
+	assert.throws(() => nextVersion("0.5.2", "0.5.2"), /not greater/);
+	assert.throws(() => nextVersion("0.5.1", "0.5.2"), /not greater/);
+	assert.throws(() => nextVersion("bogus", "0.5.2"), /invalid version/);
+});
+
 test("CLI --dry-run previews the next section without touching CHANGELOG.md (issue #64 A1)", () => {
+	const { current, next } = currentAndNextPatch();
 	const out = execFileSync(process.execPath, [scriptPath, "--dry-run", "patch"], {
-		cwd: fileURLToPath(new URL("..", import.meta.url)),
+		cwd: repoRoot,
 		encoding: "utf8",
 	});
 	const result = JSON.parse(out);
-	assert.equal(result.current_version, "0.5.2");
-	assert.match(result.changelog_preview, /^## \[0\.5\.3\] - \d{4}-\d{2}-\d{2}/);
-	assert.match(result.changelog_preview, /### Fixes/);
-	// Forward-only stub: CHANGELOG.md has no [0.5.3] section and stays unmodified.
-	const changelog = readFileSync(fileURLToPath(new URL("../CHANGELOG.md", import.meta.url)), "utf8");
-	assert.ok(!changelog.includes("[0.5.3]"), "dry-run must not write CHANGELOG.md");
+	assert.equal(result.current_version, current);
+	assert.match(result.changelog_preview, new RegExp(`^## \\[${next.replace(/\./g, "\\.")}] - \\d{4}-\\d{2}-\\d{2}`));
+	assert.match(result.changelog_preview, /^### (Features|Fixes|Performance|Changes|\[)/m);
+	// Dry-run must not write: the next-version section stays absent.
+	const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
+	assert.ok(!changelog.includes(`[${next}]`), "dry-run must not write CHANGELOG.md");
 });
 
-test("CLI verify exits 1 with missing functional PRs against the stub (issue #64 A4)", () => {
-	let caught = null;
+test("CLI verify exits 1 with missing PRs while the changelog is a stub, 0 once populated (issue #64 A4)", () => {
+	const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
+	const hasTopSection = /^##\s*\[/m.test(changelog);
 	let stdout = "";
+	let caught = null;
 	try {
-		stdout = execFileSync(process.execPath, [scriptPath, "verify"], {
-			cwd: fileURLToPath(new URL("..", import.meta.url)),
-			encoding: "utf8",
-		});
+		stdout = execFileSync(process.execPath, [scriptPath, "verify"], { cwd: repoRoot, encoding: "utf8" });
 	} catch (err) {
 		caught = err;
 		stdout = err.stdout ?? "";
 	}
-	assert.ok(caught, "verify must exit nonzero while the changelog is a stub");
 	const result = JSON.parse(stdout);
-	assert.equal(result.ok, false);
-	assert.ok(result.missing.length >= 1, "missing list covers PRs since the last tag");
+	if (!hasTopSection) {
+		assert.ok(caught, "verify must exit nonzero while the changelog is a stub");
+		assert.equal(result.ok, false);
+		assert.ok(result.missing.length >= 1, "missing list covers PRs since the last tag");
+	} else {
+		assert.equal(result.ok, true, "populated changelog must verify clean");
+	}
 });

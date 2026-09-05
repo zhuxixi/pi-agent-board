@@ -39,10 +39,12 @@ to `scripts/release_helper.mjs` (repo stack: Node ESM). Architecture:
   start from the next release after this lands. No backfill of ≤0.5.2.
 - **npm script**: `"changelog": "node scripts/release_helper.mjs"` so
   `npm run changelog -- --dry-run` works (issue acceptance wording).
-- **README Publishing section** updated to the new flow:
-  `npm version <bump>` → `npm run changelog -- <bump>` (review preview) →
-  commit CHANGELOG + package.json → PR → tag + GitHub Release with notes from
-  the top section.
+- **README Publishing section** updated to the new flow (changelog BEFORE
+  `npm version`, because the bump commit+tag would empty the generation
+  range): `npm run verify` → `npm run changelog -- --dry-run` (review) →
+  `npm run changelog -- <bump>` (insert section) → `verify` must exit 0 →
+  commit CHANGELOG → `npm version <bump>` → `npm publish` → GitHub Release
+  with notes from the top section.
 
 Tag format: this repo tags `vX.Y.Z` (verified: v0.4.2..v0.5.2), same as
 jfox's `--match v*` logic.

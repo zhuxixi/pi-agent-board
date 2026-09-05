@@ -162,26 +162,26 @@ export function insertSection(existing, section) {
 	return `${content.slice(0, insertAt + 1)}${section}\n\n${content.slice(insertAt + 1)}`;
 }
 
-/** @returns {string|null} latest `v*` tag, or null when the repo has none */
+/** @returns {string|null} latest `v*` tag, null when the repo has none, throws on git errors (fail-closed) */
 function lastTag(root = REPO_ROOT) {
-	try {
-		return execFileSync("git", ["describe", "--tags", "--abbrev=0", "--match", "v*"], { cwd: root, encoding: "utf8" }).trim() || null;
-	} catch {
-		return null;
-	}
+	const tag = gitOut(["tag", "--list", "v*"], root);
+	const tags = tag.split("\n").map((s) => s.trim()).filter(Boolean);
+	if (tags.length === 0) return null;
+	return gitOut(["describe", "--tags", "--abbrev=0", "--match", "v*"], root).trim() || null;
 }
 
-/** @returns {string[]} commit subjects in `lastTag..HEAD` (or all when no tag) */
+/** @param {string[]} args @param {string} root @returns {string} */
+function gitOut(args, root) {
+	return execFileSync("git", args, { cwd: root, encoding: "utf8" });
+}
+
+/** @returns {string[]} commit subjects in `lastTag..HEAD` (or all when no tag); throws on git errors */
 function commitSubjects(tag, root = REPO_ROOT) {
 	const range = tag ? `${tag}..HEAD` : "HEAD";
-	try {
-		return execFileSync("git", ["log", range, "--format=%s"], { cwd: root, encoding: "utf8" })
-			.split("\n")
-			.map((s) => s.trim())
-			.filter(Boolean);
-	} catch {
-		return [];
-	}
+	return execFileSync("git", ["log", range, "--format=%s"], { cwd: root, encoding: "utf8" })
+		.split("\n")
+		.map((s) => s.trim())
+		.filter(Boolean);
 }
 
 /** @returns {string} current version from package.json */
@@ -192,16 +192,21 @@ function currentVersion() {
 }
 
 /** @param {string} arg @param {string} current */
-function nextVersion(arg, current) {
+export function nextVersion(arg, current) {
 	const cur = current.split(".").map(Number);
 	if (arg === "major") return `${cur[0] + 1}.0.0`;
 	if (arg === "minor") return `${cur[0]}.${cur[1] + 1}.0`;
 	if (arg === "patch") return `${cur[0]}.${cur[1]}.${cur[2] + 1}`;
 	if (/^\d+\.\d+\.\d+$/.test(arg)) {
+		// Component-wise compare — lexicographic join(".") misorders "0.10.0" vs "0.5.2".
 		const parts = arg.split(".").map(Number);
-		if (parts.some((v, i) => v < cur[i] && i >= 0) && parts.join(".") <= current) {
-			throw new Error(`version ${arg} is not greater than current ${current}`);
+		for (let i = 0; i < 3; i++) {
+			if (parts[i] !== cur[i]) {
+				if (parts[i] < cur[i]) throw new Error(`version ${arg} is not greater than current ${current}`);
+				break;
+			}
 		}
+		if (arg === current) throw new Error(`version ${arg} is not greater than current ${current}`);
 		return arg;
 	}
 	throw new Error(`invalid version or bump type: ${arg} (expected patch/minor/major or X.Y.Z)`);
@@ -209,22 +214,24 @@ function nextVersion(arg, current) {
 
 function main(argv) {
 	if (argv[0] === "verify") {
-		const tag = lastTag();
-		const lines = tag ? commitSubjects(tag) : [];
-		const changelogText = existsSync(CHANGELOG_MD) ? readFileSync(CHANGELOG_MD, "utf8") : "";
 		let result;
 		try {
+			const tag = lastTag();
+			const lines = tag ? commitSubjects(tag) : [];
+			const changelogText = existsSync(CHANGELOG_MD) ? readFileSync(CHANGELOG_MD, "utf8") : "";
 			result = verifyFrom({ lines, changelogText });
+			result.lastTag = tag;
 		} catch (err) {
-			result = { ok: false, error: String(err?.message ?? err), missing: [], extra: [], functionalCommits: 0 };
+			// Fail-closed: a git/filesystem failure must block the release, not pass it.
+			result = { ok: false, error: String(err?.message ?? err), missing: [], extra: [], functionalCommits: 0, lastTag: null };
 		}
-		result.lastTag = tag;
 		console.log(JSON.stringify(result));
 		process.exitCode = result.ok ? 0 : 1;
 		return;
 	}
 	const dryRun = argv.includes("--dry-run");
 	const versionArg = argv.find((a) => !a.startsWith("--")) ?? "patch";
+	try {
 	const current = currentVersion();
 	const version = nextVersion(versionArg, current);
 	const tag = lastTag();
@@ -244,6 +251,10 @@ function main(argv) {
 		result.files_modified = ["CHANGELOG.md"];
 	}
 	console.log(JSON.stringify(result, null, 1));
+	} catch (err) {
+		console.log(JSON.stringify({ error: String(err?.message ?? err) }));
+		process.exitCode = 1;
+	}
 }
 
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {

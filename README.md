@@ -380,24 +380,19 @@ npm run verify
 
 ## Publishing
 
-Before publishing a release, verify the package, bump the version, generate the changelog, and publish it:
+Before publishing a release, verify the package, generate the changelog, then bump, and publish — the changelog must be generated **before** `npm version`, because `npm version` commits and tags the bump, which would empty the generation range:
 
 ```bash
 npm run verify
-npm version patch
-npm run changelog -- patch   # preview with --dry-run first; inserts the section into CHANGELOG.md
+npm run changelog -- --dry-run     # preview the next section (version = current + patch)
+npm run changelog -- patch         # inserts the section into CHANGELOG.md
+node scripts/release_helper.mjs verify   # must exit 0: no functional PR missing from the top section
+git add CHANGELOG.md && git commit -m "docs(changelog): <version>"
+npm version patch                  # bumps package.json, commits, and tags vX.Y.Z
 npm publish
 ```
 
-Use `npm version minor`/`major` and the matching `npm run changelog -- minor|major` when appropriate. If the version is already bumped, skip `npm version`. The changelog is generated from conventional commits since the last `vX.Y.Z` tag (`scripts/release_helper.mjs`, ported from the jfox release flow); review the preview before committing CHANGELOG.md together with the version bump.
-
-Before creating the GitHub Release, guard against PRs merged after the changelog was generated:
-
-```bash
-node scripts/release_helper.mjs verify   # exits 1 with a missing PR list when the changelog has drifted
-```
-
-Release notes for the GitHub Release are the top CHANGELOG section. After publishing, users install the scoped package with:
+Use `minor`/`major` in both the changelog and `npm version` steps when appropriate. The changelog is generated from conventional commits since the last `vX.Y.Z` tag (`scripts/release_helper.mjs`, ported from the jfox release flow); review the preview before committing. The `verify` step guards against PRs merged after the changelog was generated — rerun it after any late merge and re-run `npm run changelog -- <bump>` if it reports missing PRs. Release notes for the GitHub Release are the top CHANGELOG section. After publishing, users install the scoped package with:
 
 ```bash
 pi install npm:@zhuxixi/pi-agent-board
