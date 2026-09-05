@@ -1,10 +1,12 @@
 #!/usr/bin/env node
-/** Test child for the starting-protocol window (issue #70 Task 8).
- *  Same echo/exit contract as fake-pty-pi.mjs, plus a SIGWINCH handler that
- *  reports the pty size — so tests can observe a cached resize actually being
- *  applied to the child when the host publishes ready. The SIGWINCH listener
- *  is registered BEFORE the ready banner: the runner applies a cached resize
- *  on first child output, so a post-banner signal must already be hooked. */
+/** Test child for the starting-protocol window (issue #70 Task 8). The child
+ *  itself is NOT delayed — the starting window comes from the runner binding
+ *  its endpoint BEFORE spawning this child. Same echo/exit contract as
+ *  fake-pty-pi.mjs, plus a SIGWINCH handler that reports the pty size — so
+ *  tests can observe a cached resize actually being applied to the child when
+ *  the host publishes ready. The SIGWINCH listener is registered BEFORE the
+ *  ready banner: the runner applies a cached resize on first child output, so
+ *  a post-banner signal must already be hooked. */
 import { appendFileSync } from "node:fs";
 
 const reportSize = () => {

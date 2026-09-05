@@ -15,6 +15,8 @@ import { classifyProbeResult } from "./host-coordination.mjs";
 
 /** Default probe timeout. */
 export const HOST_PROBE_TIMEOUT_MS = 250;
+/** Poll cadence between attach-resolver probes / retries (issue #70 Task 12). */
+export const HOST_PROBE_RETRY_MS = 150;
 
 /**
  * @typedef {object} ProbeResult

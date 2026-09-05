@@ -26,7 +26,7 @@ import { gitRepoRoot } from "../core/repo.mjs";
 import { isAlive, killProcess } from "../core/pid.mjs";
 import { acquireOwnedViewLock, tryAcquireOwnedViewLock } from "../core/locks.mjs";
 import { canReplaceHost } from "../core/host-coordination.mjs";
-import { probeHost } from "../core/host-probe.mjs";
+import { HOST_PROBE_RETRY_MS, probeHost } from "../core/host-probe.mjs";
 import * as P from "../core/paths.mjs";
 import {
 	claimHost,
@@ -58,8 +58,6 @@ export const HOST_START_LOCK_WAIT_MS = 500;
 export const HOST_RECOVERY_GRACE_MS = 5_000;
 /** Poll cadence while waiting out a host recovery window. */
 const HOST_RECOVERY_POLL_MS = 150;
-/** Poll cadence between attach-resolver probes / retries (issue #70 Task 12). */
-const HOST_PROBE_RETRY_MS = 150;
 /** Default wall-clock budget for one attach resolution (issue #70 Task 12). */
 const ATTACH_RESOLVE_TIMEOUT_MS = 120_000;
 
@@ -177,8 +175,9 @@ export function createService(opts) {
 		try {
 			lease = acquireLockImpl(root, meta.id, "host-start", { waitMs: HOST_START_LOCK_WAIT_MS, identity: serviceIdentity() });
 		} catch {
-			// Another process is mid-launch (or the lease is unreclaimable). Never
-			// stack a second spawn on top — surface whatever it owns as pending.
+			// LOCK_TIMEOUT means lease contention (another live process holds it);
+			// an IO-class failure means the lock path itself is unusable. Both map
+			// to "cannot launch now": surface the existing claim as pending, never stack.
 			const existing = readHost(root, meta.id);
 			return pendingLaunchResult(existing);
 		}
@@ -631,10 +630,10 @@ export function createService(opts) {
 			if (runnerObservation === "owned") {
 				if (!runnerTermSent) {
 					signalOwnedProcessImpl(host.runnerIdentity, "SIGTERM");
-				runnerTermSent = true;
+					runnerTermSent = true;
 				} else if (elapsed >= HOST_RECOVERY_GRACE_MS / 2 && !runnerKillSent) {
 					signalOwnedProcessImpl(host.runnerIdentity, "SIGKILL");
-				runnerKillSent = true;
+					runnerKillSent = true;
 				}
 			}
 			// The child is only escalated once its runner is confirmed gone.
@@ -1622,10 +1621,10 @@ export function createService(opts) {
 			}
 			for (const row of listRows(root)) {
 				if ((row.state?.followUps?.queuedCount ?? 0) > 0 && canAutoDrain(row)) {
-				// Delivery is ack-gated and async now (issue #70 A13); the queue
-				// item state, not this counter, records the outcome.
-				void drainNextFollowUp(row.meta.id);
-				fixed += 1;
+					// Delivery is ack-gated and async now (issue #70 A13); the queue
+					// item state, not this counter, records the outcome.
+					void drainNextFollowUp(row.meta.id);
+					fixed += 1;
 				}
 			}
 			return fixed;
