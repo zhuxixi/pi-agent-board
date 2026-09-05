@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, existsSync, readFileSync, statSync, mkdirSync } from "node:fs";
-import { createConnection } from "node:net";
+import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { once } from "node:events";
@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { atomicWriteJson } from "../src/core/atomic.mjs";
 import { readDiagnostics } from "../src/core/diagnostics.mjs";
 import * as P from "../src/core/paths.mjs";
-import { createView, readHost } from "../src/core/store.mjs";
+import { claimHost, createView, readHost, writeHost } from "../src/core/store.mjs";
 
 function freshRoot() {
 	return mkdtempSync(join(tmpdir(), "agentview-pty-"));
@@ -572,6 +572,169 @@ test("pty-runner routes editor_state between clients, seeds hello, resets on exi
 	} finally {
 		await stopRunner(runner);
 		reapChild(root, "v1");
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+// ---- new-protocol (issue #70): per-instance endpoint + ownership fencing ----
+
+/** Launch a new-protocol runner the way the service does: instance-scoped
+ *  config + provisional host claim, then spawn. Returns runner/config/socket. */
+async function launchOwnedRunner(root, viewId, instanceId, opts = {}) {
+	const meta = createView(root, { id: viewId, name: `owned-${instanceId}`, cwd: process.cwd() });
+	const configPath = P.hostConfigPathFor(root, viewId, instanceId);
+	const socketPath = P.hostEndpointPathFor(process.platform, root, viewId, instanceId);
+	atomicWriteJson(configPath, {
+		root,
+		viewId,
+		instanceId,
+		configPath,
+		socketPath,
+		sessionFile: meta.sessionFile,
+		cwd: process.cwd(),
+		initialPrompt: null,
+		piCommand: process.execPath,
+		piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+		model: null,
+		tools: null,
+		env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" },
+		cols: 80,
+		rows: 24,
+		...opts.config,
+	});
+	const claim = claimHost(root, {
+		viewId,
+		instanceId,
+		configPath,
+		socketPath,
+		claimAt: Date.now(),
+		claimPid: process.pid,
+		claimIdentity: { pid: process.pid, startToken: null },
+	});
+	if (!claim.claimed) throw new Error(`claimHost refused: ${JSON.stringify(claim)}`);
+	const runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+	return { runner, configPath, socketPath, meta };
+}
+
+test("owned runner binds unique endpoint, publishes ready, cleans up on natural child exit", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	try {
+		({ runner } = await launchOwnedRunner(root, "v1", "i1"));
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.readyAt != null && h?.childPid ? h : false;
+		});
+		childPid = host.childPid;
+		assert.ok(isAlive(childPid), "child alive before exit");
+		assert.equal(host.instanceId, "i1");
+		assert.equal(host.socketPath, P.hostEndpointPathFor(process.platform, root, "v1", "i1"));
+		const socket = createConnection(host.socketPath);
+		socket.on("error", () => {});
+		await once(socket, "connect");
+		send(socket, { type: "input", data: "exit\r" });
+		assert.equal(await waitForExit(runner, 5000), true, "runner exits after natural child exit");
+		await waitFor(() => readHost(root, "v1")?.state === "exited");
+		const final = readHost(root, "v1");
+		assert.equal(final.instanceId, "i1");
+		assert.equal(final.childPid, null);
+		assert.equal(final.readyAt, null);
+		assert.ok(final.endedAt != null, "terminal record carries endedAt");
+		assert.equal(existsSync(host.socketPath), false, "instance endpoint must be cleaned up");
+		socket.destroy();
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("duplicate runner for the same instance exits before spawning a child", async () => {
+	const root = freshRoot();
+	let runnerA;
+	let runnerB;
+	let childPid;
+	try {
+		({ runner: runnerA } = await launchOwnedRunner(root, "v1", "i1"));
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.childPid ? h : false;
+		});
+		childPid = host.childPid;
+		// B starts from the SAME instance config — the endpoint is already owned by A.
+		runnerB = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), host.configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		assert.equal(await waitForExit(runnerB, 8000), true, "duplicate runner must exit");
+		const diags = readDiagnostics(root, "v1");
+		assert.ok(
+			diags.some((d) => d.code === "host_endpoint_busy" || d.code === "host_start_yielded"),
+			"duplicate runner records a yield/busy diagnostic",
+		);
+		assert.ok(isAlive(childPid), "original child still alive");
+		const settled = readHost(root, "v1");
+		assert.equal(settled.state, "alive");
+		assert.equal(settled.childPid, childPid);
+		assert.equal(settled.runnerPid, runnerA.pid, "duplicate runner never wrote host.json");
+	} finally {
+		try { runnerA?.kill("SIGKILL"); } catch {}
+		try { runnerB?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("owned runner does not unlink a foreign endpoint on exit", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	let foreign;
+	try {
+		({ runner } = await launchOwnedRunner(root, "v1", "i1"));
+		await waitFor(() => readHost(root, "v1")?.state === "alive");
+		childPid = readHost(root, "v1")?.childPid;
+		// A second instance's endpoint with a REAL listener must survive A's exit.
+		const foreignPath = P.hostEndpointPathFor(process.platform, root, "v1", "i2");
+		foreign = createServer(() => {});
+		await new Promise((resolveListen, rejectListen) => {
+			foreign.once("error", rejectListen);
+			foreign.listen(foreignPath, resolveListen);
+		});
+		runner.kill("SIGTERM");
+		assert.equal(await waitForExit(runner, 8000), true, "owned runner exits on SIGTERM");
+		const probe = createConnection(foreignPath);
+		probe.on("error", () => {});
+		await once(probe, "connect");
+		probe.destroy();
+		assert.equal(existsSync(foreignPath), true, "foreign endpoint survives the other instance's exit");
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		try { foreign?.close(); } catch {}
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("heartbeat detects ownership loss and exits without writing host state", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	try {
+		({ runner } = await launchOwnedRunner(root, "v1", "i1"));
+		await waitFor(() => readHost(root, "v1")?.state === "alive");
+		childPid = readHost(root, "v1")?.childPid;
+		// Simulate a superseding owner rewriting host.json.
+		writeHost(root, { ...readHost(root, "v1"), instanceId: "other" });
+		assert.equal(await waitForExit(runner, 5000), true, "runner exits after ownership loss");
+		const after = readHost(root, "v1");
+		assert.equal(after.instanceId, "other", "superseding owner's record untouched");
+		assert.equal(after.state, "alive", "loser runner never wrote a terminal state");
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
 		await new Promise((r) => setTimeout(r, 50));
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
