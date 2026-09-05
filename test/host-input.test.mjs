@@ -11,7 +11,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { createService, sendHostInput } from "../src/runtime/service.mjs";
 import { readDiagnostics } from "../src/core/diagnostics.mjs";
-import { readFollowUpQueue } from "../src/core/follow-up-queue.mjs";
+import { readFollowUpQueue, enqueueFollowUp } from "../src/core/follow-up-queue.mjs";
 import { createView, readState, writeHost, writeState } from "../src/core/store.mjs";
 import * as P from "../src/core/paths.mjs";
 
@@ -76,6 +76,7 @@ function writeLiveHost(root, viewId, socketPath, overrides = {}) {
  */
 function startFakeHost(socketPath, mode = "ack") {
 	const writes = [];
+	const received = [];
 	const seen = new Set();
 	const server = createServer((socket) => {
 		socket.write(JSON.stringify({ type: "hello", status: { state: mode === "starting" ? "starting" : "alive" }, editorEmpty: null }) + "\n");
@@ -89,6 +90,7 @@ function startFakeHost(socketPath, mode = "ack") {
 				let msg;
 				try { msg = JSON.parse(line); } catch { continue; }
 				if (msg.type !== "input") continue;
+				received.push(msg);
 				if (mode === "starting") {
 					socket.write(JSON.stringify({ type: "error", code: "host_starting", requestId: msg.requestId }) + "\n");
 					continue;
@@ -106,6 +108,7 @@ function startFakeHost(socketPath, mode = "ack") {
 	});
 	return {
 		writes,
+		received,
 		listen: () => new Promise((resolve) => server.listen(socketPath, resolve)),
 		close: () => new Promise((resolve) => server.close(() => resolve())),
 	};
@@ -232,6 +235,69 @@ test("sendHostInput re-acks a duplicate requestId without a second child write",
 		const second = await sendHostInput(join(root, "dup.sock"), "x\r", { requestId: "dup-1" });
 		assert.equal(second.ok, true);
 		assert.equal(fake.writes.length, 1, "runner dedup must re-ack without writing the child again");
+	} finally {
+		await fake.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+/** Bounded wait for fire-and-forget delivery (connect+write is async). */
+async function waitForReceived(fake, count, timeoutMs = 1000) {
+	const start = Date.now();
+	while (fake.received.length < count) {
+		if (Date.now() - start > timeoutMs) return false;
+		await new Promise((r) => setTimeout(r, 10));
+	}
+	return true;
+}
+
+test("reply over a legacy (instanceId-less) host is fire-and-forget and completes on connect", async () => {
+	const root = freshRoot();
+	const fake = startFakeHost(join(root, "legacy.sock"), "silent");
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		await fake.listen();
+		// Legacy host: state alive, no instanceId — a pre-upgrade runner that
+		// never speaks input_ack. Delivery must not wait for one (final review
+		// finding 1: ack-wait loop re-sends the prompt forever).
+		writeLiveHost(root, "v1", join(root, "legacy.sock"), { instanceId: null });
+		const svc = service(root);
+		const startedAt = Date.now();
+		const res = await svc.reply("v1", "hello");
+		assert.equal(res.ok, true);
+		assert.equal(res.sent, true);
+		assert.ok(Date.now() - startedAt < 500, "legacy reply must not stall on an ack that never comes");
+		assert.equal(await waitForReceived(fake, 1), true, "legacy input delivered exactly once");
+		assert.equal(fake.received[0].data, "hello\r");
+		const queue = readFollowUpQueue(root, "v1");
+		assert.equal(queue.items.length, 1);
+		assert.equal(queue.items[0].status, "completed", "legacy delivery must complete, not loop");
+		assert.ok(readDiagnostics(root, "v1").some((d) => d.code === "follow_up_sent"));
+	} finally {
+		await fake.close();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("drain over a legacy host completes without waiting for input_ack", async () => {
+	const root = freshRoot();
+	const fake = startFakeHost(join(root, "legacy.sock"), "silent");
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		await fake.listen();
+		writeLiveHost(root, "v1", join(root, "legacy.sock"), { instanceId: null });
+		setIdle(root, "v1");
+		// Queue an item directly (bypassing reply, which delivers instantly on
+		// the legacy path) so drainNextFollowUp must deliver it itself.
+		const enq = enqueueFollowUp(root, "v1", "queued earlier", { kind: "reply", source: "user" });
+		assert.equal(enq.ok, true);
+		const svc = service(root);
+		const drained = await svc.drainNextFollowUp("v1");
+		assert.equal(drained.ok, true);
+		assert.equal(await waitForReceived(fake, 1), true, "drain delivered the queued item once via fire-and-forget");
+		assert.equal(fake.received[0].data, "queued earlier\r");
+		const queue = readFollowUpQueue(root, "v1");
+		assert.equal(queue.items[0].status, "completed");
 	} finally {
 		await fake.close();
 		rmSync(root, { recursive: true, force: true });

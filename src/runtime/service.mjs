@@ -885,7 +885,7 @@ export function createService(opts) {
 				// abandoned launch) is adopted once past grace — fresh claims, even this
 			// process's own (recoverHost's replacement), wait out the grace window like
 			// any launcher mid-transaction (contract §6).
-				if (!legacy && host.runnerSpawnedAt == null && probe.classification === "missing" && !withinGrace && !adopted) {
+			if (!legacy && host.runnerSpawnedAt == null && probe.classification === "missing" && !withinGrace && !adopted) {
 					adopted = true;
 					ensureHostImpl(viewId);
 					await sleepFnImpl(HOST_PROBE_RETRY_MS);
@@ -894,7 +894,7 @@ export function createService(opts) {
 				if (withinGrace || legacy) {
 					// Normal cold start (or a legacy starting host — legacy is never recovered,
 				// spec §10.1): wait out the grace window.
-					await sleepFnImpl(HOST_PROBE_RETRY_MS);
+				await sleepFnImpl(HOST_PROBE_RETRY_MS);
 					continue;
 				}
 			} else if (probe.classification === "starting" || probe.classification === "occupied") {
@@ -983,6 +983,21 @@ export function createService(opts) {
 			if (item.kind === "plan_approval") markExecutingApprovedPlan(root, viewId);
 			if (row.hostActive) {
 				const socketPath = row.host?.socketPath;
+				// Legacy host (pre-upgrade runner, no instanceId): it never sends
+				// input_ack, so the ack path would loop forever. Deliver with the
+				// old fire-and-forget semantics and complete on connect (final
+				// review finding 1).
+				if (row.host?.instanceId == null) {
+					const sent = sendHostMessage(row, { type: "input", data: `${prompt}\r` });
+					if (sent.ok) {
+						completeFollowUp(root, viewId, item.id);
+						appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_sent", message: "Queued follow-up sent to live host", details: { kind: item.kind, legacy: true } });
+						return { ok: true, sent: true, item };
+					}
+					releaseFollowUp(root, viewId, item.id);
+					appendDiagnostic(root, viewId, { source: "queue", level: "warn", code: "follow_up_send_failed", message: "Queued follow-up could not be delivered to the host", details: { kind: item.kind, error: sent.error ?? "unknown", legacy: true } });
+					return { ok: true, pending: true, item };
+				}
 				const sent = socketPath
 					? await sendHostInput(socketPath, `${prompt}\r`, { requestId: item.id })
 					: { ok: false, error: "No host socket", retryable: true };
@@ -1192,6 +1207,17 @@ export function createService(opts) {
 				const queued = enqueueFollowUp(root, viewId, prompt, { kind, delivery: "auto", source: "user" });
 				if (!queued.ok) return queued;
 				appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_queued", message: "Follow-up queued", details: { kind, queuedCount: queued.summary?.queuedCount } });
+				// Legacy host: no instanceId → no input_ack → fire-and-forget (final
+				// review finding 1); connect success completes the item.
+				if (row.host?.instanceId == null) {
+					const sent = sendHostMessage(row, { type: "input", data: `${prompt}\r` });
+					if (sent.ok) {
+						completeFollowUp(root, viewId, queued.item.id);
+						appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_sent", message: "Queued follow-up sent to live host", details: { kind, legacy: true } });
+						return { ok: true, sent: true, item: queued.item };
+					}
+					return { ok: true, queued: true, summary: queued.summary };
+				}
 				const socketPath = row.host?.socketPath;
 				const sent = socketPath
 					? await sendHostInput(socketPath, `${prompt}\r`, { requestId: queued.item.id })

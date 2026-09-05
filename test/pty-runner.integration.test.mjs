@@ -996,6 +996,53 @@ test("revoke via host.json stopRequestedAt triggers controlled shutdown", async 
 	}
 });
 
+test("revoke survives a concurrent client socket close (live-record merge)", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	let socket;
+	try {
+		const { runner: r, socketPath } = await launchOwnedRunner(root, "v1", "i1");
+		runner = r;
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.readyAt != null && h?.childPid ? h : false;
+		});
+		childPid = host.childPid;
+		// Attach a client, then revoke and destroy the client immediately: the
+		// socket-close handler must MERGE into the live record, not re-spread a
+		// pre-revoke snapshot that erases stopRequestedAt (final review finding 2).
+		socket = createConnection(socketPath);
+		socket.on("error", () => {});
+		await new Promise((resolve) => socket.once("data", resolve));
+		const revoked = updateOwnedHost(root, "v1", "i1", (cur) => ({
+			...cur,
+			state: "stopping",
+			stopRequestedAt: Date.now(),
+			revokeToken: "t-close",
+		}));
+		assert.equal(revoked.updated, true);
+		socket.destroy();
+		assert.equal(await waitForExit(runner, 3000), true, "revoke must not be clobbered by the close handler");
+		await waitFor(() => readHost(root, "v1")?.state === "exited");
+		const final = readHost(root, "v1");
+		assert.equal(final.state, "exited");
+		assert.equal(final.stopReason, "revoked");
+		// Terminal contract (spec §10.2) clears stopRequestedAt while keeping
+		// stopReason; the discriminating signal is that the revoke was NOT
+		// clobbered by the close handler (a stale spread would erase it before
+		// the heartbeat tick, leaving the runner alive past the exit window).
+		assert.equal(final.stopRequestedAt, null);
+		assert.ok(!isAlive(childPid));
+	} finally {
+		try { socket?.destroy(); } catch {}
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
 test("resize before child ready is cached and applied when ready is published", async () => {
 	const root = freshRoot();
 	let runner;

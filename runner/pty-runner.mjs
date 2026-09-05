@@ -612,11 +612,13 @@ async function ownedMain(config) {
 			});
 			socket.on("close", () => {
 				clients.delete(socket);
-				ownedUpdate(() => ({ ...host }));
+				// Merge into the live record (a stale closure spread here erases a
+				// concurrent revoke — final review finding 2).
+				ownedUpdate((cur) => ({ ...cur }));
 			});
 			socket.on("error", () => {
 				clients.delete(socket);
-				ownedUpdate(() => ({ ...host }));
+				ownedUpdate((cur) => ({ ...cur }));
 			});
 		});
 		server.once("error", onError);
