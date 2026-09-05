@@ -10,7 +10,7 @@
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
-import { existsSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, statSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendLine, readJson } from "../src/core/atomic.mjs";
@@ -47,7 +47,9 @@ function main() {
 	// New ownership protocol (issue #70): instance-scoped config selects the fenced
 	// path. Legacy configs (no instanceId) keep the historical behavior unchanged.
 	if (config.instanceId) {
-		void ownedMain(config);
+		// A mid-flight throw in ownedMain must still terminate the process — the
+		// runner is detached with ignored stdio; an unhandled rejection would hang it.
+		ownedMain(config).catch(() => process.exit(1));
 		return;
 	}
 	legacyMain(config);
@@ -523,8 +525,14 @@ async function ownedMain(config) {
 		process.exit(requestedExitCode ?? exitCode ?? 0);
 	}
 
-	process.on("SIGTERM", () => { void finishHost("signal"); });
-	process.on("SIGINT", () => { void finishHost("signal"); });
+	// Bounded finish: a mid-finish throw must still exit the process (the runner
+	// is detached; an unhandled rejection inside finishHost would otherwise hang).
+	const finish = (reason, requestedExitCode = null) => {
+		finishHost(reason, requestedExitCode).catch(() => process.exit(1));
+	};
+
+	process.on("SIGTERM", () => { finish("signal"); });
+	process.on("SIGINT", () => { finish("signal"); });
 	process.on("uncaughtException", (err) => {
 		process.removeAllListeners("uncaughtException");
 		const message = err instanceof Error ? err.message : String(err);
@@ -542,7 +550,7 @@ async function ownedMain(config) {
 				readyAt: null,
 			}));
 		}
-		void finishHost("crash", 1);
+		finish("crash", 1);
 	});
 
 	// 1. Take the per-view host-start lease — the launch transaction boundary.
@@ -569,6 +577,14 @@ async function ownedMain(config) {
 	}
 	if (!current || current.instanceId !== config.instanceId) {
 		diag("host_start_stale_record", "no matching host claim for this instance", { recordInstance: current?.instanceId ?? null });
+		releaseStartLease();
+		process.exit(0);
+	}
+	// Own-terminal record: this instance already finished once (e.g. the prior
+	// runner of the SAME instance exited after claiming). Continuing would
+	// re-publish exited→starting and re-deliver initialPrompt — exit instead.
+	if (current.state === "exited" || current.state === "failed") {
+		diag("host_start_own_terminal", "host record for this instance is already terminal");
 		releaseStartLease();
 		process.exit(0);
 	}
@@ -617,7 +633,7 @@ async function ownedMain(config) {
 	}
 	server.on("error", (err) => {
 		diag("server_error", err instanceof Error ? err.message : String(err));
-		void finishHost("server_error", 1);
+		finish("server_error", 1);
 	});
 	// POSIX: record the exact inode we bound — cleanup matches dev+ino.
 	if (process.platform !== "win32") {
@@ -631,7 +647,7 @@ async function ownedMain(config) {
 	const claimedSelf = ownedUpdate((cur) => ({
 		...cur,
 		runnerPid: process.pid,
-		runnerIdentity: { pid: process.pid, startToken: null },
+		runnerIdentity: { pid: process.pid, startToken: captureStartToken(process.pid) },
 		runnerSpawnedAt: cur.runnerSpawnedAt ?? Date.now(),
 		state: cur.state === "alive" ? "alive" : "starting",
 	}));
@@ -687,18 +703,18 @@ async function ownedMain(config) {
 		exitCode = code ?? 0;
 		editorEmpty = null;
 		broadcast({ type: "editor_state", empty: null });
-		void finishHost("child_exit", exitCode);
+		finish("child_exit", exitCode);
 	});
 	child.onError((err) => {
 		diag("child_error", err instanceof Error ? err.message : String(err));
-		void finishHost("child_error", 1);
+		finish("child_error", 1);
 	});
 
 	// 6. Re-check ownership after the child exists, then publish ready.
 	const ready = ownedUpdate((cur) => ({
 		...cur,
 		childPid,
-		childIdentity: null,
+		childIdentity: { pid: childPid, startToken: captureStartToken(childPid) },
 		childSpawnedAt: Date.now(),
 		state: "alive",
 		readyAt: Date.now(),
@@ -719,15 +735,15 @@ async function ownedMain(config) {
 	heartbeatTimer = setInterval(() => {
 		const h = readHost(config.root, config.viewId);
 		if (!h || h.instanceId !== config.instanceId) {
-			void finishHost("owner_lost", 0);
+			finish("owner_lost", 0);
 			return;
 		}
 		if (h.stopRequestedAt != null) {
-			void finishHost("revoked", 0);
+			finish("revoked", 0);
 			return;
 		}
 		const hb = ownedUpdate((cur) => ({ ...cur }));
-		if (!hb.updated) void finishHost("owner_lost", 0);
+		if (!hb.updated) finish("owner_lost", 0);
 	}, HEARTBEAT_MS);
 	heartbeatTimer.unref?.();
 
@@ -756,8 +772,9 @@ async function ownedMain(config) {
 				if (child) child.write("\x1b");
 				break;
 			case "terminate":
-				// Child exit routes through finishHost (with SIGKILL escalation).
-				killChild(child, childPid, "SIGTERM");
+				// Single exit path: finishHost carries the SIGTERM→→4s→SIGKILL ladder,
+				// so a SIGTERM-immune child still terminates within a bounded window.
+				finish("terminated", 0);
 				break;
 			case "detach":
 				socket.end();
@@ -843,6 +860,25 @@ function clampInt(value, min, max, fallback) {
 	const n = Number(value);
 	if (!Number.isFinite(n)) return fallback;
 	return Math.max(min, Math.min(max, Math.floor(n)));
+}
+
+/** POSIX process start token — /proc/<pid>/stat field 22 (starttime), stable
+ *  across exec(2). Recorded in published identities so service-side recovery
+ *  (issue #70 Task 11) can tell an owned-live pid from a reused one; null on
+ *  failure or non-Linux platforms. */
+function captureStartToken(pid) {
+	if (process.platform !== "linux" || !pid) return null;
+	try {
+		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+		// comm (field 2) may contain spaces and parens — fields resume AFTER the
+		// last ')'. fields[0] is state (field 3) → starttime (field 22) is [19].
+		const afterComm = stat.slice(stat.lastIndexOf(")") + 1).trimStart();
+		const fields = afterComm.split(/\s+/);
+		const startTime = fields[19];
+		return startTime ?? null;
+	} catch {
+		return null;
+	}
 }
 
 

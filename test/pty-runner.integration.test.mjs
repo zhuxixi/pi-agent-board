@@ -739,3 +739,138 @@ test("heartbeat detects ownership loss and exits without writing host state", as
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
 });
+
+test("runner exits 0 on its own terminal host record — no resurrection, no child", async () => {
+	const root = freshRoot();
+	let runner;
+	try {
+		const meta = createView(root, { id: "v1", name: "owned-term", cwd: process.cwd() });
+		const configPath = P.hostConfigPathFor(root, "v1", "i9");
+		const socketPath = P.hostEndpointPathFor(process.platform, root, "v1", "i9");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "v1",
+			instanceId: "i9",
+			configPath,
+			socketPath,
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: "must not be re-delivered",
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" },
+			cols: 80,
+			rows: 24,
+		});
+		const claim = claimHost(root, {
+			viewId: "v1",
+			instanceId: "i9",
+			configPath,
+			socketPath,
+			claimAt: Date.now(),
+			claimPid: process.pid,
+			claimIdentity: { pid: process.pid, startToken: null },
+		});
+		assert.equal(claim.claimed, true);
+		// The record finalized (e.g. a prior runner of this instance exited after claiming):
+		// a restarted runner for the SAME instance must not republish/respawn.
+		writeHost(root, { ...claim.host, state: "exited", endedAt: Date.now() });
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		assert.equal(await waitForExit(runner, 5000), true, "runner must exit on its own terminal record");
+		assert.equal(runner.exitCode, 0);
+		const after = readHost(root, "v1");
+		assert.equal(after.state, "exited", "terminal record untouched");
+		assert.equal(after.runnerPid, null, "runner identity was never re-published");
+		assert.ok(readDiagnostics(root, "v1").some((d) => d.code === "host_start_own_terminal"), "own-terminal diagnostic recorded");
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("terminate over the socket escalates a SIGTERM-immune child and exits the runner", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid = null;
+	try {
+		const meta = createView(root, { id: "v1", name: "owned-escalate", cwd: process.cwd() });
+		const configPath = P.hostConfigPathFor(root, "v1", "i1");
+		const socketPath = P.hostEndpointPathFor(process.platform, root, "v1", "i1");
+		const childPidPath = join(root, "escalate-child.pid");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "v1",
+			instanceId: "i1",
+			configPath,
+			socketPath,
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			// The shell trap sets SIG_IGN BEFORE exec — the child ignores SIGTERM, so only
+			// the SIGKILL escalation can complete shutdown (same fixture as the legacy test).
+			piCommand: "sh",
+			piArgsPrefix: [
+				"-c",
+				`trap '' TERM HUP INT; exec ${JSON.stringify(process.execPath)} ${JSON.stringify(resolve("test-support/fake-ignore-term-pi.mjs"))}`,
+			],
+			model: null,
+			tools: null,
+			env: { FAKE_PTY_PID_PATH: childPidPath },
+			cols: 80,
+			rows: 24,
+		});
+		const claim = claimHost(root, {
+			viewId: "v1",
+			instanceId: "i1",
+			configPath,
+			socketPath,
+			claimAt: Date.now(),
+			claimPid: process.pid,
+			claimIdentity: { pid: process.pid, startToken: null },
+		});
+		assert.equal(claim.claimed, true);
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		await waitFor(() => readHost(root, "v1")?.state === "alive" && existsSync(childPidPath));
+		childPid = Number(readFileSync(childPidPath, "utf8"));
+		const socket = createConnection(socketPath);
+		socket.on("error", () => {});
+		await once(socket, "connect");
+		send(socket, { type: "terminate" });
+		// finishHost ladder: SIGTERM → 4s → SIGKILL → 1s. Runner exits only after the child.
+		assert.equal(await waitForExit(runner, 8000), true, "runner finishes despite SIGTERM-immune child");
+		assert.equal(runner.exitCode, 0);
+		assert.ok(!isAlive(childPid), "child must be gone after escalation");
+		await waitFor(() => readHost(root, "v1")?.state === "exited");
+		socket.destroy();
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("owned runner publishes proc start tokens for runner and child identities (linux)", { skip: process.platform !== "linux" }, async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	try {
+		({ runner } = await launchOwnedRunner(root, "v1", "i1"));
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.readyAt != null ? h : false;
+		});
+		childPid = host.childPid;
+		assert.match(String(host.runnerIdentity?.startToken), /^\d+$/, "runnerIdentity.startToken from /proc");
+		assert.match(String(host.childIdentity?.startToken), /^\d+$/, "childIdentity.startToken from /proc");
+		assert.equal(host.childIdentity?.pid, childPid);
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
