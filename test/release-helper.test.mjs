@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import {
@@ -15,15 +17,48 @@ import {
 } from "../scripts/release_helper.mjs";
 
 const scriptPath = fileURLToPath(new URL("../scripts/release_helper.mjs", import.meta.url));
-const repoRoot = fileURLToPath(new URL("..", import.meta.url));
 
-/** Current version from package.json, and its next patch — dynamic so these
- * tests survive future releases (review finding: hardcoded 0.5.2/0.5.3
- * would fail on the first release run under this process). */
-function currentAndNextPatch() {
-	const current = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version;
-	const [a, b, c] = current.split(".").map(Number);
-	return { current, next: `${a}.${b}.${c + 1}` };
+/**
+ * Self-contained git fixture: tag v0.5.1, then a fix (#78) and a version
+ * squash (skipped), plus a CHANGELOG stub. CLI tests run against this —
+ * never against the host repo, whose tags/history differ between local
+ * checkouts and CI shallow clones (the round-1 CI failure).
+ * @param {string} changelogBody
+ */
+function makeFixtureRepo(changelogBody = "# Changelog\n") {
+	const dir = mkdtempSync(join(tmpdir(), "relhelper-"));
+	const git = (args) => execFileSync("git", args, { cwd: dir, encoding: "utf8" });
+	git(["init", "-q"]);
+	git(["config", "user.email", "test@example.com"]);
+	git(["config", "user.name", "test"]);
+	writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "fixture", version: "0.5.2" }, null, "\t") + "\n");
+	writeFileSync(join(dir, "a.txt"), "tagged base\n");
+	git(["add", "."]);
+	git(["commit", "-q", "-m", "feat: base (#70)"]);
+	git(["tag", "v0.5.1"]);
+	writeFileSync(join(dir, "b.txt"), "fix\n");
+	git(["add", "."]);
+	git(["commit", "-q", "-m", "fix: second (#78)"]);
+	writeFileSync(join(dir, "c.txt"), "squash\n");
+	git(["add", "."]);
+	git(["commit", "-q", "-m", "0.5.2 (#74)"]);
+	writeFileSync(join(dir, "CHANGELOG.md"), changelogBody);
+	mkdirSync(join(dir, "scripts"), { recursive: true });
+	copyFileSync(scriptPath, join(dir, "scripts", "release_helper.mjs"));
+	return dir;
+}
+
+/** Run the CLI in a fixture dir; returns {code, json}. */
+function runCli(dir, args) {
+	let caught = null;
+	let stdout = "";
+	try {
+		stdout = execFileSync(process.execPath, [join(dir, "scripts", "release_helper.mjs"), ...args], { cwd: dir, encoding: "utf8" });
+	} catch (err) {
+		caught = err;
+		stdout = err.stdout ?? "";
+	}
+	return { code: caught ? caught.status ?? 1 : 0, stdout, json: (() => { try { return JSON.parse(stdout); } catch { return null; } })() };
 }
 
 test("parseCommitLines parses conventional subjects with scope, bang, and PR", () => {
@@ -145,41 +180,48 @@ test("hasSection detects an existing version section (apply idempotency guard, C
 	assert.equal(hasSection("## [0.5.30]", "0.5.3"), false, "prefix must not match a longer version");
 });
 
-test("CLI --dry-run previews the next section without touching CHANGELOG.md (issue #64 A1)", () => {
-	const { current, next } = currentAndNextPatch();
-	const out = execFileSync(process.execPath, [scriptPath, "--dry-run", "patch"], {
-		cwd: repoRoot,
-		encoding: "utf8",
-	});
-	const result = JSON.parse(out);
-	assert.equal(result.current_version, current);
-	assert.match(result.changelog_preview, new RegExp(`^## \\[${next.replace(/\./g, "\\.")}] - \\d{4}-\\d{2}-\\d{2}`));
-	assert.match(result.changelog_preview, /^### (Features|Fixes|Performance|Changes|\[)/m);
-	// Dry-run must not write: the next-version section stays absent.
-	const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
-	assert.ok(!changelog.includes(`[${next}]`), "dry-run must not write CHANGELOG.md");
+test("CLI dry-run previews the next section from the tag range without writing (issue #64 A1)", () => {
+	const dir = makeFixtureRepo();
+	try {
+		const { code, json } = runCli(dir, ["--dry-run", "patch"]);
+		assert.equal(code, 0);
+		assert.equal(json.current_version, "0.5.2");
+		assert.equal(json.new_version, "0.5.3");
+		assert.match(json.changelog_preview, /^## \[0\.5\.3\] - \d{4}-\d{2}-\d{2}/);
+		assert.match(json.changelog_preview, /### Fixes/);
+		assert.match(json.changelog_preview, /- second \(#78\)/);
+		assert.ok(!json.changelog_preview.includes("(#70)"), "range starts at the tag, not full history");
+		assert.ok(!json.changelog_preview.includes("0.5.2 (#74)"), "version squash skipped");
+		assert.ok(json.changelog_preview.includes("v0.5.1...v0.5.3"), "compare link");
+		assert.ok(!readFileSync(join(dir, "CHANGELOG.md"), "utf8").includes("[0.5.3]"), "dry-run must not write");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
 });
 
-test("CLI verify exits 1 with missing PRs while the changelog is a stub, 0 once populated (issue #64 A4)", () => {
-	const changelog = readFileSync(new URL("../CHANGELOG.md", import.meta.url), "utf8");
-	const hasTopSection = /^##\s*\[/m.test(changelog);
-	let stdout = "";
-	let caught = null;
+test("CLI verify + apply + re-verify lifecycle on the fixture (issue #64 A2/A4)", () => {
+	const dir = makeFixtureRepo();
 	try {
-		stdout = execFileSync(process.execPath, [scriptPath, "verify"], { cwd: repoRoot, encoding: "utf8" });
-	} catch (err) {
-		caught = err;
-		stdout = err.stdout ?? "";
-	}
-	const result = JSON.parse(stdout);
-	if (!hasTopSection) {
-		assert.ok(caught, "verify must exit nonzero while the changelog is a stub");
-		assert.equal(result.ok, false);
-		assert.ok(result.missing.length >= 1, "missing list covers PRs since the last tag");
-	} else {
-		// Once populated, verify's ok depends on process state (mid-cycle merges
-		// legitimately report drift) — assert the CLI invariant instead: the exit
-		// code always agrees with result.ok.
-		assert.equal(Boolean(caught), !result.ok, "verify exit code must agree with result.ok");
+		// Stub changelog: the fix PR is missing → exit 1 with the missing list.
+		const stub = runCli(dir, ["verify"]);
+		assert.equal(stub.code, 1);
+		assert.equal(stub.json.ok, false);
+		assert.deepEqual(stub.json.missing, [78]);
+		// Apply inserts the section (idempotency guard not triggered first time).
+		const apply = runCli(dir, ["patch"]);
+		assert.equal(apply.code, 0);
+		const written = readFileSync(join(dir, "CHANGELOG.md"), "utf8");
+		assert.ok(written.includes("## [0.5.3]"));
+		assert.ok(written.includes("- second (#78)"));
+		// Now verify passes.
+		const verified = runCli(dir, ["verify"]);
+		assert.equal(verified.code, 0);
+		assert.equal(verified.json.ok, true);
+		// Re-apply the same version is refused (duplicate-section guard).
+		const reapply = runCli(dir, ["patch"]);
+		assert.equal(reapply.code, 1);
+		assert.match(reapply.json.error, /already has a \[0\.5\.3\] section/);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
 	}
 });
