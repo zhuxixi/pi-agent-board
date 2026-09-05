@@ -27,7 +27,7 @@
 
 Insert after the "### Attach is slow or keeps reconnecting" paragraph, before "### Start & attach falls back to background":
 
-```markdown
+````markdown
 ### IME candidate window is stuck at the window edge (Windows WezTerm)
 
 On Windows WezTerm with a WSL2 backend, the IME candidate window may stay
@@ -48,7 +48,7 @@ machines if the config is version-controlled; harmless on Linux).
 
 Trade-off: the real terminal cursor becomes visible inside the TUI. This is
 cosmetic only.
-```
+````
 
 - [ ] **Step 2: Verify A1 (content presence)**
 
