@@ -230,3 +230,23 @@ test("loadRow falls back to the legacy mirror only when runnerPid is absent, and
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("updateOwnedHost rejects a mutate that swaps the instanceId under it", () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeHost(root, hostFixture(root, "v1"));
+		const before = readHost(root, "v1");
+
+		// A buggy/hijacked mutate returns a record carrying a different owner
+		// token; updateOwnedHost must refuse to write it (issue #70 review fix).
+		const res = updateOwnedHost(root, "v1", "inst-b", (host) => ({ ...host, instanceId: "inst-hijack" }));
+		assert.equal(res.updated, false);
+		assert.equal(res.ownerChanged, true);
+		const after = readHost(root, "v1");
+		assert.equal(after.instanceId, before.instanceId, "disk record must be unchanged");
+		assert.deepEqual(after, before);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});

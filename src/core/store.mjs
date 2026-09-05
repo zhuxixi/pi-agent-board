@@ -142,14 +142,6 @@ function hostClaimActive(host) {
 }
 
 /**
- * Resolve the viewId owning `instanceId` by scanning roster views' host.json.
- * instanceIds are unique random tokens, so at most one view matches. Used by
- * updateOwnedHost, whose caller-facing signature is keyed by the instance token.
- * @param {string} root
- * @param {string} instanceId
- * @returns {string|null}
- */
-/**
  * Atomically create the provisional `starting` host record for a new instance.
  * The ONLY entry point allowed to move "no claim / reclaimable terminal state"
  * into `starting` (issue #70). Refuses when an active claim exists or the
@@ -238,6 +230,11 @@ export function updateOwnedHost(root, viewId, expectedInstanceId, mutate, opts =
 			return { updated: false, ownerChanged: true, host };
 		}
 		const next = mutate(host);
+		// The mutate result must still belong to the expected instance: a buggy or
+		// hijacked callback that swaps the owner token is never written (issue #70).
+		if (!sameHostOwner(next, expectedInstanceId)) {
+			return { updated: false, ownerChanged: true, host };
+		}
 		writeHost(root, next);
 		try {
 			writeHostPid(root, viewId, next.runnerPid ?? null, {
