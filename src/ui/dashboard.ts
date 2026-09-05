@@ -24,6 +24,7 @@ import {
 	supportedThinkingLevels,
 } from "../core/launch-options.mjs";
 import { createPrewarmScheduler } from "../core/prewarm-schedule.mjs";
+import { planDashboardAttach, planPrewarm, replyNotice } from "./dashboard-decisions.mjs";
 import { ensureCwdStatsSeeded, rankedCwdCandidates, recordCwdLaunch } from "../core/cwd-stats.mjs";
 import { filterRows, groupRowsByFolder, rowState, stateGlyph } from "../core/rows.mjs";
 import { loadSessionView } from "../core/session-view.mjs";
@@ -266,7 +267,16 @@ export class DashboardComponent implements Component {
 		const id = this.selectedId;
 		if (!id || id === this.prewarmedId) return;
 		const row = this.selectedRow();
-		if (!row || row.hostAlive || isAgentBusy(row)) return;
+		if (!row) return;
+		// hostActive claims (starting/alive/stopping) already have a launch — mark
+		// them prewarmed without another service call; a pending claim is not a
+		// failure to retry on every debounce tick (issue #70 A14).
+		const decision = planPrewarm({ hostActive: row.hostActive, agentBusy: isAgentBusy(row) });
+		if (decision.action === "skip") return;
+		if (decision.action === "mark-only") {
+			this.prewarmedId = id;
+			return;
+		}
 		const res = this.deps.service.prewarmHost?.(id);
 		if (res?.ok) this.prewarmedId = id;
 	}
@@ -878,9 +888,8 @@ export class DashboardComponent implements Component {
 		// reply() is async since issue #70 A13 (ack-gated host delivery); the
 		// result (sent vs queued) only shapes the notice.
 		const res = await this.deps.service.reply(row.meta.id, text);
-		if (!res.ok) this.notice(res.error ?? "Reply failed", "error");
-		else if (res.hostMode === "json-runner") this.notice(`Reply sent with non-live fallback: ${res.fallbackReason ?? "PTY unavailable"}`, "warn");
-		else this.notice("Reply sent", "info");
+		const notice = replyNotice(res);
+		this.notice(notice.text, notice.level);
 		this.setInput("");
 		this.mode = "peek";
 		this.inputNotice = null;
@@ -1119,17 +1128,19 @@ export class DashboardComponent implements Component {
 	}
 
 	private requestAttach(row: Row): void {
-		if (row.hostAlive) {
-			this.done({ action: "attach", viewId: row.meta.id, stopFirst: false });
-		} else if (isAgentBusy(row)) {
+		// hostActive rows (starting/alive/stopping) attach directly — the async
+		// resolver owns the starting/stopping wait, so no interrupt confirm even
+		// when the row is busy (issue #70 A14).
+		const plan = planDashboardAttach({ hostActive: row.hostActive, agentBusy: isAgentBusy(row) });
+		if (plan.plan === "confirm-stop-first") {
 			this.pending = {
 				prompt: `"${row.meta.name}" is running. Interrupt and attach? (y/N)`,
 				onYes: () => this.done({ action: "attach", viewId: row.meta.id, stopFirst: true }),
 			};
 			this.mode = "confirm";
-		} else {
-			this.done({ action: "attach", viewId: row.meta.id, stopFirst: false });
+			return;
 		}
+		this.done({ action: "attach", viewId: row.meta.id, stopFirst: false });
 	}
 
 	// ---- rendering ----------------------------------------------------------

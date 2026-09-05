@@ -1,8 +1,10 @@
 /**
  * Reusable attach-flow helpers shared by the `agent-board` and `bg` commands.
  *
- * These are pure logic extractions — no runtime behaviour changes. Every
- * function here was previously private in agent-board.ts.
+ * Pure helpers (paths, prompts, current-view lookup) plus the resolver-driven
+ * attach flow: since issue #70 the attach path calls the async
+ * `resolveAttachTarget()` once and plans via `attach-decision.mjs`, instead of
+ * the old attachTarget-hint → ensureHost double path.
  */
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
