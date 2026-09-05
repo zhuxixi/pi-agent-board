@@ -23,6 +23,27 @@ export function assistantText(message) {
 }
 
 /**
+ * Extract text from a pi AgentToolResult object
+ * ({ content: [{ type: "text", text }, ...], details, ... }), or, defensively,
+ * a plain string. Unknown-shaped objects yield "" — never "[object Object]"
+ * (issue #41; mirrors pi's own convertToolResultOutput join("\n") semantics).
+ * @param {any} result
+ * @returns {string}
+ */
+export function toolResultText(result) {
+	if (result == null) return "";
+	if (typeof result === "string") return result;
+	if (typeof result !== "object") return String(result);
+	const content = result.content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.filter((b) => b && b.type === "text" && typeof b.text === "string")
+		.map((b) => b.text)
+		.join("\n")
+		.trim();
+}
+
+/**
  * Collect tool-call blocks from an assistant message.
  * @param {any} message
  * @returns {Array<{name:string, arguments:Record<string,any>}>}
