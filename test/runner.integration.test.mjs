@@ -360,8 +360,18 @@ test("runner does not clobber a manual completion made during post-exit model pa
 		});
 
 		// User marks the row done manually while the model passes are in flight.
+		// persist() writes status.json before state.json, so markCompleted can
+		// transiently reject ("active run") after endedAt is already visible.
+		// Poll it to success, then assert the exact shape; the race window is
+		// millisecond-scale and the 15s default timeout is ample.
 		const { createService } = await import("../src/runtime/service.mjs");
-		assert.deepEqual(createService({ root }).markCompleted("view_1"), { ok: true });
+		const svc = createService({ root });
+		let manual = null;
+		await waitFor(() => {
+			manual = svc.markCompleted("view_1");
+			return manual.ok ? manual : null;
+		});
+		assert.deepEqual(manual, { ok: true });
 
 		// Let the runner finish its passes and exit.
 		await waitFor(() => {
