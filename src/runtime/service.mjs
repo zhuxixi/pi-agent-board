@@ -53,6 +53,10 @@ import { hasPendingQuestions, isAgentBusy, selectIdleHostsToEvict } from "../cor
 export const HOST_START_GRACE_MS = 10_000;
 /** Bounded wait for the per-view host-start lease on explicit user actions (dispatch/reply). */
 export const HOST_START_LOCK_WAIT_MS = 500;
+/** Bounded wait for a revoked host's runner/child to end before recovery escalates (issue #70). */
+export const HOST_RECOVERY_GRACE_MS = 5_000;
+/** Poll cadence while waiting out a host recovery window. */
+const HOST_RECOVERY_POLL_MS = 150;
 
 /**
  * @param {{
@@ -74,6 +78,8 @@ export const HOST_START_LOCK_WAIT_MS = 500;
  *   now?: () => number,
  *   acquireLock?: typeof acquireOwnedViewLock,
  *   tryAcquireLock?: typeof tryAcquireOwnedViewLock,
+ *   observeProcess?: (identity: {pid: number, startToken: string|null}|null) => "not_started"|"dead"|"owned"|"foreign"|"unknown",
+ *   signalOwnedProcess?: (identity: {pid: number, startToken: string|null}, signal: string) => void,
  * }} opts
  */
 export function createService(opts) {
@@ -89,6 +95,10 @@ export function createService(opts) {
 	const nowImpl = opts.now ?? Date.now;
 	const acquireLockImpl = opts.acquireLock ?? acquireOwnedViewLock;
 	const tryAcquireLockImpl = opts.tryAcquireLock ?? tryAcquireOwnedViewLock;
+	// Identity-aware observation/signalling for host recovery (issue #70). Callers must
+	// only signal after observeProcess returned "owned" for that exact identity.
+	const observeProcessImpl = opts.observeProcess ?? defaultObserveProcess;
+	const signalOwnedProcessImpl = opts.signalOwnedProcess ?? defaultSignalOwnedProcess;
 
 	const pruneScreenLogsImpl = opts.pruneScreenLogs ?? pruneScreenLogs;
 	// Reclaim replay logs of long-ended views on dashboard startup. Deferred via
@@ -372,7 +382,8 @@ export function createService(opts) {
 	function archiveView(viewId) {
 		const row = loadRow(root, viewId);
 		if (!row) return { ok: false, error: "Unknown session" };
-		if (row.hostAlive) sendHostMessage(row, { type: "terminate" });
+		if (row.host?.instanceId) stopHostRow(row, "archive");
+		else if (row.hostAlive) sendHostMessage(row, { type: "terminate" });
 		if (row.alive && row.state?.currentRunId) {
 			const pid = readPid(root, viewId, row.state.currentRunId);
 			if (pid) killProcess(pid);
@@ -509,7 +520,169 @@ export function createService(opts) {
 			if (isAgentBusy(row)) continue;
 			if ((row.host?.attachedClients ?? 0) !== 0) continue;
 			if (graceMs > 0 && row.host?.startedAt != null && Date.now() - row.host.startedAt < graceMs) continue;
-			sendHostMessage(row, { type: "terminate" });
+			stopHostRow(row, "warm_prune");
+		}
+	}
+
+	/** Stop a host row by policy (issue #70): new-protocol hosts get the authoritative
+	 *  file-based revoke (works even when the control socket is dead); legacy hosts
+	 *  without an instanceId keep the old socket-terminate fallback. */
+	function stopHostRow(row, reason) {
+		const instanceId = row.host?.instanceId ?? null;
+		if (instanceId) return requestHostStop(row.meta.id, instanceId, reason);
+		return sendHostMessage(row, { type: "terminate" });
+	}
+
+	/**
+	 * File-based host revoke (issue #70): marks the host record `stopping` with a
+	 * fresh revoke token so the runner's heartbeat shuts it down cooperatively.
+	 * Never signals, never spawns a replacement. Idempotent: terminal or
+	 * already-stopping states are left untouched (`requested: false`).
+	 * @param {string} viewId
+	 * @param {string|null} expectedInstanceId
+	 * @param {string} reason
+	 * @returns {{ ok: boolean, requested?: boolean, error?: string }}
+	 */
+	function requestHostStop(viewId, expectedInstanceId, reason) {
+		let wasRequested = false;
+		const res = updateOwnedHost(root, viewId, expectedInstanceId, (h) => {
+			if (h.state === "exited" || h.state === "failed" || h.state === "stopping") return h;
+			wasRequested = true;
+			return { ...h, state: "stopping", stopRequestedAt: nowImpl(), revokeToken: randomIdImpl(), stopReason: reason };
+		});
+		if (!res.updated) return { ok: false, error: "owner_changed" };
+		return { ok: true, requested: wasRequested };
+	}
+
+	/** Observe one host role: a recorded identity goes through identity-aware
+	 *  observation; a missing identity means `not_started` (never spawned) or
+	 *  `unknown` (spawn attempted, identity unavailable) — never `dead`. */
+	function observeHostRole(host, role) {
+		const identity = host?.[`${role}Identity`] ?? null;
+		if (identity) return observeProcessImpl(identity);
+		return host?.[`${role}SpawnedAt`] == null ? "not_started" : "unknown";
+	}
+
+	/**
+	 * Revoke + wait + replace a broken host (issue #70). The caller (attach
+	 * resolver) has already probed and decided the instance is unrecoverable.
+	 * Escalation signals go ONLY to identities observed as "owned" at that
+	 * moment, each guarded by an instance re-read; unknown identities leave the
+	 * host pending instead of guessing. The replacement claim is created only
+	 * after runner and child are both confirmed ended.
+	 * @param {string} viewId
+	 * @param {string} expectedInstanceId
+	 * @returns {Promise<{ ok: boolean, recovered?: boolean, instanceId?: string, socketPath?: string|null, error?: string }>}
+	 */
+	async function recoverHost(viewId, expectedInstanceId) {
+		const ended = (o) => o === "not_started" || o === "dead" || o === "foreign";
+		const instanceStillExpected = () => {
+			const h = readHost(root, viewId);
+			return h != null && h.instanceId === expectedInstanceId;
+		};
+
+		// Gate: another launch/recovery in flight, or the instance already moved on.
+		const gate = tryAcquireLockImpl(root, viewId, "host-start", { identity: serviceIdentity() });
+		if (!gate.acquired) return { ok: false, error: "busy_retry_later" };
+		try {
+			const current = readHost(root, viewId);
+			if (!current || current.instanceId !== expectedInstanceId) return { ok: false, error: "already_recovered" };
+			if (current.state === "exited" || current.state === "failed") return { ok: false, error: "already_recovered" };
+		} finally {
+			try { gate.lease.release(); } catch { /* best effort */ }
+		}
+
+		// File-based revoke under the lease is done; release before waiting so the
+		// dying runner's own finish path is never blocked by this recovery.
+		requestHostStop(viewId, expectedInstanceId, "recovery");
+
+		// Bounded wait for runner/child to end, with identity-checked escalation.
+		const startedAt = nowImpl();
+		let runnerTermSent = false;
+		let runnerKillSent = false;
+		let childTermSent = false;
+		let childKillSent = false;
+		let childTermAt = 0;
+		while (nowImpl() - startedAt < HOST_RECOVERY_GRACE_MS) {
+			const host = readHost(root, viewId);
+			if (!host || host.instanceId !== expectedInstanceId) return { ok: false, error: "already_recovered" };
+			const runnerObservation = observeHostRole(host, "runner");
+			const childObservation = observeHostRole(host, "child");
+			if (ended(runnerObservation) && ended(childObservation)) break;
+			// Alive-but-unverifiable: never signal, never claim — stay pending.
+			if (runnerObservation === "unknown" || childObservation === "unknown") return { ok: false, error: "recovery_pending" };
+			if (!instanceStillExpected()) return { ok: false, error: "already_recovered" };
+			const elapsed = nowImpl() - startedAt;
+			if (runnerObservation === "owned") {
+				if (!runnerTermSent) {
+					signalOwnedProcessImpl(host.runnerIdentity, "SIGTERM");
+				runnerTermSent = true;
+				} else if (elapsed >= HOST_RECOVERY_GRACE_MS / 2 && !runnerKillSent) {
+					signalOwnedProcessImpl(host.runnerIdentity, "SIGKILL");
+				runnerKillSent = true;
+				}
+			}
+			// The child is only escalated once its runner is confirmed gone.
+			if (childObservation === "owned" && runnerObservation !== "owned") {
+				if (!childTermSent) {
+					signalOwnedProcessImpl(host.childIdentity, "SIGTERM");
+					childTermSent = true;
+					childTermAt = elapsed;
+				} else if (elapsed - childTermAt >= 1_000 && !childKillSent) {
+					signalOwnedProcessImpl(host.childIdentity, "SIGKILL");
+					childKillSent = true;
+				}
+			}
+			await new Promise((resolve) => setTimeout(resolve, HOST_RECOVERY_POLL_MS));
+		}
+		// Grace exhausted or loop broke — verify both roles are confirmed ended before claiming.
+		const finalHost = readHost(root, viewId);
+		if (!finalHost || finalHost.instanceId !== expectedInstanceId) return { ok: false, error: "already_recovered" };
+		if (!ended(observeHostRole(finalHost, "runner")) || !ended(observeHostRole(finalHost, "child"))) {
+			return { ok: false, error: "recovery_pending" };
+		}
+
+		// Claim the replacement under the host-start lease: finalize the old record
+		// (clearing its process fields — they are confirmed gone) and claim fresh.
+		let claimLease;
+		try {
+			claimLease = acquireLockImpl(root, viewId, "host-start", { waitMs: HOST_START_LOCK_WAIT_MS, identity: serviceIdentity() });
+		} catch {
+			return { ok: false, error: "busy_retry_later" };
+		}
+		try {
+			const current = readHost(root, viewId);
+			if (!current || current.instanceId !== expectedInstanceId) return { ok: false, error: "already_recovered" };
+			const finalized = updateOwnedHost(root, viewId, expectedInstanceId, (h) => ({
+				...h,
+				state: "exited",
+				endedAt: h.endedAt ?? nowImpl(),
+				exitCode: h.exitCode ?? 0,
+				runnerPid: null,
+				runnerIdentity: null,
+				runnerSpawnedAt: null,
+				childPid: null,
+				childIdentity: null,
+				childSpawnedAt: null,
+			}));
+			if (!finalized.updated) return { ok: false, error: "owner_changed" };
+			const instanceId = randomIdImpl();
+			const claimed = claimHost(root, {
+				viewId,
+				instanceId,
+				configPath: P.hostConfigPathFor(root, viewId, instanceId),
+				socketPath: P.hostEndpointPathFor(process.platform, root, viewId, instanceId),
+				claimAt: nowImpl(),
+				claimPid: process.pid,
+				claimIdentity: serviceIdentity(),
+				cols: Number(process.env.COLUMNS || 120),
+				rows: Number(process.env.LINES || 36),
+			});
+			if (!claimed.claimed) return { ok: false, error: "claim_lost", socketPath: claimed.host?.socketPath ?? null };
+			appendDiagnostic(root, viewId, { source: "service", code: "host_recovered", message: "PTY host recovered after revoke", details: { oldInstanceId: expectedInstanceId, instanceId } });
+			return { ok: true, recovered: true, instanceId, socketPath: claimed.host?.socketPath ?? null };
+		} finally {
+			try { claimLease.release(); } catch { /* best effort */ }
 		}
 	}
 
@@ -797,7 +970,11 @@ export function createService(opts) {
 		 */
 		stop(viewId) {
 			const row = loadRow(root, viewId);
-			if (row?.hostAlive) return sendHostMessage(row, { type: "interrupt" });
+			if (row?.hostActive) {
+				// Interrupt is turn-abort, not host-stop; an already-stopping host has nothing to abort.
+				if (row.host?.state === "stopping") return { ok: true };
+				return sendHostMessage(row, { type: "interrupt" });
+			}
 			const state = readState(root, viewId);
 			if (!state?.currentRunId) return { ok: false, error: "No active run" };
 			const pid = readPid(root, viewId, state.currentRunId);
@@ -809,9 +986,25 @@ export function createService(opts) {
 		/** @param {string} viewId */
 		terminateHost(viewId) {
 			const row = loadRow(root, viewId);
-			if (!row?.hostAlive) return { ok: false, error: "No live host" };
+			if (!row?.host) return { ok: false, error: "No live host" };
+			if (row.host.instanceId) return requestHostStop(viewId, row.host.instanceId, "user");
+			if (!row.hostAlive) return { ok: false, error: "No live host" };
 			return sendHostMessage(row, { type: "terminate" });
 		},
+
+		/**
+		 * File-based host revoke (issue #70). See the closure doc above; exposed for
+		 * the attach resolver and lifecycle callers.
+		 * @param {string} viewId @param {string|null} expectedInstanceId @param {string} reason
+		 */
+		requestHostStop,
+
+		/**
+		 * Revoke + wait + replace a broken host (issue #70). Only the attach
+		 * resolver / recovery-aware reconcile should call this.
+		 * @param {string} viewId @param {string} expectedInstanceId
+		 */
+		recoverHost,
 
 		/**
 		 * Ensure there is an interactive PTY host for this session. Used for fast attach
@@ -1105,7 +1298,8 @@ export function createService(opts) {
 					skipped += 1;
 					continue;
 				}
-				if (row.hostAlive) sendHostMessage(row, { type: "terminate" });
+				if (row.host?.instanceId) stopHostRow(row, "archive");
+				else if (row.hostAlive) sendHostMessage(row, { type: "terminate" });
 				row.meta.archived = true;
 				writeMeta(root, row.meta);
 				archived += 1;
@@ -1127,7 +1321,10 @@ export function createService(opts) {
 				const looksActive = s?.processState === "alive" || s?.semanticState === "queued" || s?.semanticState === "working";
 				if (!s || !looksActive) continue;
 				if (!s.currentRunId) {
-					if (row.host && !row.hostAlive && (row.host.state === "starting" || row.host.state === "alive" || row.host.state === "exited" || row.host.state === "failed")) {
+				if (row.host && !row.hostAlive && (row.host.state === "starting" || row.host.state === "alive" || row.host.state === "exited" || row.host.state === "failed")) {
+					// A starting claim inside the launch grace is a normal cold start (issue #70):
+					// its runner pid may legitimately be absent — never finalize it to failed yet.
+					if (row.host.state === "starting" && now - (row.host.claimAt ?? row.host.startedAt ?? 0) < HOST_START_GRACE_MS) continue;
 						const failed = row.host.state === "starting" || row.host.state === "alive" || row.host.state === "failed" || Boolean(row.host.error) || (row.host.exitCode !== null && row.host.exitCode !== 0);
 						s.semanticState = failed ? "failed" : "idle";
 						s.processState = "exited";
@@ -1324,6 +1521,28 @@ function serviceIdentity() {
 function conservativeObservation(pid) {
 	if (pid == null) return "dead";
 	return isAlive(pid) ? "unknown" : "dead";
+}
+
+/** Identity-aware process observation (issue #70): a live pid whose /proc start
+ *  token matches the recorded identity is `owned` (safe to signal); a mismatch is
+ *  `foreign` (pid reused — the original is gone); alive-but-unverifiable is
+ *  `unknown` (recovery must stay pending, never signal). */
+function defaultObserveProcess(identity) {
+	if (!identity || identity.pid == null) return "unknown";
+	if (!isAlive(identity.pid)) return "dead";
+	const token = readProcStartToken(identity.pid);
+	if (identity.startToken == null || token == null) return "unknown";
+	return token === identity.startToken ? "owned" : "foreign";
+}
+
+/** Signal an identity previously observed as "owned". ESRCH is tolerated (the
+ *  process may exit between observation and signal); anything else rethrows. */
+function defaultSignalOwnedProcess(identity, signal) {
+	try {
+		process.kill(identity.pid, signal);
+	} catch (err) {
+		if (/** @type {NodeJS.ErrnoException} */ (err).code !== "ESRCH") throw err;
+	}
 }
 
 /** @param {import("../core/types.mjs").HostStatus|null} host */
