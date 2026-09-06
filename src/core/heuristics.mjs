@@ -23,6 +23,27 @@ export function assistantText(message) {
 }
 
 /**
+ * Extract text from a pi AgentToolResult object
+ * ({ content: [{ type: "text", text }, ...], details, ... }), or, defensively,
+ * a plain string. Unknown-shaped objects yield "" — never "[object Object]"
+ * (issue #41; mirrors pi's own convertToolResultOutput join("\n") semantics).
+ * @param {any} result
+ * @returns {string}
+ */
+export function toolResultText(result) {
+	if (result == null) return "";
+	if (typeof result === "string") return result;
+	if (typeof result !== "object") return String(result);
+	const content = result.content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.filter((b) => b && b.type === "text" && typeof b.text === "string")
+		.map((b) => b.text)
+		.join("\n")
+		.trim();
+}
+
+/**
  * Collect tool-call blocks from an assistant message.
  * @param {any} message
  * @returns {Array<{name:string, arguments:Record<string,any>}>}
@@ -209,16 +230,33 @@ function capitalize(s) {
 	return s ? s.charAt(0).toUpperCase() + s.slice(1) : s;
 }
 
+const LONE_HIGH_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])/g;
+const LONE_LOW_SURROGATE_RE = /(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+
+/** @param {string} s */
+function stripLoneSurrogates(s) {
+	if (!s) return s;
+	return s.replace(LONE_HIGH_SURROGATE_RE, "").replace(LONE_LOW_SURROGATE_RE, "");
+}
+
 /**
  * Truncate to `n` chars with an ellipsis (counts characters, not display width).
+ * The budget `n` is in UTF-16 units. The cut never splits a surrogate pair
+ * (it backs off one unit when it would), and lone surrogates in the input are
+ * stripped from the result — a lone surrogate renders as U+FFFD, whose
+ * terminal width can disagree with the computed width and misalign rows.
  * @param {string} s
  * @param {number} n
  * @returns {string}
  */
 export function truncate(s, n) {
 	const str = String(s ?? "");
-	if (str.length <= n) return str;
-	return `${str.slice(0, Math.max(0, n - 1))}…`;
+	if (str.length <= n) return stripLoneSurrogates(str);
+	let end = Math.max(0, n - 1);
+	const lastUnit = str.charCodeAt(end - 1);
+	const nextUnit = str.charCodeAt(end);
+	if (lastUnit >= 0xd800 && lastUnit <= 0xdbff && nextUnit >= 0xdc00 && nextUnit <= 0xdfff) end -= 1;
+	return `${stripLoneSurrogates(str.slice(0, end))}…`;
 }
 
 /**

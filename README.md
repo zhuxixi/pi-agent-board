@@ -236,6 +236,26 @@ steer:awaiting-approval
 
 Evidence is collected locally from session events. Agent Board can extract issue and pull-request references from that evidence and show badges such as `#40` or `▸#45` on rows; Peek includes the provider, confidence, source, and URL when available. Built-in GitHub/GitLab-style providers are available, and an optional per-store `providers.json` can extend the provider rules. The `AGENT_BOARD_CODE_REFS=off` setting disables extraction.
 
+For internal code platforms (non-github/gitlab hosts) or custom CLIs, add a per-store `providers.json` so claim/action rules exist and sessions stop depending on the low-confidence mention fallback. Example — an internal CLI (`acli`) with claim-strength issue rules:
+
+```json
+{
+  "providers": [
+    {
+      "name": "acode",
+      "hosts": ["acode.internal.example.com"],
+      "rules": [
+        { "pattern": "acli\\s+issue\\s+update\\s+#?(\\d+)(?=[\\s\\S]*--assignee)", "kind": "issue", "strength": "claim" },
+        { "pattern": "acli\\s+issue\\s+(?:note|comment|close)\\s+#?(\\d+)", "kind": "issue", "strength": "action" },
+        { "pattern": "acli\\s+issue\\s+(?:show|view)\\s+#?(\\d+)", "kind": "issue", "strength": "view" }
+      ]
+    }
+  ]
+}
+```
+
+`hosts` matches the repo's remote host; rules follow the same `pattern`/`kind`/`strength` shape as the built-in `gh`/`glab` tables (`strength`: `claim` > `action` > `view`), and the `#N` capture group supplies the number. Validation errors from a broken file surface in the diagnostics panel and never break extraction — an invalid file is simply ignored.
+
 ## Attach and Fallback Behavior
 
 When PTY support is healthy, Agent Board uses an interactive PTY host for attach and start-and-attach. If PTY support is unavailable, eligible managed sessions can still run in the background through the JSON runner; start-and-attach falls back to background launch with a warning. Adopted external foreground sessions require PTY to continue safely. Press `!` in the dashboard for diagnosis and repair hints.
@@ -319,6 +339,20 @@ Press `!` in the dashboard to open the diagnostic panel and follow its repair hi
 
 A cold PTY host may briefly show a loading or reconnecting surface while it starts. Check the PTY status in the dashboard with `!`; stale hosts are diagnosed separately from active task workers. If the host never becomes healthy, repair `node-pty` or use background mode for eligible managed sessions.
 
+### IME candidate window is stuck at the window edge (Windows WezTerm)
+
+On Windows WezTerm with a WSL2 backend, the IME candidate window may stay pinned to the right edge instead of following the text cursor in an attached session. Windows WezTerm only tracks the IME candidate position from the visible hardware cursor, and Pi hides the hardware cursor by default — the block cursor you see in the editor is drawn content, not the hardware cursor. Linux terminals are not affected.
+
+Make the hardware cursor visible, either way:
+
+```bash
+export PI_HARDWARE_CURSOR=1    # machine-local, e.g. ~/.zshrc.local
+```
+
+or set `"showHardwareCursor": true` in Pi's `settings.json` (syncs across machines if the config is version-controlled; harmless on Linux).
+
+Trade-off: the real terminal cursor becomes visible inside the TUI. This is cosmetic only.
+
 ### Start & attach falls back to background
 
 Start & attach requires PTY support. When PTY is unavailable, the task is still dispatched in the background and the dashboard displays a warning. Repair PTY and retry attach from the normal `/agent-board` command path.
@@ -346,15 +380,19 @@ npm run verify
 
 ## Publishing
 
-Before publishing a release, verify the package, bump the version, and publish it:
+Before publishing a release, verify the package, generate the changelog, then bump, and publish — the changelog must be generated **before** `npm version`, because `npm version` commits and tags the bump, which would empty the generation range:
 
 ```bash
 npm run verify
-npm version patch
+npm run changelog -- --dry-run     # preview the next section (version = current + patch)
+npm run changelog -- patch         # inserts the section into CHANGELOG.md
+node scripts/release_helper.mjs verify   # must exit 0: no functional PR missing from the top section
+git add CHANGELOG.md && git commit -m "docs(changelog): <version>"
+npm version patch                  # bumps package.json, commits, and tags vX.Y.Z
 npm publish
 ```
 
-Use `npm version minor` or `npm version major` when appropriate. If the version is already bumped, skip `npm version patch`. After publishing, users install the scoped package with:
+Use `minor`/`major` in both the changelog and `npm version` steps when appropriate. The changelog is generated from conventional commits since the last `vX.Y.Z` tag (`scripts/release_helper.mjs`, ported from the jfox release flow); review the preview before committing. The `verify` step guards against PRs merged after the changelog was generated — rerun it after any late merge and, after removing the stale top section, re-run `npm run changelog -- <bump>` if it reports missing PRs (apply refuses when the section already exists — remove the stale section first). Release notes for the GitHub Release are the top CHANGELOG section. After publishing, users install the scoped package with:
 
 ```bash
 pi install npm:@zhuxixi/pi-agent-board

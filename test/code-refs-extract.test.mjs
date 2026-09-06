@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
 	builtinProviders,
@@ -283,6 +284,61 @@ test("mention fallback yields no winner when #40 x3 and #41 x3", () => {
 	);
 	assert.equal(result.issue, null);
 	assert.equal(result.pr, null);
+});
+
+test("mention fallback ignores ##N heading forms and word-prefixed #N (issue #61)", () => {
+	const result = extractCodeRefs(
+		{ commands: [], assistantTexts: ["##1378", "##1378", "##1378", "a#1378", "b#99"], worktreePath: null, branch: null, repoUrl: null, host: null },
+		github()
+	);
+	assert.equal(result.issue, null);
+	assert.equal(result.pr, null);
+});
+
+test("mention fallback ignores #N inside inline code spans (issue #61)", () => {
+	const result = extractCodeRefs(
+		{ commands: [], assistantTexts: ["`monitor pr #1378`", "`#1378` x3", "see `#1378`"], worktreePath: null, branch: null, repoUrl: null, host: null },
+		github()
+	);
+	assert.equal(result.issue, null);
+});
+
+test("mention fallback does not count pr-context #N toward issue candidates (issue #61)", () => {
+	const result = extractCodeRefs(
+		{ commands: [], assistantTexts: ["monitor pr #1378", "monitor pr #1378", "monitor pr #1378", "monitor pr #1378", "monitor pr #1378"], worktreePath: null, branch: null, repoUrl: null, host: null },
+		github()
+	);
+	assert.equal(result.issue, null);
+});
+
+test("issue #61 repro shape: guarded placeholder loses, real issue prose wins", () => {
+	const result = extractCodeRefs(
+		{
+			commands: [],
+			assistantTexts: [
+				"设置 IID=\"#1378\" 会让 \"#$IID\" 展开成 \"##1378\" → 404",
+				"`monitor pr #1378` 文档示例",
+				"monitor pr #1378 用户独立调用",
+				"正在处理 issue #18", "issue #18 的修复", "更新 #18 状态",
+			],
+			worktreePath: null, branch: null, repoUrl: null, host: null,
+		},
+		github()
+	);
+	assert.equal(result.issue.number, 18);
+	assert.equal(result.issue.strength, "mention");
+});
+
+test("README providers.json example parses and validates (issue #61)", () => {
+	const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+	const fence = readme.match(/```json\n([\s\S]*?)\n```/);
+	assert.ok(fence, "README contains a json fence");
+	const parsed = JSON.parse(fence[1]);
+	assert.ok(Array.isArray(parsed.providers), "example is a providers.json payload");
+	const { provider, errors } = validateProvider(parsed.providers[0]);
+	assert.deepEqual(errors, []);
+	assert.equal(provider.name, "acode");
+	assert.equal(provider.rules.length, 3);
 });
 
 test("unresolved gh pr create yields pr null", () => {

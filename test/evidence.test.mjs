@@ -22,12 +22,14 @@ test("evidence reducer captures files, commands, errors, assistant evidence, and
 	reduceEvidence(snap, { type: "tool_execution_start", toolCallId: "t1", toolName: "write", args: { path: "src/a.ts" } }, 10);
 	reduceEvidence(snap, { type: "tool_execution_start", toolCallId: "b1", toolName: "bash", args: { command: "npm test" } }, 20);
 	reduceEvidence(snap, { type: "tool_execution_end", toolCallId: "b1", toolName: "bash", isError: false, result: "ok" }, 30);
+	reduceEvidence(snap, { type: "tool_execution_end", toolCallId: "b2", toolName: "bash", isError: false, result: { content: [{ type: "text", text: "https://github.com/zhuxixi/pi-agent-board/pull/45" }] } }, 31);
 	reduceEvidence(snap, { type: "tool_execution_end", toolCallId: "e1", toolName: "edit", isError: true }, 40);
 	reduceEvidence(snap, { type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Tests pass." }] } }, 50);
 	assert.equal(snap.fileChanges.length, 1);
 	assert.equal(snap.fileChanges[0].path, "src/a.ts");
 	assert.equal(snap.commands[0].kind, "test");
 	assert.equal(snap.commands[0].status, "passed");
+	assert.equal(snap.commands.find((c) => c.id === "b2").outputPreview, "https://github.com/zhuxixi/pi-agent-board/pull/45");
 	assert.equal(snap.errors.length, 1);
 	assert.equal(snap.assistantEvidence.at(-1).text, "Tests pass.");
 	const status = createRunStatus({ viewId: "v1", runId: "r1", kind: "dispatch", prompt: "x", model: null }, null, 1);
@@ -35,7 +37,7 @@ test("evidence reducer captures files, commands, errors, assistant evidence, and
 	finalizeEvidence(snap, status, 60);
 	const summary = summarizeEvidence(snap);
 	assert.equal(summary.ready, true);
-	assert.equal(summary.commandCount, 1);
+	assert.equal(summary.commandCount, 2);
 });
 
 test("view evidence persists", () => {

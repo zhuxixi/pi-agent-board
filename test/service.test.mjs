@@ -1132,6 +1132,35 @@ test("ensureHost probes PTY support with TTL cache, not forced refresh", () => {
 	}
 });
 
+test("reconcile auto-drain uses the cached PTY probe, never forced refresh", () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const st = readState(root, "v1");
+		st.semanticState = "idle";
+		st.processState = "exited";
+		writeState(root, st);
+		const probeCalls = [];
+		const svc = service(root, {
+			ptySupport: (opts = {}) => {
+				probeCalls.push(opts);
+				return { ok: false, reason: "test" };
+			},
+			launch: () => ({ pid: null, configPath: "/no/config.json" }),
+		});
+		const queued = svc.queueFollowUp("v1", "next step");
+		assert.equal(queued.ok, true);
+		const fixed = svc.reconcile();
+		assert.ok(fixed >= 1, "reconcile drained the queued follow-up");
+		assert.ok(probeCalls.length >= 1, "drain path probed ptySupport");
+		for (const opts of probeCalls) {
+			assert.notEqual(opts?.refresh, true, "reconcile→drain must not force ptySupport refresh");
+		}
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("markCompleted clears autoState in the run status so in-flight model passes skip refinement", () => {
 	const root = freshRoot();
 	try {

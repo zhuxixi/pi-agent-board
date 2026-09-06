@@ -1060,7 +1060,10 @@ export function createService(opts) {
 				appendDiagnostic(root, viewId, { source: "queue", level: "warn", code: "follow_up_send_failed", message: "Queued follow-up could not be delivered to the host", details: { kind: item.kind, error: sent.error ?? "unknown", retryable: sent.retryable !== false } });
 				return { ok: true, pending: true, item };
 			}
-			const pty = ptySupport({ refresh: true });
+			// Poll-path drain (reconcile): cached probe semantics — success cached for
+			// process lifetime, failures retried on a 2s TTL; never force a real
+			// pty.spawn on every 700ms cycle when a follow-up keeps failing to start.
+			const pty = ptySupport();
 			let runId = null;
 			let hostMode = "pty";
 			if (!pty.ok) hostMode = "json-runner";
