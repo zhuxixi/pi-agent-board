@@ -1111,8 +1111,17 @@ test("heartbeat survives host-meta lock contention from a foreign process (CR r1
 		// several heartbeat ticks: the runner's ownedUpdate reads pure lock
 		// contention ({updated:false, ownerChanged:false}) and must retry next
 		// tick — never tear down the live session as "owner_lost".
-		const lock = tryAcquireOwnedViewLock(root, "v1", "host-meta", { identity: { pid: process.pid, startToken: "tester" } });
-		assert.equal(lock.acquired, true, "test must hold the host-meta lease");
+		// Acquiring the lease must tolerate transient contention from the
+		// runner's periodic heartbeat writes (busy → retry; 2s bound).
+		let lock = null;
+		const leaseDeadline = Date.now() + 2000;
+		for (;;) {
+			const attempt = tryAcquireOwnedViewLock(root, "v1", "host-meta", { identity: { pid: process.pid, startToken: "tester" } });
+			if (attempt.acquired) { lock = attempt; break; }
+			if (Date.now() >= leaseDeadline) break;
+			await new Promise((r) => setTimeout(r, 25));
+		}
+		assert.ok(lock, "test must hold the host-meta lease");
 		await new Promise((resolve) => setTimeout(resolve, 2300)); // > 2 heartbeat ticks
 		assert.ok(isAlive(runner.pid ?? -1), "runner must survive lease contention");
 		assert.ok(isAlive(childPid), "child must survive lease contention");
