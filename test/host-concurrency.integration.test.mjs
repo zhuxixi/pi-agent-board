@@ -201,16 +201,20 @@ test("A10: SIGKILLed runner is recovered by the attach resolver without double c
 		const original = await waitFor(() => {
 			const h = readHost(root, "v1");
 			return h?.state === "alive" && h.readyAt != null && h.childPid && isAlive(h.runnerPid) ? h : false;
-		}, 15_000);
+		}, 30_000);
 		assert.equal(isAlive(original.childPid), true, "original child alive before the kill");
 
 		// Orphan the host the hard way: runner SIGKILL leaves a stale endpoint file,
 		// host.json claiming alive, and a live orphaned child — the classic #70 state.
 		process.kill(original.runnerPid, "SIGKILL");
-		await waitFor(() => !isAlive(original.runnerPid), 5_000);
+		await waitFor(() => !isAlive(original.runnerPid), 10_000);
 
+		// CR round-7 (blocking): on slow CI runners the full chain — stale detection,
+		// recovery + child-kill ladder, adopt, cold runner boot, ready probe — can
+		// stretch past 40s and starve the deadline ("host start timed out"). Budget
+		// is sized for the slowest runners; typical completion is ~20s.
 		const service = testService(root);
-		const resolved = await service.resolveAttachTarget("v1", { timeoutMs: 40_000 });
+		const resolved = await service.resolveAttachTarget("v1", { timeoutMs: 90_000 });
 		assert.equal(resolved.kind, "pty", `resolver produced a pty target: ${JSON.stringify(resolved)}`);
 		assert.notEqual(resolved.instanceId, original.instanceId, "replacement is a new instance");
 
@@ -220,7 +224,7 @@ test("A10: SIGKILLed runner is recovered by the attach resolver without double c
 		const replacement = await waitFor(() => {
 			const h = readHost(root, "v1");
 			return h?.state === "alive" && h.readyAt != null && h.runnerPid && isAlive(h.runnerPid) && h.childPid ? h : false;
-		}, 15_000);
+		}, 30_000);
 		assert.notEqual(replacement.childPid, original.childPid);
 		assert.notEqual(replacement.instanceId, original.instanceId);
 		assert.equal(isAlive(replacement.runnerPid), true);
