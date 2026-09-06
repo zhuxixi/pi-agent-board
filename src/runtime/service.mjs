@@ -588,8 +588,12 @@ export function createService(opts) {
 	 * @param {string} expectedInstanceId
 	 * @returns {Promise<{ ok: boolean, recovered?: boolean, instanceId?: string, socketPath?: string|null, error?: string }>}
 	 */
+	/** A host role observation is "ended" when it is provably not running:
+	 *  never-spawned, confirmed dead, or a reused PID (foreign). */
+	const hostRoleEnded = (o) => o === "not_started" || o === "dead" || o === "foreign";
+
 	async function recoverHost(viewId, expectedInstanceId) {
-		const ended = (o) => o === "not_started" || o === "dead" || o === "foreign";
+		const ended = hostRoleEnded;
 		const instanceStillExpected = () => {
 			const h = readHost(root, viewId);
 			return h != null && h.instanceId === expectedInstanceId;
@@ -647,7 +651,7 @@ export function createService(opts) {
 					childKillSent = true;
 				}
 			}
-			await new Promise((resolve) => setTimeout(resolve, HOST_RECOVERY_POLL_MS));
+			await sleepFnImpl(HOST_RECOVERY_POLL_MS);
 		}
 		// Grace exhausted or loop broke — verify both roles are confirmed ended before claiming.
 		const finalHost = readHost(root, viewId);
@@ -711,11 +715,11 @@ export function createService(opts) {
 		const host = row.host ?? null;
 		// Adopt-and-spawn (issue #70 Task 12): a `starting` claim whose runner was never
 		// spawned (the launcher crashed between claim and spawn, or recoverHost claimed
-		// a replacement without spawning) would pend forever. Take it over when the
-		// claim is provably stale, its claimer is gone, or it is THIS process's own
-		// claim (recoverHost's fresh claim — no other launcher can be mid-transaction
-		// for it). Fresh foreign claims stay untouched: their launcher may legitimately
-		// be between claim and spawn inside the grace window.
+		// a replacement without spawning) would pend forever. Take it over ONLY when the
+		// claim is provably stale or its claimer is gone; even THIS process's own fresh
+		// claims (e.g. recoverHost's replacement) wait out the grace window like any
+		// launcher mid-transaction (contract §6). Fresh foreign claims stay untouched:
+		// their launcher may legitimately be between claim and spawn inside the window.
 		if (host?.state === "starting" && host.runnerSpawnedAt == null && host.instanceId != null) {
 			const claimStale = nowImpl() - (host.claimAt ?? 0) > HOST_START_GRACE_MS;
 			const claimerGone = !isAlive(host.claimPid ?? null);
@@ -867,8 +871,33 @@ export function createService(opts) {
 				continue;
 			}
 
-			// A revoke is already in flight — wait it out; never revoke twice.
+			// A revoke is in flight — wait it out; never revoke twice. But a stale
+			// `stopping` record whose processes are provably gone is a stranded
+		// deadlock (SIGKILLed runner never finalizes; nothing else covers stopping)
+			// — finalize it through the same bounded recovery path (CR r1 f2).
 			if (host.state === "stopping") {
+				const staleStop = host.instanceId != null && nowImpl() - (host.stopRequestedAt ?? host.claimAt ?? 0) >= HOST_RECOVERY_GRACE_MS;
+				if (staleStop && !recovered) {
+					const runnerObs = observeHostRole(host, "runner");
+					const childObs = observeHostRole(host, "child");
+					if (runnerObs === "unknown" || childObs === "unknown") {
+						// Unverifiable processes on a stranded record — never force.
+						return pending(sessionFile, "recovery_pending: host identity unverifiable");
+					}
+					if (hostRoleEnded(runnerObs) && hostRoleEnded(childObs)) {
+						recovered = true;
+						try {
+							const rec = await recoverHost(viewId, /** @type {string} */ (host.instanceId));
+							if (!rec.ok && rec.error === "recovery_pending") {
+								return pending(sessionFile, "recovery_pending: host identity unverifiable");
+							}
+						} catch {
+							// recoverHost rethrows non-ESRCH signal failures — surface, don't crash.
+						}
+						await sleepFnImpl(HOST_PROBE_RETRY_MS);
+						continue;
+					}
+				}
 				await sleepFnImpl(HOST_PROBE_RETRY_MS);
 				continue;
 			}

@@ -328,3 +328,77 @@ test("attachTarget remains a pure sync hint with no probe or spawn side effects"
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("resolver finalizes a stale stopping host with provably-dead processes (CR r1 f2)", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		// Runner SIGKILLed mid-run: host.json was flipped to stopping, nothing
+		// ever finalizes it. stopRequestedAt is far in the past (stale).
+		aliveHost(root, "v1", "i1", {
+			state: "stopping",
+			stopRequestedAt: 1_000_000 - 30_000,
+			revokeToken: "rev-1",
+			stopReason: "user",
+		});
+		let clock = 1_000_000;
+		const probe = scriptProbe(["missing", "ready"]);
+		const spawns = [];
+		const svc = resolverService(root, {
+			now: () => clock,
+			probeHostFn: probe.fn,
+			sleepFn: async () => {
+				clock += 20_000;
+			},
+			observeProcess: () => "dead",
+			launchHost: (_root, config) => {
+				spawns.push({ config });
+				return { pid: process.pid, configPath: config.configPath };
+			},
+		});
+		const result = await svc.resolveAttachTarget("v1");
+		assert.equal(result.kind, "pty", `expected replacement attach, got ${JSON.stringify(result)}`);
+		assert.ok(result.instanceId && result.instanceId !== "i1", "attaches to a replacement instance");
+		assert.equal(spawns.length, 1, "adopt-and-spawn runs exactly once for the recovered claim");
+		assert.equal(spawns[0].config.instanceId, result.instanceId);
+		const finalHost = readHost(root, "v1");
+		assert.equal(finalHost.instanceId, result.instanceId, "stale stopping record was finalized and replaced");
+		assert.ok(finalHost.runnerSpawnedAt != null, "replacement claim carries the adopted spawn");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("resolver keeps waiting on a fresh stopping host — no recovery while it winds down (CR r1 f2)", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		// Fresh revoke with the runner observably alive: the resolver must wait,
+		// not escalate, not probe, not spawn.
+		aliveHost(root, "v1", "i1", {
+			state: "stopping",
+			stopRequestedAt: Date.now(),
+			revokeToken: "rev-2",
+			stopReason: "user",
+		});
+		const probe = scriptProbe([]);
+		const spawns = [];
+		const svc = resolverService(root, {
+			probeHostFn: probe.fn,
+			sleepFn: instantSleep,
+			observeProcess: () => "owned",
+			launchHost: (_root, config) => {
+				spawns.push({ config });
+				return { pid: process.pid, configPath: config.configPath };
+			},
+		});
+		const result = await svc.resolveAttachTarget("v1", { timeoutMs: 250 });
+		assert.equal(result.kind, "pending");
+		assert.match(result.reason, /timed out/);
+		assert.equal(probe.calls.length, 0, "a live stopping host is never probed or recovered");
+		assert.equal(spawns.length, 0);
+		assert.equal(readHost(root, "v1")?.instanceId, "i1", "record untouched while the runner winds down");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});

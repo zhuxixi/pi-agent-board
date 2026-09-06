@@ -10,6 +10,7 @@ import { atomicWriteJson } from "../src/core/atomic.mjs";
 import { readDiagnostics } from "../src/core/diagnostics.mjs";
 import * as P from "../src/core/paths.mjs";
 import { claimHost, createView, readHost, updateOwnedHost, writeHost } from "../src/core/store.mjs";
+import { tryAcquireOwnedViewLock } from "../src/core/locks.mjs";
 
 function freshRoot() {
 	return mkdtempSync(join(tmpdir(), "agentview-pty-"));
@@ -1086,6 +1087,96 @@ test("resize before child ready is cached and applied when ready is published", 
 		assert.equal(await waitForExit(runner, 5000), true);
 	} finally {
 		try { socket?.destroy(); } catch {}
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("heartbeat survives host-meta lock contention from a foreign process (CR r1 f1)", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	let socket;
+	try {
+		const { runner: r, socketPath } = await launchOwnedRunner(root, "v1", "i1");
+		runner = r;
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.readyAt != null && h?.childPid ? h : false;
+		});
+		childPid = host.childPid;
+		// Hold the host-meta lease from THIS (foreign-to-the-runner) process across
+		// several heartbeat ticks: the runner's ownedUpdate reads pure lock
+		// contention ({updated:false, ownerChanged:false}) and must retry next
+		// tick — never tear down the live session as "owner_lost".
+		const lock = tryAcquireOwnedViewLock(root, "v1", "host-meta", { identity: { pid: process.pid, startToken: "tester" } });
+		assert.equal(lock.acquired, true, "test must hold the host-meta lease");
+		await new Promise((resolve) => setTimeout(resolve, 2300)); // > 2 heartbeat ticks
+		assert.ok(isAlive(runner.pid ?? -1), "runner must survive lease contention");
+		assert.ok(isAlive(childPid), "child must survive lease contention");
+		assert.equal(readHost(root, "v1")?.state, "alive", "no terminal write during contention");
+		lock.lease.release();
+		// Contention over: heartbeat resumes bumping lastSeenAt, and the session
+		// still serves clients end-to-end.
+		await waitFor(() => (readHost(root, "v1")?.lastSeenAt ?? 0) > host.lastSeenAt, 4000);
+		socket = createConnection(socketPath);
+		socket.on("error", () => {});
+		await once(socket, "connect");
+		send(socket, { type: "input", data: "exit\r" });
+		assert.equal(await waitForExit(runner, 5000), true, "runner still healthy after contention");
+		await waitFor(() => readHost(root, "v1")?.state === "exited");
+		socket.destroy();
+	} finally {
+		try { socket?.destroy(); } catch {}
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("probe connections leave host.json untouched; real clients flip attachedEver (CR r1 f3)", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	try {
+		const { runner: r, socketPath } = await launchOwnedRunner(root, "v1", "i1");
+		runner = r;
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.readyAt != null && h?.childPid ? h : false;
+		});
+		childPid = host.childPid;
+		// The resolver's probe pattern: connect, probe hello, destroy. Repeat.
+		for (let i = 0; i < 5; i++) {
+			const probe = createConnection(socketPath);
+			probe.on("error", () => {});
+			await once(probe, "connect");
+			probe.write(JSON.stringify({ type: "hello", clientId: "probe", wantOutput: false }) + "\n");
+			await new Promise((resolve) => probe.once("data", resolve));
+			probe.destroy();
+			await new Promise((resolve) => setTimeout(resolve, 30));
+		}
+		const afterProbes = readHost(root, "v1");
+		assert.notEqual(afterProbes.attachedEver, true, "probes must never mark the host attached");
+		// A real UI client (hello with a non-probe clientId) flips attachedEver.
+		const client = createConnection(socketPath);
+		client.on("error", () => {});
+		await once(client, "connect");
+		client.write(JSON.stringify({ type: "hello", clientId: "ui-test", wantOutput: true }) + "\n");
+		const afterClient = await waitFor(() => (readHost(root, "v1")?.attachedEver === true ? readHost(root, "v1") : false), 2000);
+		assert.equal(afterClient.attachedEver, true, "a real client still records attachedEver");
+		client.destroy();
+		// Cleanup: exit the child naturally so teardown stays on the tested path.
+		const exitClient = createConnection(socketPath);
+		exitClient.on("error", () => {});
+		await once(exitClient, "connect");
+		send(exitClient, { type: "input", data: "exit\r" });
+		await waitForExit(runner, 5000);
+		exitClient.destroy();
+	} finally {
 		try { runner?.kill("SIGKILL"); } catch {}
 		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
 		await new Promise((r) => setTimeout(r, 50));

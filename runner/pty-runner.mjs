@@ -598,10 +598,13 @@ async function ownedMain(config) {
 	//    instance; an occupied path means someone else owns it.
 	const listenOutcome = await new Promise((resolveListen) => {
 		const onError = (err) => resolveListen({ ok: false, error: err });
+		// Probe connections (clientId:"probe" hello) must not write host.json: the
+		// attach resolver's 150ms probe loop would amplify fenced writes and flip
+		// attachedEver with no client ever attached (CR round-1 finding 3).
+		const probeSockets = new WeakSet();
 		server = createServer((socket) => {
 			clients.add(socket);
 			socket.write(JSON.stringify({ type: "hello", status: host, editorEmpty }) + "\n");
-			ownedUpdate((cur) => ({ ...cur, attachedEver: true }));
 			broadcast({ type: "status", status: host });
 			let buffer = "";
 			socket.on("data", (chunk) => {
@@ -612,14 +615,17 @@ async function ownedMain(config) {
 			});
 			socket.on("close", () => {
 				clients.delete(socket);
+				if (probeSockets.has(socket)) return;
 				// Merge into the live record (a stale closure spread here erases a
 				// concurrent revoke — final review finding 2).
 				ownedUpdate((cur) => ({ ...cur }));
 			});
 			socket.on("error", () => {
 				clients.delete(socket);
+				if (probeSockets.has(socket)) return;
 				ownedUpdate((cur) => ({ ...cur }));
 			});
+			socket.markProbe = () => probeSockets.add(socket);
 		});
 		server.once("error", onError);
 		server.listen(socketPath, () => {
@@ -767,7 +773,10 @@ async function ownedMain(config) {
 			return;
 		}
 		const hb = ownedUpdate((cur) => ({ ...cur }));
-		if (!hb.updated) finish("owner_lost", 0);
+		// Plain host-meta lease contention returns {updated:false, ownerChanged:false}
+		// — transient, retry next tick (store.mjs contract). Only a confirmed
+		// ownership change tears the session down (CR round-1 finding 1).
+		if (hb.ownerChanged) finish("owner_lost", 0);
 	}, HEARTBEAT_MS);
 	heartbeatTimer.unref?.();
 
@@ -781,6 +790,15 @@ async function ownedMain(config) {
 		try { msg = JSON.parse(line); } catch { return send(socket, { type: "error", message: "invalid json" }); }
 		switch (msg.type) {
 			case "hello":
+				// Probe handshakes (host-probe.mjs) are read-only: mark the socket so
+				// close/error skip the merge write, and never flip attachedEver
+				// (CR round-1 finding 3). Real clients record attachedEver here —
+				// deferred from connect time, which cannot distinguish them yet.
+				if (msg.clientId === "probe") {
+					socket.markProbe?.();
+				} else {
+					ownedUpdate((cur) => ({ ...cur, attachedEver: true }));
+				}
 				send(socket, { type: "hello", status: host, editorEmpty });
 				break;
 			case "input": {
