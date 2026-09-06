@@ -281,3 +281,55 @@ test("reconcile leaves starting hosts within the claim grace alone, and finalize
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+
+test("recoverHost's replacement claim is immediately adopt-eligible (no grace wait)", async () => {
+	const root = freshRoot();
+	const spawnCalls = [];
+	// Frozen-ish clock: recovery runs at T, adoption is probed at T+100 — deep
+	// inside HOST_START_GRACE_MS. Before the fix the fresh claim (live claimPid)
+	// pended through the whole grace window; now it must adopt on the spot.
+	let clock = 1_000_000_000_000;
+	const svc = service(root, {
+		now: () => clock,
+		observeProcess: () => "dead",
+		signalOwnedProcess: () => {},
+		launchHost: (_root, config) => {
+			spawnCalls.push(config.instanceId);
+			return { pid: process.pid, configPath: config.configPath };
+		},
+	});
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeHostRecord(root, "v1", {
+			runnerPid: 4242,
+			runnerIdentity: { pid: 4242, startToken: "t" },
+			runnerSpawnedAt: 1,
+		});
+
+		const res = await svc.recoverHost("v1", "i1");
+		assert.equal(res.ok, true);
+
+		// The replacement claim carries NO launcher: the recovery transaction is
+		// complete, spawning is the adopter's job, nothing waits on claimPid.
+		const claimed = readHost(root, "v1");
+		assert.equal(claimed.instanceId, res.instanceId);
+		assert.equal(claimed.claimPid, null, "recovery claim must not carry a live claimPid");
+		assert.equal(claimed.claimIdentity, null, "recovery claim must not carry a claimIdentity");
+
+		// 100ms after the claim — far inside the grace window — adoption fires.
+		clock += 100;
+		const ensured = svc.ensureHost("v1");
+		assert.equal(ensured.ok, true);
+		assert.equal(ensured.started, true, `adoption must be immediate, got: ${JSON.stringify(ensured)}`);
+		assert.equal(ensured.instanceId, res.instanceId, "adoption spawns the recovery claim, not a new one");
+
+		const after = readHost(root, "v1");
+		assert.notEqual(after.runnerSpawnedAt, null, "runner spawned by adoption");
+		assert.equal(after.instanceId, res.instanceId);
+		assert.deepEqual(spawnCalls, [res.instanceId], "exactly one adopt-and-spawn");
+		assert.ok(readDiagnostics(root, "v1").some((d) => d.code === "host_adopted"), "host_adopted recorded");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});

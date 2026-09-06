@@ -685,14 +685,21 @@ export function createService(opts) {
 			}));
 			if (!finalized.updated) return { ok: false, error: "owner_changed" };
 			const instanceId = randomIdImpl();
+			// claimPid stays null: this recovery transaction is COMPLETE once the claim
+			// is on disk (nothing of ours is still between claim and spawn — spawning is
+			// deliberately the adopter's job). A live claimPid would make ensureHost /
+			// the resolver treat the replacement as a launcher mid-transaction and wait
+			// out HOST_START_GRACE_MS before adopting, which starves the recovery chain
+			// on slow machines (PR #84 A10 CI flake). Null = no launcher to protect:
+			// claimerGone holds immediately, so adoption can fire on the next tick.
 			const claimed = claimHost(root, {
 				viewId,
 				instanceId,
 				configPath: P.hostConfigPathFor(root, viewId, instanceId),
 				socketPath: P.hostEndpointPathFor(process.platform, root, viewId, instanceId),
 				claimAt: nowImpl(),
-				claimPid: process.pid,
-				claimIdentity: serviceIdentity(),
+				claimPid: null,
+				claimIdentity: null,
 				cols: Number(process.env.COLUMNS || 120),
 				rows: Number(process.env.LINES || 36),
 			});
@@ -716,10 +723,11 @@ export function createService(opts) {
 		// Adopt-and-spawn (issue #70 Task 12): a `starting` claim whose runner was never
 		// spawned (the launcher crashed between claim and spawn, or recoverHost claimed
 		// a replacement without spawning) would pend forever. Take it over ONLY when the
-		// claim is provably stale or its claimer is gone; even THIS process's own fresh
-		// claims (e.g. recoverHost's replacement) wait out the grace window like any
-		// launcher mid-transaction (contract §6). Fresh foreign claims stay untouched:
-		// their launcher may legitimately be between claim and spawn inside the window.
+		// claim is provably stale or its claimer is gone. Recovery-created claims carry
+		// claimPid:null (their transaction is complete; spawning is the adopter's job),
+		// so claimerGone holds immediately and they adopt without a grace wait. Fresh
+		// claims with a live claimPid stay untouched: their launcher may legitimately be
+		// between claim and spawn inside the grace window.
 		if (host?.state === "starting" && host.runnerSpawnedAt == null && host.instanceId != null) {
 			const claimStale = nowImpl() - (host.claimAt ?? 0) > HOST_START_GRACE_MS;
 			const claimerGone = !isAlive(host.claimPid ?? null);
@@ -922,7 +930,7 @@ export function createService(opts) {
 			}
 
 			const legacy = host.instanceId == null;
-			const withinGrace = host.state === "starting" && (legacy || nowImpl() - (host.claimAt ?? 0) < HOST_START_GRACE_MS);
+			const withinGrace = host.state === "starting" && (legacy || (host.claimPid != null && nowImpl() - (host.claimAt ?? 0) < HOST_START_GRACE_MS));
 			const probe = await probeHostImpl(host.socketPath ?? "", { expectedViewId: viewId, expectedInstanceId: host.instanceId ?? null });
 			if (probe.classification === "ready") {
 				return { kind: "pty", socketPath: host.socketPath ?? null, sessionFile, instanceId: host.instanceId ?? null };
@@ -930,9 +938,10 @@ export function createService(opts) {
 
 			if (host.state === "starting") {
 				// Gap-closer: a claim whose runner was never spawned (recovery claim or an
-				// abandoned launch) is adopted past grace — fresh claims, even this
-			// process's own (recoverHost's replacement), wait out the grace window like
-			// any launcher mid-transaction (contract §6).
+				// abandoned launch) is adopted past grace. Recovery-created claims carry
+				// claimPid:null — no launcher to protect — so they are NOT within grace and
+				// adopt immediately; claims with a live claimPid wait out the window like
+				// any launcher mid-transaction (contract §6).
 				// Retried per iteration: a contended or failed attempt must not pend
 				// the resolver to its deadline (issue #70 CI wave 2).
 			if (!legacy && host.runnerSpawnedAt == null && probe.classification === "missing" && !withinGrace) {
