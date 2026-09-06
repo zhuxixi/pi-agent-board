@@ -208,22 +208,51 @@ export function claimHost(root, provisionalHost, opts = {}) {
 }
 
 /**
+ * Bounded contention retry for owner-fenced host writes (issue #70, PR #84 CI
+ * wave 2). Heartbeat/client-merge writes hold the host-meta lease for only a
+ * few milliseconds, but a one-shot acquire can land inside that window and
+ * return busy — a revoke or recovery write that silently no-ops is a real
+ * reliability bug, not just a test race. Both `busy` (live owner) and
+ * `blocked` (identity-less short hold — updateOwnedHost itself acquires
+ * host-meta without a reclaimable identity, so concurrent fenced writes look
+ * blocked to each other) are transient here: retry a few times with a short
+ * synchronous sleep before giving up. A genuinely orphaned host-meta lock
+ * (holder SIGKILLed mid-hold) survives the window and surfaces as retryable
+ * not-updated — never as ownership loss.
+ */
+const UPDATE_LOCK_BUSY_ATTEMPTS = 3;
+const UPDATE_LOCK_BUSY_SLEEP_MS = 20;
+
+/**
  * Owner-fenced compare-and-write for host.json. Re-reads the view's record
  * under the host-meta lease and only applies `mutate` while it still belongs
  * to `expectedInstanceId`; a superseded instance's late heartbeat/crash/exit
  * writes are rejected with `ownerChanged: true` and the current host (issue
- * #70). Lease contention returns not-updated with `ownerChanged: false` —
- * callers (heartbeats) simply retry next tick.
+ * #70). Lease contention that survives the bounded retry returns not-updated
+ * with `ownerChanged: false` — callers treat that as retryable (heartbeats
+ * simply retry next tick; revokes/recovery re-attempt).
  * @param {string} root
  * @param {string} viewId
  * @param {string} expectedInstanceId
  * @param {(host: HostStatus) => HostStatus} mutate returns a new record
- * @param {{ heldStartLease?: unknown }} [opts] reserved for host-start lease nesting
+ * @param {{ heldStartLease?: unknown, lockImpl?: typeof tryAcquireOwnedViewLock }} [opts]
+ *   heldStartLease is reserved for host-start lease nesting; lockImpl injects
+ *   the host-meta acquisition for deterministic contention tests.
  * @returns {{ updated: boolean, ownerChanged: boolean, host: HostStatus|null }}
  */
 export function updateOwnedHost(root, viewId, expectedInstanceId, mutate, opts = {}) {
-	const lock = tryAcquireOwnedViewLock(root, viewId, "host-meta");
-	if (!lock.acquired) return { updated: false, ownerChanged: false, host: null };
+	const acquireHostMeta = opts.lockImpl ?? tryAcquireOwnedViewLock;
+	let lock;
+	for (let attempt = 0; ; attempt++) {
+		lock = acquireHostMeta(root, viewId, "host-meta");
+		if (lock.acquired) break;
+		// busy and blocked are both millisecond-scale holds for host-meta;
+		// neither is ownership information — only the fenced read below is.
+		if (attempt >= UPDATE_LOCK_BUSY_ATTEMPTS - 1) {
+			return { updated: false, ownerChanged: false, host: null };
+		}
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, UPDATE_LOCK_BUSY_SLEEP_MS);
+	}
 	try {
 		const host = readHost(root, viewId);
 		if (!host || !sameHostOwner(host, expectedInstanceId)) {

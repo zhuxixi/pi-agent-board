@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import * as P from "../src/core/paths.mjs";
-import { acquireOwnedViewLock } from "../src/core/locks.mjs";
+import { acquireOwnedViewLock, tryAcquireOwnedViewLock } from "../src/core/locks.mjs";
 import {
 	claimHost,
 	createView,
@@ -246,6 +246,93 @@ test("updateOwnedHost rejects a mutate that swaps the instanceId under it", () =
 		const after = readHost(root, "v1");
 		assert.equal(after.instanceId, before.instanceId, "disk record must be unchanged");
 		assert.deepEqual(after, before);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+// ---- bounded contention retry (issue #70 CI wave 2) -------------------------
+
+/** Scripted host-meta acquisition: pops scripted results, then delegates. */
+function scriptLock(scripted) {
+	const calls = [];
+	const impl = (root, viewId, name) => {
+		calls.push({ root, viewId, name });
+		const next = scripted.shift();
+		return next ? next(root, viewId, name) : tryAcquireOwnedViewLock(root, viewId, name);
+	};
+	return { impl, calls };
+}
+
+test("updateOwnedHost retries transient host-meta contention and lands the write", () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeHost(root, hostFixture(root, "v1"));
+
+		// Two busy acquires then free: exactly the transient contention window
+		// (runner heartbeat holds host-meta for a few ms) that no-op'd the revoke
+		// write on Node 22 CI. The bounded retry must ride it out and land.
+		const lock = scriptLock([
+			() => ({ acquired: false, reason: "busy" }),
+			() => ({ acquired: false, reason: "busy" }),
+		]);
+		const res = updateOwnedHost(
+			root,
+			"v1",
+			"inst-b",
+			(host) => ({ ...host, state: "stopping", stopRequestedAt: Date.now() }),
+			{ lockImpl: lock.impl },
+		);
+		assert.equal(res.updated, true, "write lands after contention clears within the retry window");
+		assert.equal(res.ownerChanged, false);
+		assert.equal(lock.calls.length, 3, "two busy attempts then a real acquire");
+		assert.equal(readHost(root, "v1").state, "stopping");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("updateOwnedHost gives up bounded after sustained contention, retryable not ownerChanged", () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeHost(root, hostFixture(root, "v1"));
+
+		const lock = scriptLock(Array.from({ length: 10 }, () => () => ({ acquired: false, reason: "busy" })));
+		const res = updateOwnedHost(root, "v1", "inst-b", (host) => ({ ...host, state: "stopping" }), { lockImpl: lock.impl });
+		assert.equal(res.updated, false);
+		assert.equal(res.ownerChanged, false, "contention is never reported as ownership loss");
+		assert.equal(lock.calls.length, 3, "bounded at 3 attempts, no hang, no infinite retry");
+		assert.equal(readHost(root, "v1").state, "alive", "disk record untouched");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("updateOwnedHost retries blocked contention the same bounded amount (identity-less short holds)", () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeHost(root, hostFixture(root, "v1"));
+
+		// A concurrent updateOwnedHost holder acquires host-meta WITHOUT a
+		// reclaimable identity, so contenders see `blocked`, not `busy` — the
+		// exact signature of the Node 22 CI revoke collision. It is still a
+		// millisecond-scale hold: retry it, bounded, like busy.
+		const lock = scriptLock([
+			() => ({ acquired: false, reason: "blocked" }),
+			() => ({ acquired: false, reason: "blocked" }),
+		]);
+		const res = updateOwnedHost(
+			root,
+			"v1",
+			"inst-b",
+			(host) => ({ ...host, state: "stopping", stopRequestedAt: Date.now() }),
+			{ lockImpl: lock.impl },
+		);
+		assert.equal(res.updated, true, "write lands after identity-less contention clears");
+		assert.equal(lock.calls.length, 3, "two blocked attempts then a real acquire");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

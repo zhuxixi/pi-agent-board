@@ -840,8 +840,14 @@ export function createService(opts) {
 	async function resolveAttachTargetInner(viewId, timeoutMs) {
 		const deadline = nowImpl() + timeoutMs;
 		let ensured = false;
-		let adopted = false;
 		let recovered = false;
+		// Last adopt-and-spawn attempt (issue #70 CI wave 2): adoption is retried
+		// across loop iterations while the stale-claim conditions hold — a single
+		// failed/contended attempt must not pend the resolver to its deadline. The
+		// host-start lease inside adoptClaimedHost serializes attempts (idempotent:
+		// a successful adoption flips runnerSpawnedAt and the conditions stop
+		// holding), and this timestamp rate-limits post-adopt re-ensures.
+		let lastAdoptAt = 0;
 		/** @param {string} reason @param {string} sessionFile */
 		const pending = (sessionFile, reason) => ({ kind: "pending", sessionFile, reason });
 		for (;;) {
@@ -855,6 +861,19 @@ export function createService(opts) {
 			// ensure exactly one host start per invocation, then fall through to probing.
 			if (!host || !row.hostActive) {
 				if (isAgentBusy(row)) return pending(sessionFile, "background run active");
+				// A claim that turned terminal AFTER our adopt attempt (spawn failed —
+				// adoptClaimedHost marks it failed fenced) may be re-claimed, at most
+				// once per grace window: the fresh claim's own grace period spaces the
+				// attempts out and the resolver deadline bounds the total, preserving the
+				// once-per-invocation ensure guarantee as a rate limit rather than a
+				// pend-forever on one bad attempt.
+				if (
+					(host?.state === "exited" || host?.state === "failed") &&
+					lastAdoptAt > 0 &&
+					nowImpl() - lastAdoptAt >= HOST_START_GRACE_MS
+				) {
+					ensured = false;
+				}
 				if (!ensured) {
 					ensured = true;
 					const res = ensureHostImpl(viewId);
@@ -911,11 +930,13 @@ export function createService(opts) {
 
 			if (host.state === "starting") {
 				// Gap-closer: a claim whose runner was never spawned (recovery claim or an
-				// abandoned launch) is adopted once past grace — fresh claims, even this
+				// abandoned launch) is adopted past grace — fresh claims, even this
 			// process's own (recoverHost's replacement), wait out the grace window like
 			// any launcher mid-transaction (contract §6).
-			if (!legacy && host.runnerSpawnedAt == null && probe.classification === "missing" && !withinGrace && !adopted) {
-					adopted = true;
+				// Retried per iteration: a contended or failed attempt must not pend
+				// the resolver to its deadline (issue #70 CI wave 2).
+			if (!legacy && host.runnerSpawnedAt == null && probe.classification === "missing" && !withinGrace) {
+					lastAdoptAt = nowImpl();
 					ensureHostImpl(viewId);
 					await sleepFnImpl(HOST_PROBE_RETRY_MS);
 					continue;

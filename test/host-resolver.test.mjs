@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createService, HOST_START_GRACE_MS } from "../src/runtime/service.mjs";
+import { tryAcquireOwnedViewLock } from "../src/core/locks.mjs";
 import { createView, readHost, writeHost, writePid, writeState } from "../src/core/store.mjs";
 import * as P from "../src/core/paths.mjs";
 
@@ -398,6 +399,51 @@ test("resolver keeps waiting on a fresh stopping host — no recovery while it w
 		assert.equal(probe.calls.length, 0, "a live stopping host is never probed or recovered");
 		assert.equal(spawns.length, 0);
 		assert.equal(readHost(root, "v1")?.instanceId, "i1", "record untouched while the runner winds down");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+// ---- adoption convergence under transient lock contention (issue #70 CI wave 2) ----
+
+test("adoption retries through a transient host-start lock busy and still converges", { timeout: 10_000 }, async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		hostRecord(root, "v1", {
+			instanceId: "i1",
+			state: "starting",
+			claimAt: Date.now() - HOST_START_GRACE_MS - 5_000,
+			claimPid: process.pid,
+			runnerSpawnedAt: null,
+		});
+		const probe = scriptProbe(["missing", "missing", "ready"]);
+		const spawns = [];
+		let busyReturns = 0;
+		const svc = resolverService(root, {
+			probeHostFn: probe.fn,
+			sleepFn: instantSleep,
+			launchHost: (_root, config) => {
+				spawns.push({ config });
+				return { pid: process.pid, configPath: config.configPath };
+			},
+			// The first host-start acquire returns busy — exactly the transient
+			// contention that stranded the resolver on Node 22 CI when adoption
+			// was once-per-invocation. Subsequent attempts use the real lease.
+			tryAcquireLock: (r, v, name, o) => {
+				if (name === "host-start" && busyReturns === 0) {
+					busyReturns += 1;
+					return { acquired: false, reason: "busy" };
+				}
+				return tryAcquireOwnedViewLock(r, v, name, o);
+			},
+		});
+		const result = await svc.resolveAttachTarget("v1", { timeoutMs: 2_000 });
+		assert.equal(result.kind, "pty", `must converge despite one busy adopt: ${JSON.stringify(result)}`);
+		assert.equal(result.instanceId, "i1");
+		assert.equal(busyReturns, 1, "the contention path was actually exercised");
+		assert.equal(spawns.length, 1, "retry adopts exactly once");
+		assert.equal(probe.calls.length, 3, "missing(busy) → missing(retry) → ready");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
