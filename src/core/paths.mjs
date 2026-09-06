@@ -5,6 +5,7 @@
  * The live default is `~/.pi/agent/agent-board/` (override with $AGENT_BOARD_ROOT;
  * legacy $AGENT_VIEW_ROOT is also honored for migration).
  */
+import { createHash } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -38,6 +39,13 @@ export const statePath = (root, viewId) => path.join(viewDir(root, viewId), "sta
 export const hostPath = (root, viewId) => path.join(viewDir(root, viewId), "host.json");
 /** @param {string} root @param {string} viewId */
 export const hostConfigPath = (root, viewId) => path.join(viewDir(root, viewId), "host-config.json");
+/**
+ * Per-instance host config path. Each host launch owns its own config file so a
+ * concurrent launch can never overwrite another instance's prompt/cwd/model (issue #70).
+ * @param {string} root @param {string} viewId @param {string} instanceId
+ */
+export const hostConfigPathFor = (root, viewId, instanceId) =>
+	path.join(viewDir(root, viewId), `host-config.${instanceId}.json`);
 /** @param {string} root @param {string} viewId */
 export const titleConfigPath = (root, viewId) => path.join(viewDir(root, viewId), "title-config.json");
 /** @param {string} root @param {string} viewId */
@@ -63,6 +71,22 @@ export function controlSocketPathFor(platform, root, viewId) {
 }
 /** @param {string} root @param {string} viewId */
 export const controlSocketPath = (root, viewId) => controlSocketPathFor(process.platform, root, viewId);
+/**
+ * Per-instance control endpoint. Each new host instance binds its own socket/pipe,
+ * so a superseded runner can never unlink the current owner's endpoint (issue #70).
+ * win32 pipe names embed an 8-hex hash of the instanceId to stay under the 256-char limit.
+ * @param {"win32"|"linux"|"darwin"} platform
+ * @param {string} root
+ * @param {string} viewId
+ * @param {string} instanceId
+ */
+export function hostEndpointPathFor(platform, root, viewId, instanceId) {
+	if (platform === "win32") {
+		const hash = createHash("sha256").update(String(instanceId)).digest("hex").slice(0, 8);
+		return `\\\\.\\pipe\\pi-agent-board-${viewId}-${hash}`;
+	}
+	return path.join(viewDir(root, viewId), `control.${instanceId}.sock`);
+}
 /** @param {string} root @param {string} viewId */
 export const screenLogPath = (root, viewId) => path.join(viewDir(root, viewId), "screen.log");
 /** @param {string} root @param {string} viewId */

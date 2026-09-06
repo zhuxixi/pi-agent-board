@@ -5,6 +5,8 @@
  */
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { atomicWriteJson, ensureDir, readJson } from "./atomic.mjs";
+import { sameHostOwner } from "./host-coordination.mjs";
+import { tryAcquireOwnedViewLock } from "./locks.mjs";
 import * as P from "./paths.mjs";
 import { isAlive } from "./pid.mjs";
 import { readCodeRefs, summarizeCodeRefs } from "./code-refs-store.mjs";
@@ -120,9 +122,159 @@ export function writeHost(root, host) {
 	atomicWriteJson(P.hostPath(root, host.viewId), host);
 }
 
-/** @param {string} root @param {string} viewId @param {number|null} pid */
-export function writeHostPid(root, viewId, pid) {
-	atomicWriteJson(P.hostPidPath(root, viewId), { pid, at: Date.now() });
+/**
+ * @param {string} root
+ * @param {string} viewId
+ * @param {number|null} pid
+ * @param {{ instanceId?: string, identity?: object|null }} [extra] merged into the mirror record
+ */
+export function writeHostPid(root, viewId, pid, extra) {
+	atomicWriteJson(P.hostPidPath(root, viewId), { pid, at: Date.now(), ...(extra ?? {}) });
+}
+
+/**
+ * Host states that represent an unreplaced claim: no replacement may be
+ * started while a host record is in one of these states (issue #70).
+ * @param {HostStatus|null} host
+ */
+function hostClaimActive(host) {
+	return Boolean(host && (host.state === "starting" || host.state === "alive" || host.state === "stopping"));
+}
+
+/**
+ * Atomically create the provisional `starting` host record for a new instance.
+ * The ONLY entry point allowed to move "no claim / reclaimable terminal state"
+ * into `starting` (issue #70). Refuses when an active claim exists or the
+ * host-meta lease is contended; the fresh record always nulls runner/child/
+ * ready/stop fields so no stale owner data survives the handover.
+ * @param {string} root
+ * @param {Partial<HostStatus> & { viewId: string, instanceId: string }} provisionalHost
+ * @param {{ heldStartLease?: unknown }} [opts] reserved for host-start lease nesting;
+ *   host-meta is always acquired independently here (short critical section).
+ * @returns {{ claimed: boolean, host: HostStatus|null }}
+ */
+export function claimHost(root, provisionalHost, opts = {}) {
+	const lock = tryAcquireOwnedViewLock(root, provisionalHost.viewId, "host-meta");
+	if (!lock.acquired) return { claimed: false, host: null };
+	try {
+		const existing = readHost(root, provisionalHost.viewId);
+		if (hostClaimActive(existing)) return { claimed: false, host: existing };
+		const now = Date.now();
+		/** @type {HostStatus} */
+		const record = {
+			version: 1,
+			viewId: provisionalHost.viewId,
+			mode: "pty",
+			instanceId: provisionalHost.instanceId,
+			configPath: provisionalHost.configPath ?? null,
+			socketPath: provisionalHost.socketPath ?? null,
+			claimAt: provisionalHost.claimAt ?? now,
+			claimPid: provisionalHost.claimPid ?? null,
+			claimIdentity: provisionalHost.claimIdentity ?? null,
+			// A fresh claim owns nothing yet: force-clear every field a superseded
+			// instance might have left behind.
+			runnerPid: null,
+			runnerIdentity: null,
+			runnerSpawnedAt: null,
+			childPid: null,
+			childIdentity: null,
+			childSpawnedAt: null,
+			readyAt: null,
+			stopRequestedAt: null,
+			revokeToken: null,
+			stopReason: null,
+			state: "starting",
+			startedAt: provisionalHost.claimAt ?? now,
+			lastSeenAt: now,
+			endedAt: null,
+			exitCode: null,
+			error: null,
+			cols: provisionalHost.cols ?? 120,
+			rows: provisionalHost.rows ?? 36,
+			attachedClients: 0,
+		};
+		writeHost(root, record);
+		// Mirror is best-effort; host.json is the authority for the new protocol.
+		try {
+			writeHostPid(root, provisionalHost.viewId, record.claimPid, {
+				instanceId: record.instanceId,
+				identity: record.claimIdentity,
+			});
+		} catch { /* best effort */ }
+		return { claimed: true, host: record };
+	} finally {
+		lock.lease.release();
+	}
+}
+
+/**
+ * Bounded contention retry for owner-fenced host writes (issue #70, PR #84 CI
+ * wave 2). Heartbeat/client-merge writes hold the host-meta lease for only a
+ * few milliseconds, but a one-shot acquire can land inside that window and
+ * return busy — a revoke or recovery write that silently no-ops is a real
+ * reliability bug, not just a test race. Both `busy` (live owner) and
+ * `blocked` (identity-less short hold — updateOwnedHost itself acquires
+ * host-meta without a reclaimable identity, so concurrent fenced writes look
+ * blocked to each other) are transient here: retry a few times with a short
+ * synchronous sleep before giving up. A genuinely orphaned host-meta lock
+ * (holder SIGKILLed mid-hold) survives the window and surfaces as retryable
+ * not-updated — never as ownership loss.
+ */
+const UPDATE_LOCK_BUSY_ATTEMPTS = 3;
+const UPDATE_LOCK_BUSY_SLEEP_MS = 20;
+
+/**
+ * Owner-fenced compare-and-write for host.json. Re-reads the view's record
+ * under the host-meta lease and only applies `mutate` while it still belongs
+ * to `expectedInstanceId`; a superseded instance's late heartbeat/crash/exit
+ * writes are rejected with `ownerChanged: true` and the current host (issue
+ * #70). Lease contention that survives the bounded retry returns not-updated
+ * with `ownerChanged: false` — callers treat that as retryable (heartbeats
+ * simply retry next tick; revokes/recovery re-attempt).
+ * @param {string} root
+ * @param {string} viewId
+ * @param {string} expectedInstanceId
+ * @param {(host: HostStatus) => HostStatus} mutate returns a new record
+ * @param {{ heldStartLease?: unknown, lockImpl?: typeof tryAcquireOwnedViewLock }} [opts]
+ *   heldStartLease is reserved for host-start lease nesting; lockImpl injects
+ *   the host-meta acquisition for deterministic contention tests.
+ * @returns {{ updated: boolean, ownerChanged: boolean, host: HostStatus|null }}
+ */
+export function updateOwnedHost(root, viewId, expectedInstanceId, mutate, opts = {}) {
+	const acquireHostMeta = opts.lockImpl ?? tryAcquireOwnedViewLock;
+	let lock;
+	for (let attempt = 0; ; attempt++) {
+		lock = acquireHostMeta(root, viewId, "host-meta");
+		if (lock.acquired) break;
+		// busy and blocked are both millisecond-scale holds for host-meta;
+		// neither is ownership information — only the fenced read below is.
+		if (attempt >= UPDATE_LOCK_BUSY_ATTEMPTS - 1) {
+			return { updated: false, ownerChanged: false, host: null };
+		}
+		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, UPDATE_LOCK_BUSY_SLEEP_MS);
+	}
+	try {
+		const host = readHost(root, viewId);
+		if (!host || !sameHostOwner(host, expectedInstanceId)) {
+			return { updated: false, ownerChanged: true, host };
+		}
+		const next = mutate(host);
+		// The mutate result must still belong to the expected instance: a buggy or
+		// hijacked callback that swaps the owner token is never written (issue #70).
+		if (!sameHostOwner(next, expectedInstanceId)) {
+			return { updated: false, ownerChanged: true, host };
+		}
+		writeHost(root, next);
+		try {
+			writeHostPid(root, viewId, next.runnerPid ?? null, {
+				instanceId: next.instanceId,
+				identity: next.runnerIdentity ?? null,
+			});
+		} catch { /* best effort */ }
+		return { updated: true, ownerChanged: false, host: next };
+	} finally {
+		lock.lease.release();
+	}
 }
 
 /** @param {string} root @param {string} viewId @returns {number|null} */
@@ -177,6 +329,8 @@ function mtime(dir) {
  * @property {ViewState|null} state
  * @property {boolean} alive  Whether the row's current run pid/foreground activity is alive.
  * @property {boolean} hostAlive Whether a PTY host/socket is alive and attachable.
+ * @property {boolean} hostActive Whether an unreplaced host claim exists (starting/alive/stopping).
+ * @property {boolean} hostReady Whether the host claims readiness (alive + readyAt); metadata hint only.
  * @property {HostStatus|null} host
  * @property {import("./types.mjs").ReviewSummary} [review]
  * @property {import("./types.mjs").DiagnosticSummary} [diagnostics]
@@ -202,9 +356,14 @@ export function loadRow(root, viewId) {
 	// poll, but foreground extension events mirror processState into state.json.
 	if (!alive && enrichedState?.processState === "alive") alive = true;
 	const host = readHost(root, viewId);
-	const hostPid = host?.runnerPid ?? readHostPid(root, viewId);
+	// New-protocol records carry an explicit runnerPid (null until spawn
+	// confirms); only legacy records without the property fall back to the
+	// host-pid mirror (issue #70).
+	const hostPid = host && Object.hasOwn(host, "runnerPid") ? host.runnerPid : readHostPid(root, viewId);
 	const hostAlive = Boolean(host && (host.state === "alive" || host.state === "starting") && isAlive(hostPid));
-	return { meta, state: enrichedState, alive, hostAlive, host, ...summaries };
+	const hostActive = Boolean(host && (host.state === "starting" || host.state === "alive" || host.state === "stopping"));
+	const hostReady = Boolean(hostActive && host.state === "alive" && host.readyAt != null);
+	return { meta, state: enrichedState, alive, hostAlive, hostActive, hostReady, host, ...summaries };
 }
 
 /** @param {string} root @param {string} viewId */

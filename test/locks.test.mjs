@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { defaultLocksFs, withFileLockSync, withViewLockSync } from "../src/core/locks.mjs";
+import { acquireOwnedViewLock, defaultLocksFs, releaseWithToken, tryAcquireOwnedViewLock, withFileLockSync, withViewLockSync } from "../src/core/locks.mjs";
 import * as P from "../src/core/paths.mjs";
 
 function freshRoot() {
@@ -230,6 +230,45 @@ test("lock timeout errors carry LOCK_TIMEOUT code and the lock path", { timeout:
 			() => withFileLockSync(lockPath, () => "no", { fs }),
 			(err) => err.code === "LOCK_TIMEOUT" && String(err.message).includes(lockPath),
 		);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("owned lease publishes complete owner record and old token cannot release new lock", () => {
+	const root = freshRoot();
+	try {
+		const a = acquireOwnedViewLock(root, "v1", "host-start", { identity: { pid: process.pid, startToken: "a" } });
+		assert.equal(a.isOwner(), true);
+		const b = tryAcquireOwnedViewLock(root, "v1", "host-start", { identity: { pid: process.pid, startToken: "b" } });
+		assert.equal(b.acquired, false);
+		assert.equal(b.reason, "busy");
+		const stale = { token: a.token, release: () => {} };
+		a.release();
+		const c = acquireOwnedViewLock(root, "v1", "host-start", { identity: { pid: process.pid, startToken: "c" } });
+		// simulate late release from the old token by forging a release with a's token
+		assert.equal(releaseWithToken(root, "v1", "host-start", a.token), false, "old token must not delete the new lock");
+		assert.equal(c.isOwner(), true);
+		c.release();
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("dead-owner lock is reclaimed via quarantine, unknown identity is blocked", () => {
+	const root = freshRoot();
+	try {
+		const lockPath = P.viewLockPath(root, "v1", "host-start");
+		mkdirSync(lockPath, { recursive: true });
+		writeFileSync(join(lockPath, "owner.json"), JSON.stringify({ token: "old", pid: 99999999, identity: { pid: 99999999, startToken: "x" }, startedAt: Date.now() }));
+		const got = tryAcquireOwnedViewLock(root, "v1", "host-start", { identity: { pid: process.pid, startToken: "me" } });
+		assert.equal(got.acquired, true);
+		got.lease.release();
+		mkdirSync(lockPath, { recursive: true });
+		writeFileSync(join(lockPath, "owner.json"), JSON.stringify({ token: "unk", pid: process.pid, identity: null, startedAt: Date.now() }));
+		const blocked = tryAcquireOwnedViewLock(root, "v1", "host-start", { identity: { pid: process.pid, startToken: "me" } });
+		assert.equal(blocked.acquired, false);
+		assert.equal(blocked.reason, "blocked");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

@@ -9,6 +9,7 @@ import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-c
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { requestDashboardRender } from "../core/dashboard-render.mjs";
 import { createService } from "../runtime/service.mjs";
+import { planAttachPrelude, planAttachResolved } from "./attach-decision.mjs";
 import { screenLogPath } from "../core/paths.mjs";
 import { DashboardComponent, type DashboardResult } from "../ui/dashboard.js";
 import { PtyAttachComponent, type PtyAttachResult } from "../ui/pty-attach.js";
@@ -161,54 +162,56 @@ async function attach(
 		ctx.ui.notify("Session no longer exists.", "warning");
 		return { action: "none" };
 	}
-	if (stopFirst && row.alive && !row.hostAlive) {
-		service.stop(viewId);
-		// Give the runner a moment to terminate the worker and release the session file.
-		await sleep(500);
-	} else if (row.alive && !row.hostAlive) {
+	const prelude = planAttachPrelude({ rowAlive: row.alive, rowHostActive: row.hostActive, stopFirst });
+	if (prelude.plan === "warn-running") {
 		ctx.ui.notify("Session is still running. Stop it before attaching, or confirm from the dashboard.", "warning");
 		return { action: "none" };
 	}
+	if (prelude.plan === "stop-first") {
+		service.stop(viewId);
+		// Give the runner a moment to terminate the worker and release the session file.
+		await sleep(500);
+	}
 
-	const target = service.attachTarget(viewId);
-	if (target.kind === "pty" && target.socketPath) {
+	// Single async resolver entry: real probe + bounded recovery decide readiness (issue #70).
+	const plan = planAttachResolved(await service.resolveAttachTarget(viewId));
+	if (plan.plan === "open-pty") {
 		service.markVisited?.(viewId);
-		const result = await openPtyAttach(ctx, root, row.meta.id, row.meta.name, target.socketPath);
+		const result = await openPtyAttach(ctx, root, row.meta.id, row.meta.name, plan.socketPath);
 		service.markVisited?.(viewId);
 		return { action: result.action === "closed" ? "closed" : "detached" };
 	}
-
-	const ensured = service.ensureHost(viewId);
-	if (ensured.ok && ensured.socketPath) {
+	if (plan.plan === "session-switch") {
+		const latest = service.row(viewId) ?? row;
+		if (!existsSync(latest.meta.sessionFile)) {
+			ctx.ui.notify("Session file isn't ready yet — try again once the run has started.", "warning");
+			return { action: "none" };
+		}
+		const name = latest.meta.name;
 		service.markVisited?.(viewId);
-		const result = await openPtyAttach(ctx, root, row.meta.id, row.meta.name, ensured.socketPath);
-		service.markVisited?.(viewId);
-		return { action: result.action === "closed" ? "closed" : "detached" };
+		const switchingOverlay = await showSwitchingOverlay(ctx, name, "PTY unavailable");
+		const result = await ctx.switchSession(latest.meta.sessionFile, {
+			withSession: async (replaced) => {
+				replaced.ui.notify(`Attached to "${name}". Press ← on empty input to return to agent board.`, "info");
+				installBackToDashboard(replaced, service);
+			},
+		}).finally(() => {
+			try {
+				switchingOverlay?.hide();
+			} catch {}
+		});
+		if (result.cancelled) {
+			ctx.ui.notify("Attach cancelled.", "warning");
+			return { action: "none" };
+		}
+		return { action: "switched" };
 	}
-
-	const latest = service.row(viewId) ?? row;
-	if (!existsSync(latest.meta.sessionFile)) {
-		ctx.ui.notify("Session file isn't ready yet — try again once the run has started.", "warning");
+	if (plan.plan === "notify-pending") {
+		ctx.ui.notify(plan.reason, "info");
 		return { action: "none" };
 	}
-	const name = latest.meta.name;
-	service.markVisited?.(viewId);
-	const switchingOverlay = await showSwitchingOverlay(ctx, name, ensured.fallbackReason ?? ensured.error ?? "PTY unavailable");
-	const result = await ctx.switchSession(latest.meta.sessionFile, {
-		withSession: async (replaced) => {
-			replaced.ui.notify(`Attached to "${name}". Press ← on empty input to return to agent board.`, "info");
-			installBackToDashboard(replaced, service);
-		},
-	}).finally(() => {
-		try {
-			switchingOverlay?.hide();
-		} catch {}
-	});
-	if (result.cancelled) {
-		ctx.ui.notify("Attach cancelled.", "warning");
-		return { action: "none" };
-	}
-	return { action: "switched" };
+	ctx.ui.notify("Session no longer exists.", "warning");
+	return { action: "none" };
 }
 
 async function openPtyAttach(

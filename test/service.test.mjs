@@ -8,7 +8,8 @@ import { createService, shouldProbePtySupport } from "../src/runtime/service.mjs
 import { readCodeRefs } from "../src/core/code-refs-store.mjs";
 import { diagnoseNodePtyFailure } from "../src/core/pty-support.mjs";
 import * as P from "../src/core/paths.mjs";
-import { createView, readState, readStatus, writeHost, writeHostPid, writeLaunchPrefs, writeState, writeStatus } from "../src/core/store.mjs";
+import { createView, readHost, readState, readStatus, writeHost, writeHostPid, writeLaunchPrefs, writeState, writeStatus } from "../src/core/store.mjs";
+import { readFollowUpQueue } from "../src/core/follow-up-queue.mjs";
 
 function freshRoot() {
 	return mkdtempSync(join(tmpdir(), "agentview-service-"));
@@ -312,12 +313,181 @@ test("ensureHost starts an idle PTY host without changing row task state", () =>
 		const res = svc.ensureHost("v1");
 		assert.equal(res.ok, true);
 		assert.equal(res.started, true);
-		assert.equal(res.socketPath, P.controlSocketPath(root, "v1"));
+		assert.ok(res.instanceId, "fresh start reports its instanceId");
+		assert.equal(res.socketPath, P.hostEndpointPathFor(process.platform, root, "v1", res.instanceId));
 		assert.equal(launched.initialPrompt, null);
+		const host = readHost(root, "v1");
+		assert.equal(host.instanceId, res.instanceId);
+		assert.equal(host.state, "starting");
+		assert.equal(host.runnerPid, process.pid);
 		const after = readState(root, "v1");
 		assert.equal(after.semanticState, "completed");
 		assert.equal(after.processState, "exited");
 		assert.equal(after.summary, "Done");
+	} finally {
+		if (oldForce === undefined) delete process.env.AGENT_BOARD_FORCE_PTY;
+		else process.env.AGENT_BOARD_FORCE_PTY = oldForce;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+function startingClaimHost(root, viewId, instanceId = "i1") {
+	writeHost(root, {
+		version: 1,
+		viewId,
+		mode: "pty",
+		instanceId,
+		runnerPid: null,
+		childPid: null,
+		socketPath: P.hostEndpointPathFor(process.platform, root, viewId, instanceId),
+		state: "starting",
+		claimAt: Date.now(),
+		claimPid: process.pid,
+		claimIdentity: { pid: process.pid, startToken: null },
+		runnerIdentity: null,
+		runnerSpawnedAt: null,
+		childIdentity: null,
+		childSpawnedAt: null,
+		readyAt: null,
+		stopRequestedAt: null,
+		revokeToken: null,
+		stopReason: null,
+		startedAt: Date.now(),
+		lastSeenAt: Date.now(),
+		endedAt: null,
+		exitCode: null,
+		error: null,
+		cols: 80,
+		rows: 24,
+		attachedClients: 0,
+	});
+}
+
+test("ensureHost returns pending for a fresh starting claim with null runnerPid", () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		startingClaimHost(root, "v1", "i1");
+		let launches = 0;
+		const svc = service(root, {
+			launchHost: () => {
+				launches += 1;
+				return { pid: process.pid, configPath: "/no/host-config.json" };
+			},
+		});
+		const res = svc.ensureHost("v1");
+		assert.deepEqual(res, { ok: true, pending: true, socketPath: P.hostEndpointPathFor(process.platform, root, "v1", "i1"), instanceId: "i1" });
+		assert.equal(launches, 0, "an existing starting claim must never trigger a second spawn");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("second ensureHost sees the on-disk claim and never spawns twice", () => {
+	const root = freshRoot();
+	const oldForce = process.env.AGENT_BOARD_FORCE_PTY;
+	try {
+		process.env.AGENT_BOARD_FORCE_PTY = "1";
+		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeFileSync(meta.sessionFile, "");
+		let launches = 0;
+		const svc = service(root, {
+			launchHost: () => {
+				launches += 1;
+				return { pid: process.pid, configPath: "/no/host-config.json" };
+			},
+		});
+		const first = svc.ensureHost("v1");
+		assert.equal(first.ok, true);
+		assert.equal(first.started, true);
+		assert.equal(launches, 1);
+		const second = svc.ensureHost("v1");
+		assert.equal(second.ok, true);
+		assert.equal(second.pending, true);
+		assert.equal(second.instanceId, first.instanceId);
+		assert.equal(launches, 1, "the provisional claim on disk must dedupe a second ensure");
+	} finally {
+		if (oldForce === undefined) delete process.env.AGENT_BOARD_FORCE_PTY;
+		else process.env.AGENT_BOARD_FORCE_PTY = oldForce;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("lock contention yields pending without spawn", () => {
+	const root = freshRoot();
+	try {
+		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeFileSync(meta.sessionFile, "");
+		let launches = 0;
+		const svc = service(root, {
+			ptySupport: () => ({ ok: true }),
+			tryAcquireLock: () => ({ acquired: false, reason: "busy" }),
+			launchHost: () => {
+				launches += 1;
+				return { pid: process.pid, configPath: "/no/host-config.json" };
+			},
+		});
+		const res = svc.ensureHost("v1");
+		assert.deepEqual(res, { ok: true, pending: true, socketPath: null, instanceId: null });
+		assert.equal(launches, 0);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("reply with a pending host enqueues the prompt instead of dropping it", async () => {
+	const root = freshRoot();
+	const oldForce = process.env.AGENT_BOARD_FORCE_PTY;
+	try {
+		process.env.AGENT_BOARD_FORCE_PTY = "1";
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		startingClaimHost(root, "v1", "i1");
+		let launches = 0;
+		const svc = service(root, {
+			launchHost: () => {
+				launches += 1;
+				return { pid: process.pid, configPath: "/no/host-config.json" };
+			},
+		});
+		const res = await svc.reply("v1", "hello");
+		assert.equal(res.ok, true);
+		assert.equal(res.queued, true);
+		assert.equal(launches, 0, "pending claim must not spawn a second host");
+		const queue = readFollowUpQueue(root, "v1");
+		assert.equal(queue.items.filter((i) => i.status === "queued").length, 1);
+		assert.equal(queue.items[0].text, "hello");
+	} finally {
+		if (oldForce === undefined) delete process.env.AGENT_BOARD_FORCE_PTY;
+		else process.env.AGENT_BOARD_FORCE_PTY = oldForce;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("dispatch creates per-instance config and endpoint paths", () => {
+	const root = freshRoot();
+	const oldForce = process.env.AGENT_BOARD_FORCE_PTY;
+	try {
+		process.env.AGENT_BOARD_FORCE_PTY = "1";
+		let captured = null;
+		const svc = service(root, {
+			launchHost: (_root, config) => {
+				captured = config;
+				return { pid: process.pid, configPath: config.configPath };
+			},
+		});
+		const res = svc.dispatch("ship it", { cwd: "/tmp/project-a" });
+		assert.equal(res.ok, true);
+		assert.equal(res.hostMode, "pty");
+		assert.ok(captured, "launchHostImpl must have been called");
+		assert.ok(captured.instanceId, "config carries the instance token");
+		assert.equal(captured.configPath, P.hostConfigPathFor(root, res.viewId, captured.instanceId));
+		assert.equal(captured.socketPath, P.hostEndpointPathFor(process.platform, root, res.viewId, captured.instanceId));
+		const host = readHost(root, res.viewId);
+		assert.equal(host.instanceId, captured.instanceId);
+		assert.equal(host.state, "starting");
+		assert.equal(host.configPath, captured.configPath);
+		assert.equal(host.socketPath, captured.socketPath);
+		assert.equal(host.runnerPid, process.pid);
 	} finally {
 		if (oldForce === undefined) delete process.env.AGENT_BOARD_FORCE_PTY;
 		else process.env.AGENT_BOARD_FORCE_PTY = oldForce;
@@ -348,7 +518,7 @@ test("syncForegroundEvent marks a managed attached session working when user inp
 	}
 });
 
-test("syncHostedEvent persists interactive questions and resets them on new input", () => {
+test("syncHostedEvent persists interactive questions and resets them on new input", async () => {
 	const root = freshRoot();
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
@@ -366,7 +536,7 @@ test("syncHostedEvent persists interactive questions and resets them on new inpu
 		assert.equal(waiting.question, "Choose a mode?");
 		assert.deepEqual(waiting.pendingQuestions, [{ toolCallId: "q1", question: "Choose a mode?" }]);
 		assert.equal(svc.markCompleted("v1").ok, false);
-		assert.deepEqual(svc.reply("v1", "safe"), { ok: false, error: "Attach to answer the pending question" });
+		assert.deepEqual(await svc.reply("v1", "safe"), { ok: false, error: "Attach to answer the pending question" });
 
 		assert.equal(svc.syncHostedEvent("v1", { type: "input", text: "safe" }), true);
 		const resumed = readState(root, "v1");
@@ -542,7 +712,7 @@ test("archiveMany archives explicit completed rows and skips live ones", () => {
 	}
 });
 
-test("busy replies queue and drain when idle", () => {
+test("busy replies queue and drain when idle", async () => {
 	const root = freshRoot();
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
@@ -558,7 +728,7 @@ test("busy replies queue and drain when idle", () => {
 				return { pid: null, configPath: "/no/config.json" };
 			},
 		});
-		const queued = svc.reply("v1", "next step");
+		const queued = await svc.reply("v1", "next step");
 		assert.equal(queued.ok, true);
 		assert.equal(queued.queued, true);
 		assert.equal(svc.followUps("v1").summary.queuedCount, 1);
@@ -567,7 +737,7 @@ test("busy replies queue and drain when idle", () => {
 		idle.semanticState = "idle";
 		idle.processState = "exited";
 		writeState(root, idle);
-		const drained = svc.drainNextFollowUp("v1");
+		const drained = await svc.drainNextFollowUp("v1");
 		assert.equal(drained.ok, true);
 		assert.equal(launched.length, 1);
 		assert.equal(launched[0].prompt, "next step");
@@ -619,7 +789,7 @@ test("reconcile does not drain queued follow-ups after failed terminal state", (
 	}
 });
 
-test("busy steering actions queue raw steering payloads", () => {
+test("busy steering actions queue raw steering payloads", async () => {
 	const root = freshRoot();
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
@@ -628,7 +798,7 @@ test("busy steering actions queue raw steering payloads", () => {
 		st.processState = "alive";
 		writeState(root, st);
 		const svc = service(root);
-		const res = svc.requestPlan("v1", "make a plan");
+		const res = await svc.requestPlan("v1", "make a plan");
 		assert.equal(res.ok, true);
 		const queue = svc.followUps("v1").queue;
 		assert.equal(queue.items[0].kind, "plan_request");
@@ -639,7 +809,7 @@ test("busy steering actions queue raw steering payloads", () => {
 	}
 });
 
-test("idle non-PTY plan request launches with plan run kind", () => {
+test("idle non-PTY plan request launches with plan run kind", async () => {
 	const root = freshRoot();
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
@@ -655,7 +825,7 @@ test("idle non-PTY plan request launches with plan run kind", () => {
 				return { pid: null, configPath: "/no/config.json" };
 			},
 		});
-		const res = svc.requestPlan("v1", "make a plan");
+		const res = await svc.requestPlan("v1", "make a plan");
 		assert.equal(res.ok, true);
 		assert.equal(launched.length, 1);
 		assert.equal(launched[0].kind, "plan");
@@ -723,7 +893,7 @@ test("reconcile finalizes host-backed row when PTY host exits without agent_end"
 	}
 });
 
-test("adopted external session does not fall back to JSON runner when PTY is unavailable", () => {
+test("adopted external session does not fall back to JSON runner when PTY is unavailable", async () => {
 	const root = freshRoot();
 	try {
 		const sessionFile = join(root, "external-current.jsonl");
@@ -736,7 +906,7 @@ test("adopted external session does not fall back to JSON runner when PTY is una
 			},
 		});
 		const adopted = svc.adoptSession({ sessionFile, cwd: "/r", name: "current" });
-		const res = svc.reply(adopted.viewId, "continue", { delivery: "now" });
+		const res = await svc.reply(adopted.viewId, "continue", { delivery: "now" });
 		assert.equal(res.ok, false);
 		assert.match(res.error, /PTY is required/);
 		assert.equal(launched.length, 0);
@@ -822,7 +992,7 @@ test("ensureHost passes screenLogMaxBytes from prefs into HostConfig", async () 
 			ptySupport: () => ({ ok: true }),
 			launchHost: (r, config) => {
 				captured = config;
-				return { pid: null, configPath: "/no/host-config.json" };
+				return { pid: process.pid, configPath: "/no/host-config.json" };
 			},
 		});
 		const result = svc.ensureHost("gc1");
