@@ -360,8 +360,16 @@ test("runner does not clobber a manual completion made during post-exit model pa
 		});
 
 		// User marks the row done manually while the model passes are in flight.
+		// The runner persists status.json before projecting state.json, so endedAt
+		// can be visible while processState is still "alive" for a few ms — a
+		// one-shot assertion races that window and fails as busy (issue #63).
+		// Poll markCompleted until the exit projection flips the row non-busy.
 		const { createService } = await import("../src/runtime/service.mjs");
-		assert.deepEqual(createService({ root }).markCompleted("view_1"), { ok: true });
+		const marked = await waitFor(() => {
+			const res = createService({ root }).markCompleted("view_1");
+			return res.ok ? res : null;
+		}, 10_000);
+		assert.deepEqual(marked, { ok: true });
 
 		// Let the runner finish its passes and exit.
 		await waitFor(() => {
