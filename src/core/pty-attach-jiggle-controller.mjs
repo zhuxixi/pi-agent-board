@@ -60,6 +60,11 @@ const NO_FRAME_RESTORE_MS = 6000;
  */
 const POST_RESTORE_VERIFY_MS = 900;
 
+/** Lifetime cap on runtime desync heals (issue #11): a persistent misdiagnosis
+ * must not flicker the screen forever; after this many attempts the backstop
+ * stays quiet until the controller is recreated. Consumed on heal() entry. */
+const HEAL_MAX_PER_LIFETIME = 5;
+
 /**
  * @typedef {Object} JiggleRetryControllerDeps
  * @property {(cols: number, rows: number) => void} sendResize - Resize the child PTY.
@@ -88,6 +93,8 @@ export function createJiggleRetryController(deps) {
 	let chainTimer = null;
 	/** @type {unknown | null} */
 	let g1Timer = null;
+	/** Runtime heals spent (issue #11); never reset by start()/restoreAndStop(). */
+	let healCount = 0;
 
 	function clearChainTimer() {
 		if (chainTimer === null) return;
@@ -243,6 +250,44 @@ export function createJiggleRetryController(deps) {
 	}
 
 	/**
+	 * Runtime desync backstop (issue #11): re-arm the shrink-and-hold protocol
+	 * mid-session. Unlike start(), tuiFrameSeen is preserved (the child has
+	 * rendered), G1 is not armed (frames are flowing), and the budget is
+	 * lifetime-capped so a misdiagnosis cannot flicker the screen forever.
+	 * Consumes one budget slot on entry, including the tiny-terminal give-up.
+	 * @param {number} cols
+	 * @param {number} rows
+	 * @returns {boolean} true when a heal hold was armed.
+	 */
+	function heal(cols, rows) {
+		if (healCount >= HEAL_MAX_PER_LIFETIME) return false;
+		healCount++;
+		clearAllTimers();
+		if (held) {
+			// Unwind any live hold (e.g. a previous clear-less heal) first.
+			sendResize(originalCols, originalRows);
+			restored = true;
+			held = false;
+		}
+		state = createJiggleRetryState();
+		carry = "";
+		originalCols = cols;
+		originalRows = rows;
+		holdSize = resizeJiggleSize(cols, rows);
+		if (!holdSize) {
+			state = stopRetry(state);
+			held = false;
+			restored = true;
+			return false;
+		}
+		sendResize(holdSize.cols, holdSize.rows);
+		held = true;
+		restored = false;
+		scheduleNextRetry(); // G2 backoff re-shrinks while a renderer is seen but no clear follows
+		return true;
+	}
+
+	/**
 	 * Restore the held size (if any) and stop all chain activity. Used by the
 	 * component on close/detach while the socket is still usable (G3).
 	 */
@@ -272,8 +317,9 @@ export function createJiggleRetryController(deps) {
 	return {
 		start,
 		feed,
+		heal,
 		restoreAndStop,
 		notifyExternalResize,
-		getState: () => ({ ...state, held, tuiFrameSeen, originalCols, originalRows, holdSize }),
+		getState: () => ({ ...state, held, tuiFrameSeen, originalCols, originalRows, holdSize, healCount }),
 	};
 }
