@@ -17,6 +17,34 @@ import { writePid } from "./store.mjs";
 /** @typedef {import("./types.mjs").AutoStateConfig} AutoStateConfig */
 
 /**
+ * Spawn a fully detached runner child with async spawn failures made harmless.
+ *
+ * A spawn that fails to start (e.g. a transient ENOENT on the node binary,
+ * issue #86) reports asynchronously via the 'error' event; without a listener
+ * the EventEmitter rethrows it as an uncaughtException and takes down the
+ * whole host Pi process. Callers already handle the failure gracefully via
+ * the pid == null branch (state "failed").
+ * @param {string} command
+ * @param {string[]} args
+ * @param {string} cwd
+ * @returns {import("node:child_process").ChildProcess}
+ */
+function spawnDetached(command, args, cwd) {
+	const child = spawn(command, args, {
+		cwd,
+		detached: true,
+		stdio: "ignore",
+		env: process.env,
+		// Windows: detached children get their own console window unless
+		// suppressed (CREATE_NO_WINDOW; no-op on POSIX) — issue #49.
+		windowsHide: true,
+	});
+	child.on("error", () => {});
+	child.unref();
+	return child;
+}
+
+/**
  * @param {string} root
  * @param {RunConfig} config
  * @param {{ runnerScript: string, node?: string }} opts
@@ -28,16 +56,7 @@ export function launchRun(root, config, opts) {
 	atomicWriteJson(configPath, config);
 
 	const node = opts.node ?? resolveNode();
-	const child = spawn(node, [opts.runnerScript, configPath], {
-		cwd: config.cwd,
-		detached: true,
-		stdio: "ignore",
-		env: process.env,
-		// Windows: detached children get their own console window unless
-		// suppressed (CREATE_NO_WINDOW; no-op on POSIX) — issue #49.
-		windowsHide: true,
-	});
-	child.unref();
+	const child = spawnDetached(node, [opts.runnerScript, configPath], config.cwd);
 
 	const pid = child.pid ?? null;
 	// Record the *runner/monitor* pid for liveness polling (the worker pid is tracked
@@ -61,14 +80,7 @@ export function launchHost(root, config, opts) {
 	atomicWriteJson(configPath, config);
 
 	const node = opts.node ?? resolveNode();
-	const child = spawn(node, [opts.runnerScript, configPath], {
-		cwd: config.cwd,
-		detached: true,
-		stdio: "ignore",
-		env: process.env,
-		windowsHide: true,
-	});
-	child.unref();
+	const child = spawnDetached(node, [opts.runnerScript, configPath], config.cwd);
 
 	return { pid: child.pid ?? null, configPath };
 }
@@ -86,14 +98,7 @@ export function launchTitle(root, config, opts) {
 	atomicWriteJson(configPath, config);
 
 	const node = opts.node ?? resolveNode();
-	const child = spawn(node, [opts.runnerScript, configPath], {
-		cwd: config.cwd,
-		detached: true,
-		stdio: "ignore",
-		env: process.env,
-		windowsHide: true,
-	});
-	child.unref();
+	const child = spawnDetached(node, [opts.runnerScript, configPath], config.cwd);
 
 	return { pid: child.pid ?? null, configPath };
 }
@@ -111,14 +116,7 @@ export function launchAutoState(root, config, opts) {
 	atomicWriteJson(configPath, config);
 
 	const node = opts.node ?? resolveNode();
-	const child = spawn(node, [opts.runnerScript, configPath], {
-		cwd: config.cwd,
-		detached: true,
-		stdio: "ignore",
-		env: process.env,
-		windowsHide: true,
-	});
-	child.unref();
+	const child = spawnDetached(node, [opts.runnerScript, configPath], config.cwd);
 
 	return { pid: child.pid ?? null, configPath };
 }
