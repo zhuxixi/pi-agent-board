@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { existingCwdCandidates, filterCwdCandidates, listDirectorySuggestions, nextCwdPickerState } from "../src/core/launch-options.mjs";
+import { existingCwdCandidates, filterCwdCandidates, listDirectorySuggestions, modelRefAvailable, nextCwdPickerState } from "../src/core/launch-options.mjs";
 
 const ranked = [
 	{ path: "/home/elling", count: 107 },
@@ -68,4 +68,24 @@ test("nextCwdPickerState: unmatched query falls back to filesystem browse", () =
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
+});
+
+// ---- modelRefAvailable (issue #90) ----
+
+test("modelRefAvailable matches case-insensitive exact provider/id and conservatively allows when it cannot judge", () => {
+	const available = [
+		{ provider: "zai-coding-cn", id: "glm-5.3" },
+		{ provider: "openai", id: "gpt-5" },
+	];
+	assert.equal(modelRefAvailable("zai-coding-cn/glm-5.3", available), true);
+	assert.equal(modelRefAvailable("ZAI-Coding-CN/GLM-5.3", available), true, "case-insensitive");
+	assert.equal(modelRefAvailable("  zai-coding-cn/glm-5.3  ", available), true, "trimmed");
+	assert.equal(modelRefAvailable("glm/glm-5.3", available), false, "provider mismatch (the stale-model case)");
+	assert.equal(modelRefAvailable("glm-5.3", available), false, "bare id is not an exact provider/id match");
+	assert.equal(modelRefAvailable("openai/gpt-4", available), false);
+	assert.equal(modelRefAvailable(null, available), true, "no configured model = no constraint");
+	assert.equal(modelRefAvailable("", available), true);
+	assert.equal(modelRefAvailable("   ", available), true);
+	assert.equal(modelRefAvailable("glm/glm-5.3", undefined), true, "no list = cannot judge, allow");
+	assert.equal(modelRefAvailable("glm/glm-5.3", []), true, "empty list = cannot judge, allow");
 });

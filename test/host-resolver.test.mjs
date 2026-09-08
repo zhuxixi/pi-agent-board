@@ -609,3 +609,132 @@ test("adoption retries through a transient host-start lock busy and still conver
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+// ---- stale defaultModel launch guard (issue #90) ----
+
+test("ensureHost refuses to launch when the view's defaultModel is provably unavailable", () => {
+	const root = freshRoot();
+	try {
+		const meta = createView(root, { id: "v1", name: "stale-model", cwd: "/r", defaultModel: "glm/glm-5.3" });
+		writeFileSync(meta.sessionFile, "");
+		const spawns = [];
+		const svc = resolverService(root, {
+			availableModels: () => [{ provider: "zai-coding-cn", id: "glm-5.3" }],
+			launchHost: (_root, config) => {
+				spawns.push({ config });
+				return { pid: process.pid, configPath: config.configPath };
+			},
+		});
+		const res = svc.ensureHost("v1");
+		assert.equal(res.ok, false);
+		assert.match(res.error, /glm\/glm-5\.3/);
+		assert.match(res.error, /no longer available/);
+		assert.equal(spawns.length, 0, "a dead model must not spawn a child");
+		assert.equal(readHost(root, "v1"), null, "no claim record may be left behind");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("ensureHost launches normally when the defaultModel matches the available list", () => {
+	const root = freshRoot();
+	try {
+		const meta = createView(root, { id: "v1", name: "valid-model", cwd: "/r", defaultModel: "zai-coding-cn/glm-5.3" });
+		writeFileSync(meta.sessionFile, "");
+		const spawns = [];
+		const svc = resolverService(root, {
+			availableModels: () => [{ provider: "zai-coding-cn", id: "glm-5.3" }],
+			launchHost: (_root, config) => {
+				spawns.push({ config });
+				return { pid: process.pid, configPath: config.configPath };
+			},
+		});
+		const res = svc.ensureHost("v1");
+		assert.equal(res.ok, true);
+		assert.equal(res.started, true);
+		assert.equal(spawns.length, 1);
+		assert.equal(readHost(root, "v1").state, "starting");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("ensureHost skips the stale-model guard when defaultModel is null even with an injected list", () => {
+	const root = freshRoot();
+	try {
+		const meta = createView(root, { id: "v1", name: "null-model", cwd: "/r", defaultModel: null });
+		writeFileSync(meta.sessionFile, "");
+		const spawns = [];
+		const svc = resolverService(root, {
+			availableModels: () => [{ provider: "zai-coding-cn", id: "glm-5.3" }],
+			launchHost: (_root, config) => {
+				spawns.push({ config });
+				return { pid: process.pid, configPath: config.configPath };
+			},
+		});
+		const res = svc.ensureHost("v1");
+		assert.equal(res.ok, true);
+		assert.equal(res.started, true);
+		assert.equal(spawns.length, 1, "null defaultModel imposes no constraint");
+		assert.equal(readHost(root, "v1").state, "starting");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("missing availableModels injection skips the stale-model guard (backward compatible)", () => {
+	const root = freshRoot();
+	try {
+		const meta = createView(root, { id: "v1", name: "no-injection", cwd: "/r", defaultModel: "glm/glm-5.3" });
+		writeFileSync(meta.sessionFile, "");
+		const spawns = [];
+		const svc = resolverService(root, {
+			launchHost: (_root, config) => {
+				spawns.push({ config });
+				return { pid: process.pid, configPath: config.configPath };
+			},
+		});
+		const res = svc.ensureHost("v1");
+		assert.equal(res.ok, true);
+		assert.equal(res.started, true);
+		assert.equal(spawns.length, 1, "without a list the guard conservatively allows");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("adopt path marks an abandoned claim failed without spawning when the model is stale", async () => {
+	const root = freshRoot();
+	try {
+		const meta = createView(root, { id: "v1", name: "a", cwd: "/r", defaultModel: "glm/glm-5.3" });
+		writeFileSync(meta.sessionFile, "");
+		hostRecord(root, "v1", {
+			instanceId: "i1",
+			state: "starting",
+			claimAt: Date.now() - HOST_START_GRACE_MS - 5_000,
+			claimPid: process.pid,
+			runnerSpawnedAt: null,
+		});
+		const probe = scriptProbe(["missing"]);
+		const spawns = [];
+		const svc = resolverService(root, {
+			probeHostFn: probe.fn,
+			sleepFn: instantSleep,
+			availableModels: () => [{ provider: "zai-coding-cn", id: "glm-5.3" }],
+			launchHost: (_root, config) => {
+				spawns.push({ config });
+				return { pid: process.pid, configPath: config.configPath };
+			},
+		});
+		const result = await svc.resolveAttachTarget("v1", { timeoutMs: 2_000 });
+		assert.equal(spawns.length, 0, "adopt must not spawn a doomed child");
+		const host = readHost(root, "v1");
+		assert.equal(host.state, "failed");
+		assert.match(host.error, /glm\/glm-5\.3/);
+		assert.equal(host.claimPid, null, "the dead claimer's fields are cleared for a later fresh claim");
+		assert.equal(result.kind, "pending", "the resolver surfaces the guard as its pending reason");
+		assert.match(result.reason, /no longer available/);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});

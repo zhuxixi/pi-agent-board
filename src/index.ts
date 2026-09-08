@@ -76,8 +76,17 @@ export default function piAgentBoard(pi: ExtensionAPI): void {
 	});
 
 	// Footer status: reconcile stale rows and surface how many need attention.
+	// Live model list for the stale-defaultModel launch guard (issue #90); the
+	// service calls it per validation, and undefined conservatively skips.
+	const availableModelsFor = (ctx: ExtensionContext) => () => {
+		try {
+			return ctx.modelRegistry.getAvailable();
+		} catch {
+			return undefined;
+		}
+	};
 	const serviceFor = (ctx: ExtensionContext) =>
-		createService({ root, runnerScript: RUNNER_SCRIPT, ptyRunnerScript: PTY_RUNNER_SCRIPT, titleRunnerScript: TITLE_RUNNER_SCRIPT, autoStateRunnerScript: AUTO_STATE_RUNNER_SCRIPT, piCommand, piArgsPrefix, defaultCwd: ctx.cwd });
+		createService({ root, runnerScript: RUNNER_SCRIPT, ptyRunnerScript: PTY_RUNNER_SCRIPT, titleRunnerScript: TITLE_RUNNER_SCRIPT, autoStateRunnerScript: AUTO_STATE_RUNNER_SCRIPT, piCommand, piArgsPrefix, defaultCwd: ctx.cwd, availableModels: availableModelsFor(ctx) });
 
 	const updateStatus = (ctx: ExtensionContext) => {
 		try {
@@ -112,7 +121,7 @@ export default function piAgentBoard(pi: ExtensionAPI): void {
 		}
 		updateStatus(ctx);
 		if (event.reason === "startup" && !isHostedChild && pi.getFlag("agent-board") === true && ctx.hasUI) {
-			const service = createService({ root, runnerScript: RUNNER_SCRIPT, ptyRunnerScript: PTY_RUNNER_SCRIPT, titleRunnerScript: TITLE_RUNNER_SCRIPT, autoStateRunnerScript: AUTO_STATE_RUNNER_SCRIPT, piCommand, piArgsPrefix, defaultCwd: ctx.cwd });
+			const service = createService({ root, runnerScript: RUNNER_SCRIPT, ptyRunnerScript: PTY_RUNNER_SCRIPT, titleRunnerScript: TITLE_RUNNER_SCRIPT, autoStateRunnerScript: AUTO_STATE_RUNNER_SCRIPT, piCommand, piArgsPrefix, defaultCwd: ctx.cwd, availableModels: availableModelsFor(ctx) });
 			service.reconcile();
 			ctx.ui.setWorkingVisible(false);
 			ctx.ui.setHeader(() => ({ render: () => [], invalidate() {} }));

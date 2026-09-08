@@ -18,6 +18,7 @@ import {
 	clampThinkingLevel,
 	listDirectorySuggestions,
 	existingCwdCandidates,
+	modelRefAvailable,
 	nextCwdPickerState,
 	resolveDirectoryValue,
 	resolveLaunchContext,
@@ -1738,7 +1739,9 @@ function filterLaunchChoices(choices: LaunchChoice[], query: string): LaunchChoi
 function findLaunchModelByRef(models: LaunchModel[], ref: string): LaunchModel | null {
 	const target = String(ref || "").trim().toLowerCase();
 	if (!target) return null;
-	return models.find((model) => `${model.provider}/${model.id}`.toLowerCase() === target) ?? null;
+	// Single source of truth with the service-side stale-model guard (issue #90):
+	// same case-insensitive exact "provider/id" rule.
+	return models.find((model) => modelRefAvailable(target, [model])) ?? null;
 }
 
 function stripBracketedPaste(data: string): string {

@@ -1192,3 +1192,54 @@ test("probe connections leave host.json untouched; real clients flip attachedEve
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
 });
+
+// ---- child-exit error attribution (issue #90) ----
+
+test("owned runner attributes an abnormal child exit's last visible line into host.json error", async () => {
+	const root = freshRoot();
+	let runner;
+	try {
+		({ runner } = await launchOwnedRunner(root, "v1", "i90", {
+			config: { piArgsPrefix: [resolve("test-support/fake-failing-pty-pi.mjs")] },
+		}));
+		assert.equal(await waitForExit(runner, 8000), true, "runner exits after the failing child");
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.endedAt != null ? h : false;
+		});
+		assert.equal(host.state, "exited", "child_exit is not a FAILED_REASONS entry");
+		assert.equal(host.exitCode, 1);
+		assert.match(host.error, /Model "glm\/glm-5\.3" not found/);
+		assert.ok(!host.error.includes("\x1b"), "the attributed line must be stripped of escape sequences");
+		assert.ok(!host.error.includes("starting model check"), "the CR overwrite must resolve to the last segment");
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("owned runner leaves error untouched on a clean child exit", async () => {
+	const root = freshRoot();
+	let runner;
+	try {
+		({ runner } = await launchOwnedRunner(root, "v1", "i90", {
+			config: {
+				piArgsPrefix: [resolve("test-support/fake-failing-pty-pi.mjs")],
+				env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1", FAKE_PTY_EXIT_CODE: "0" },
+			},
+		}));
+		assert.equal(await waitForExit(runner, 8000), true, "runner exits after the clean child");
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.endedAt != null ? h : false;
+		});
+		assert.equal(host.state, "exited");
+		assert.equal(host.exitCode, 0);
+		assert.equal(host.error ?? null, null, "a zero exit must not capture a screen.log line");
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
