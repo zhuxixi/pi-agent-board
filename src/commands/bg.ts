@@ -40,6 +40,15 @@ async function handleBgCommand(args: string, ctx: ExtensionCommandContext, opts:
 		piCommand: opts.piCommand,
 		piArgsPrefix: opts.piArgsPrefix,
 		defaultCwd: ctx.cwd,
+		// Stale-defaultModel launch guard (issue #90): live list, undefined
+		// when the registry is unavailable so validation conservatively skips.
+		availableModels: () => {
+			try {
+				return ctx.modelRegistry.getAvailable();
+			} catch {
+				return undefined;
+			}
+		},
 	});
 	const model = modelRef(ctx.model as any);
 	const adopted = service.adoptSession({

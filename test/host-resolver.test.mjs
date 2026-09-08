@@ -659,6 +659,29 @@ test("ensureHost launches normally when the defaultModel matches the available l
 	}
 });
 
+test("ensureHost skips the stale-model guard when defaultModel is null even with an injected list", () => {
+	const root = freshRoot();
+	try {
+		const meta = createView(root, { id: "v1", name: "null-model", cwd: "/r", defaultModel: null });
+		writeFileSync(meta.sessionFile, "");
+		const spawns = [];
+		const svc = resolverService(root, {
+			availableModels: () => [{ provider: "zai-coding-cn", id: "glm-5.3" }],
+			launchHost: (_root, config) => {
+				spawns.push({ config });
+				return { pid: process.pid, configPath: config.configPath };
+			},
+		});
+		const res = svc.ensureHost("v1");
+		assert.equal(res.ok, true);
+		assert.equal(res.started, true);
+		assert.equal(spawns.length, 1, "null defaultModel imposes no constraint");
+		assert.equal(readHost(root, "v1").state, "starting");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("missing availableModels injection skips the stale-model guard (backward compatible)", () => {
 	const root = freshRoot();
 	try {

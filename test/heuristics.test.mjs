@@ -151,6 +151,7 @@ test("lastVisibleLogLine strips ANSI/OSC, resolves CR overwrites, skips empty li
 	assert.equal(lastVisibleLogLine("a\r\n\r\n \r\nb\r\n"), "b", "empty lines skipped");
 	assert.equal(lastVisibleLogLine("x".repeat(300)), `${"x".repeat(199)}…`, "truncated with ellipsis");
 	assert.equal(lastVisibleLogLine("\x1b[2J\x1b[H"), null, "control-only input yields null");
+	assert.equal(lastVisibleLogLine("Error: boom\r\r\n"), "Error: boom", "stacked ONLCR \\r\\r\\n resolves to the visible line");
 	assert.equal(lastVisibleLogLine(""), null);
 	assert.equal(lastVisibleLogLine(null), null);
 	assert.equal(lastVisibleLogLine("tail without newline"), "tail without newline");
