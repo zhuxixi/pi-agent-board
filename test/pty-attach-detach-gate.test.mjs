@@ -29,6 +29,9 @@ test("attach detach gate: ctrl+] passes through, ← keeps its gate", () => {
 	assert.equal(parsed.leftDetachesOnTableRowsWithoutFakeCursor, true, "← must detach when a zero-inverse buffer holds only table/quote glyph lines and editor_state is unknown (issue #69)");
 	assert.equal(parsed.leftDetachesOnContentGlyphFallback, true, "← must detach on a content glyph line in the no-fake-cursor fallback — spurious detach beats trapping (issue #69)");
 	assert.equal(parsed.leftDetachRestoresBeforeGracefulEnd, true, "← must restore before graceful socket end");
+	assert.equal(parsed.ctrlLeftDetachesOnDraft, true, "Ctrl+← must detach even when editor_state reports a draft (issue #89)");
+	assert.equal(parsed.ctrlLeftDetachesOnEmptyInput, true, "Ctrl+← must detach from an empty editor too (issue #89)");
+	assert.equal(parsed.headerMentionsCtrlLeft, true, "the live header must advertise the Ctrl+← chord (issue #89)");
 	assert.equal(parsed.minimumSizeAvoidsInvalidShrink, true, "minimum terminal size must avoid an invalid shrink");
 	assert.equal(parsed.staleSocketEventsDoNotClearCurrent, true, "stale socket events must not clear a replacement connection");
 });
