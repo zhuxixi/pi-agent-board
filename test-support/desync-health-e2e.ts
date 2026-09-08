@@ -83,13 +83,18 @@ async function main(): Promise<void> {
 		await new Promise((r) => setTimeout(r, 9_000));
 
 		const state = (attach as unknown as {
-			jiggleRetry: { getState: () => { healCount: number; held: boolean; stopped: boolean } };
+			jiggleRetry: { getState: () => { healCount: number; held: boolean; stopped: boolean; tuiFrameSeen: boolean; clearDetected: boolean } };
 		}).jiggleRetry.getState();
-		// Raw controller state: healedNever/chainDone assert the derived flags,
-		// held carries the raw held bit (must be false once the chain is done).
-		const result = { healedNever: state.healCount === 0, chainDone: state.stopped === true, held: state.held };
+		// Assertion set locks in non-vacuity: gate 2 opened (frameSeen) and the probe genuinely evaluated alignment after a GENUINE clear (clearSeen), not G2 budget exhaustion or G4.
+		const result = {
+			healedNever: state.healCount === 0,
+			chainDone: state.stopped === true,
+			frameSeen: state.tuiFrameSeen === true,
+			clearSeen: state.clearDetected === true,
+			held: state.held,
+		};
 		console.log(JSON.stringify(result));
-		if (!Object.values(result).every((v, i) => (i === 2 ? v === false : v === true))) process.exitCode = 1;
+		if (!(result.healedNever && result.chainDone && result.frameSeen && result.clearSeen && result.held === false)) process.exitCode = 1;
 	} finally {
 		try { attach?.close(); } catch {}
 		if (runner) await stopRunner(runner);

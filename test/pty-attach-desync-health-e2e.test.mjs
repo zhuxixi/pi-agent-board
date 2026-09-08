@@ -34,6 +34,8 @@ test(
 		const parsed = parseResultLine(out);
 		assert.equal(parsed.healedNever, true, "healCount must stay 0 on a healthy idle session");
 		assert.equal(parsed.chainDone, true, "attach chain must complete");
+		assert.equal(parsed.frameSeen, true, "gate 2 must actually open (tuiFrameSeen) — the probe must have evaluated the classifier");
+		assert.equal(parsed.clearSeen, true, "chain must have stopped via a GENUINE clear (clearDetected), not G2 budget exhaustion or G4");
 		assert.equal(parsed.held, false, "no hold left armed");
 	},
 );
