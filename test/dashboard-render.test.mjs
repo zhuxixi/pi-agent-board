@@ -26,6 +26,14 @@ test("dashboard repaint self-heals on mount and on content shrink (issue #88)", 
 	assert.equal(parsed.frame1Forced, true, "mount frame must force a full clear (dirty bottoms persist otherwise)");
 	assert.equal(parsed.frame2Forced, false, "unchanged frame must keep differential repaint");
 	assert.equal(parsed.frame3Forced, true, "content-shrink frame must force a full clear (overlay disables clearOnShrink)");
+	// The forced clear must be deferred past the active doRender pass — an
+	// in-pass requestRender(true) is swallowed by pi-tui's first-render no-clear
+	// branch and never clears anything (issue #88 CR r1, real pi-tui semantics
+	// modeled by the harness). Assert real clears, not just recorded calls.
+	assert.equal(parsed.swallowedCount, 0, "no force-clear may be issued synchronously from inside render");
+	assert.equal(parsed.frame1Cleared, true, "mount frame's deferred force-clear must actually clear");
+	assert.equal(parsed.frame2Cleared, false, "unchanged frame must not clear");
+	assert.equal(parsed.frame3Cleared, true, "shrink frame's deferred force-clear must actually clear");
 });
 
 test("dashboard row line shows issue/PR badge and peek renders the Refs section", () => {

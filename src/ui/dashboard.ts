@@ -1170,12 +1170,17 @@ export class DashboardComponent implements Component {
 		// overlay is active ("overlays need the padding"), so a content shrink
 		// under the dashboard overlay would leave stale rows forever. Force a
 		// full clear on the first frame and on any content-line shrink.
-		// requestRender(true) resets diff state and renders on a nextTick —
-		// safe to call from inside render; the full-clear frame is wrapped in
-		// DECSET 2026 synchronized output by pi-tui itself.
+		// The force MUST be deferred past the active doRender pass: calling
+		// requestRender(true) synchronously here resets pi-tui's diff state
+		// mid-frame (previousLines=[], previousWidth=-1), making the CURRENT frame
+		// take the first-render no-clear branch, after which the deferred re-render
+		// diffs identical content — nothing is ever cleared (issue #88 CR r1).
+		// Deferred to nextTick, the reset lands between frames: the next doRender
+		// sees previousWidth=-1 ≠ width → widthChanged → fullRender(true), a real
+		// clear wrapped in DECSET 2026 synchronized output by pi-tui itself.
 		if (this.needsFullClear || (this.lastContentLineCount != null && this.frameContentLineCount < this.lastContentLineCount)) {
 			this.needsFullClear = false;
-			this.tui.requestRender(true);
+			process.nextTick(() => this.tui.requestRender(true));
 		}
 		this.lastContentLineCount = this.frameContentLineCount;
 		return lines;
