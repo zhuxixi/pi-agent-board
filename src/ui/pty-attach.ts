@@ -244,6 +244,16 @@ export class PtyAttachComponent implements Component {
 			this.send({ type: "input", data });
 			return;
 		}
+		if (matchesKey(data, Key.ctrl("left"))) {
+			// Explicit detach chord (issue #89): single ← is gated on editor state
+			// (it doubles as cursor-left inside a non-empty draft), so a user with
+			// a draft had no way out short of Ctrl+C/D, which kills the child Pi.
+			// Ctrl+← is unambiguous intent — detach unconditionally, regardless of
+			// editor state or socket liveness (same always-exitable guarantee as
+			// the disconnected-← escape, issue #48).
+			this.detach();
+			return;
+		}
 		if (matchesKey(data, Key.left)) {
 			// While the socket is down the key can never reach the child, so
 			// escape unconditionally — the view must always be exitable, even
@@ -279,7 +289,7 @@ export class PtyAttachComponent implements Component {
 		}
 		const header =
 			this.theme.fg("accent", this.theme.bold(` ${this.opts.title} `)) +
-			this.theme.fg("muted", `${this.status} · click opens links · dblclick/drag selects+copies · ← detach`);
+			this.theme.fg("muted", `${this.status} · click opens links · dblclick/drag selects+copies · ←/Ctrl+← detach`);
 		return [clip(header, width), ...body.map((l) => clipTerminalLine(l, width)), this.theme.fg("dim", "─".repeat(width))];
 	}
 
@@ -295,7 +305,7 @@ export class PtyAttachComponent implements Component {
 		out.push(center(this.theme.fg("accent", this.theme.bold(title)), width));
 		out.push(center(this.theme.fg("muted", detail), width));
 		out.push("");
-		out.push(center(this.theme.fg("dim", "← to detach"), width));
+		out.push(center(this.theme.fg("dim", "←/Ctrl+← to detach"), width));
 		while (out.length < height) out.push("");
 		return out.slice(0, height);
 	}
