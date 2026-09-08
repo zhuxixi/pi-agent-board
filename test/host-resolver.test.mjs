@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createService, HOST_START_GRACE_MS } from "../src/runtime/service.mjs";
+import { readDiagnostics } from "../src/core/diagnostics.mjs";
 import { tryAcquireOwnedViewLock } from "../src/core/locks.mjs";
-import { createView, readHost, writeHost, writePid, writeState } from "../src/core/store.mjs";
+import { createView, readHost, writeHost, writeHostPid, writePid, writeState } from "../src/core/store.mjs";
 import * as P from "../src/core/paths.mjs";
 
 function freshRoot() {
@@ -89,6 +90,140 @@ function aliveHost(root, viewId, instanceId, over = {}) {
 		...over,
 	});
 }
+
+/**
+ * A v0.5.x-era legacy host record: no `instanceId`/`runnerPid` properties at
+ * all — the pid lives only in the host-pid.json mirror, and loadRow's
+ * `Object.hasOwn(host, "runnerPid")` fallback only consults the mirror when
+ * the property is absent (issue #87).
+ * @param {string} root
+ * @param {string} viewId
+ * @param {number} pid pid recorded in the host-pid.json mirror (999999 = dead)
+ * @param {Record<string, unknown>} [over]
+ */
+function legacyHostRecord(root, viewId, pid, over = {}) {
+	const host = {
+		version: 1,
+		viewId,
+		mode: "pty",
+		childPid: null,
+		socketPath: P.hostEndpointPathFor(process.platform, root, viewId, "legacy"),
+		state: "alive",
+		claimAt: Date.now(),
+		// Long-gone claimer: in the real #87 scenario the entire old process tree
+		// (claimer + runner) is dead; a live claimPid would make canReplaceHost
+		// see an unverifiable claim and refuse the replacement claim.
+		claimPid: 999999,
+		readyAt: 12345,
+		startedAt: Date.now(),
+		lastSeenAt: Date.now(),
+		endedAt: null,
+		exitCode: null,
+		error: null,
+		...over,
+	};
+	writeHost(root, host);
+	writeHostPid(root, viewId, pid);
+	return host;
+}
+
+/** Resolver overrides for the full self-heal loop: real ensureHostImpl claim + scripted probe. */
+function healServiceOverrides(probe, spawns) {
+	return {
+		probeHostFn: probe.fn,
+		sleepFn: instantSleep,
+		ptySupport: () => ({ ok: true }),
+		launchHost: (_root, config) => {
+			spawns.push({ config });
+			return { pid: process.pid, configPath: config.configPath };
+		},
+	};
+}
+
+test("resolver finalizes a provably-dead legacy alive host and self-heals onto a fresh claim (issue #87)", async () => {
+	const root = freshRoot();
+	try {
+		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeFileSync(meta.sessionFile, "");
+		legacyHostRecord(root, "v1", 999999, { state: "alive" });
+		const probe = scriptProbe(["missing", "ready"]);
+		const spawns = [];
+		const svc = resolverService(root, healServiceOverrides(probe, spawns));
+		const result = await svc.resolveAttachTarget("v1", { timeoutMs: 2_000 });
+		assert.equal(result.kind, "pty", `must heal onto a fresh host: ${JSON.stringify(result)}`);
+		assert.ok(result.instanceId != null, "attaches to a new-protocol instance");
+		assert.ok(readDiagnostics(root, "v1").some((e) => e.code === "legacy_host_finalized"), "finalize is diagnosed");
+		assert.equal(spawns.length, 1, "exactly one fresh claim spawn");
+		const finalHost = readHost(root, "v1");
+		assert.equal(finalHost.instanceId, result.instanceId);
+		assert.equal(finalHost.state, "starting");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("resolver keeps pending for a legacy alive host whose runner pid is still alive (issue #87 conservative path)", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		legacyHostRecord(root, "v1", process.pid, { state: "alive" });
+		const probe = scriptProbe(["missing"]);
+		const svc = resolverService(root, {
+			probeHostFn: probe.fn,
+			sleepFn: instantSleep,
+		});
+		const result = await svc.resolveAttachTarget("v1");
+		assert.equal(result.kind, "pending");
+		assert.match(result.reason, /legacy host unreachable/);
+		assert.equal(readHost(root, "v1").state, "alive", "host record untouched");
+		assert.equal(readDiagnostics(root, "v1").some((e) => e.code === "legacy_host_finalized"), false, "no finalize diagnostic");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("resolver finalizes a provably-dead legacy starting host instead of waiting out grace forever (issue #87)", async () => {
+	const root = freshRoot();
+	try {
+		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeFileSync(meta.sessionFile, "");
+		legacyHostRecord(root, "v1", 999999, {
+			state: "starting",
+			readyAt: null,
+			claimAt: Date.now() - HOST_START_GRACE_MS - 5_000,
+			claimPid: 999999,
+		});
+		const probe = scriptProbe(["missing", "ready"]);
+		const spawns = [];
+		const svc = resolverService(root, healServiceOverrides(probe, spawns));
+		const result = await svc.resolveAttachTarget("v1", { timeoutMs: 2_000 });
+		assert.equal(result.kind, "pty", `must not pend on the legacy grace window: ${JSON.stringify(result)}`);
+		assert.ok(readDiagnostics(root, "v1").some((e) => e.code === "legacy_host_finalized"));
+		assert.equal(spawns.length, 1);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("resolver never finalizes a legacy host on an unknown probe (issue #87 conservative path)", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		legacyHostRecord(root, "v1", 999999, { state: "alive" });
+		const probe = scriptProbe(["unknown"]);
+		const svc = resolverService(root, {
+			probeHostFn: probe.fn,
+			sleepFn: instantSleep,
+		});
+		const result = await svc.resolveAttachTarget("v1");
+		assert.equal(result.kind, "pending");
+		assert.match(result.reason, /legacy host unreachable/);
+		assert.equal(readHost(root, "v1").state, "alive", "host record untouched");
+		assert.equal(readDiagnostics(root, "v1").some((e) => e.code === "legacy_host_finalized"), false);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
 
 test("resolver waits out a starting host and returns pty once probe ready", async () => {
 	const root = freshRoot();
