@@ -270,6 +270,40 @@ const out: Record<string, boolean> = {};
 	attach.dispose();
 }
 
+// L. Issue #89: the Ctrl+← chord detaches unconditionally — even when the
+// editor holds a draft (editor_state empty:false would forward single ←),
+// because the chord is unambiguous exit intent, not a cursor-left.
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat content\r\n");
+	(attach as unknown as { onSocketData: (t: string) => void }).onSocketData(JSON.stringify({ type: "editor_state", empty: false }) + "\n");
+	(attach as unknown as { connected: boolean }).connected = true;
+	attach.handleInput("\x1b[1;5D");
+	out.ctrlLeftDetachesOnDraft = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	attach.dispose();
+}
+
+// M. Issue #89: the chord also detaches from a genuinely empty editor —
+// same unconditional guarantee on the other side of the gate.
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat content\r\n> \x1b[7m \x1b[27m");
+	(attach as unknown as { connected: boolean }).connected = true;
+	attach.handleInput("\x1b[1;5D");
+	out.ctrlLeftDetachesOnEmptyInput = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	attach.dispose();
+}
+
+// N. Issue #89: the surface must advertise the chord — the live header names
+// Ctrl+← next to ← once the loading screen is gone.
+{
+	const { attach } = makeAttach();
+	await writeToTerm(attach, "chat content\r\n");
+	const lines = attach.render(80);
+	out.headerMentionsCtrlLeft = lines.some((line) => line.includes("Ctrl+←"));
+	attach.dispose();
+}
+
 // E2. A terminal at the minimum supported size must not emit a shrink that the
 // runner immediately clamps back, because that is not a real width delta.
 {
