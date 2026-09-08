@@ -172,7 +172,16 @@ test("A9: a hijacked host record fences second launchers and late writers", { sk
 		assert.equal(second.result?.ok, true, `second helper ok: ${JSON.stringify(second)}`);
 		assert.equal(second.result.started !== true && second.result.pending === true, true, `second helper pends against the hijacked claim: ${JSON.stringify(second.result)}`);
 		assert.equal(launchHostEvents(root, "v1").length, 1, "no second spawn happened");
-		assert.equal(isAlive(original.runnerPid), true, "original runner untouched");
+		// The second helper never signals the original runner. The runner may still
+		// be alive here, or may already have self-terminated via its 1s owner_lost
+		// heartbeat after the hijack (by design, issue #70) — owner_lost deliberately
+		// skips the terminal write, so the hijacked record must stay untouched either
+		// way. On slow CI runners the heartbeat reliably wins this race (issue #95).
+		if (!isAlive(original.runnerPid)) {
+			const hijacked = readHost(root, "v1");
+			assert.equal(hijacked.instanceId, "hijack", "owner_lost exit left the hijacked record untouched");
+			assert.equal(hijacked.state, "alive", "dead runner wrote no terminal state");
+		}
 
 		// Restore the true record; a writer holding the pre-hijack token is fenced out.
 		writeHost(root, { ...original });
@@ -213,8 +222,9 @@ test("A10: SIGKILLed runner is recovered by the attach resolver without double c
 		// recovery + child-kill ladder, adopt, cold runner boot, ready probe — can
 		// stretch past 40s and starve the deadline ("host start timed out"). Budget
 		// is sized for the slowest runners; typical completion is ~20s.
+		// issue #95: 90s proved insufficient on slower CI — widened to 150s.
 		const service = testService(root);
-		const resolved = await service.resolveAttachTarget("v1", { timeoutMs: 90_000 });
+		const resolved = await service.resolveAttachTarget("v1", { timeoutMs: 150_000 });
 		assert.equal(resolved.kind, "pty", `resolver produced a pty target: ${JSON.stringify(resolved)}`);
 		assert.notEqual(resolved.instanceId, original.instanceId, "replacement is a new instance");
 
