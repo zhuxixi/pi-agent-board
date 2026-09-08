@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { test } from "node:test";
-import { launchAutoState, launchHost, launchTitle } from "../src/core/launch.mjs";
+import { launchAutoState, launchHost, launchRun, launchTitle } from "../src/core/launch.mjs";
 import * as P from "../src/core/paths.mjs";
 
 const ROOT_DIR = fileURLToPath(new URL("../", import.meta.url));
@@ -132,6 +132,75 @@ test("launchAutoState persists the auto-state config", async () => {
 		assert.ok(persisted, "auto-state config must be written");
 		assert.equal(JSON.parse(persisted).runId, "run_3");
 	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("async spawn failures are swallowed instead of crashing the host (issue #86)", async () => {
+	const root = freshRoot();
+	let uncaughtCount = 0;
+	const onUncaught = () => {
+		uncaughtCount += 1;
+	};
+	process.on("uncaughtException", onUncaught);
+	try {
+		const opts = { runnerScript: FAKE_PI, node: "/nonexistent/node-ENOENT-test" };
+		const hostConfig = {
+			root,
+			viewId: "view_e1",
+			sessionFile: "/tmp/sessions/view_e1.jsonl",
+			cwd: root,
+			initialPrompt: null,
+			piCommand: process.execPath,
+			piArgsPrefix: [],
+			model: null,
+			thinkingLevel: null,
+			tools: null,
+			env: {},
+			cols: 80,
+			rows: 24,
+			screenLogMaxBytes: 1_000_000,
+		};
+		const titleConfig = {
+			root,
+			viewId: "view_e2",
+			cwd: root,
+			prompt: "name it",
+			fallbackName: "name",
+			piCommand: process.execPath,
+			piArgsPrefix: [],
+			model: null,
+		};
+		const autoStateConfig = {
+			root,
+			viewId: "view_e3",
+			runId: "run_e3",
+			cwd: root,
+			piCommand: process.execPath,
+			piArgsPrefix: [],
+		};
+		const runConfig = {
+			root,
+			viewId: "view_e4",
+			runId: "run_e4",
+			cwd: root,
+			piCommand: process.execPath,
+			piArgsPrefix: [],
+		};
+
+		// Every entry point must degrade to the pid == null branch (state "failed")
+		// instead of letting the async spawn 'error' escape as uncaughtException.
+		assert.equal(launchHost(root, hostConfig, opts).pid, null);
+		assert.equal(launchTitle(root, titleConfig, opts).pid, null);
+		assert.equal(launchAutoState(root, autoStateConfig, opts).pid, null);
+		assert.equal(launchRun(root, runConfig, opts).pid, null);
+
+		// Give the async 'error' events time to surface; an uncaughtException
+		// here would kill the test process outright (the issue #86 symptom).
+		await sleep(300);
+		assert.equal(uncaughtCount, 0, "no spawn failure may surface as uncaughtException");
+	} finally {
+		process.removeListener("uncaughtException", onUncaught);
 		rmSync(root, { recursive: true, force: true });
 	}
 });
