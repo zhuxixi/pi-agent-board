@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+	canFinalizeLegacyHost,
 	canReplaceHost,
 	classifyProbeResult,
 	isStartingWithinGrace,
@@ -31,6 +32,25 @@ test("canReplaceHost refuses unknown observations", () => {
 	assert.equal(canReplaceHost({ host, runnerObservation: "unknown", childObservation: "dead", claimObservation: "dead", launchLeaseActive: false }), false);
 	assert.equal(canReplaceHost({ host, runnerObservation: "dead", childObservation: "not_started", claimObservation: "dead", launchLeaseActive: false }), true);
 	assert.equal(canReplaceHost({ host, runnerObservation: "dead", childObservation: "dead", claimObservation: "dead", launchLeaseActive: true }), false);
+});
+
+test("canFinalizeLegacyHost requires legacy record + dead pid + unreachable endpoint", () => {
+	const base = { host: { instanceId: null, state: "alive" }, hostPid: 999999, hostPidAlive: false, probeClassification: "missing" };
+	assert.equal(canFinalizeLegacyHost(base), true);
+	assert.equal(canFinalizeLegacyHost({ ...base, probeClassification: "stale" }), true);
+	assert.equal(canFinalizeLegacyHost({ ...base, host: { instanceId: null, state: "starting" } }), true);
+	assert.equal(canFinalizeLegacyHost({ host: { instanceId: null, state: "starting" }, hostPid: 999999, hostPidAlive: false, probeClassification: "stale" }), true);
+	assert.equal(canFinalizeLegacyHost({ ...base, host: { instanceId: "i1", state: "alive" } }), false, "new-protocol host never finalizes here");
+	assert.equal(canFinalizeLegacyHost({ ...base, host: { instanceId: null, state: "stopping" } }), false, "stopping has its own recovery path");
+	assert.equal(canFinalizeLegacyHost({ ...base, host: { instanceId: null, state: "exited" } }), false);
+	assert.equal(canFinalizeLegacyHost({ ...base, host: { instanceId: null, state: "failed" } }), false);
+	assert.equal(canFinalizeLegacyHost({ ...base, hostPid: null }), false, "unknown pid is unverifiable — never finalize");
+	assert.equal(canFinalizeLegacyHost({ ...base, hostPidAlive: true }), false, "live runner stays conservative pending");
+	assert.equal(canFinalizeLegacyHost({ ...base, probeClassification: "unknown" }), false);
+	assert.equal(canFinalizeLegacyHost({ ...base, probeClassification: "occupied" }), false);
+	assert.equal(canFinalizeLegacyHost({ ...base, probeClassification: "ready" }), false);
+	assert.equal(canFinalizeLegacyHost({ ...base, probeClassification: "starting" }), false);
+	assert.equal(canFinalizeLegacyHost({ ...base, host: null }), false);
 });
 
 test("ownsEndpoint compares dev+ino", () => {

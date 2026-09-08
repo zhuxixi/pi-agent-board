@@ -122,6 +122,29 @@ export function classifyProbeResult(result) {
 	return "starting";
 }
 
+/**
+ * Whether a legacy (pre-instanceId) host record can be safely finalized as
+ * `exited` so the next attach claims a fresh host. Spec §10.1 keeps legacy
+ * hosts unrecovered because their identity is unverifiable — but a provably
+ * dead runner pid IS a certain identity (a reused pid reads alive, which
+ * conservatively lands here as false), and an unreachable endpoint (missing
+ * socket file / refused socket) rules out a merely slow host. All four
+ * conditions must hold at once (issue #87).
+ * @param {{
+ *   host: HostStatus|null|undefined,
+ *   hostPid: number|null|undefined,
+ *   hostPidAlive: boolean,
+ *   probeClassification: string,
+ * }} input
+ * @returns {boolean}
+ */
+export function canFinalizeLegacyHost({ host, hostPid, hostPidAlive, probeClassification }) {
+	if (!host || host.instanceId != null) return false;
+	if (host.state !== "starting" && host.state !== "alive") return false;
+	if (hostPid == null || hostPidAlive) return false;
+	return probeClassification === "missing" || probeClassification === "stale";
+}
+
 /** Host states in which a claim exists and must not be duplicated. */
 const ACTIVE_STATES = new Set(["starting", "alive", "stopping"]);
 

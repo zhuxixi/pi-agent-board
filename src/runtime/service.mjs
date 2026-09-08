@@ -25,7 +25,7 @@ import { launchAutoState as launchAutoStateProcess, launchHost as launchHostProc
 import { gitRepoRoot } from "../core/repo.mjs";
 import { isAlive, killProcess } from "../core/pid.mjs";
 import { acquireOwnedViewLock, tryAcquireOwnedViewLock } from "../core/locks.mjs";
-import { canReplaceHost } from "../core/host-coordination.mjs";
+import { canFinalizeLegacyHost, canReplaceHost } from "../core/host-coordination.mjs";
 import { HOST_PROBE_RETRY_MS, probeHost } from "../core/host-probe.mjs";
 import * as P from "../core/paths.mjs";
 import {
@@ -34,11 +34,13 @@ import {
 	listRows,
 	loadRow,
 	readHost,
+	readHostPid,
 	readLaunchPrefs,
 	readPid,
 	readState,
 	readStatus,
 	updateOwnedHost,
+	writeHost,
 	writeLaunchPrefs,
 	writeMeta,
 	writeState,
@@ -951,6 +953,13 @@ export function createService(opts) {
 					continue;
 				}
 				if (withinGrace || legacy) {
+					// A legacy starting host whose runner is provably dead would wait out
+					// the grace window forever (withinGrace is always true for legacy) —
+					// finalize it now instead (issue #87).
+					if (legacy && finalizeDeadLegacyHost(root, viewId, host, probe.classification, nowImpl(), tryAcquireLockImpl)) {
+						await sleepFnImpl(HOST_PROBE_RETRY_MS);
+						continue;
+					}
 					// Normal cold start (or a legacy starting host — legacy is never recovered,
 				// spec §10.1): wait out the grace window.
 				await sleepFnImpl(HOST_PROBE_RETRY_MS);
@@ -961,6 +970,13 @@ export function createService(opts) {
 				await sleepFnImpl(HOST_PROBE_RETRY_MS);
 				continue;
 			} else if (legacy) {
+				// Legacy host unreachable. spec §10.1 says never recover — unless the
+				// runner pid is provably dead, in which case finalize and self-heal
+				// (issue #87).
+				if (finalizeDeadLegacyHost(root, viewId, host, probe.classification, nowImpl(), tryAcquireLockImpl)) {
+					await sleepFnImpl(HOST_PROBE_RETRY_MS);
+					continue;
+				}
 				return pending(sessionFile, "legacy host unreachable — manual restart needed");
 			}
 
@@ -1865,6 +1881,54 @@ function readProcStartToken(pid) {
 /** Launch-time identity this service process stamps on leases and claims. */
 function serviceIdentity() {
 	return { pid: process.pid, startToken: readProcStartToken(process.pid) };
+}
+
+/**
+ * Finalize a provably-dead legacy host as `exited` so the resolver loop's next
+ * iteration sees hostActive=false and claims a fresh new-protocol host
+ * (issue #87). The gate is `canFinalizeLegacyHost` — anything unverifiable
+ * stays pending (spec §10.1 conservatism). The write itself is serialized
+ * under the host-start lease (same gate as recoverHost/claim) with a
+ * live-record re-check: a concurrent resolver may have already finalized and
+ * claimed a new-protocol host, and a stale `alive` snapshot must never clobber
+ * that replacement's record (issue #87 CR r1).
+ * @param {string} root
+ * @param {string} viewId
+ * @param {import("../core/types.mjs").HostStatus} host
+ * @param {string} probeClassification
+ * @param {number} now
+ * @param {(r: string, v: string, name: string, o?: object) => ({ acquired: true, lease: { release: () => void } } | { acquired: false, reason: string })} acquireHostStartLock
+ * @returns {boolean} true when finalized (caller should `continue` the loop).
+ */
+function finalizeDeadLegacyHost(root, viewId, host, probeClassification, now, acquireHostStartLock) {
+	// Same pid fallback as loadRow: legacy records carry no runnerPid property —
+	// the pid lives only in the host-pid.json mirror.
+	const hostPid = Object.hasOwn(host, "runnerPid") ? host.runnerPid : readHostPid(root, viewId);
+	if (!canFinalizeLegacyHost({ host, hostPid, hostPidAlive: isAlive(hostPid), probeClassification })) return false;
+	// Serialize with claims: only write while the live record still matches our
+	// (possibly stale) snapshot.
+	const gate = acquireHostStartLock(root, viewId, "host-start", { identity: serviceIdentity() });
+	if (!gate.acquired) return false; // busy — record left untouched; caller pends/waits this attempt, a later one finalizes
+	try {
+		const cur = readHost(root, viewId);
+		if (!cur || cur.instanceId != null) return false; // already claimed by a new-protocol host
+		if (cur.state !== "starting" && cur.state !== "alive") return false; // already finalized
+		if (cur.socketPath !== host.socketPath || cur.state !== host.state) return false; // snapshot drifted
+		const finalizedAt = now;
+		writeHost(root, { ...cur, state: "exited", endedAt: finalizedAt, lastSeenAt: finalizedAt, error: "legacy host finalized: runner pid dead" });
+	} finally {
+		try { gate.lease.release(); } catch { /* best effort */ }
+	}
+	try {
+		appendDiagnostic(root, viewId, {
+			source: "service",
+			level: "info",
+			code: "legacy_host_finalized",
+			message: `Finalized stale legacy host (pid ${hostPid} dead, probe ${probeClassification}) — next attach claims a fresh host`,
+			details: { hostPid, probeClassification, previousState: host.state },
+		});
+	} catch { /* best effort */ }
+	return true;
 }
 
 /** Conservative pre-identity observation (issue #70 Task 10): a recorded pid that
