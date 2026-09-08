@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	createAttachOutputRenderScheduler,
+	detectCursorDesync,
 	nextAttachRender,
 	projectPtyCursor,
 	shouldScheduleAttachRenderForMessage,
@@ -74,4 +75,57 @@ test("projectPtyCursor tolerates missing or negative cursor coordinates", () => 
 	assert.equal(projectPtyCursor({ baseY: 0 }, 0, 36), null);
 	assert.equal(projectPtyCursor({ baseY: 0, cursorX: -1, cursorY: 3 }, 0, 36), null);
 	assert.equal(projectPtyCursor({ baseY: 0, cursorX: 0, cursorY: -2 }, 0, 36), null);
+});
+
+// --- issue #11: runtime desync classifier ---
+
+function fakeDesyncBuf(cells) {
+	// cells: array of { inverse: boolean, width: number } | null (null = no cell at x)
+	return {
+		getLine(row) {
+			if (row !== 0) return undefined;
+			return {
+				length: cells.length,
+				getCell(x) {
+					const c = cells[x];
+					if (!c) return undefined;
+					return { isInverse: () => c.inverse, getWidth: () => c.width };
+				},
+			};
+		},
+	};
+}
+
+test("detectCursorDesync: null cursor (viewport-scrolled) is unknown", () => {
+	assert.equal(detectCursorDesync(fakeDesyncBuf([]), null), "unknown");
+});
+
+test("detectCursorDesync: cursor on an inverse cell is aligned", () => {
+	const buf = fakeDesyncBuf([{ inverse: false, width: 1 }, { inverse: true, width: 1 }]);
+	assert.equal(detectCursorDesync(buf, { row: 0, col: 1 }), "aligned");
+});
+
+test("detectCursorDesync: cursor on a non-inverse cell is misaligned", () => {
+	const buf = fakeDesyncBuf([{ inverse: true, width: 1 }, { inverse: false, width: 1 }]);
+	assert.equal(detectCursorDesync(buf, { row: 0, col: 1 }), "misaligned");
+});
+
+test("detectCursorDesync: cursor past line end falls back to the last inverse cell (aligned)", () => {
+	const buf = fakeDesyncBuf([{ inverse: false, width: 1 }, { inverse: true, width: 1 }]);
+	assert.equal(detectCursorDesync(buf, { row: 0, col: 99 }), "aligned");
+});
+
+test("detectCursorDesync: cursor on a width-0 CJK continuation falls back to the leading wide cell", () => {
+	// "你" occupies cols 0-1: col 0 width 2 inverse, col 1 width 0 (continuation)
+	const buf = fakeDesyncBuf([{ inverse: true, width: 2 }, { inverse: false, width: 0 }, { inverse: false, width: 1 }]);
+	assert.equal(detectCursorDesync(buf, { row: 0, col: 1 }), "aligned");
+});
+
+test("detectCursorDesync: fully empty line (no cells, no inverse) is misaligned", () => {
+	const buf = fakeDesyncBuf([]);
+	assert.equal(detectCursorDesync(buf, { row: 0, col: 0 }), "misaligned");
+});
+
+test("detectCursorDesync: missing buffer line is unknown", () => {
+	assert.equal(detectCursorDesync(fakeDesyncBuf([{ inverse: true, width: 1 }]), { row: 5, col: 0 }), "unknown");
 });
