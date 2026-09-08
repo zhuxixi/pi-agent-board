@@ -375,3 +375,23 @@ test("heal() while a previous heal is held: restores the old hold first", () => 
 	assert.deepEqual(resizes, [[169, 35], [170, 36], [169, 35]], "second heal unwinds the first hold before re-shrinking");
 	assert.equal(controller.getState().healCount, 2);
 });
+
+// --- issue #11 follow-up: clear-wins chunk must still learn frame cognition ---
+
+test("feed() with 2026h and 2J in ONE chunk: clear wins the re-arm, but tuiFrameSeen is still learned", () => {
+	const { controller, resizes } = makeController();
+	controller.start(170, 36);
+	resizes.length = 0;
+	// One replay-style chunk bundling a TUI frame start AND a full clear: the
+	// clear wins the re-arm (restore + stop), but frame cognition — the runtime
+	// heal's gate 2 (issue #11) — must still be learned from the same chunk.
+	controller.feed("\x1b[?2026hframe\x1b[2J\x1b[Hredraw");
+	assert.equal(controller.getState().clearDetected, true);
+	assert.equal(controller.getState().stopped, true);
+	assert.equal(controller.getState().held, false);
+	assert.equal(controller.getState().tuiFrameSeen, true, "frame cognition must survive a clear-wins chunk");
+	// heal() consumes the learned cognition: gate 2 open, hold armed, cognition preserved.
+	assert.equal(controller.heal(170, 36), true);
+	assert.equal(controller.getState().tuiFrameSeen, true);
+	assert.equal(controller.getState().held, true);
+});

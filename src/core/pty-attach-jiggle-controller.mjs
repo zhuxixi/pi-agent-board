@@ -206,7 +206,10 @@ export function createJiggleRetryController(deps) {
 
 	/**
 	 * Feed one socket output chunk. A clear wins over the re-arm when both
-	 * appear in one chunk. The first TUI frame restores the held size (the
+	 * appear in one chunk — but frame cognition is still learned from that
+	 * chunk: a clear only proves the child redraws, not that it isn't a TUI
+	 * (screen-log replay bundles historical frames with clears, issue #11).
+	 * The first TUI frame restores the held size (the
 	 * child is now rendering and will fullRender on the width delta) and
 	 * does NOT reschedule the chain; if G1 already released the hold before
 	 * the TUI booted, the frame instead re-arms a fresh hold so the running
@@ -219,14 +222,18 @@ export function createJiggleRetryController(deps) {
 		const result = feedOutput(state, data, carry);
 		state = result.state;
 		carry = result.carry;
+		// Learn frame cognition unconditionally, BEFORE the clear branch: a
+		// clear-wins chunk must not swallow it (issue #11), and only the FIRST
+		// frame ever seen drives the re-arm/fast-path logic below.
+		const firstFrame = result.frameStartFound && !tuiFrameSeen;
+		if (result.frameStartFound) tuiFrameSeen = true;
 		if (result.clearFound) {
 			clearAllTimers();
 			restoreIfHeld();
 			state = stopRetry({ ...state, clearDetected: true });
 			return;
 		}
-		if (result.frameStartFound && !tuiFrameSeen) {
-			tuiFrameSeen = true;
+		if (firstFrame) {
 			clearG1Timer();
 			if (held) {
 				restoreIfHeld(); // fast path: child is rendering, width delta now lands
