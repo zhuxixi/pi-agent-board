@@ -13,6 +13,28 @@ test("dashboard repaint preserves Pi TUI differential render state", () => {
 
 const ROOT_DIR = fileURLToPath(new URL("../", import.meta.url));
 const REFS_RENDER_SCRIPT = join(ROOT_DIR, "test-support", "dashboard-refs-render.ts");
+const SHRINK_RENDER_SCRIPT = join(ROOT_DIR, "test-support", "dashboard-shrink-render.ts");
+
+test("dashboard repaint self-heals on mount and on content shrink (issue #88)", () => {
+	// Same transform-types requirement as the refs harness above.
+	const out = execFileSync(process.execPath, ["--experimental-transform-types", SHRINK_RENDER_SCRIPT], {
+		encoding: "utf8",
+		timeout: 30_000,
+	});
+	const parsed = JSON.parse(out);
+	assert.equal(parsed.ok, true);
+	assert.equal(parsed.frame1Forced, true, "mount frame must force a full clear (dirty bottoms persist otherwise)");
+	assert.equal(parsed.frame2Forced, false, "unchanged frame must keep differential repaint");
+	assert.equal(parsed.frame3Forced, true, "content-shrink frame must force a full clear (overlay disables clearOnShrink)");
+	// The forced clear must be deferred past the active doRender pass — an
+	// in-pass requestRender(true) is swallowed by pi-tui's first-render no-clear
+	// branch and never clears anything (issue #88 CR r1, real pi-tui semantics
+	// modeled by the harness). Assert real clears, not just recorded calls.
+	assert.equal(parsed.swallowedCount, 0, "no force-clear may be issued synchronously from inside render");
+	assert.equal(parsed.frame1Cleared, true, "mount frame's deferred force-clear must actually clear");
+	assert.equal(parsed.frame2Cleared, false, "unchanged frame must not clear");
+	assert.equal(parsed.frame3Cleared, true, "shrink frame's deferred force-clear must actually clear");
+});
 
 test("dashboard row line shows issue/PR badge and peek renders the Refs section", () => {
 	// dashboard.ts uses TS parameter properties, which strip-only mode rejects;
