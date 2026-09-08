@@ -43,6 +43,23 @@ export function canonicalModelRef(model) {
 	return model ? `${model.provider}/${model.id}` : "";
 }
 
+/**
+ * Whether a stored model reference resolves to a currently-available model.
+ * Same rule as the dashboard launch picker: case-insensitive exact "provider/id".
+ * A null/empty reference is trivially available (no constraint), and an
+ * empty/unavailable model list must not block launches (the caller cannot judge
+ * availability, so the conservative answer is allow — issue #90).
+ * @param {string|null|undefined} modelRef
+ * @param {LaunchModelLike[]|undefined|null} availableModels
+ * @returns {boolean}
+ */
+export function modelRefAvailable(modelRef, availableModels) {
+	const ref = String(modelRef ?? "").trim().toLowerCase();
+	if (!ref) return true;
+	if (!availableModels || availableModels.length === 0) return true;
+	return availableModels.some((model) => `${model.provider}/${model.id}`.toLowerCase() === ref);
+}
+
 /** @param {LaunchModelLike|null|undefined} a @param {LaunchModelLike|null|undefined} b */
 export function sameModel(a, b) {
 	return Boolean(a && b && a.provider === b.provider && a.id === b.id);
