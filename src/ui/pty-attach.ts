@@ -569,7 +569,7 @@ export class PtyAttachComponent implements Component {
 
 	/**
 	 * Runtime desync backstop (issue #11). Seven gates, cheapest first:
-	 * settled+connected, child is a TUI (frame seen), output quiet, chain idle,
+	 * settled+connected, child is a TUI (frame seen), chain idle, output quiet,
 	 * heal rate limit, misaligned cursor. All pass → heal() re-arms
 	 * shrink-and-hold; the child's fullRender clear then restores the size
 	 * and repaints a consistent screen.

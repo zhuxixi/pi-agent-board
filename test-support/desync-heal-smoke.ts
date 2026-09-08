@@ -124,21 +124,23 @@ async function main(): Promise<void> {
 
 	// H3: pre-settle (attaching true) — no heal
 	{
-		const { attach, sent } = makeAttach();
+		const { attach, sent, clock } = makeAttach();
 		await primeRuntime(attach);
 		await write(attach, desyncFrame);
 		// do NOT finishAttachTransition(); attaching is still true
+		clock.now += 10_000; // all other gates open — only attaching can stop it
 		attach.checkDesync();
 		out.preSettleNoHeal = attach.jiggleRetry.getState().healCount === 0 && resizes(sent) === 0;
 	}
 
 	// H4: no 2026h frame — no heal
 	{
-		const { attach, sent } = makeAttach();
+		const { attach, sent, clock } = makeAttach();
 		// No primeRuntime (it would set tuiFrameSeen); chain is stopped via the
 		// clear so only gate 2 (no TUI frame) blocks the heal.
 		await write(attach, CLEAR + "plain shell output, no TUI frame");
 		attach.finishAttachTransition();
+		clock.now += 10_000; // all other gates open — only the missing TUI frame can stop it
 		attach.checkDesync();
 		out.noFrameNoHeal = attach.jiggleRetry.getState().healCount === 0 && resizes(sent) === 0;
 	}
