@@ -5,6 +5,18 @@ conventional commits by `scripts/release_helper.mjs`. Entries are
 forward-only: they begin with the first release after this file landed —
 for earlier history, see the git log and the pull-request list.
 
+## [0.6.1] - 2026-09-08
+
+### Fixes
+
+- add an unconditional Ctrl+Left detach chord to the attach surface (issue #89) (#97)
+- force full-clear repaint on dashboard mount and content shrink (issue #88) (#96)
+- fail host launch fast on a provably stale defaultModel + exit attribution (issue #90) (#94)
+- finalize provably-dead legacy hosts in attach resolver and self-heal (issue #87) (#93)
+- swallow async spawn errors in detached runner launches (issue #86) (#92)
+
+[0.6.1]: https://github.com/zhuxixi/pi-agent-board/compare/v0.6.0...v0.6.1
+
 ## [0.6.0] - 2026-09-07
 
 ### Features
