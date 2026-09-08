@@ -144,6 +144,15 @@ export class DashboardComponent implements Component {
 	private inputNotice: InputNotice | null = null;
 	private launch: LaunchState | null = null;
 	private lastLaunchPrefs: { cwd: string | null; model: string | null; thinkingLevel: ThinkingLevel | null } | null = null;
+	/** First frame after mount must clear the screen: pi-tui's first render
+	 *  "assumes clean screen" (fullRender(false)) and overlays never get
+	 *  clearOnShrink — crash output / dirty bottoms would persist (issue #88). */
+	private needsFullClear = true;
+	/** Content line count of the previous frame BEFORE spacer/padding fill
+	 *  (padding always fills the terminal height, so padded counts never
+	 *  shrink — shrink detection must run on pre-fill counts). */
+	private lastContentLineCount: number | null = null;
+	private frameContentLineCount = 0;
 	private readonly editor: CustomEditor;
 
 	constructor(
@@ -1156,6 +1165,23 @@ export class DashboardComponent implements Component {
 	}
 
 	render(width: number): string[] {
+		const lines = this.renderLines(width);
+		// Self-heal frames (issue #88): pi-tui disables clearOnShrink while an
+		// overlay is active ("overlays need the padding"), so a content shrink
+		// under the dashboard overlay would leave stale rows forever. Force a
+		// full clear on the first frame and on any content-line shrink.
+		// requestRender(true) resets diff state and renders on a nextTick —
+		// safe to call from inside render; the full-clear frame is wrapped in
+		// DECSET 2026 synchronized output by pi-tui itself.
+		if (this.needsFullClear || (this.lastContentLineCount != null && this.frameContentLineCount < this.lastContentLineCount)) {
+			this.needsFullClear = false;
+			this.tui.requestRender(true);
+		}
+		this.lastContentLineCount = this.frameContentLineCount;
+		return lines;
+	}
+
+	private renderLines(width: number): string[] {
 		const allRows = this.deps.service.rows();
 		const needs = allRows.filter((r) => r.state?.semanticState === "needs_input").length;
 		const working = allRows.filter((r) => r.state?.semanticState === "working").length;
@@ -1185,6 +1211,12 @@ export class DashboardComponent implements Component {
 		const body = this.renderRows(width);
 		const windowed = this.windowBody(body, capacity);
 		lines.push(...windowed.lines);
+		// Shrink-detection count: recorded BEFORE the spacer fill — the spacer
+		// pads the frame back out to the terminal height, so the padded (or
+		// pre-fitToHeight-padding) total never shrinks and would mask row
+		// removals, the exact ghosting trigger (issue #88). Non-list modes
+		// return earlier and intentionally don't record.
+		this.frameContentLineCount = lines.length;
 		// Keep the compose box visually docked to the bottom instead of glued to the
 		// final session row. This matches the Claude-style layout: list at top,
 		// large calm workspace, input/footer at bottom.
