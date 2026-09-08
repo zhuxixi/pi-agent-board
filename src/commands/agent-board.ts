@@ -42,6 +42,15 @@ export function registerAgentBoardCommand(pi: ExtensionAPI, opts: AgentBoardComm
 				piCommand: opts.piCommand,
 				piArgsPrefix: opts.piArgsPrefix,
 				defaultCwd: ctx.cwd,
+				// Stale-defaultModel launch guard (issue #90): live list, undefined
+				// when the registry is unavailable so validation conservatively skips.
+				availableModels: () => {
+					try {
+						return ctx.modelRegistry.getAvailable();
+					} catch {
+						return undefined;
+					}
+				},
 			});
 
 			if (!ctx.hasUI) {

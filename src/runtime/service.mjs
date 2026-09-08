@@ -26,6 +26,7 @@ import { gitRepoRoot } from "../core/repo.mjs";
 import { isAlive, killProcess } from "../core/pid.mjs";
 import { acquireOwnedViewLock, tryAcquireOwnedViewLock } from "../core/locks.mjs";
 import { canFinalizeLegacyHost, canReplaceHost } from "../core/host-coordination.mjs";
+import { modelRefAvailable } from "../core/launch-options.mjs";
 import { HOST_PROBE_RETRY_MS, probeHost } from "../core/host-probe.mjs";
 import * as P from "../core/paths.mjs";
 import {
@@ -87,6 +88,7 @@ const ATTACH_RESOLVE_TIMEOUT_MS = 120_000;
  *   signalOwnedProcess?: (identity: {pid: number, startToken: string|null}, signal: string) => void,
  *   probeHostFn?: typeof probeHost,
  *   sleepFn?: (ms: number) => Promise<void>,
+ *   availableModels?: () => Array<{ provider: string, id: string }> | undefined,
  * }} opts
  */
 export function createService(opts) {
@@ -111,6 +113,10 @@ export function createService(opts) {
 	// through sleepFn (never a blocking acquire / Atomics.wait).
 	const probeHostImpl = opts.probeHostFn ?? probeHost;
 	const sleepFnImpl = opts.sleepFn ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+	// Live model list for the stale-defaultModel launch guard (issue #90). Called
+	// at validation time (never cached at startup) and wrapped defensively by the
+	// caller; undefined/absent skips validation entirely.
+	const availableModelsImpl = opts.availableModels ?? null;
 	// In-flight attach resolutions, keyed by viewId: concurrent resolver calls for
 	// the same view share one promise (issue #70 Task 12).
 	const inflightAttachResolvers = new Map();
@@ -196,6 +202,28 @@ export function createService(opts) {
 	}
 
 	/**
+	 * Actionable error when the view's defaultModel is provably unavailable
+	 * (issue #90): launching a child with a dead model id makes it exit 1 on
+	 * every start, so attach would loop cold starts forever. Only fires when a
+	 * model is configured AND a live model list is injectable; anything
+	 * uncertain (no list, list call failure) conservatively allows the launch.
+	 * @param {import("../core/types.mjs").ViewMeta} meta
+	 * @returns {string|null}
+	 */
+	function validateViewModelMeta(meta) {
+		const model = meta.defaultModel ?? null;
+		if (!model || !availableModelsImpl) return null;
+		let available;
+		try {
+			available = availableModelsImpl();
+		} catch {
+			return null;
+		}
+		if (modelRefAvailable(model, available)) return null;
+		return `Model "${model}" configured for this session is no longer available — update the view's model (or clear defaultModel) and retry attach.`;
+	}
+
+	/**
 	 * Claim → spawn → merge flow. The CALLER must already hold the `host-start`
 	 * lease; this function never acquires or releases it.
 	 * @param {import("../core/types.mjs").ViewMeta} meta
@@ -215,6 +243,11 @@ export function createService(opts) {
 		if (existing && !canReplaceHost(observeHostForReplace(existing))) {
 			return pendingLaunchResult(existing);
 		}
+
+		// Fail fast BEFORE claiming (issue #90): no claim record, no config file,
+		// no spawn — the resolver surfaces the error via its pending reason.
+		const modelError = validateViewModelMeta(meta);
+		if (modelError) return { ok: false, error: modelError };
 
 		const instanceId = randomIdImpl();
 		const configPath = P.hostConfigPathFor(root, meta.id, instanceId);
@@ -790,6 +823,14 @@ export function createService(opts) {
 			if (!current || current.instanceId !== instanceId || current.state !== "starting" || current.runnerSpawnedAt != null) {
 				// The record moved on (adopted elsewhere, revoked, or replaced) — surface it.
 				return { ok: true, pending: true, socketPath: current?.socketPath ?? host.socketPath ?? null, instanceId: current?.instanceId ?? instanceId };
+			}
+			// Stale-model guard (issue #90): the claim is an abandoned record, so mark
+			// it failed fenced (same shape as the spawn-failure path below — the next
+			// ensure can claim anew) instead of spawning a child doomed to exit 1.
+			const modelError = validateViewModelMeta(meta);
+			if (modelError) {
+				updateOwnedHost(root, viewId, instanceId, (h) => ({ ...h, state: "failed", endedAt: nowImpl(), exitCode: 1, error: modelError, claimPid: null, claimIdentity: null }));
+				return { ok: true, pending: true, socketPath: null, instanceId };
 			}
 			const configPath = current.configPath ?? P.hostConfigPathFor(root, viewId, instanceId);
 			const socketPath = current.socketPath ?? P.hostEndpointPathFor(process.platform, root, viewId, instanceId);
