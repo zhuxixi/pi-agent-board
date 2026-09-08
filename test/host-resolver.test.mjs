@@ -205,6 +205,32 @@ test("resolver finalizes a provably-dead legacy starting host instead of waiting
 	}
 });
 
+test("resolver leaves a legacy host untouched while the host-start lease is held elsewhere (issue #87 CR r1)", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		legacyHostRecord(root, "v1", 999999, { state: "alive" });
+		// Hold the host-start lease like a concurrent resolver would; the lock
+		// files live under root, so the outer rmSync cleanup releases them.
+		const held = tryAcquireOwnedViewLock(root, "v1", "host-start");
+		assert.equal(held.acquired, true, "test setup: lease must be acquired");
+		const probe = scriptProbe(["missing"]);
+		const svc = resolverService(root, {
+			probeHostFn: probe.fn,
+			sleepFn: instantSleep,
+		});
+		const result = await svc.resolveAttachTarget("v1");
+		assert.equal(result.kind, "pending");
+		assert.match(result.reason, /legacy host unreachable/);
+		const cur = readHost(root, "v1");
+		assert.equal(cur.state, "alive", "host record NOT rewritten while lease is busy");
+		assert.equal(cur.endedAt, null, "no finalize timestamp while lease is busy");
+		assert.equal(readDiagnostics(root, "v1").some((e) => e.code === "legacy_host_finalized"), false, "no finalize diagnostic while lease is busy");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("resolver never finalizes a legacy host on an unknown probe (issue #87 conservative path)", async () => {
 	const root = freshRoot();
 	try {

@@ -956,7 +956,7 @@ export function createService(opts) {
 					// A legacy starting host whose runner is provably dead would wait out
 					// the grace window forever (withinGrace is always true for legacy) —
 					// finalize it now instead (issue #87).
-					if (legacy && finalizeDeadLegacyHost(root, viewId, host, probe.classification)) {
+					if (legacy && finalizeDeadLegacyHost(root, viewId, host, probe.classification, nowImpl(), tryAcquireLockImpl)) {
 						await sleepFnImpl(HOST_PROBE_RETRY_MS);
 						continue;
 					}
@@ -973,7 +973,7 @@ export function createService(opts) {
 				// Legacy host unreachable. spec §10.1 says never recover — unless the
 				// runner pid is provably dead, in which case finalize and self-heal
 				// (issue #87).
-				if (finalizeDeadLegacyHost(root, viewId, host, probe.classification)) {
+				if (finalizeDeadLegacyHost(root, viewId, host, probe.classification, nowImpl(), tryAcquireLockImpl)) {
 					await sleepFnImpl(HOST_PROBE_RETRY_MS);
 					continue;
 				}
@@ -1886,22 +1886,39 @@ function serviceIdentity() {
 /**
  * Finalize a provably-dead legacy host as `exited` so the resolver loop's next
  * iteration sees hostActive=false and claims a fresh new-protocol host
- * (issue #87). Legacy records have no instanceId — no concurrent owner exists,
- * so an unfenced writeHost is safe; the claim path is serialized by the
- * host-start lease. The gate is `canFinalizeLegacyHost` — anything unverifiable
- * stays pending (spec §10.1 conservatism).
+ * (issue #87). The gate is `canFinalizeLegacyHost` — anything unverifiable
+ * stays pending (spec §10.1 conservatism). The write itself is serialized
+ * under the host-start lease (same gate as recoverHost/claim) with a
+ * live-record re-check: a concurrent resolver may have already finalized and
+ * claimed a new-protocol host, and a stale `alive` snapshot must never clobber
+ * that replacement's record (issue #87 CR r1).
  * @param {string} root
  * @param {string} viewId
  * @param {import("../core/types.mjs").HostStatus} host
  * @param {string} probeClassification
+ * @param {number} now
+ * @param {(r: string, v: string, name: string, o?: object) => ({ acquired: true, lease: { release: () => void } } | { acquired: false, reason: string })} acquireHostStartLock
  * @returns {boolean} true when finalized (caller should `continue` the loop).
  */
-function finalizeDeadLegacyHost(root, viewId, host, probeClassification) {
+function finalizeDeadLegacyHost(root, viewId, host, probeClassification, now, acquireHostStartLock) {
 	// Same pid fallback as loadRow: legacy records carry no runnerPid property —
 	// the pid lives only in the host-pid.json mirror.
 	const hostPid = Object.hasOwn(host, "runnerPid") ? host.runnerPid : readHostPid(root, viewId);
 	if (!canFinalizeLegacyHost({ host, hostPid, hostPidAlive: isAlive(hostPid), probeClassification })) return false;
-	writeHost(root, { ...host, state: "exited", endedAt: Date.now(), lastSeenAt: Date.now(), error: "legacy host finalized: runner pid dead (issue #87)" });
+	// Serialize with claims: only write while the live record still matches our
+	// (possibly stale) snapshot.
+	const gate = acquireHostStartLock(root, viewId, "host-start", { identity: serviceIdentity() });
+	if (!gate.acquired) return false; // busy — record left untouched; caller pends/waits this attempt, a later one finalizes
+	try {
+		const cur = readHost(root, viewId);
+		if (!cur || cur.instanceId != null) return false; // already claimed by a new-protocol host
+		if (cur.state !== "starting" && cur.state !== "alive") return false; // already finalized
+		if (cur.socketPath !== host.socketPath || cur.state !== host.state) return false; // snapshot drifted
+		const finalizedAt = now;
+		writeHost(root, { ...cur, state: "exited", endedAt: finalizedAt, lastSeenAt: finalizedAt, error: "legacy host finalized: runner pid dead" });
+	} finally {
+		try { gate.lease.release(); } catch { /* best effort */ }
+	}
 	try {
 		appendDiagnostic(root, viewId, {
 			source: "service",
