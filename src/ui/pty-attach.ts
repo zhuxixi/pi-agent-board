@@ -1150,16 +1150,24 @@ function asciiCellsForBufferLine(line: BufferLineLike, reusable: BufferCellLike)
 function openExternalTarget(target: string): boolean {
 	const sanitized = sanitizeOscPayload(target).trim();
 	if (!sanitized) return false;
+	// Opening the target is best-effort: an async spawn failure (e.g. xdg-open
+	// missing on a minimal server) must be swallowed, not crash the host (issue #86).
 	try {
 		if (process.platform === "darwin") {
-			spawn("open", [sanitized], { detached: true, stdio: "ignore" }).unref();
+			const child = spawn("open", [sanitized], { detached: true, stdio: "ignore" });
+			child.on("error", () => {});
+			child.unref();
 			return true;
 		}
 		if (process.platform === "win32") {
-			spawn("cmd", ["/c", "start", "", sanitized], { detached: true, stdio: "ignore" }).unref();
+			const child = spawn("cmd", ["/c", "start", "", sanitized], { detached: true, stdio: "ignore" });
+			child.on("error", () => {});
+			child.unref();
 			return true;
 		}
-		spawn("xdg-open", [sanitized], { detached: true, stdio: "ignore" }).unref();
+		const child = spawn("xdg-open", [sanitized], { detached: true, stdio: "ignore" });
+		child.on("error", () => {});
+		child.unref();
 		return true;
 	} catch {
 		return false;
