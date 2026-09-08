@@ -259,6 +259,41 @@ export function truncate(s, n) {
 	return `${stripLoneSurrogates(str.slice(0, end))}…`;
 }
 
+const OSC_SEQUENCE_RE = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g;
+const CSI_SEQUENCE_RE = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
+const OTHER_ESCAPE_RE = /\x1b./g;
+
+/**
+ * Last non-empty visible line of a raw terminal log chunk: strips OSC/CSI/ESC
+ * escape sequences, resolves per-line carriage-return overwrites (progress
+ * bars / boot spinners), and returns the final remaining line truncated to
+ * `maxLen`. Used to attribute a failed child's exit reason from screen.log
+ * into host.json (issue #90). Returns null for empty/all-invisible input.
+ * @param {string|null|undefined} text
+ * @param {number} [maxLen]
+ * @returns {string|null}
+ */
+export function lastVisibleLogLine(text, maxLen = 200) {
+	if (!text) return null;
+	const visible = String(text)
+		.replace(OSC_SEQUENCE_RE, "")
+		.replace(CSI_SEQUENCE_RE, "")
+		.replace(OTHER_ESCAPE_RE, "")
+		// A \r directly before \n is a line terminator (CRLF), not an overwrite
+		// marker — normalize it away so the line content survives.
+		.replace(/\r\n/g, "\n");
+	const lines = visible.split("\n");
+	for (let i = lines.length - 1; i >= 0; i--) {
+		// Trailing \r chars are line-terminator junk (PTY ONLCR + the program's own
+		// CRLF stack up as \r\r\n) — drop them, then resolve interior \r overwrites.
+		const cleaned = lines[i].replace(/\r+$/, "");
+		const cr = cleaned.lastIndexOf("\r");
+		const line = (cr >= 0 ? cleaned.slice(cr + 1) : cleaned).trim();
+		if (line) return truncate(line, maxLen);
+	}
+	return null;
+}
+
 /**
  * Compact relative age, e.g. "10s", "2m", "3h", "4d".
  * @param {number} fromMs

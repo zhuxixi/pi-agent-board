@@ -5,6 +5,7 @@ import {
 	baseName,
 	detectNeedsInput,
 	firstSentence,
+	lastVisibleLogLine,
 	relativeTime,
 	toolPath,
 	toolResultText,
@@ -135,4 +136,22 @@ test("toolResultText handles nullish and scalar inputs", () => {
 	assert.equal(toolResultText(undefined), "");
 	assert.equal(toolResultText(42), "42");
 	assert.equal(toolResultText(true), "true");
+});
+
+// ---- lastVisibleLogLine (issue #90) ----
+
+test("lastVisibleLogLine strips ANSI/OSC, resolves CR overwrites, skips empty lines, truncates", () => {
+	assert.equal(
+		lastVisibleLogLine('Error: Model "glm/glm-5.3" not found. Use --list-models to see available models.\r\n'),
+		'Error: Model "glm/glm-5.3" not found. Use --list-models to see available models.',
+	);
+	assert.equal(lastVisibleLogLine("\x1b]8;;https://x.co\x1b\\boot link\x1b]8;;\x1b\\\r\nplain tail\r\n"), "plain tail", "OSC-8 stripped");
+	assert.equal(lastVisibleLogLine("starting...\rError: boom\r\n"), "Error: boom", "CR overwrite resolves to last segment");
+	assert.equal(lastVisibleLogLine("\x1b[1;31mred error\x1b[0m\r\n"), "red error", "CSI stripped");
+	assert.equal(lastVisibleLogLine("a\r\n\r\n \r\nb\r\n"), "b", "empty lines skipped");
+	assert.equal(lastVisibleLogLine("x".repeat(300)), `${"x".repeat(199)}…`, "truncated with ellipsis");
+	assert.equal(lastVisibleLogLine("\x1b[2J\x1b[H"), null, "control-only input yields null");
+	assert.equal(lastVisibleLogLine(""), null);
+	assert.equal(lastVisibleLogLine(null), null);
+	assert.equal(lastVisibleLogLine("tail without newline"), "tail without newline");
 });

@@ -10,13 +10,14 @@
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
-import { existsSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, statSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendLine, readJson } from "../src/core/atomic.mjs";
 import { appendDiagnostic } from "../src/core/diagnostics.mjs";
 import { finalizeHostCrash } from "../src/core/host-crash.mjs";
 import { ownsEndpoint, shouldYieldRunner } from "../src/core/host-coordination.mjs";
+import { lastVisibleLogLine } from "../src/core/heuristics.mjs";
 import { acquireOwnedViewLock } from "../src/core/locks.mjs";
 import * as P from "../src/core/paths.mjs";
 import { appendBoundedScreenLog, reconcileScreenLog } from "../src/core/screen-log.mjs";
@@ -39,6 +40,48 @@ const HEARTBEAT_MS = 1000;
 const HOST_ACK_DEDUP_MAX = 1000;
 /** Max time an owned runner waits to take the per-view host-start lease (issue #70). */
 const HOST_RUNNER_LOCK_WAIT_MS = 5_000;
+/** How much of the screen.log tail to scan when attributing an abnormal child
+ *  exit (issue #90). Tail-only: the log can be 100MB+. */
+const EXIT_LOG_TAIL_BYTES = 8_192;
+
+/** Tail-read the last `maxBytes` of a file without loading it whole.
+ * @param {string} path
+ * @param {number} maxBytes
+ * @returns {string}
+ */
+function readScreenLogTail(path, maxBytes) {
+	let fd;
+	try {
+		fd = openSync(path, "r");
+		const size = fstatSync(fd).size;
+		const start = Math.max(0, size - maxBytes);
+		const length = size - start;
+		const buffer = Buffer.allocUnsafe(length);
+		readSync(fd, buffer, 0, length, start);
+		return buffer.toString("utf8");
+	} finally {
+		try { if (fd != null) closeSync(fd); } catch { /* best effort */ }
+	}
+}
+
+/**
+ * Best-effort error attribution for an abnormal child exit (issue #90): the
+ * child's failure reason (e.g. "Model X not found") exists only in the raw
+ * screen log, so surface its last visible line in host.json.error. Never
+ * throws — this runs on the exit path.
+ * @param {number} exitCode
+ * @param {string} screenLogPath
+ * @returns {{} | { error: string }}
+ */
+function attributedExitError(exitCode, screenLogPath) {
+	if (exitCode === 0) return {};
+	try {
+		const line = lastVisibleLogLine(readScreenLogTail(screenLogPath, EXIT_LOG_TAIL_BYTES));
+		return line ? { error: line } : {};
+	} catch {
+		return {};
+	}
+}
 
 function main() {
 	const configPath = process.argv[2];
@@ -214,7 +257,9 @@ function legacyMain(config) {
 		// After a crash the handler already persisted "failed" and broadcast
 		// exit; this callback must not overwrite that state.
 		if (!crashed) {
-			update({ state: "exited", endedAt: Date.now(), exitCode, childPid: null });
+			// Attribute only a NATURAL abnormal exit (issue #90): after a deliberate
+			// stop (shutdownStarted) the child was killed by us — no error line.
+			update({ state: "exited", endedAt: Date.now(), exitCode, childPid: null, ...(shutdownStarted ? {} : attributedExitError(exitCode, screenLog)) });
 			editorEmpty = null;
 			broadcast({ type: "editor_state", empty: null });
 			broadcast({ type: "exit", exitCode });
@@ -512,6 +557,13 @@ async function ownedMain(config) {
 				readyAt: null,
 				stopRequestedAt: null,
 				stopReason: reason,
+				// Attribute abnormal NATURAL child exits only (issue #90): reason
+				// "child_exit" with a non-zero code. Stops ("signal") and crashes
+				// have their own attribution (stopReason / crash finalize), and a
+				// SIGTERM'd healthy child must not capture a junk error line.
+				...(reason === "child_exit" && cur.error == null
+					? attributedExitError(requestedExitCode ?? exitCode ?? 0, screenLog)
+					: {}),
 			}));
 		}
 		// Endpoint cleanup: only the exact inode this instance bound.
