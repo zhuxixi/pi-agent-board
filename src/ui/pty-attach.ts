@@ -7,7 +7,7 @@ import type { Component, KeybindingsManager, TUI } from "@earendil-works/pi-tui"
 import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { isProbablyEmptyPiInputLine, isProbablyPiInputLine, resolveEditorEmpty } from "../core/pty-input.mjs";
 import { findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
-import { createAttachOutputRenderScheduler, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
+import { createAttachOutputRenderScheduler, detectCursorDesync, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
 import { evaluateAttachReconnect, shouldEscapeAttach } from "../core/pty-attach-reconnect.mjs";
 import { installImeCursorCoalesce } from "../core/ime-cursor-coalesce.mjs";
 import { createJiggleRetryController } from "../core/pty-attach-jiggle-controller.mjs";
@@ -42,6 +42,15 @@ const ATTACH_SETTLE_MS = 250;
 const ATTACH_HARD_TIMEOUT_MS = 2500;
 /** Give ordered detach packets time to flush before using destroy as a fallback. */
 const GRACEFUL_SOCKET_CLOSE_MS = 1000;
+/** Desync detection window: how long output must stay silent before a
+ * misaligned cursor counts as desync (issue #11). Streaming keeps the cursor
+ * on plain output cells legitimately; a healthy idle child re-parks it on the
+ * inverse fake-cursor cell on its last rendered frame. */
+const DESYNC_QUIET_MS = 1500;
+/** How often the post-settle probe runs checkDesync() (issue #11). */
+const DESYNC_PROBE_INTERVAL_MS = 2000;
+/** Minimum spacing between two runtime heals (issue #11). */
+const HEAL_RATELIMIT_MS = 10000;
 /** How many tail bytes of the screen log to replay on attach. Read from the file tail
  * (not the whole file) so multi-MB logs don't block startup; ~60KB covers the last
  * handful of screens, which is all a fresh attach needs. */
@@ -150,6 +159,13 @@ export class PtyAttachComponent implements Component {
 	private rows = 24;
 	// Absolute buffer line shown at the top of the viewport. null means follow bottom.
 	private viewportTop: number | null = null;
+	// Runtime desync backstop state (issue #11): last socket-output timestamp,
+	// last heal timestamp, the probe timer, and an injectable clock for tests.
+	private lastOutputAt = 0;
+	private lastHealAt = 0;
+	private desyncProbeTimer: ReturnType<typeof setInterval> | null = null;
+	/** Injectable clock for desync gating (tests override this). */
+	private nowFn: () => number = () => Date.now();
 	private selection: MouseSelection | null = null;
 	private selectionDragging = false;
 	private selectionAutoScrollTimer: ReturnType<typeof setInterval> | null = null;
@@ -541,6 +557,48 @@ export class PtyAttachComponent implements Component {
 		// Force a full clear so the loading banner is replaced atomically by the settled
 		// buffer, instead of diffing banner lines into buffer lines.
 		this.scheduleRender(true);
+		this.startDesyncProbe();
+	}
+
+	private startDesyncProbe(): void {
+		this.stopDesyncProbe();
+		// The probe is deliberately NOT hooked into the render path: rendering is
+		// event-driven (socket output / keypress / resize) and stops exactly when
+		// desync strikes (output goes quiet). A self-contained timer is the only
+		// way an idle desynced screen gets its self-heal without user action.
+		this.desyncProbeTimer = setInterval(() => this.checkDesync(), DESYNC_PROBE_INTERVAL_MS);
+		this.desyncProbeTimer.unref?.();
+	}
+
+	private stopDesyncProbe(): void {
+		if (this.desyncProbeTimer) {
+			clearInterval(this.desyncProbeTimer);
+			this.desyncProbeTimer = null;
+		}
+	}
+
+	/**
+	 * Runtime desync backstop (issue #11). Seven gates, cheapest first:
+	 * settled+connected, child is a TUI (frame seen), chain idle, output quiet,
+	 * heal rate limit, misaligned cursor. All pass → heal() re-arms
+	 * shrink-and-hold; the child's fullRender clear then restores the size
+	 * and repaints a consistent screen.
+	 */
+	private checkDesync(): void {
+		if (this.closed || this.attaching || !this.connected) return; // gates 1, 7
+		const chain = this.jiggleRetry.getState();
+		if (!chain.tuiFrameSeen) return; // gate 2: shell/vim children never heal
+		if (!chain.stopped || chain.held) return; // gate 5: attach/heal chain active
+		const now = this.nowFn();
+		if (now - this.lastOutputAt <= DESYNC_QUIET_MS) return; // gate 4: streaming
+		if (now - this.lastHealAt <= HEAL_RATELIMIT_MS) return; // gate 6: rate limit
+		const height = this.bodyHeight();
+		this.clampViewportTop(height);
+		const start = this.viewportTop ?? this.bottomViewportTop(height);
+		const buf = this.term.buffer.active;
+		if (detectCursorDesync(buf, projectPtyCursor(buf, start, height)) !== "misaligned") return; // gate 3
+		this.lastHealAt = now;
+		this.jiggleRetry.heal(this.cols, this.rows);
 	}
 
 	private clearMouseRefreshTimers(): void {
@@ -1060,6 +1118,9 @@ export class PtyAttachComponent implements Component {
 
 	private pushOutput(data: string, opts: { forwardProtocols?: boolean } = {}): void {
 		if (data.length === 0) return;
+		// Recorded synchronously BEFORE term.write (whose callback is async): the
+		// desync quiet-window must measure when output ARRIVED, not when parsing finished.
+		this.lastOutputAt = this.nowFn();
 		if (opts.forwardProtocols) this.forwardTerminalProtocols(data);
 		// @xterm/headless parses asynchronously; the buffer is only populated once this
 		// callback fires. Mark the buffer as ready (so the project path can paint it), but
@@ -1110,6 +1171,7 @@ export class PtyAttachComponent implements Component {
 		this.clearRetry();
 		this.stopLoadingTicker();
 		this.outputRenderScheduler.dispose();
+		this.stopDesyncProbe();
 		if (this.attachSettleTimer) {
 			clearTimeout(this.attachSettleTimer);
 			this.attachSettleTimer = null;

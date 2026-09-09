@@ -291,3 +291,107 @@ test("issue #42: minimum PTY size skips an invalid shrink", () => {
 	assert.equal(controller.getState().stopped, true);
 	assert.equal(scheduler.timers.size, 0);
 });
+
+// --- issue #11: runtime desync heal ---
+
+function frameSeenController() {
+	const { controller, scheduler, resizes } = makeController();
+	controller.start(170, 36);
+	controller.feed("\x1b[?2026h"); // first TUI frame → restore via fast path
+	controller.feed("\x1b[2J");     // clear → chain done, runtime idle state
+	return { controller, scheduler, resizes };
+}
+
+test("heal(): re-arms shrink-and-hold, preserves tuiFrameSeen, no G1", () => {
+	const { controller, scheduler, resizes } = frameSeenController();
+	resizes.length = 0;
+	assert.equal(controller.heal(170, 36), true);
+	assert.deepEqual(resizes, [[169, 35]], "heal sends exactly one shrink");
+	assert.equal(controller.getState().held, true);
+	assert.equal(controller.getState().tuiFrameSeen, true, "heal must NOT reset tuiFrameSeen");
+	assert.equal(scheduler.findByDelay(6000), null, "heal must NOT arm G1");
+	assert.ok(scheduler.delays().length > 0, "chain (G2 backoff) is scheduled");
+});
+
+test("heal() then feed clear → restore + stop", () => {
+	const { controller, resizes } = frameSeenController();
+	resizes.length = 0;
+	controller.heal(170, 36);
+	controller.feed("redraw\x1b[2J\x1b[Hframe");
+	assert.deepEqual(resizes.slice(-1), [[170, 36]], "clear restores original size");
+	assert.equal(controller.getState().held, false);
+	assert.equal(controller.getState().clearDetected, true);
+	assert.equal(controller.getState().stopped, true);
+});
+
+test("heal() budget: 5 attempts max per controller lifetime", () => {
+	const { controller, resizes } = frameSeenController();
+	resizes.length = 0;
+	for (let i = 0; i < 5; i++) {
+		assert.equal(controller.heal(170, 36), true, `heal #${i + 1} succeeds`);
+		// resolve each heal with a clear so the next one starts idle
+		controller.feed("\x1b[2J");
+	}
+	resizes.length = 0;
+	assert.equal(controller.heal(170, 36), false, "6th heal rejected");
+	assert.deepEqual(resizes, [], "no resize sent after budget exhausted");
+	assert.equal(controller.getState().healCount, 5);
+});
+
+test("heal() budget is NOT reset by start() or restoreAndStop()", () => {
+	const { controller } = frameSeenController();
+	controller.heal(170, 36);
+	controller.feed("\x1b[2J");
+	controller.start(170, 36);
+	controller.feed("\x1b[2J");
+	controller.restoreAndStop();
+	assert.equal(controller.getState().healCount, 1);
+});
+
+test("heal() consumes budget even on tiny terminals (no valid hold size)", () => {
+	const { controller } = frameSeenController();
+	assert.equal(controller.heal(20, 5), false, "tiny terminal cannot hold");
+	assert.equal(controller.getState().healCount, 1, "budget consumed on entry");
+});
+
+test("heal() hold is cancelled by G4 notifyExternalResize", () => {
+	const { controller, resizes } = frameSeenController();
+	resizes.length = 0;
+	controller.heal(170, 36);
+	controller.notifyExternalResize(200, 50);
+	assert.equal(controller.getState().held, false);
+	assert.equal(controller.getState().stopped, true);
+	// G4 adopts the new size as original: a later heal restores to the new size
+	assert.equal(controller.heal(200, 50), true);
+	controller.feed("\x1b[2J");
+	assert.deepEqual(resizes.filter(([c]) => c === 200).length >= 1, true, "restore tracks the adopted size");
+});
+
+test("heal() while a previous heal is held: restores the old hold first", () => {
+	const { controller, resizes } = frameSeenController();
+	resizes.length = 0;
+	controller.heal(170, 36);       // shrink #1
+	controller.heal(170, 36);       // shrink #2 — must restore #1 first (no clear between)
+	assert.deepEqual(resizes, [[169, 35], [170, 36], [169, 35]], "second heal unwinds the first hold before re-shrinking");
+	assert.equal(controller.getState().healCount, 2);
+});
+
+// --- issue #11 follow-up: clear-wins chunk must still learn frame cognition ---
+
+test("feed() with 2026h and 2J in ONE chunk: clear wins the re-arm, but tuiFrameSeen is still learned", () => {
+	const { controller, resizes } = makeController();
+	controller.start(170, 36);
+	resizes.length = 0;
+	// One replay-style chunk bundling a TUI frame start AND a full clear: the
+	// clear wins the re-arm (restore + stop), but frame cognition — the runtime
+	// heal's gate 2 (issue #11) — must still be learned from the same chunk.
+	controller.feed("\x1b[?2026hframe\x1b[2J\x1b[Hredraw");
+	assert.equal(controller.getState().clearDetected, true);
+	assert.equal(controller.getState().stopped, true);
+	assert.equal(controller.getState().held, false);
+	assert.equal(controller.getState().tuiFrameSeen, true, "frame cognition must survive a clear-wins chunk");
+	// heal() consumes the learned cognition: gate 2 open, hold armed, cognition preserved.
+	assert.equal(controller.heal(170, 36), true);
+	assert.equal(controller.getState().tuiFrameSeen, true);
+	assert.equal(controller.getState().held, true);
+});

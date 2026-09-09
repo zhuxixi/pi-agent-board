@@ -70,3 +70,33 @@ export function createAttachOutputRenderScheduler(requestRender, delayMs = ATTAC
 		},
 	};
 }
+
+/**
+ * Classify the PTY cursor's alignment for runtime desync detection (issue #11).
+ *
+ * Healthy idle pi: the child pi-tui parks the hardware cursor on the editor
+ * marker, whose cell is the inverse-video "fake cursor" — so the cursor cell
+ * itself is inverse. A desynced buffer leaves the cursor parked elsewhere
+ * (typically where the last differential write ended), on a non-inverse cell.
+ * Width-0 cells are CJK continuation cells and out-of-range columns sit past
+ * the line's cells; in both cases the meaningful attribute lives on the
+ * preceding cell, so we look left. Returns:
+ *   "aligned"    — cursor resolves to an inverse cell (healthy);
+ *   "misaligned" — cursor resolves to a non-inverse cell (candidate desync;
+ *                  callers gate this with an output-quietness window);
+ *   "unknown"    — no cursor (scrolled out of the projected viewport) or no
+ *                  buffer line (defensive); never treat these as desync.
+ */
+export function detectCursorDesync(buf, cursor) {
+	if (!cursor) return "unknown";
+	const line = buf.getLine(cursor.row);
+	if (!line) return "unknown";
+	let x = cursor.col;
+	let cell = line.getCell(x);
+	while ((!cell || cell.getWidth() === 0) && x > 0) {
+		x--;
+		cell = line.getCell(x);
+	}
+	if (!cell) return "misaligned";
+	return cell.isInverse() ? "aligned" : "misaligned";
+}
