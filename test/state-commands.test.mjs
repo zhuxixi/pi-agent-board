@@ -58,7 +58,10 @@ test("validateCommand accepts a well-formed command and exposes frozen vocabular
 	]);
 	assert.deepEqual([...COMMAND_SOURCES], ["dashboard-user", "service", "job-runner", "state-runner", "pty-runner"]);
 	assert.deepEqual([...TRANSIENT_KINDS], ["run_progress"]);
-	assert.deepEqual(PATCHABLE_FIELDS["job-runner"], { state: ["review", "evidenceSummary"], status: ["evidenceSummary"] });
+	assert.deepEqual(PATCHABLE_FIELDS["job-runner"], {
+		state: ["review", "evidenceSummary", "summary", "latestAssistantPreview"],
+		status: ["evidenceSummary", "summary", "latestAssistantPreview"],
+	});
 	assert.deepEqual(PATCHABLE_FIELDS["state-runner"], { state: ["review", "evidenceSummary"], status: ["evidenceSummary"] });
 	assert.deepEqual(PATCHABLE_FIELDS["service"], { state: ["lastVisitedAt"], status: [] });
 });
@@ -254,8 +257,13 @@ test("validateCommand enforces payload shapes for lifecycle kinds", () => {
 	assert.equal(validateCommand({ ...baseCmd, kind: "run_progress", payload: {} }).ok, false);
 	assert.equal(validateCommand({ ...baseCmd, kind: "run_progress", payload: { statusPatch: { turns: 2 } } }).ok, true);
 	assert.equal(validateCommand({ ...baseCmd, kind: "followup_started", payload: {} }).ok, false);
-	assert.equal(validateCommand({ ...baseCmd, kind: "reconcile_finalize", payload: { semanticState: "stopped" } }).ok, false);
-	assert.equal(validateCommand({ ...baseCmd, kind: "reconcile_finalize", payload: { semanticState: "failed", reason: "host gone" } }).ok, true);
+	assert.equal(validateCommand({ ...baseCmd, kind: "reconcile_finalize", payload: { semanticState: "stopped", summary: "x" } }).ok, false);
+	assert.equal(validateCommand({ ...baseCmd, kind: "reconcile_finalize", payload: { semanticState: "failed", reason: "host gone" } }).ok, false);
+	assert.equal(validateCommand({ ...baseCmd, kind: "reconcile_finalize", payload: { semanticState: "failed", reason: "host gone", summary: "Failed (PTY host exited)" } }).ok, true);
+	assert.equal(validateCommand({ ...baseCmd, kind: "followup_started", payload: { statusPatch: { turns: 1 } } }).ok, false);
+	assert.equal(validateCommand({ ...baseCmd, kind: "followup_started", payload: { newRunId: "r2", statusPatch: { turns: 1 } } }).ok, true);
+	assert.equal(validateCommand({ ...baseCmd, kind: "plan_ready", payload: {} }).ok, false);
+	assert.equal(validateCommand({ ...baseCmd, kind: "plan_ready", payload: { runId: "r1" } }).ok, true);
 	assert.equal(validateCommand({ ...baseCmd, kind: "sync_foreground", payload: {} }).ok, false);
 	assert.equal(validateCommand({ ...baseCmd, kind: "sync_foreground", payload: { projection: { semanticState: "idle" } } }).ok, true);
 	assert.equal(validateCommand({ ...baseCmd, kind: "patch_fields", payload: {} }).ok, false);
@@ -316,7 +324,7 @@ test("run_progress rejects a dead or re-pointed run (liveness semantics)", () =>
 // -- reconcile_finalize --
 
 test("reconcile_finalize finalizes a dead-run row and syncs the status half", () => {
-	const cmd = { ...baseCmd, kind: "reconcile_finalize", payload: { semanticState: "failed", reason: "PTY host exited unexpectedly", exitCode: null } };
+	const cmd = { ...baseCmd, kind: "reconcile_finalize", payload: { semanticState: "failed", reason: "PTY host exited unexpectedly", exitCode: null, summary: "Failed (PTY host exited)" } };
 	const d = decideStateTransition(cmd, { ...liveState, processState: "alive" }, makeStatus(), 80);
 	assert.equal(d.action, "apply");
 	assert.equal(d.mutate.state.semanticState, "failed");
@@ -329,7 +337,7 @@ test("reconcile_finalize finalizes a dead-run row and syncs the status half", ()
 });
 
 test("reconcile_finalize is a no_change on an already-exited row", () => {
-	const cmd = { ...baseCmd, kind: "reconcile_finalize", payload: { semanticState: "idle" } };
+	const cmd = { ...baseCmd, kind: "reconcile_finalize", payload: { semanticState: "idle", summary: "Needs instructions" } };
 	const d = decideStateTransition(cmd, { ...liveState, processState: "exited", semanticState: "idle" }, makeStatus({ processState: "exited" }), 80);
 	assert.deepEqual(d, { action: "reject", reason: "no_change" });
 });
@@ -394,32 +402,42 @@ test("sync_foreground applies the caller projection but forces currentRunId null
 
 // -- plan_ready --
 
-test("plan_ready stamps needs-input on a live row", () => {
-	const cmd = { ...baseCmd, kind: "plan_ready", payload: { question: "Approve this plan?" } };
-	const d = decideStateTransition(cmd, liveState, makeStatus(), 60);
+test("plan_ready stamps needs-input on an exited row with legacy parity (R3)", () => {
+	const cmd = { ...baseCmd, kind: "plan_ready", payload: { runId: "r1" } };
+	const exited = { ...liveState, semanticState: "idle", processState: "exited" };
+	const d = decideStateTransition(cmd, exited, null, 60);
 	assert.equal(d.action, "apply");
-	assert.equal(d.mutate.state.needsInput, true);
-	assert.equal(d.mutate.state.question, "Approve this plan?");
+	assert.deepEqual(d.mutate.state, {
+		semanticState: "needs_input",
+		processState: "exited",
+		needsInput: true,
+		question: "Approve this plan?",
+		summary: "Plan ready for approval",
+		currentRunId: "r1",
+	});
+	// payload.question overrides the legacy default
+	const override = decideStateTransition({ ...cmd, payload: { runId: "r1", question: "Approve plan X?" } }, exited, null, 60);
+	assert.equal(override.mutate.state.question, "Approve plan X?");
 });
 
-test("plan_ready is no_change on an exited row (per plan table)", () => {
-	const cmd = { ...baseCmd, kind: "plan_ready", payload: { question: "Approve this plan?" } };
-	const d = decideStateTransition(cmd, { ...liveState, processState: "exited", semanticState: "idle" }, null, 60);
-	assert.deepEqual(d, { action: "reject", reason: "no_change" });
+test("plan_ready is no_change on a live row (producer fires post-finalization only)", () => {
+	const cmd = { ...baseCmd, kind: "plan_ready", payload: { runId: "r1" } };
+	assert.deepEqual(decideStateTransition(cmd, liveState, makeStatus(), 60), { action: "reject", reason: "no_change" });
 });
 
 // -- followup_started --
 
-test("followup_started creates the follow-up run status and re-points the row", () => {
-	// The command carries the PARENT runId (generic stale-run guard); the new
-	// run identity travels in the status patch.
+test("followup_started creates the follow-up run status and re-points the row (R2)", () => {
+	// The command carries NO runId (the generic stale-run guard must not fire
+	// against the finished parent run); the NEW run identity travels in
+	// payload.newRunId and governs the state-side currentRunId even when the
+	// status patch itself carries no runId.
 	const cmd = {
-		...baseCmd, kind: "followup_started",
-		payload: { statusPatch: makeStatus({ runId: "r2", semanticState: "queued", summary: "Queued", startedAt: 70, lastActivityAt: 70 }) },
+		...baseCmd, runId: null, kind: "followup_started",
+		payload: { newRunId: "r2", statusPatch: { semanticState: "queued", summary: "Queued", lastActivityAt: 70 } },
 	};
 	const d = decideStateTransition(cmd, { ...liveState, semanticState: "completed", processState: "exited" }, null, 70);
 	assert.equal(d.action, "apply");
-	assert.equal(d.mutate.status.runId, "r2");
 	assert.equal(d.mutate.state.currentRunId, "r2");
 	assert.equal(d.mutate.state.semanticState, "queued");
 	assert.equal(d.mutate.state.processState, "alive");
@@ -455,6 +473,134 @@ test("patch_fields rejects out-of-whitelist fields, unknown sources, and no-op p
 test("patch_fields honors the stale-run guard when payload.runId is set", () => {
 	const cmd = { ...baseCmd, kind: "patch_fields", runId: "rOld", payload: { state: { review: {} } } };
 	assert.deepEqual(decideStateTransition(cmd, liveState, null, 55), { action: "reject", reason: "stale_run" });
+});
+
+// ---- Controller-ruling corrections (R1-R4) -------------------------------
+
+// R1: job-runner patch_fields whitelist gains summary + latestAssistantPreview
+// (the post-exit model-summary persist routes through patch_fields in Task 3).
+test("R1: job-runner patch_fields accepts summary and latestAssistantPreview on both sides", () => {
+	const cmd = {
+		...baseCmd, source: "job-runner", kind: "patch_fields",
+		payload: {
+			state: { summary: "Refactored the parser", latestAssistantPreview: "final text" },
+			status: { summary: "Refactored the parser", latestAssistantPreview: "final text" },
+		},
+	};
+	const d = decideStateTransition(cmd, liveState, makeStatus(), 55);
+	assert.equal(d.action, "apply");
+	assert.equal(d.mutate.state.summary, "Refactored the parser");
+	assert.equal(d.mutate.state.latestAssistantPreview, "final text");
+	assert.equal(d.mutate.status.summary, "Refactored the parser");
+	assert.equal(d.mutate.status.latestAssistantPreview, "final text");
+	// state-runner keeps the narrower mirror-only whitelist
+	assert.deepEqual(PATCHABLE_FIELDS["state-runner"], { state: ["review", "evidenceSummary"], status: ["evidenceSummary"] });
+});
+
+// R2: followup_started validates newRunId and the null command.runId skips the
+// generic stale-run guard even when the row still points at the parent run.
+test("R2: followup_started re-points currentRunId with the stale-run guard skipped", () => {
+	const cmd = {
+		...baseCmd, runId: null, kind: "followup_started",
+		payload: { newRunId: "r2", statusPatch: { semanticState: "queued", summary: "Queued", lastActivityAt: 70 } },
+	};
+	const parentState = { ...liveState, semanticState: "completed", processState: "exited", currentRunId: "r1" };
+	const d = decideStateTransition(cmd, parentState, null, 70);
+	assert.equal(d.action, "apply");
+	assert.equal(d.mutate.state.currentRunId, "r2"); // from payload.newRunId, not the patch
+	assert.equal(d.mutate.state.semanticState, "queued");
+});
+
+// R3: plan_ready guard inverted (producer fires post-finalization) + exact
+// legacy parity with runner/job-runner.mjs's plan-ready write.
+test("R3: plan_ready applies post-exit with legacy parity and rejects a live row", () => {
+	const cmd = { ...baseCmd, kind: "plan_ready", payload: { runId: "r1" } };
+	const exited = { ...liveState, semanticState: "idle", processState: "exited", needsInput: false, question: null };
+	const d = decideStateTransition(cmd, exited, null, 60);
+	assert.equal(d.action, "apply");
+	assert.deepEqual(d.mutate.state, {
+		semanticState: "needs_input",
+		processState: "exited",
+		needsInput: true,
+		question: "Approve this plan?",
+		summary: "Plan ready for approval",
+		currentRunId: "r1",
+	});
+	assert.deepEqual(decideStateTransition(cmd, liveState, makeStatus(), 60), { action: "reject", reason: "no_change" });
+	const override = decideStateTransition({ ...cmd, payload: { runId: "r1", question: "Approve plan X?" } }, exited, null, 60);
+	assert.equal(override.mutate.state.question, "Approve plan X?");
+});
+
+// R4: derived-field clearing at legacy parity (service.mjs markQueued /
+// adoptSession / reconcile sites).
+test("R4: mark_queued clears derived fields at legacy parity (exact patch)", () => {
+	const cmd = { ...baseCmd, source: "service", kind: "mark_queued", payload: { runId: "r9" } };
+	const dirty = {
+		...manualCompletedState, semanticState: "failed", needsInput: true, hasError: true,
+		question: "old?", pendingQuestions: [{ toolCallId: "t", question: "q" }], error: "old error", summary: "Failed",
+	};
+	const d = decideStateTransition(cmd, dirty, null, 20);
+	assert.equal(d.action, "apply");
+	assert.deepEqual(d.mutate.state, {
+		currentRunId: "r9",
+		semanticState: "queued",
+		processState: "alive",
+		summary: "Queued",
+		needsInput: false,
+		hasError: false,
+		question: null,
+		pendingQuestions: [],
+		error: null,
+		autoState: null,
+	});
+});
+
+test("R4: adopt_session clears derived fields at legacy parity (exact patch)", () => {
+	const cmd = { ...baseCmd, source: "service", kind: "adopt_session", payload: {} };
+	const dirty = {
+		...liveState, semanticState: "working", processState: "exited", needsInput: true, hasError: true,
+		question: "old?", pendingQuestions: [{ toolCallId: "t", question: "q" }], error: "old error",
+	};
+	const d = decideStateTransition(cmd, dirty, null, 30);
+	assert.equal(d.action, "apply");
+	assert.deepEqual(d.mutate.state, {
+		semanticState: "idle",
+		processState: "exited",
+		needsInput: false,
+		hasError: false,
+		question: null,
+		pendingQuestions: [],
+		error: null,
+		summary: "Backgrounded session",
+	});
+	// autoState is NOT touched: the legacy adopt path leaves it alone.
+	assert.equal(d.mutate.state.autoState, undefined);
+});
+
+test("R4: reconcile_finalize clears derived fields at legacy parity", () => {
+	const dirty = {
+		...liveState, needsInput: true, hasError: true, error: "old error",
+		question: "old?", pendingQuestions: [{ toolCallId: "t", question: "q" }],
+	};
+	const failedCmd = {
+		...baseCmd, kind: "reconcile_finalize",
+		payload: { semanticState: "failed", reason: "PTY host exited unexpectedly", exitCode: null, summary: "Failed (PTY host exited)" },
+	};
+	const d = decideStateTransition(failedCmd, dirty, null, 80);
+	assert.equal(d.action, "apply");
+	assert.equal(d.mutate.state.needsInput, false);
+	assert.equal(d.mutate.state.question, null);
+	assert.deepEqual(d.mutate.state.pendingQuestions, []);
+	assert.equal(d.mutate.state.hasError, undefined); // stays true → unchanged → not in patch
+	assert.equal(d.mutate.state.error, "PTY host exited unexpectedly");
+	assert.equal(d.mutate.state.summary, "Failed (PTY host exited)");
+
+	const idleCmd = { ...baseCmd, kind: "reconcile_finalize", payload: { semanticState: "idle", summary: "Needs instructions" } };
+	const idle = decideStateTransition(idleCmd, dirty, null, 80);
+	assert.equal(idle.action, "apply");
+	assert.equal(idle.mutate.state.hasError, false);
+	assert.equal(idle.mutate.state.error, null);
+	assert.equal(idle.mutate.state.summary, "Needs instructions");
 });
 
 test("new kinds keep decisions pure: inputs are not mutated", () => {

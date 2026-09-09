@@ -68,7 +68,9 @@ export const TRANSIENT_KINDS = Object.freeze(["run_progress"]);
  * @type {Record<string, PatchableFields>}
  */
 export const PATCHABLE_FIELDS = Object.freeze({
-	"job-runner": Object.freeze({ state: Object.freeze(["review", "evidenceSummary"]), status: Object.freeze(["evidenceSummary"]) }),
+	// summary/latestAssistantPreview: the post-exit model-summary persist routes
+	// through patch_fields (controller ruling R1 — plan oversight, Task 3).
+	"job-runner": Object.freeze({ state: Object.freeze(["review", "evidenceSummary", "summary", "latestAssistantPreview"]), status: Object.freeze(["evidenceSummary", "summary", "latestAssistantPreview"]) }),
 	"state-runner": Object.freeze({ state: Object.freeze(["review", "evidenceSummary"]), status: Object.freeze(["evidenceSummary"]) }),
 	"service": Object.freeze({ state: Object.freeze(["lastVisitedAt"]), status: Object.freeze([]) }),
 });
@@ -133,12 +135,21 @@ export function validateCommand(raw) {
 			break;
 		}
 		case "run_progress":
-		case "followup_started":
 			if (!raw.payload || typeof raw.payload.statusPatch !== "object" || raw.payload.statusPatch == null) return { ok: false, error: "missing_statusPatch" };
+			break;
+		case "followup_started":
+			// The command carries NO runId (a null runId skips the generic stale-run
+			// guard against the finished parent run); the NEW run's id travels here
+			// and governs the state-side currentRunId (ruling R2).
+			if (!raw.payload || typeof raw.payload.statusPatch !== "object" || raw.payload.statusPatch == null) return { ok: false, error: "missing_statusPatch" };
+			if (typeof raw.payload.newRunId !== "string" || !raw.payload.newRunId) return { ok: false, error: "missing_newRunId" };
 			break;
 		case "reconcile_finalize": {
 			const semanticState = raw.payload?.semanticState;
 			if (semanticState !== "failed" && semanticState !== "idle") return { ok: false, error: "bad_semanticState" };
+			// The reconciler's summary is caller-provided (legacy parity: both
+			// service reconcile sites always stamp a summary, ruling R4).
+			if (typeof raw.payload?.summary !== "string" || !raw.payload.summary) return { ok: false, error: "missing_summary" };
 			if (raw.payload.reason != null && typeof raw.payload.reason !== "string") return { ok: false, error: "bad_reason" };
 			if (raw.payload.exitCode != null && typeof raw.payload.exitCode !== "number") return { ok: false, error: "bad_exitCode" };
 			break;
@@ -151,7 +162,10 @@ export function validateCommand(raw) {
 			if (!raw.payload?.projection || typeof raw.payload.projection !== "object") return { ok: false, error: "missing_projection" };
 			break;
 		case "plan_ready":
+			// The producer (job-runner's plan-ready pass) fires post-finalization and
+			// re-points the row at the plan-producing run (ruling R3).
 			if (raw.payload?.question != null && typeof raw.payload.question !== "string") return { ok: false, error: "bad_question" };
+			if (typeof raw.payload?.runId !== "string" || !raw.payload.runId) return { ok: false, error: "missing_runId" };
 			break;
 		case "patch_fields": {
 			const hasState = raw.payload?.state != null && typeof raw.payload.state === "object";
@@ -303,18 +317,34 @@ export function decideStateTransition(command, currentState, currentStatus, now 
 			return applyStatusProjection(command, currentState, currentStatus, now);
 		}
 		case "followup_started": {
-			// No liveness guard: the follow-up starts from a just-finalized run.
-			// The command carries the PARENT runId (or none) — never the new run's
-			// id, or the generic stale-run guard above would reject it.
-			return applyStatusProjection(command, currentState, currentStatus, now);
+			// No liveness guard and no command.runId: the follow-up starts from a
+			// just-finalized parent run, so the generic stale-run guard must not fire
+			// against it. The NEW run's identity (payload.newRunId) governs the
+			// state-side currentRunId regardless of what the status patch carries,
+			// and a follow-up starting is definitionally the row running again —
+			// pin processState so a sparse bootstrap patch can never materialize
+			// an undefined (key-dropping) processState on a re-pointed row.
+			const result = applyStatusProjection(command, currentState, currentStatus, now);
+			return {
+				...result,
+				mutate: { ...result.mutate, state: { ...result.mutate.state, currentRunId: command.payload.newRunId, processState: "alive" } },
+			};
 		}
 		case "reconcile_finalize": {
 			if (currentState.processState !== "alive") return reject("no_change");
 			const at = now ?? 0;
+			const failed = command.payload.semanticState === "failed";
 			const stateClone = cloneJson(currentState);
 			stateClone.semanticState = command.payload.semanticState;
 			stateClone.processState = "exited";
-			if (command.payload.reason != null) stateClone.error = command.payload.reason;
+			// Derived-field clearing at legacy parity (service.mjs reconcile sites,
+			// ruling R4): both legacy branches always stamp these fields.
+			stateClone.needsInput = false;
+			stateClone.hasError = failed;
+			stateClone.question = null;
+			stateClone.pendingQuestions = [];
+			stateClone.error = command.payload.reason ?? null;
+			stateClone.summary = command.payload.summary;
 			const mutate = { state: diffFields(currentState, stateClone) };
 			if (currentStatus) {
 				const statusClone = cloneJson(currentStatus);
@@ -372,6 +402,9 @@ export function decideStateTransition(command, currentState, currentStatus, now 
 		}
 		case "adopt_session": {
 			if (currentState.processState === "alive") return reject("busy");
+			// Derived-field clearing at legacy parity (service.mjs adoptSession reuse
+			// path, ruling R4). autoState is intentionally untouched: the legacy
+			// adopt path leaves it alone.
 			return {
 				action: "apply",
 				reason: command.kind,
@@ -379,6 +412,11 @@ export function decideStateTransition(command, currentState, currentStatus, now 
 					state: {
 						semanticState: "idle",
 						processState: "exited",
+						needsInput: false,
+						hasError: false,
+						question: null,
+						pendingQuestions: [],
+						error: null,
 						summary: "Backgrounded session",
 					},
 				},
@@ -393,14 +431,22 @@ export function decideStateTransition(command, currentState, currentStatus, now 
 			return { action: "apply", reason: command.kind, mutate: { state: diffFields(currentState, stateClone) } };
 		}
 		case "plan_ready": {
-			if (currentState.processState !== "alive") return reject("no_change");
+			// The producer (job-runner's plan-ready pass) fires POST-finalization:
+			// the run has exited by the time a plan is ready for approval, so a live
+			// row means out-of-order delivery — drop it (ruling R3 inverts the guard).
+			if (currentState.processState === "alive") return reject("no_change");
+			// Exact legacy parity with runner/job-runner.mjs's plan-ready write.
 			return {
 				action: "apply",
 				reason: command.kind,
 				mutate: {
 					state: {
+						semanticState: "needs_input",
+						processState: "exited",
 						needsInput: true,
-						question: command.payload?.question ?? null,
+						question: command.payload?.question ?? "Approve this plan?",
+						summary: "Plan ready for approval",
+						currentRunId: command.payload.runId,
 					},
 				},
 			};
