@@ -14,9 +14,16 @@
  *   run on deep clones; changed fields are diffed into field patches.
  * - `run_finalized` → events.mjs finalizeRun + projectViewState run on a deep
  *   clone of the on-disk status; diffs produce the status/state patches.
+ * - `run_progress` / `followup_started` → payload.statusPatch merges onto the
+ *   status clone, then projectViewState recomputes the state side (shared
+ *   applyStatusProjection helper).
+ * - `reconcile_finalize` → stamps finalizeRun's exact field names on the
+ *   status (endedAt/exitCode/processState/pid) but does NOT run finalizeRun:
+ *   the reconciler's explicitly observed semanticState governs, and a full
+ *   finalize would recompute it from a possibly stale preview.
  *
  * Reject reasons: "unknown_view" | "revision_conflict" | "stale_run" |
- * "manual_fence" | "busy" | "no_change".
+ * "manual_fence" | "busy" | "no_change" | "field_not_allowed".
  */
 import {
 	applyAutoStateToStatus,
@@ -25,12 +32,46 @@ import {
 } from "./auto-state.mjs";
 import { finalizeRun, projectViewState } from "./events.mjs";
 
-/** Command kinds accepted in PR #1 (view-state coordinator scope). */
+/** Command kinds accepted by the View State Coordinator (issue #91 scope). */
 export const STATE_COMMAND_KINDS = Object.freeze([
 	"mark_completed",
 	"auto_state_classified",
 	"run_finalized",
+	"mark_queued",
+	"run_started",
+	"run_progress",
+	"reconcile_finalize",
+	"host_run_failed",
+	"archive_view",
+	"adopt_session",
+	"sync_foreground",
+	"plan_ready",
+	"followup_started",
+	"patch_fields",
 ]);
+
+/**
+ * Kinds the coordinator applies WITHOUT journaling (plan D3/Task-3 decision:
+ * run_progress is a periodic self-healing snapshot — ~4 writes/sec/run would
+ * bloat the journal unboundedly; a lost beat is overwritten by the next one).
+ * Transient commands still materialize and bump materializedRevision, but they
+ * are not replayed and not deduped.
+ */
+export const TRANSIENT_KINDS = Object.freeze(["run_progress"]);
+
+/**
+ * Per-source whitelist for `patch_fields` (metadata/evidence-mirror merges).
+ * Anything not listed here is rejected with "field_not_allowed" — semantic
+ * fields must travel through their dedicated kinds so the guard table in the
+ * plan stays exhaustive.
+ * @typedef {{ state: string[], status: string[] }} PatchableFields
+ * @type {Record<string, PatchableFields>}
+ */
+export const PATCHABLE_FIELDS = Object.freeze({
+	"job-runner": Object.freeze({ state: Object.freeze(["review", "evidenceSummary"]), status: Object.freeze(["evidenceSummary"]) }),
+	"state-runner": Object.freeze({ state: Object.freeze(["review", "evidenceSummary"]), status: Object.freeze(["evidenceSummary"]) }),
+	"service": Object.freeze({ state: Object.freeze(["lastVisitedAt"]), status: Object.freeze([]) }),
+});
 
 /** Who may originate a state command. Non-human sources are fenced by manual completions. */
 export const COMMAND_SOURCES = Object.freeze([
@@ -38,6 +79,7 @@ export const COMMAND_SOURCES = Object.freeze([
 	"service",
 	"job-runner",
 	"state-runner",
+	"pty-runner",
 ]);
 
 /**
@@ -78,6 +120,45 @@ export function validateCommand(raw) {
 		if (raw.payload.lastAgentActivityAt != null && typeof raw.payload.lastAgentActivityAt !== "number") return { ok: false, error: "bad_lastAgentActivityAt" };
 		if (raw.payload.stoppedByUser != null && typeof raw.payload.stoppedByUser !== "boolean") return { ok: false, error: "bad_stoppedByUser" };
 		if (raw.payload.stopReason != null && typeof raw.payload.stopReason !== "string") return { ok: false, error: "bad_stopReason" };
+	}
+	switch (raw.kind) {
+		case "mark_queued":
+			if (typeof raw.payload?.runId !== "string" || !raw.payload.runId) return { ok: false, error: "missing_runId" };
+			break;
+		case "run_started": {
+			if (raw.runId == null) return { ok: false, error: "missing_runId" };
+			const status = raw.payload?.status;
+			if (!status || typeof status !== "object") return { ok: false, error: "missing_status" };
+			if (typeof status.runId !== "string" || status.runId !== raw.runId) return { ok: false, error: "bad_status" };
+			break;
+		}
+		case "run_progress":
+		case "followup_started":
+			if (!raw.payload || typeof raw.payload.statusPatch !== "object" || raw.payload.statusPatch == null) return { ok: false, error: "missing_statusPatch" };
+			break;
+		case "reconcile_finalize": {
+			const semanticState = raw.payload?.semanticState;
+			if (semanticState !== "failed" && semanticState !== "idle") return { ok: false, error: "bad_semanticState" };
+			if (raw.payload.reason != null && typeof raw.payload.reason !== "string") return { ok: false, error: "bad_reason" };
+			if (raw.payload.exitCode != null && typeof raw.payload.exitCode !== "number") return { ok: false, error: "bad_exitCode" };
+			break;
+		}
+		case "host_run_failed":
+			if (raw.payload?.error != null && typeof raw.payload.error !== "string") return { ok: false, error: "bad_error" };
+			if (raw.payload?.exitCode != null && typeof raw.payload.exitCode !== "number") return { ok: false, error: "bad_exitCode" };
+			break;
+		case "sync_foreground":
+			if (!raw.payload?.projection || typeof raw.payload.projection !== "object") return { ok: false, error: "missing_projection" };
+			break;
+		case "plan_ready":
+			if (raw.payload?.question != null && typeof raw.payload.question !== "string") return { ok: false, error: "bad_question" };
+			break;
+		case "patch_fields": {
+			const hasState = raw.payload?.state != null && typeof raw.payload.state === "object";
+			const hasStatus = raw.payload?.status != null && typeof raw.payload.status === "object";
+			if (!hasState && !hasStatus) return { ok: false, error: "missing_payload" };
+			break;
+		}
 	}
 	return { ok: true, command: raw };
 }
@@ -179,6 +260,176 @@ export function decideStateTransition(command, currentState, currentStatus, now 
 				},
 			};
 		}
+		case "mark_queued": {
+			return {
+				action: "apply",
+				reason: command.kind,
+				mutate: {
+					state: {
+						currentRunId: command.payload.runId,
+						semanticState: "queued",
+						processState: "alive",
+						summary: "Queued",
+						needsInput: false,
+						hasError: false,
+						question: null,
+						pendingQuestions: [],
+						error: null,
+						autoState: null,
+					},
+				},
+			};
+		}
+		case "run_started": {
+			const statusAfter = cloneJson(command.payload.status);
+			return {
+				action: "apply",
+				reason: command.kind,
+				mutate: {
+					state: {
+						processState: "alive",
+						semanticState: "working",
+						currentRunId: command.runId,
+					},
+					status: diffFields(currentStatus, statusAfter),
+				},
+			};
+		}
+		case "run_progress": {
+			// Liveness semantics: only the row's current live run may move forward.
+			// Late/duplicate progress from a finished run is dropped (next run's
+			// progress supersedes it anyway — this kind is transient by design).
+			if (currentState.currentRunId !== command.runId || currentState.processState !== "alive") return reject("stale_run");
+			return applyStatusProjection(command, currentState, currentStatus, now);
+		}
+		case "followup_started": {
+			// No liveness guard: the follow-up starts from a just-finalized run.
+			// The command carries the PARENT runId (or none) — never the new run's
+			// id, or the generic stale-run guard above would reject it.
+			return applyStatusProjection(command, currentState, currentStatus, now);
+		}
+		case "reconcile_finalize": {
+			if (currentState.processState !== "alive") return reject("no_change");
+			const at = now ?? 0;
+			const stateClone = cloneJson(currentState);
+			stateClone.semanticState = command.payload.semanticState;
+			stateClone.processState = "exited";
+			if (command.payload.reason != null) stateClone.error = command.payload.reason;
+			const mutate = { state: diffFields(currentState, stateClone) };
+			if (currentStatus) {
+				const statusClone = cloneJson(currentStatus);
+				// Same field names finalizeRun stamps, minus the semantic recomputation:
+				// the reconciler observed the outcome explicitly and its verdict governs.
+				statusClone.endedAt = at;
+				statusClone.exitCode = command.payload.exitCode ?? null;
+				statusClone.processState = "exited";
+				statusClone.pid = null;
+				statusClone.semanticState = command.payload.semanticState;
+				mutate.status = diffFields(currentStatus, statusClone);
+			}
+			return { action: "apply", reason: command.kind, mutate };
+		}
+		case "host_run_failed": {
+			// No kind-specific guard: the generic manual_fence above is exactly the
+			// PR #1 residual-risk closure — a late host crash must not flip a row
+			// the user already completed by hand.
+			const mutate = {
+				state: {
+					semanticState: "failed",
+					processState: "exited",
+					error: command.payload?.error ?? null,
+				},
+			};
+			if (currentStatus) {
+				mutate.status = {
+					semanticState: "failed",
+					processState: "exited",
+					error: command.payload?.error ?? null,
+				};
+			}
+			return { action: "apply", reason: command.kind, mutate };
+		}
+		case "archive_view": {
+			// Busy rows are allowed: archiving a working row stops it (matches the
+			// legacy archiveView behavior this kind replaces).
+			return {
+				action: "apply",
+				reason: command.kind,
+				mutate: {
+					state: {
+						semanticState: "stopped",
+						processState: "exited",
+						needsInput: false,
+						hasError: false,
+						question: null,
+						pendingQuestions: [],
+						error: null,
+						autoState: null,
+						summary: "Stopped",
+					},
+				},
+			};
+		}
+		case "adopt_session": {
+			if (currentState.processState === "alive") return reject("busy");
+			return {
+				action: "apply",
+				reason: command.kind,
+				mutate: {
+					state: {
+						semanticState: "idle",
+						processState: "exited",
+						summary: "Backgrounded session",
+					},
+				},
+			};
+		}
+		case "sync_foreground": {
+			// Foreground mirrors never own a background run: the projection is the
+			// caller's, but currentRunId stays null regardless of what it carries.
+			const stateClone = cloneJson(currentState);
+			Object.assign(stateClone, command.payload.projection);
+			stateClone.currentRunId = null;
+			return { action: "apply", reason: command.kind, mutate: { state: diffFields(currentState, stateClone) } };
+		}
+		case "plan_ready": {
+			if (currentState.processState !== "alive") return reject("no_change");
+			return {
+				action: "apply",
+				reason: command.kind,
+				mutate: {
+					state: {
+						needsInput: true,
+						question: command.payload?.question ?? null,
+					},
+				},
+			};
+		}
+		case "patch_fields": {
+			const allowed = PATCHABLE_FIELDS[command.source];
+			if (!allowed) return reject("field_not_allowed");
+			const requestedState = command.payload.state ?? {};
+			const requestedStatus = command.payload.status ?? {};
+			for (const key of Object.keys(requestedState)) {
+				if (!allowed.state.includes(key)) return reject("field_not_allowed");
+			}
+			for (const key of Object.keys(requestedStatus)) {
+				if (!allowed.status.includes(key)) return reject("field_not_allowed");
+			}
+			const stateClone = cloneJson(currentState);
+			Object.assign(stateClone, requestedState);
+			const statePatch = diffFields(currentState, stateClone);
+			let statusPatch;
+			if (currentStatus && Object.keys(requestedStatus).length > 0) {
+				const statusClone = cloneJson(currentStatus);
+				Object.assign(statusClone, requestedStatus);
+				statusPatch = diffFields(currentStatus, statusClone);
+			}
+			if (Object.keys(statePatch).length === 0 && (!statusPatch || Object.keys(statusPatch).length === 0)) {
+				return reject("no_change");
+			}
+			return { action: "apply", reason: command.kind, mutate: statusPatch ? { state: statePatch, status: statusPatch } : { state: statePatch } };
+		}
 		default:
 			// validateCommand already rejects unknown kinds; defensive only.
 			return reject("unknown_kind");
@@ -215,4 +466,40 @@ function buildPatches(currentState, stateClone, stateChanged, currentStatus, sta
 	if (stateChanged) mutate.state = diffFields(currentState, stateClone);
 	if (statusChanged) mutate.status = diffFields(currentStatus, statusClone);
 	return mutate;
+}
+
+/**
+ * Shared body for the status-patch kinds (`run_progress`, `followup_started`):
+ * merge payload.statusPatch onto the materialized status, then let
+ * projectViewState recompute the state side — the projection rules live in
+ * events.mjs and are never copied here (same delegation contract as
+ * run_finalized).
+ *
+ * A missing status file is tolerated: the patch merges onto an empty object so
+ * the coordinator materializes a fresh status from the patch fields (this is
+ * the followup_started bootstrap path — a new run's status file does not exist
+ * yet). The caller should send enough fields to make that object meaningful.
+ *
+ * Pure; timestamp comes from `now`, falling back to the patch's
+ * lastActivityAt (payload-carried determinism, same rule as run_finalized).
+ *
+ * @param {object} command
+ * @param {object} currentState
+ * @param {object|null} currentStatus
+ * @param {number|undefined} now
+ */
+function applyStatusProjection(command, currentState, currentStatus, now) {
+	const patch = command.payload.statusPatch;
+	const at = now ?? patch.lastActivityAt ?? 0;
+	const statusClone = cloneJson(currentStatus) ?? {};
+	Object.assign(statusClone, patch);
+	const projectedState = projectViewState(statusClone, at, currentState);
+	return {
+		action: "apply",
+		reason: command.kind,
+		mutate: {
+			state: diffFields(currentState, projectedState),
+			status: diffFields(currentStatus ?? {}, statusClone),
+		},
+	};
 }
