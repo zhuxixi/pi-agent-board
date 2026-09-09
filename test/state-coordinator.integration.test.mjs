@@ -14,7 +14,7 @@ import { once } from "node:events";
 import { test } from "node:test";
 import { readJournal } from "../src/core/coordinator-journal.mjs";
 import * as P from "../src/core/paths.mjs";
-import { createView, readState, writeState } from "../src/core/store.mjs";
+import { createView, readState, readStatus, writeState, writeStatus } from "../src/core/store.mjs";
 
 const COORDINATOR_SCRIPT = fileURLToPath(new URL("../runner/state-coordinator.mjs", import.meta.url));
 
@@ -327,6 +327,91 @@ test("boot replay repairs a journal record whose materialization was lost", asyn
 	const repaired = readState(root, "v1");
 	assert.equal(repaired.materializedRevision, applied.materializedRevision, "replay restores the recorded revision");
 	assert.equal(repaired.semanticState, "completed");
+});
+
+test("boot replay repairs the status half of a half-materialized write pair without regressing state", async (t) => {
+	const root = freshRoot();
+	let child = startCoordinator(root);
+	t.after(async () => {
+		if (child && isAlive(child.pid)) {
+			child.kill("SIGTERM");
+			await waitForExit(child);
+		}
+		rmSync(root, { recursive: true, force: true });
+	});
+	createView(root, { id: "v1", name: "x", cwd: root });
+	// Seed a live run r1: state.currentRunId points at it, status.json exists.
+	writeState(root, { ...readState(root, "v1"), currentRunId: "r1", semanticState: "working", processState: "alive" });
+	const preFinalizeStatus = {
+		version: 1,
+		runId: "r1",
+		viewId: "v1",
+		pid: null,
+		startedAt: 1,
+		endedAt: null,
+		exitCode: null,
+		kind: "dispatch",
+		prompt: "p",
+		model: null,
+		semanticState: "working",
+		processState: "alive",
+		summary: "Working",
+		lastActivityAt: 1,
+		currentTool: null,
+		latestAssistantPreview: "partial answer",
+		question: null,
+		pendingQuestions: [],
+		error: null,
+		lastAgentActivityAt: null,
+		stopReason: null,
+		stoppedByUser: false,
+		turns: 0,
+		toolCount: 0,
+		eventCount: 0,
+		lastEventAt: null,
+		usage: null,
+		stallReason: null,
+		evidenceSummary: null,
+		autoState: null,
+	};
+	writeStatus(root, preFinalizeStatus);
+
+	const { client } = await readyClient(root);
+	client.send({
+		type: "state_command",
+		commandId: "cmd-crash-status-1",
+		viewId: "v1",
+		runId: "r1",
+		source: "job-runner",
+		kind: "run_finalized",
+		payload: { exitCode: 0, endedAt: 123 },
+	});
+	const applied = await client.next();
+	assert.equal(applied.status, "applied");
+
+	// Decision-time status binding must be recorded in the journal (not re-derived
+	// from whatever currentRunId is on disk at replay time).
+	const record = readJournal(root).find((r) => r?.command?.commandId === "cmd-crash-status-1");
+	assert.ok(record, "journal record exists");
+	assert.equal(record.statusRunId, "r1", "decision-time status binding recorded");
+
+	// Crash window: writeState landed, writeStatus did not. Rewind ONLY status.json
+	// to its pre-finalize content (no patch, no stamp); state.json keeps the stamp.
+	const stateAtCrash = readState(root, "v1");
+	assert.equal(stateAtCrash.materializedRevision, applied.materializedRevision);
+	writeStatus(root, preFinalizeStatus);
+	child.kill("SIGKILL");
+	await waitForExit(child);
+
+	child = startCoordinator(root);
+	await readyClient(root);
+
+	const repairedStatus = readStatus(root, "v1", "r1");
+	assert.equal(repairedStatus.processState, "exited", "status patch replayed into the bound run's status file");
+	assert.equal(repairedStatus.materializedRevision, applied.materializedRevision, "status stamped to the record revision");
+	const stateAfterReplay = readState(root, "v1");
+	assert.equal(stateAfterReplay.materializedRevision, applied.materializedRevision, "state revision not moved backwards by replay");
+	assert.equal(stateAfterReplay.semanticState, stateAtCrash.semanticState, "state content untouched by the status-half repair");
 });
 
 test("second coordinator instance exits immediately (lease held)", async (t) => {

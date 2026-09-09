@@ -21,9 +21,12 @@
  *   boot to max(checkpoint, max journal revision, max revision across views'
  *   state.json), incremented once per applied command, and stamped identically
  *   on state.json and the command's run status.json (spec 根治条件 5 scope).
- * - Boot replay re-materializes any applied journal record whose target view is
- *   behind the recorded revision (journal fsynced, materialization incomplete).
- *   Patches are stored in the record, so replay is deterministic — no re-decision.
+ * - Boot replay re-materializes every applied journal record from its stored
+ *   patches; per-file guards stamp only files strictly behind the recorded
+ *   revision, so a half-materialized pair (state.json written, status.json not)
+ *   repairs just the lagging half without moving the other one backwards. The
+ *   decision-time status binding (statusRunId) is recorded in the journal, so
+ *   replay is deterministic — no re-decision, no re-binding.
  * - Legacy adoption: a view without materializedRevision is stamped as part of
  *   its first applied command's single materialization write (no extra write).
  * - AGENT_BOARD_COORDINATOR=off makes the process exit 0 immediately (tests and
@@ -105,15 +108,15 @@ async function main() {
 		}
 	}
 
-	// Replay in journal order: any applied record whose view sits behind the
-	// recorded revision is re-materialized from the stored patches.
+	// Replay in journal order: re-materialize every applied record from its stored
+	// patches; materialize's per-file guards write only files strictly behind the
+	// recorded revision, so this repairs just the half that missed its write in a
+	// crash window and never moves the other half backwards.
 	for (const record of journal) {
 		if (record?.result?.status !== "applied") continue;
 		const viewId = record?.command?.viewId;
 		if (!viewId) continue;
-		const state = readState(root, viewId);
-		if (state && (state.materializedRevision ?? 0) >= (record.materializedRevision ?? 0)) continue;
-		materialize(viewId, record.command ?? {}, record.mutate ?? {}, record.materializedRevision ?? 0);
+		materialize(viewId, record.command ?? {}, record.mutate ?? {}, record.materializedRevision ?? 0, record.statusRunId ?? null);
 	}
 
 	// Global revision counter: never reissue a revision that exists anywhere.
@@ -248,9 +251,9 @@ async function main() {
 		const result = { status: "applied", reason: decision.reason };
 		// Journal first (fsync inside), materialize second: boot replay repairs
 		// the window between the two using the stored patches.
-		const record = { command, result, materializedRevision: newRevision, at: now, mutate: decision.mutate };
+		const record = { command, result, materializedRevision: newRevision, at: now, mutate: decision.mutate, statusRunId };
 		const journalBytes = appendCommand(root, record);
-		materialize(command.viewId, command, decision.mutate, newRevision);
+		materialize(command.viewId, command, decision.mutate, newRevision, statusRunId);
 		revisionCounter = newRevision;
 		rememberProcessed(command.commandId, result, newRevision);
 		maybeCheckpoint(journalBytes);
@@ -259,20 +262,30 @@ async function main() {
 
 	/**
 	 * Merge patches onto state.json (and the run's status.json when it exists)
-	 * under the view's materialize lock, stamping the shared revision. A status
-	 * patch without a status file is skipped — patch presence ≠ file requirement
-	 * (mark_completed always emits `status: {autoState: null}`).
+	 * under the view's materialize lock, stamping the shared revision. Per-file
+	 * guards stamp only files strictly behind the record revision: the live path
+	 * always qualifies (the global counter is monotonic), while replay repairs
+	 * just the half that missed its write in a crash window and never moves the
+	 * other half backwards. A status patch without a status file is skipped —
+	 * patch presence ≠ file requirement (mark_completed always emits
+	 * `status: {autoState: null}`). The status run binding is the decision-time
+	 * one (`statusRunId`, recorded in the journal) so replay cannot re-bind a
+	 * runId-less patch to whatever run is current on disk at replay time;
+	 * `state.currentRunId` remains only as a legacy fallback for records written
+	 * before statusRunId existed.
 	 */
-	function materialize(viewId, command, mutate, revision) {
+	function materialize(viewId, command, mutate, revision, statusRunId) {
 		withViewLockSync(root, viewId, "state-materialize", () => {
 			const state = readState(root, viewId);
-			if (mutate?.state && state) {
+			if (mutate?.state && state && (state.materializedRevision ?? 0) < revision) {
 				writeState(root, { ...state, ...mutate.state, materializedRevision: revision });
 			}
-			const runId = command?.runId ?? state?.currentRunId ?? null;
+			const runId = command?.runId ?? statusRunId ?? state?.currentRunId ?? null;
 			if (mutate?.status && runId) {
 				const status = readStatus(root, viewId, runId);
-				if (status) writeStatus(root, { ...status, ...mutate.status, materializedRevision: revision });
+				if (status && (status.materializedRevision ?? 0) < revision) {
+					writeStatus(root, { ...status, ...mutate.status, materializedRevision: revision });
+				}
 			}
 		});
 	}
