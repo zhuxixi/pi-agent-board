@@ -847,44 +847,49 @@ export class DashboardComponent implements Component {
 		const launchCwd = launchOpts?.cwd ?? this.deps.defaultCwd;
 		const launchModel = launchOpts?.model ?? (this.launch?.model ? canonicalModelRef(this.launch.model) : null);
 		const launchThinking = launchOpts?.thinkingLevel ?? this.launch?.thinking ?? this.deps.currentThinkingLevel;
-		const res = this.deps.service.dispatch(text, {
-			cwd: launchCwd,
-			model: launchModel,
-			thinkingLevel: launchThinking,
+		// dispatch is async (mark_queued routes through the view-state coordinator
+		// before the runner spawns, issue #91); notices/attach land when it settles.
+		void Promise.resolve(
+			this.deps.service.dispatch(text, {
+				cwd: launchCwd,
+				model: launchModel,
+				thinkingLevel: launchThinking,
+			}),
+		).then((res) => {
+			if (!res.ok) this.notice(res.error ?? "Dispatch failed", "error");
+			else {
+				this.lastLaunchPrefs = { ...this.deps.service.getLaunchPrefs?.(), cwd: launchCwd, model: launchModel, thinkingLevel: launchThinking };
+				try {
+					recordCwdLaunch(this.deps.root, launchCwd);
+				} catch {
+					/* best effort: stats must never block dispatch */
+				}
+				try {
+					this.deps.service.saveLaunchPrefs?.(this.lastLaunchPrefs);
+				} catch {
+					/* best effort */
+				}
+				this.selectedId = res.viewId ?? this.selectedId;
+				if (launchOpts?.attach && res.hostMode === "pty" && res.viewId) {
+					this.setInput("");
+					this.launch = null;
+					this.mode = "list";
+					this.inputNotice = null;
+					this.done({ action: "attach", viewId: res.viewId, stopFirst: false });
+					return;
+				}
+				if (res.hostMode === "json-runner") {
+					this.notice(launchOpts?.attach ? `Start & attach needs PTY; launched in background: ${res.fallbackReason ?? "PTY unavailable"}` : `Dispatched with non-live fallback: ${res.fallbackReason ?? "PTY unavailable"}`, "warn");
+				} else {
+					this.notice(`Dispatched: ${truncate(text, 40)}`, "info");
+				}
+			}
+			this.setInput("");
+			this.launch = null;
+			this.mode = "list";
+			this.inputNotice = null;
+			this.refresh();
 		});
-		if (!res.ok) this.notice(res.error ?? "Dispatch failed", "error");
-		else {
-			this.lastLaunchPrefs = { ...this.deps.service.getLaunchPrefs?.(), cwd: launchCwd, model: launchModel, thinkingLevel: launchThinking };
-			try {
-				recordCwdLaunch(this.deps.root, launchCwd);
-			} catch {
-				/* best effort: stats must never block dispatch */
-			}
-			try {
-				this.deps.service.saveLaunchPrefs?.(this.lastLaunchPrefs);
-			} catch {
-				/* best effort */
-			}
-			this.selectedId = res.viewId ?? this.selectedId;
-			if (launchOpts?.attach && res.hostMode === "pty" && res.viewId) {
-				this.setInput("");
-				this.launch = null;
-				this.mode = "list";
-				this.inputNotice = null;
-				this.done({ action: "attach", viewId: res.viewId, stopFirst: false });
-				return;
-			}
-			if (res.hostMode === "json-runner") {
-				this.notice(launchOpts?.attach ? `Start & attach needs PTY; launched in background: ${res.fallbackReason ?? "PTY unavailable"}` : `Dispatched with non-live fallback: ${res.fallbackReason ?? "PTY unavailable"}`, "warn");
-			} else {
-				this.notice(`Dispatched: ${truncate(text, 40)}`, "info");
-			}
-		}
-		this.setInput("");
-		this.launch = null;
-		this.mode = "list";
-		this.inputNotice = null;
-		this.refresh();
 	}
 
 	private async submitReply(): Promise<void> {

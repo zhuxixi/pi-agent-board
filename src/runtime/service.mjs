@@ -149,7 +149,7 @@ export function createService(opts) {
 	 * @param {RunKind} kind
 	 * @returns {{ runId: string, pid: number|null }}
 	 */
-	function launchForView(meta, prompt, kind) {
+	async function launchForView(meta, prompt, kind) {
 		const runId = newRunId();
 		/** @type {import("../core/types.mjs").RunConfig} */
 		const config = {
@@ -166,9 +166,17 @@ export function createService(opts) {
 			thinkingLevel: meta.defaultThinking ?? null,
 			tools: null,
 		};
+		// Final-review F2 residual (fix round 2): mark_queued must LAND before the
+		// runner can boot. A detached runner that boots faster than this round-trip
+		// used to send run_started while the row was still manual-completed → the
+		// command hit the manual fence → row stuck queued/alive with no status file
+		// → beats and run_finalized reject stale_run forever → permanent zombie.
+		// Spawn regardless of the result: with the coordinator unreachable the
+		// runner's own commands fail the same way either way — launch availability
+		// beats strict ordering.
+		await markQueued(meta.id, runId);
 		const { pid } = launch(root, config, { runnerScript: opts.runnerScript });
 		appendDiagnostic(root, meta.id, { source: "service", runId, code: "launch_run", message: "Detached runner launched", details: { kind, pid } });
-		markQueued(meta.id, runId);
 		return { runId, pid };
 	}
 
@@ -179,9 +187,9 @@ export function createService(opts) {
 	 * can never stack a second host on top of a live claim.
 	 * @param {import("../core/types.mjs").ViewMeta} meta
 	 * @param {string|null} initialPrompt
-	 * @returns {{ ok: true, status: "started"|"pending"|"reused", pid: number|null, socketPath: string|null, instanceId: string|null } | { ok: false, error: string, fallbackReason?: string }}
+	 * @returns {Promise<{ ok: true, status: "started"|"pending"|"reused", pid: number|null, socketPath: string|null, instanceId: string|null } | { ok: false, error: string, fallbackReason?: string }>}
 	 */
-	function launchHost(meta, initialPrompt, launchOpts = {}) {
+	async function launchHost(meta, initialPrompt, launchOpts = {}) {
 		let lease;
 		try {
 			lease = acquireLockImpl(root, meta.id, "host-start", { waitMs: HOST_START_LOCK_WAIT_MS, identity: serviceIdentity() });
@@ -193,7 +201,12 @@ export function createService(opts) {
 			return pendingLaunchResult(existing);
 		}
 		try {
-			return startHostUnderLease(meta, initialPrompt, launchOpts);
+			// Same ordering contract as launchForView (final-review F2 residual):
+			// the row must leave completed/fenced before the host can start work.
+			// `return await` (not `return`) keeps the host-start lease held until
+			// the two-phase claim transaction settles.
+			if (launchOpts.markQueued !== false) await markQueued(meta.id, null);
+			return await startHostUnderLease(meta, initialPrompt, launchOpts);
 		} finally {
 			try { lease.release(); } catch { /* best effort */ }
 		}
@@ -307,7 +320,6 @@ export function createService(opts) {
 		}
 		updateOwnedHost(root, meta.id, instanceId, (h) => ({ ...h, runnerPid: pid, runnerSpawnedAt: nowImpl() }));
 		appendDiagnostic(root, meta.id, { source: "service", code: "launch_host", message: "PTY host launched", details: { pid, instanceId, hasInitialPrompt: Boolean(initialPrompt) } });
-		if (launchOpts.markQueued !== false) markQueued(meta.id, null);
 		return { ok: true, status: "started", pid, socketPath, instanceId };
 	}
 
@@ -441,11 +453,11 @@ export function createService(opts) {
 		writeState(root, state);
 	}
 
-	/** @param {string} viewId @param {string|null} runId */
+	/** @param {string} viewId @param {string|null} runId @returns {Promise<{status: string, reason: string|null, materializedRevision?: number}>} */
 	function markQueued(viewId, runId) {
 		if (coordinatorDisabled()) {
 			markQueuedDirect(viewId, runId);
-			return;
+			return Promise.resolve({ status: "applied", reason: "coordinator_disabled" });
 		}
 		// Fire-and-forget: legacy issued this write right after launch() without
 		// waiting on the runner, and the coordinator serializes arrival order the
@@ -465,7 +477,9 @@ export function createService(opts) {
 		// and the service-side drain path delivers already-queued user follow-ups
 		// with no fence by design (prompt-not-lost, issue #70 — its live-host input
 		// path never fenced either).
-		void sendLifecycleCommand({
+		// Fix round 2 (launch ordering): this promise is now AWAITED by launchForView
+		// / launchHost before they spawn — see the ordering notes there.
+		return sendLifecycleCommand({
 			type: "state_command",
 			viewId,
 			runId: null,
@@ -473,7 +487,7 @@ export function createService(opts) {
 			kind: "mark_queued",
 			expectedRevision: null,
 			payload: { runId },
-		}).catch(() => { /* ambiguity: the runner's own beats / reconcile converge */ });
+		}).catch(() => ({ status: "rejected", reason: "connection_reset" }));
 	}
 
 	/** Legacy direct write for markVisited — coordinator_disabled escape hatch only. */
@@ -1344,7 +1358,7 @@ export function createService(opts) {
 			let hostMode = "pty";
 			if (!pty.ok) hostMode = "json-runner";
 			if (pty.ok) {
-				const launched = launchHost(row.meta, prompt);
+				const launched = await launchHost(row.meta, prompt);
 				if (launched.ok && launched.status !== "started") {
 					// An existing claim owns the view; the item stays queued and retries
 					// after that host becomes ready (issue #70 prompt-not-lost invariant).
@@ -1361,7 +1375,7 @@ export function createService(opts) {
 				return { ok: false, error: "PTY is required to drain adopted session follow-ups safely" };
 			}
 			if (hostMode === "json-runner") {
-				runId = launchForView(row.meta, prompt, runKindForFollowUp(item)).runId;
+				({ runId } = await launchForView(row.meta, prompt, runKindForFollowUp(item)));
 			}
 			completeFollowUp(root, viewId, item.id, { runId });
 			appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_started", message: "Queued follow-up started", details: { kind: item.kind, hostMode } });
@@ -1483,9 +1497,9 @@ export function createService(opts) {
 		 *   model?: string|null,
 		 *   thinkingLevel?: "off"|"minimal"|"low"|"medium"|"high"|"xhigh"|"max"|null,
 		 * }} [dispatchOpts]
-		 * @returns {{ ok: boolean, viewId?: string, error?: string, hostMode?: "pty"|"json-runner", fallbackReason?: string }}
+		 * @returns {Promise<{ ok: boolean, viewId?: string, error?: string, hostMode?: "pty"|"json-runner", fallbackReason?: string }>}
 		 */
-		dispatch(text, dispatchOpts = {}) {
+		async dispatch(text, dispatchOpts = {}) {
 			const prompt = String(text || "").trim();
 			if (!prompt) return { ok: false, error: "Empty task" };
 
@@ -1517,7 +1531,7 @@ export function createService(opts) {
 			let fallbackReason;
 			let queued;
 			if (pty.ok) {
-				const launched = launchHost(meta, prompt);
+				const launched = await launchHost(meta, prompt);
 				if (launched.ok) {
 					hostMode = "pty";
 					if (launched.status !== "started") {
@@ -1529,11 +1543,11 @@ export function createService(opts) {
 					}
 				} else {
 					fallbackReason = launched.fallbackReason ?? launched.error;
-					launchForView(meta, prompt, "dispatch");
+					await launchForView(meta, prompt, "dispatch");
 				}
 			} else {
 				fallbackReason = nodePtyFallbackMessage(pty);
-				launchForView(meta, prompt, "dispatch");
+				await launchForView(meta, prompt, "dispatch");
 			}
 			queueGeneratedTitle(meta, prompt);
 			return {
@@ -1602,7 +1616,7 @@ export function createService(opts) {
 			let hostMode = null;
 			let fallbackReason;
 			if (pty.ok) {
-				const launched = launchHost(row.meta, prompt);
+				const launched = await launchHost(row.meta, prompt);
 				if (launched.ok) {
 					if (launched.status !== "started") {
 						// The existing claim will consume the prompt later — keep it queued
@@ -1623,7 +1637,7 @@ export function createService(opts) {
 			}
 			if (!hostMode) {
 				if (isExternalSession(row.meta)) return { ok: false, error: "PTY is required to continue an adopted foreground session safely" };
-				launchForView(row.meta, prompt, runKindForKind(kind));
+				await launchForView(row.meta, prompt, runKindForKind(kind));
 				hostMode = "json-runner";
 			}
 			return { ok: true, hostMode, ...(hostMode === "json-runner" ? { fallbackReason } : {}) };
@@ -2020,9 +2034,13 @@ export function createService(opts) {
 						expectedRevision: null,
 						payload: { project: true },
 					}, row.meta.id);
-					if (result.status === "applied" || result.reason === "coordinator_disabled") {
-						if (result.reason === "coordinator_disabled") writeState(root, projectViewState(status, now, readState(root, row.meta.id) ?? row.state ?? null));
+					if (result.status !== "applied" && result.reason !== "coordinator_disabled") {
+						// Fix round 2 (F5 leftover): a rejected/ambiguous project-mode
+						// row (manual fence, no_change, stale_run, timeout) mutated
+						// nothing — it must not count toward the fixed tally.
+						continue;
 					}
+					if (result.reason === "coordinator_disabled") writeState(root, projectViewState(status, now, readState(root, row.meta.id) ?? row.state ?? null));
 				} else {
 					const result = await sendLifecycleCommand({
 						type: "state_command",
