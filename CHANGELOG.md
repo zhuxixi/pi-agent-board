@@ -5,6 +5,14 @@ conventional commits by `scripts/release_helper.mjs`. Entries are
 forward-only: they begin with the first release after this file landed —
 for earlier history, see the git log and the pull-request list.
 
+## [0.6.2] - 2026-09-09
+
+### Fixes
+
+- **host**: claim role no longer blocks terminal host replacement (#99) (#100)
+
+[0.6.2]: https://github.com/zhuxixi/pi-agent-board/compare/v0.6.1...v0.6.2
+
 ## [0.6.1] - 2026-09-08
 
 ### Fixes
