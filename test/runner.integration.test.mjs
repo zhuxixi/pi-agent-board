@@ -344,22 +344,19 @@ test("during-run progress materializes through the coordinator without journal g
 			return s && s.currentRunId === "r" && s.processState === "alive" && s.semanticState === "working" ? s : null;
 		});
 		assert.ok(startedState, "run_started pinned the row to the live run");
-		const revAfterStart = startedState.materializedRevision ?? 0;
 
-		// The pid beat lands through the coordinator (the runner never writes
-		// status.json directly anymore — run_started carried pid null).
+		// The pid beat is the deterministic progress-materialization proof: the
+		// runner never writes status.json directly and run_started carried pid
+		// null, so pid > 0 can only arrive via a post-start run_progress beat.
+		// (Revision-bump coverage for transient beats lives in the coordinator
+		// suite's transient tests; asserting a revision bump here races — hang
+		// mode emits all its events within the first ~100ms, so every beat can
+		// land before the startedState sample.)
 		const withPid = await waitFor(() => {
 			const s = readStatus(root, "v", "r");
 			return s && s.pid > 0 ? s : null;
 		});
 		assert.ok(withPid, "pid beat materialized through the coordinator");
-
-		// An event-driven beat advanced the shared materializedRevision.
-		const beatState = await waitFor(() => {
-			const s = readState(root, "v");
-			return s && (s.materializedRevision ?? 0) > revAfterStart ? s : null;
-		});
-		assert.ok(beatState, "progress beats bump materializedRevision");
 
 		// Transient by design: ZERO run_progress records in the journal, and
 		// every journal line stays parseable (torn-tail repair intact).

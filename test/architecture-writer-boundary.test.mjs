@@ -49,10 +49,10 @@ const WRITE_STATE_ALLOWLIST = new Map([
 	// process holds a service object created by a pre-Task-6 module instance
 	// (live-reload window). The normal path routes through the coordinator.
 	["src/ui/dashboard.ts", "PR #1: markCompleted 对已打开 dashboard 旧 service 对象的兼容回退（热重载窗口）；正常路径已走 coordinator，待 PR #2 清理"],
-	// markRowFailed: host crash/failure-path view-state finalization inside the
-	// PTY runner. Outside Task 8's finalize scope (job-runner exit chain +
-	// service terminal sites); PR #2 should route it through a failure command.
-	["runner/pty-runner.mjs", "PR #1: markRowFailed 宿主崩溃/失败路径的 view-state 终态写，不在 Task 8 范围内；PR #2 应改走 failure 终态命令"],
+	// markRowFailed moved to the fenced host_run_failed command in Phase-2b
+	// Task 5; this module now only holds the coordinator_disabled escape-hatch
+	// direct write (markRowFailedDirect) — no manual-completion fence by design.
+	["runner/pty-runner-legacy.mjs", "coordinator_disabled 逃生门（markRowFailedDirect 直写，无 fence——默认配置不可达），设计内豁免"],
 ]);
 
 /** The only unconditional writer: the View State Coordinator itself. */

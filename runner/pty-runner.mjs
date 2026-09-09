@@ -22,7 +22,9 @@ import { acquireOwnedViewLock } from "../src/core/locks.mjs";
 import * as P from "../src/core/paths.mjs";
 import { appendBoundedScreenLog, reconcileScreenLog } from "../src/core/screen-log.mjs";
 import { encodePromptForCliArg } from "../src/core/prompt-transport.mjs";
-import { readHost, readState, updateOwnedHost, writeHost, writeState } from "../src/core/store.mjs";
+import { readHost, readState, updateOwnedHost, writeHost } from "../src/core/store.mjs";
+import { sendStateCommand } from "../src/core/coordinator-client.mjs";
+import { markRowFailedDirect } from "./pty-runner-legacy.mjs";
 import { ensureNodePtySpawnHelperExecutable } from "../src/core/pty-support.mjs";
 
 const requireForPty = createRequire(import.meta.url);
@@ -240,8 +242,12 @@ function legacyMain(config) {
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		update({ state: "failed", endedAt: Date.now(), exitCode: 1, error: message });
-		markRowFailed(config.root, config.viewId, `PTY host failed: ${message}`);
-		process.exit(1);
+		// The command settles within the client's own timeout (never throws), so
+		// the exit stays bounded while the fenced write gets its chance. Return
+		// instead of falling through: child is null here and the rest of this
+		// function assumes a spawned child.
+		void markRowFailed(config.root, config.viewId, `PTY host failed: ${message}`).finally(() => process.exit(1));
+		return;
 	}
 	childPid = child.pid ?? null;
 	update({ childPid });
@@ -754,7 +760,7 @@ async function ownedMain(config) {
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		diag("child_spawn_failed", message);
-		markRowFailed(config.root, config.viewId, `PTY host failed: ${message}`);
+		await markRowFailed(config.root, config.viewId, `PTY host failed: ${message}`);
 		await finishHost("child_spawn_failed", 1);
 		return;
 	}
@@ -1018,34 +1024,66 @@ function captureStartToken(pid) {
 }
 
 
-function markRowFailed(root, viewId, message) {
-	const now = Date.now();
-	const state = readState(root, viewId) ?? {
-		version: 1,
+/**
+ * Finalize the view row as failed when the PTY host itself fails (child spawn
+ * failure). Routed through the View State Coordinator as a fenced
+ * `host_run_failed` command (issue #91, PR #1 residual risk #2): a manually
+ * completed row rejects with manual_fence and stays completed, and a row
+ * re-pointed to a newer run rejects with stale_run.
+ *
+ * The runId is sourced from the row's current state.json (null = the row had
+ * no run) so the coordinator's stale_run guard stays effective; the
+ * coordinator cannot enforce this from its side because it has no visibility
+ * into what the host knows.
+ *
+ * Never throws: every client outcome is handled so the crash path cannot hang.
+ *  - applied → done (journaled + materialized by the coordinator).
+ *  - coordinator_disabled → legacy direct write (documented escape hatch).
+ *  - decided rejections (manual_fence / stale_run / no_change) → info
+ *    diagnostic; the coordinator's verdict governs.
+ *  - everything else (timeout / connection reset / unavailable) → warn
+ *    diagnostic: the outcome is unknown or the row could not be marked — the
+ *    runner still shuts down.
+ * @param {string} root
+ * @param {string} viewId
+ * @param {string} message
+ */
+async function markRowFailed(root, viewId, message) {
+	const knownRunId = readState(root, viewId)?.currentRunId ?? null;
+	const result = await sendStateCommand(root, {
+		type: "state_command",
 		viewId,
-		currentRunId: null,
-		semanticState: "queued",
-		processState: "exited",
-		summary: "Queued",
-		lastActivityAt: now,
-		updatedAt: now,
-		needsInput: false,
-		hasError: false,
-		latestAssistantPreview: "",
-		latestTool: null,
-		question: null,
-		pendingQuestions: [],
-		error: null,
-	};
-	state.semanticState = "failed";
-	state.processState = "exited";
-	state.summary = message;
-	state.hasError = true;
-	state.needsInput = false;
-	state.error = message;
-	state.updatedAt = now;
-	state.lastActivityAt = now;
-	writeState(root, state);
+		runId: knownRunId,
+		source: "pty-runner",
+		kind: "host_run_failed",
+		payload: { error: message },
+	});
+	if (result.status === "applied") return;
+	if (result.reason === "coordinator_disabled") {
+		markRowFailedDirect(root, viewId, message);
+		return;
+	}
+	if (result.reason === "manual_fence" || result.reason === "stale_run" || result.reason === "no_change") {
+		try {
+			appendDiagnostic(root, viewId, {
+				source: "runner",
+				level: "info",
+				code: "host_run_failed_skipped",
+				message: `Host failure not applied to the row (${result.reason})`,
+				details: { reason: result.reason },
+			});
+		} catch { /* best effort */ }
+		return;
+	}
+	try {
+		appendDiagnostic(root, viewId, {
+			source: "runner",
+			level: "warn",
+			code: "host_run_failed_ambiguous",
+			message: `Host failure outcome unknown (${result.reason}); the row may not reflect the failed host`,
+			details: { reason: result.reason },
+		});
+	} catch { /* best effort */ }
 }
 
 function failEarly(message) {

@@ -18,9 +18,35 @@ import { writeEvidence } from "../src/core/evidence.mjs";
 import * as P from "../src/core/paths.mjs";
 import { createRunStatus } from "../src/core/events.mjs";
 import { createView, readState, readStatus, writeState, writeStatus } from "../src/core/store.mjs";
+import { sendStateCommand } from "../src/core/coordinator-client.mjs";
 
 const COORDINATOR_SCRIPT = fileURLToPath(new URL("../runner/state-coordinator.mjs", import.meta.url));
 const STATE_RUNNER_SCRIPT = fileURLToPath(new URL("../runner/state-runner.mjs", import.meta.url));
+
+/** Exited idle row with a run-tracked id and a NON-manual autoState (the
+ *  manual fence signal is autoState: null + completed). Fixed lastActivityAt
+ *  so stamp assertions can discriminate. */
+function legacyRowState(viewId) {
+	return {
+		version: 1,
+		viewId,
+		currentRunId: null,
+		semanticState: "idle",
+		processState: "exited",
+		summary: "Idle",
+		lastActivityAt: 1000,
+		updatedAt: 1000,
+		needsInput: false,
+		hasError: false,
+		latestAssistantPreview: "",
+		latestTool: null,
+		question: null,
+		pendingQuestions: [],
+		error: null,
+		autoState: { source: "heuristic" },
+		materializedRevision: 1,
+	};
+}
 
 function freshRoot() {
 	return mkdtempSync(join(tmpdir(), "agentview-coord-"));
@@ -748,6 +774,64 @@ async function seedLiveRun(client, root) {
 	assert.equal(status.processState, "alive");
 	return { mqRevision: mq.materializedRevision, startedRevision: rs.materializedRevision };
 }
+
+// -- Task 5 (Phase-2b): F5b — mark_completed + host_run_failed stamp lastActivityAt --
+
+/** Table of every kind in the coordinator's LAST_ACTIVITY_STAMP_KINDS, with a
+ *  fixture state + command that applies cleanly. Mirrors the set in
+ *  runner/state-coordinator.mjs (not importable — the module runs main() on
+ *  import); keep the two lists in sync. */
+const STAMP_KIND_CASES = [
+	{ kind: "mark_queued", source: "service", command: { payload: { runId: "rq" } } },
+	{ kind: "archive_view", source: "dashboard-user", command: { payload: {} } },
+	{ kind: "adopt_session", source: "service", command: { payload: {} } },
+	{ kind: "reconcile_finalize", source: "service", command: { runId: "rc", payload: { semanticState: "idle", summary: "reconciled" } }, stateOverrides: { processState: "alive", semanticState: "working", currentRunId: "rc" } },
+	{ kind: "plan_ready", source: "job-runner", command: { runId: "rp", payload: { runId: "rp" } } },
+	{ kind: "mark_completed", source: "dashboard-user", command: { payload: {} } },
+	{ kind: "host_run_failed", source: "pty-runner", command: { payload: { error: "PTY host failed: boom" } } },
+];
+
+for (const { kind, source, command, stateOverrides } of STAMP_KIND_CASES) {
+	test(`F5b: ${kind} stamps lastActivityAt on apply`, async (t) => {
+		const root = freshRoot();
+		let child = null;
+		t.after(async () => {
+			if (child && isAlive(child.pid)) { child.kill("SIGTERM"); await waitForExit(child); }
+			rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+		});
+		createView(root, { id: "v1", name: "x", cwd: root });
+		writeState(root, { ...legacyRowState("v1"), ...(stateOverrides ?? {}) });
+		child = startCoordinator(root);
+		await waitFor(() => existsSync(P.coordinatorEndpointPathFor(process.platform, root)));
+		const result = await sendStateCommand(root, {
+			type: "state_command", viewId: "v1", source, kind, ...command,
+		});
+		assert.equal(result.status, "applied", `${kind} must apply against the fixture row`);
+		const state = readState(root, "v1");
+		assert.ok(state.lastActivityAt > 1000, `${kind} must stamp lastActivityAt (legacy parity: service.mjs completeView / pty-runner markRowFailed)`);
+	});
+}
+
+test("F5b negative: patch_fields does not stamp lastActivityAt", async (t) => {
+	const root = freshRoot();
+	let child = null;
+	t.after(async () => {
+		if (child && isAlive(child.pid)) { child.kill("SIGTERM"); await waitForExit(child); }
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	});
+	createView(root, { id: "v1", name: "x", cwd: root });
+	writeState(root, legacyRowState("v1"));
+	child = startCoordinator(root);
+	await waitFor(() => existsSync(P.coordinatorEndpointPathFor(process.platform, root)));
+	const result = await sendStateCommand(root, {
+		type: "state_command", viewId: "v1", source: "service", kind: "patch_fields",
+		payload: { state: { lastVisitedAt: 4242 } },
+	});
+	assert.equal(result.status, "applied");
+	const state = readState(root, "v1");
+	assert.equal(state.lastVisitedAt, 4242, "the whitelisted patch applies");
+	assert.equal(state.lastActivityAt, 1000, "patch_fields must NOT stamp lastActivityAt");
+});
 
 test("transient run_progress applies, stamps the revision, and never touches the journal", async (t) => {
 	const root = freshRoot();

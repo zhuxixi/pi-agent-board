@@ -68,7 +68,7 @@ const HEARTBEAT_MS = 1000;
  *  shell adds the wall-clock stamp — into the patch BEFORE the journal
  *  append, so boot replay re-applies the exact same fields deterministically
  *  (there is no clock at replay time either). (Task 1 review F5.) */
-const LAST_ACTIVITY_STAMP_KINDS = new Set(["mark_queued", "archive_view", "adopt_session", "reconcile_finalize", "plan_ready"]);
+const LAST_ACTIVITY_STAMP_KINDS = new Set(["mark_queued", "archive_view", "adopt_session", "reconcile_finalize", "plan_ready", "mark_completed", "host_run_failed"]);
 /** Kinds whose status patch may CREATE the run's status file: they carry the
  *  full status content for a run that has no materialized status yet. Every
  *  other kind keeps PR #1's "patch presence ≠ file requirement" semantics
