@@ -7,9 +7,21 @@ import { createService, HOST_START_GRACE_MS } from "../src/runtime/service.mjs";
 import { createView, readHost, readState, writeHost, writeHostPid, writeState } from "../src/core/store.mjs";
 import { readDiagnostics } from "../src/core/diagnostics.mjs";
 import * as P from "../src/core/paths.mjs";
+import { startCoordinator } from "../test-support/ensure-coordinator-helper.mjs";
 
 function freshRoot() {
 	return mkdtempSync(join(tmpdir(), "agentview-recovery-"));
+}
+
+/** Poll until the view's state.json reaches `semanticState` (coordinator materialization is async). */
+async function waitForState(root, viewId, semanticState, timeoutMs = 5000) {
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		const state = readState(root, viewId);
+		if (state?.semanticState === semanticState) return state;
+		if (Date.now() > deadline) return null;
+		await new Promise((resolve) => setTimeout(resolve, 25));
+	}
 }
 
 function service(root, overrides = {}) {
@@ -247,8 +259,15 @@ test("pruneWarmHosts revokes new-protocol hosts via the file record instead of t
 	}
 });
 
-test("reconcile leaves starting hosts within the claim grace alone, and finalizes them past it", () => {
+test("reconcile leaves starting hosts within the claim grace alone, and finalizes them past it", async () => {
 	const root = freshRoot();
+	const prevCoordinator = process.env.AGENT_BOARD_COORDINATOR;
+	delete process.env.AGENT_BOARD_COORDINATOR;
+	const prevBoardRoot = process.env.AGENT_BOARD_ROOT;
+	process.env.AGENT_BOARD_ROOT = root;
+	const prevPiDir = process.env.PI_CODING_AGENT_DIR;
+	process.env.PI_CODING_AGENT_DIR = root;
+	const coord = await startCoordinator(root);
 	try {
 		// Within grace: starting claim with no runner pid must NOT be reconciled to failed.
 		createView(root, { id: "fresh", name: "f", cwd: "/r" });
@@ -269,15 +288,19 @@ test("reconcile leaves starting hosts within the claim grace alone, and finalize
 		writeState(root, staleState);
 
 		const svc = service(root);
-		svc.reconcile();
+		await svc.reconcile();
 
 		const afterFresh = readState(root, "fresh");
 		assert.equal(afterFresh.semanticState, "queued", "within-grace starting host must stay untouched");
 		assert.equal(readDiagnostics(root, "fresh").some((d) => d.code === "host_reconciled"), false);
 
-		const afterStale = readState(root, "stale");
-		assert.equal(afterStale.semanticState, "failed", "past-grace starting host is reconciled to failed");
+		const afterStale = await waitForState(root, "stale", "failed");
+		assert.ok(afterStale, "past-grace starting host is reconciled to failed");
 	} finally {
+		await coord.kill();
+		if (prevCoordinator === undefined) delete process.env.AGENT_BOARD_COORDINATOR; else process.env.AGENT_BOARD_COORDINATOR = prevCoordinator;
+		if (prevBoardRoot === undefined) delete process.env.AGENT_BOARD_ROOT; else process.env.AGENT_BOARD_ROOT = prevBoardRoot;
+		if (prevPiDir === undefined) delete process.env.PI_CODING_AGENT_DIR; else process.env.PI_CODING_AGENT_DIR = prevPiDir;
 		rmSync(root, { recursive: true, force: true });
 	}
 });
