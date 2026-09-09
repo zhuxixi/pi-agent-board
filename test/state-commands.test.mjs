@@ -80,6 +80,22 @@ test("validateCommand requires an exitCode payload for run_finalized", () => {
 	);
 });
 
+test("validateCommand type-checks run_finalized payload fields when present", () => {
+	const ok = { ...baseCmd, kind: "run_finalized" };
+	assert.equal(validateCommand({ ...ok, payload: { exitCode: 0, endedAt: "100" } }).ok, false);
+	assert.equal(validateCommand({ ...ok, payload: { exitCode: 0, lastAgentActivityAt: "x" } }).ok, false);
+	assert.equal(validateCommand({ ...ok, payload: { exitCode: 0, stoppedByUser: "yes" } }).ok, false);
+	assert.equal(validateCommand({ ...ok, payload: { exitCode: 0, stopReason: 5 } }).ok, false);
+	// Nullable/optional fields stay legal:
+	assert.equal(
+		validateCommand({
+			...ok,
+			payload: { exitCode: null, endedAt: 100, lastAgentActivityAt: null, stoppedByUser: false, stopReason: null },
+		}).ok,
+		true,
+	);
+});
+
 test("unknown view rejects", () => {
 	const d = decideStateTransition(baseCmd, null, null);
 	assert.deepEqual(d, { action: "reject", reason: "unknown_view" });
@@ -152,6 +168,34 @@ test("run_finalized rejects an already-exited run (duplicate finalize)", () => {
 	const state = { ...manualCompletedState, semanticState: "idle", autoState: {}, processState: "exited" };
 	const d = decideStateTransition(cmd, state, { runId: "r1", processState: "exited" });
 	assert.deepEqual(d, { action: "reject", reason: "stale_run" });
+});
+
+test("run_finalized overlays payload.stopReason so a fresh abort yields failed", () => {
+	// The on-disk status may lag (throttled writes): stopReason null on disk,
+	// but the runner observed the abort and reports it in the payload.
+	const cmd = {
+		...baseCmd, kind: "run_finalized", source: "job-runner",
+		payload: { exitCode: null, stopReason: "aborted", endedAt: 100 },
+	};
+	const state = {
+		viewId: "v1", currentRunId: "r1", semanticState: "working", processState: "alive",
+		autoState: null, summary: "Running…", latestAssistantPreview: "partial", question: null,
+		needsInput: false, hasError: false, error: null, lastActivityAt: 5, updatedAt: 5,
+		latestTool: null, pendingQuestions: [], lastVisitedAt: null,
+	};
+	const status = {
+		version: 1, runId: "r1", viewId: "v1", pid: 4242, startedAt: 1, endedAt: null, exitCode: null,
+		kind: "dispatch", prompt: "x", model: null, semanticState: "working", processState: "alive",
+		summary: "Running…", lastActivityAt: 5, currentTool: null,
+		latestAssistantPreview: "partial", question: null, pendingQuestions: [], error: null,
+		lastAgentActivityAt: null, stopReason: null, stoppedByUser: false, turns: 1, toolCount: 0,
+		autoState: null,
+	};
+	const d = decideStateTransition(cmd, state, status, 100);
+	assert.equal(d.action, "apply");
+	assert.equal(d.mutate.status.stopReason, "aborted");
+	assert.equal(d.mutate.status.semanticState, "failed"); // finalizeSemanticState reads status.stopReason
+	assert.equal(d.mutate.state.semanticState, "failed");
 });
 
 test("decisions are pure: inputs are not mutated", () => {

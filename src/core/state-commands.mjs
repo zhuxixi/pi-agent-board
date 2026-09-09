@@ -74,6 +74,10 @@ export function validateCommand(raw) {
 	if (raw.kind === "run_finalized") {
 		if (!raw.payload || typeof raw.payload !== "object") return { ok: false, error: "missing_payload" };
 		if (typeof raw.payload.exitCode !== "number" && raw.payload.exitCode !== null) return { ok: false, error: "missing_exitCode" };
+		if (raw.payload.endedAt != null && typeof raw.payload.endedAt !== "number") return { ok: false, error: "bad_endedAt" };
+		if (raw.payload.lastAgentActivityAt != null && typeof raw.payload.lastAgentActivityAt !== "number") return { ok: false, error: "bad_lastAgentActivityAt" };
+		if (raw.payload.stoppedByUser != null && typeof raw.payload.stoppedByUser !== "boolean") return { ok: false, error: "bad_stoppedByUser" };
+		if (raw.payload.stopReason != null && typeof raw.payload.stopReason !== "string") return { ok: false, error: "bad_stopReason" };
 	}
 	return { ok: true, command: raw };
 }
@@ -152,8 +156,13 @@ export function decideStateTransition(command, currentState, currentStatus, now 
 			const at = now ?? payload.endedAt ?? 0;
 			const statusClone = cloneJson(currentStatus);
 			// Overlay fresher fields the throttled on-disk write may lag behind.
+			// stopReason must be overlaid onto the status itself: finalizeSemanticState
+			// reads status.stopReason (finalizeRun's opts have no stopReason slot), so
+			// a fresh "aborted" reported by the runner would otherwise be lost and the
+			// run would land on "idle" instead of "failed".
 			if (typeof payload.latestAssistantPreview === "string") statusClone.latestAssistantPreview = payload.latestAssistantPreview;
 			if (payload.lastAgentActivityAt != null) statusClone.lastAgentActivityAt = payload.lastAgentActivityAt;
+			if (payload.stopReason != null) statusClone.stopReason = payload.stopReason;
 			finalizeRun(statusClone, {
 				exitCode: payload.exitCode,
 				stoppedByUser: payload.stoppedByUser,
