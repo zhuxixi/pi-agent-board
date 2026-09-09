@@ -866,6 +866,46 @@ test("transient run_progress applies, stamps the revision, and never touches the
 	assert.equal(status.turns, 2);
 });
 
+test("run_progress after an applied run_finalized is rejected stale_run and mutates nothing (Task 3 review regression)", async (t) => {
+	const root = freshRoot();
+	let child = null;
+	t.after(async () => {
+		if (child && isAlive(child.pid)) { child.kill("SIGTERM"); await waitForExit(child); }
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	});
+	createView(root, { id: "v1", name: "x", cwd: root });
+	child = startCoordinator(root);
+	const { client } = await readyClient(root);
+	await seedLiveRun(client, root);
+
+	// Finalize the run (journaled, applied), then a late transient beat arrives
+	// out of order — the liveness guard must drop it without touching disk.
+	client.send({
+		type: "state_command", commandId: "seed-rf-late", viewId: "v1", runId: "r1", source: "job-runner",
+		kind: "run_finalized", payload: { exitCode: 0, endedAt: Date.now() },
+	});
+	assert.equal((await client.next()).status, "applied");
+
+	const stateBefore = JSON.stringify(readState(root, "v1"));
+	const statusBefore = JSON.stringify(readStatus(root, "v1", "r1"));
+	const journalLinesBefore = readJournal(root).length;
+
+	client.send({
+		type: "state_command", commandId: "cmd-rp-late", viewId: "v1", runId: "r1", source: "job-runner",
+		kind: "run_progress",
+		payload: { statusPatch: { latestAssistantPreview: "late-beat", turns: 9 } },
+	});
+	const result = await client.next();
+	assert.equal(result.type, "state_command_result");
+	assert.equal(result.status, "rejected");
+	assert.equal(result.reason, "stale_run");
+
+	// The rejected beat mutates nothing and leaves no trace anywhere.
+	assert.equal(JSON.stringify(readState(root, "v1")), stateBefore, "rejected progress beat must not mutate state.json");
+	assert.equal(JSON.stringify(readStatus(root, "v1", "r1")), statusBefore, "rejected progress beat must not mutate status.json");
+	assert.equal(readJournal(root).length, journalLinesBefore, "rejected transient command must not append journal records");
+});
+
 test("followup_started bootstraps the NEW run's status and never touches the parent's (F1)", async (t) => {
 	const root = freshRoot();
 	let child = null;
