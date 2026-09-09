@@ -599,10 +599,27 @@ test("state-runner routes classification through the coordinator (journal record
 
 	const state = readState(root, "v1");
 	assert.equal(state.autoState?.kind, "done", "classification materialized by the coordinator");
-	assert.equal(state.materializedRevision, record.materializedRevision, "state carries the journal revision");
 	const status = readStatus(root, "v1", "run_1");
 	assert.equal(status.autoState?.kind, "done", "status patch materialized too");
-	assert.equal(status.materializedRevision, record.materializedRevision, "shared revision across both files");
+
+	// PR #2 (Task 4): the evidence mirrors move behind the coordinator too — a
+	// follow-up patch_fields record carries review/evidenceSummary with its own
+	// (higher) revision and materializes both files under one shared revision.
+	const patchRecord = readJournal(root).find(
+		(r) => r?.command?.kind === "patch_fields" && r?.command?.source === "state-runner",
+	);
+	assert.ok(patchRecord, "evidence mirrors journaled as a patch_fields command");
+	assert.equal(patchRecord.result?.status, "applied");
+	assert.ok(patchRecord.materializedRevision > record.materializedRevision, "patch bumps the revision past the classification");
+	assert.ok(patchRecord.mutate?.state?.review != null, "patch carries the review mirror");
+	assert.ok(patchRecord.mutate?.status?.evidenceSummary != null, "patch carries the evidenceSummary mirror");
+
+	const finalState = readState(root, "v1");
+	assert.deepEqual(finalState.review, patchRecord.mutate.state.review, "review mirror materialized from the journal patch");
+	assert.equal(finalState.materializedRevision, patchRecord.materializedRevision, "state carries the patch revision");
+	const finalStatus = readStatus(root, "v1", "run_1");
+	assert.deepEqual(finalStatus.evidenceSummary, patchRecord.mutate.status.evidenceSummary, "evidenceSummary mirror materialized from the journal patch");
+	assert.equal(finalStatus.materializedRevision, patchRecord.materializedRevision, "shared revision across both files");
 });
 
 test("duplicate commandId still returns the original result after a checkpoint+GC cycle", async (t) => {
