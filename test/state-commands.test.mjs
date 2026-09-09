@@ -628,3 +628,42 @@ test("transient kinds may omit commandId; journaled kinds may not", () => {
 	const finalized = { type: "state_command", viewId: "v1", runId: "r1", source: "job-runner", kind: "run_finalized", payload: { exitCode: 0 } };
 	assert.equal(validateCommand(finalized).ok, false, "journaled kinds still require commandId for dedupe/replay");
 });
+
+// -- Task 6: service-migration extensions (dashboard-user patch whitelist,
+//    nullable mark_queued runId, reconcile_finalize project mode) --
+
+test("patch_fields allows dashboard-user lastVisitedAt and still rejects semantic fields", () => {
+	const cmd = { ...baseCmd, source: "dashboard-user", kind: "patch_fields", payload: { state: { lastVisitedAt: 123 } } };
+	assert.equal(validateCommand(cmd).ok, true);
+	const d = decideStateTransition(cmd, { ...liveState, semanticState: "completed", autoState: null }, null, 50);
+	assert.equal(d.action, "apply", "visiting a manually-completed row keeps stamping lastVisitedAt (legacy parity — fence is for non-human sources)");
+	assert.equal(d.mutate.state.lastVisitedAt, 123);
+	const semantic = { ...cmd, payload: { state: { semanticState: "working" } } };
+	assert.deepEqual(decideStateTransition(semantic, { ...liveState, semanticState: "completed", autoState: null }, null, 50), { action: "reject", reason: "field_not_allowed" });
+});
+
+test("mark_queued accepts a null runId (PTY host launch pins no run)", () => {
+	const cmd = { type: "state_command", commandId: "c1", viewId: "v1", runId: null, source: "service", kind: "mark_queued", expectedRevision: null, payload: { runId: null } };
+	assert.equal(validateCommand(cmd).ok, true);
+	const d = decideStateTransition(cmd, { ...liveState, processState: "exited", currentRunId: null }, null, 50);
+	assert.equal(d.action, "apply");
+	assert.equal(d.mutate.state.currentRunId, null);
+	assert.equal(d.mutate.state.semanticState, "queued");
+	const badType = { ...cmd, payload: { runId: 7 } };
+	assert.equal(validateCommand(badType).ok, false);
+});
+
+test("reconcile_finalize project mode derives the verdict from the materialized status", () => {
+	const terminalStatus = makeStatus();
+	terminalStatus.semanticState = "completed";
+	terminalStatus.processState = "exited";
+	terminalStatus.endedAt = 40;
+	const cmd = { ...baseCmd, runId: "r1", source: "service", kind: "reconcile_finalize", payload: { project: true } };
+	assert.equal(validateCommand(cmd).ok, true, "project mode needs no semanticState/summary");
+	const d = decideStateTransition(cmd, { ...liveState, currentRunId: "r1" }, terminalStatus, 50);
+	assert.equal(d.action, "apply");
+	assert.equal(d.mutate.state.semanticState, "completed", "the status's own verdict governs — never forced to failed/idle");
+	assert.equal(d.mutate.state.processState, "exited");
+	// No status to project from → nothing faithful to materialize.
+	assert.deepEqual(decideStateTransition(cmd, { ...liveState, currentRunId: "r1" }, null, 50), { action: "reject", reason: "stale_run" });
+});

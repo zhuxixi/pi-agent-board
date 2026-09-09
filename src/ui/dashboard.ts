@@ -1027,10 +1027,13 @@ export class DashboardComponent implements Component {
 		const now = Date.now();
 		if (this.deleteArm !== null && this.deleteArm.id === row.meta.id && now - this.deleteArm.at <= DELETE_DOUBLE_PRESS_MS) {
 			this.deleteArm = null;
-			const res = this.deps.service.archive(row.meta.id);
-			if (!res.ok) this.notice(res.error ?? "Delete failed", "error");
-			else this.notice(`Deleted "${row.meta.name}"`, "info");
-			this.refresh();
+			// archive is async (routes through the view-state coordinator, issue #91);
+			// the notice + refresh land when the command settles.
+			void Promise.resolve(this.deps.service.archive(row.meta.id)).then((res) => {
+				if (!res.ok) this.notice(res.error ?? "Delete failed", "error");
+				else this.notice(`Deleted "${row.meta.name}"`, "info");
+				this.refresh();
+			});
 			return;
 		}
 		this.deleteArm = { id: row.meta.id, at: now };
@@ -1065,11 +1068,13 @@ export class DashboardComponent implements Component {
 			prompt: `Delete ${rows.length} done session${rows.length === 1 ? "" : "s"}? Session files are preserved. (y/N)`,
 			returnMode: "select",
 			onYes: () => {
-				const res = this.deps.service.archiveMany?.(rows.map((row) => row.meta.id)) ?? { ok: true, archived: 0, skipped: rows.length };
-				if (!res.ok) this.notice("Delete failed", "error");
-				else this.notice(`Deleted ${res.archived}${res.skipped ? ` · skipped ${res.skipped}` : ""}`, "info");
-				this.exitSelectionMode(true);
-				this.refresh();
+				// archiveMany is async (coordinator-routed, issue #91).
+				void Promise.resolve(this.deps.service.archiveMany?.(rows.map((row) => row.meta.id)) ?? { ok: true, archived: 0, skipped: rows.length }).then((res) => {
+					if (!res.ok) this.notice("Delete failed", "error");
+					else this.notice(`Deleted ${res.archived}${res.skipped ? ` · skipped ${res.skipped}` : ""}`, "info");
+					this.exitSelectionMode(true);
+					this.refresh();
+				});
 			},
 		};
 		this.mode = "confirm";

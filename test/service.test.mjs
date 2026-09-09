@@ -54,6 +54,35 @@ function setEnv(name, value) {
 	return prev;
 }
 
+/** Poll until `fn` returns truthy (fire-and-forget beats materialize asynchronously). */
+async function waitFor(fn, timeoutMs = 5000) {
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		const value = fn();
+		if (value) return value;
+		if (Date.now() > deadline) return null;
+		await new Promise((resolve) => setTimeout(resolve, 25));
+	}
+}
+
+/** Pin the isolation env the coordinator/client pair needs, then start a tracked coordinator. */
+async function startTrackedCoordinator(root) {
+	const prev = {
+		coordinator: setEnv("AGENT_BOARD_COORDINATOR", undefined),
+		boardRoot: setEnv("AGENT_BOARD_ROOT", root),
+		piDir: setEnv("PI_CODING_AGENT_DIR", root),
+	};
+	const coord = await startCoordinator(root);
+	return {
+		coord,
+		restore() {
+			setEnv("AGENT_BOARD_COORDINATOR", prev.coordinator);
+			setEnv("AGENT_BOARD_ROOT", prev.boardRoot);
+			setEnv("PI_CODING_AGENT_DIR", prev.piDir);
+		},
+	};
+}
+
 test("archiveByState archives inactive rows and skips live rows", () => {
 	const root = freshRoot();
 	try {
@@ -80,8 +109,9 @@ test("archiveByState archives inactive rows and skips live rows", () => {
 	}
 });
 
-test("archive deletes an active or stuck queued row after confirmation", () => {
+test("archive deletes an active or stuck queued row after confirmation", async () => {
 	const root = freshRoot();
+	const { coord, restore } = await startTrackedCoordinator(root);
 	try {
 		createView(root, { id: "stuck", name: "stuck", cwd: "/r" });
 		const state = readState(root, "stuck");
@@ -90,12 +120,14 @@ test("archive deletes an active or stuck queued row after confirmation", () => {
 		state.summary = "Queued";
 		writeState(root, state);
 
-		assert.deepEqual(service(root).archive("stuck"), { ok: true });
+		assert.deepEqual(await service(root).archive("stuck"), { ok: true });
 		assert.deepEqual(service(root).rows().map((r) => r.meta.id), []);
 		const archived = readState(root, "stuck");
 		assert.equal(archived.semanticState, "stopped");
 		assert.equal(archived.processState, "exited");
 	} finally {
+		await coord.kill();
+		restore();
 		rmSync(root, { recursive: true, force: true });
 	}
 });
@@ -507,6 +539,7 @@ test("dispatch creates per-instance config and endpoint paths", () => {
 
 test("syncForegroundEvent marks a managed attached session working when user inputs", async () => {
 	const root = freshRoot();
+	const { coord, restore } = await startTrackedCoordinator(root);
 	try {
 		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
 		const s = readState(root, "v1");
@@ -517,13 +550,24 @@ test("syncForegroundEvent marks a managed attached session working when user inp
 		writeState(root, s);
 
 		assert.equal(await service(root).syncForegroundEvent(meta.sessionFile, { type: "input", text: "yes" }), true);
-		const next = readState(root, "v1");
-		assert.equal(next.semanticState, "working");
+		// The working-state mirror is a fire-and-forget sync_foreground beat — poll
+		// for the coordinator to materialize it instead of asserting synchronously.
+		const next = await waitFor(() => {
+			const s = readState(root, "v1");
+			return s?.semanticState === "working" ? s : null;
+		});
+		assert.ok(next, "sync_foreground beat materialized the working state");
 		assert.equal(next.processState, "alive");
 		assert.equal(next.currentRunId, null);
 		assert.equal(next.question, null);
 		assert.equal(service(root).row("v1").alive, true);
+		// Let the in-flight fire-and-forget beat settle against the tracked
+		// coordinator before kill — otherwise its ensure path can spawn an
+		// untracked twin that outlives the rmSync below.
+		await new Promise((resolve) => setTimeout(resolve, 150));
 	} finally {
+		await coord.kill();
+		restore();
 		rmSync(root, { recursive: true, force: true });
 	}
 });
@@ -805,16 +849,22 @@ test("completeView does not fall back to a direct write on ambiguous coordinator
 	}
 });
 
-test("markVisited records a durable lastVisitedAt timestamp", () => {
+test("markVisited records a durable lastVisitedAt timestamp", async () => {
 	const root = freshRoot();
+	const { coord, restore } = await startTrackedCoordinator(root);
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
 		const before = readState(root, "v1");
 		assert.equal(before.lastVisitedAt, null);
-		assert.deepEqual(service(root).markVisited("v1"), { ok: true });
-		const after = readState(root, "v1");
-		assert.equal(typeof after.lastVisitedAt, "number");
+		assert.deepEqual(await service(root).markVisited("v1"), { ok: true });
+		const after = await waitFor(() => {
+			const s = readState(root, "v1");
+			return typeof s?.lastVisitedAt === "number" ? s : null;
+		});
+		assert.ok(after, "lastVisitedAt materialized through the coordinator");
 	} finally {
+		await coord.kill();
+		restore();
 		rmSync(root, { recursive: true, force: true });
 	}
 });
@@ -854,7 +904,7 @@ test("markCompletedMany completes inactive rows and skips live/already-done rows
 });
 
 
-test("archiveMany archives explicit completed rows and skips live ones", () => {
+test("archiveMany archives explicit completed rows and skips live ones", async () => {
 	const root = freshRoot();
 	try {
 		createView(root, { id: "done1", name: "done1", cwd: "/r" });
@@ -871,7 +921,7 @@ test("archiveMany archives explicit completed rows and skips live ones", () => {
 		live.processState = "alive";
 		writeState(root, live);
 
-		assert.deepEqual(service(root).archiveMany(["done1", "done2", "live1"]), { ok: true, archived: 2, skipped: 1 });
+		assert.deepEqual(await service(root).archiveMany(["done1", "done2", "live1"]), { ok: true, archived: 2, skipped: 1 });
 		assert.deepEqual(service(root).rows().map((r) => r.meta.id), ["live1"]);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
@@ -913,19 +963,22 @@ test("busy replies queue and drain when idle", async () => {
 	}
 });
 
-test("adoptSession creates and reuses rows for an existing session file", () => {
+test("adoptSession creates and reuses rows for an existing session file", async () => {
 	const root = freshRoot();
+	const { coord, restore } = await startTrackedCoordinator(root);
 	try {
 		const sessionFile = join(root, "current.jsonl");
 		const svc = service(root);
-		const first = svc.adoptSession({ sessionFile, cwd: "/r", name: "current" });
+		const first = await svc.adoptSession({ sessionFile, cwd: "/r", name: "current" });
 		assert.equal(first.ok, true);
 		assert.equal(first.reused, false);
-		const second = svc.adoptSession({ sessionFile, cwd: "/r", name: "current renamed" });
+		const second = await svc.adoptSession({ sessionFile, cwd: "/r", name: "current renamed" });
 		assert.equal(second.ok, true);
 		assert.equal(second.reused, true);
 		assert.equal(second.viewId, first.viewId);
 	} finally {
+		await coord.kill();
+		restore();
 		rmSync(root, { recursive: true, force: true });
 	}
 });
@@ -1001,30 +1054,37 @@ test("idle non-PTY plan request launches with plan run kind", async () => {
 	}
 });
 
-test("adoptSession resets reused inactive failed row to idle so queued bg prompts can drain", () => {
+test("adoptSession resets reused inactive failed row to idle so queued bg prompts can drain", async () => {
 	const root = freshRoot();
+	const { coord, restore } = await startTrackedCoordinator(root);
 	try {
 		const sessionFile = join(root, "current.jsonl");
 		const svc = service(root);
-		const first = svc.adoptSession({ sessionFile, cwd: "/r", name: "current" });
+		const first = await svc.adoptSession({ sessionFile, cwd: "/r", name: "current" });
 		const state = readState(root, first.viewId);
 		state.semanticState = "failed";
 		state.processState = "exited";
 		state.hasError = true;
 		state.error = "old failure";
 		writeState(root, state);
-		const reused = svc.adoptSession({ sessionFile, cwd: "/r", name: "current" });
+		const reused = await svc.adoptSession({ sessionFile, cwd: "/r", name: "current" });
 		assert.equal(reused.reused, true);
-		const next = readState(root, first.viewId);
-		assert.equal(next.semanticState, "idle");
+		const next = await waitFor(() => {
+			const s = readState(root, first.viewId);
+			return s?.semanticState === "idle" ? s : null;
+		});
+		assert.ok(next, "adopt_session materialized the idle reset");
 		assert.equal(next.hasError, false);
 	} finally {
+		await coord.kill();
+		restore();
 		rmSync(root, { recursive: true, force: true });
 	}
 });
 
-test("reconcile finalizes host-backed row when PTY host exits without agent_end", () => {
+test("reconcile finalizes host-backed row when PTY host exits without agent_end", async () => {
 	const root = freshRoot();
+	const { coord, restore } = await startTrackedCoordinator(root);
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
 		const st = readState(root, "v1");
@@ -1049,18 +1109,23 @@ test("reconcile finalizes host-backed row when PTY host exits without agent_end"
 			rows: 24,
 			attachedClients: 0,
 		});
-		const fixed = service(root).reconcile();
-		assert.equal(fixed, 1);
-		const next = readState(root, "v1");
+		assert.equal(await service(root).reconcile(), 1);
+		const next = await waitFor(() => {
+			const s = readState(root, "v1");
+			return s?.processState === "exited" ? s : null;
+		});
+		assert.ok(next, "reconcile_finalize materialized through the coordinator");
 		assert.equal(next.semanticState, "idle");
-		assert.equal(next.processState, "exited");
 	} finally {
+		await coord.kill();
+		restore();
 		rmSync(root, { recursive: true, force: true });
 	}
 });
 
 test("adopted external session does not fall back to JSON runner when PTY is unavailable", async () => {
 	const root = freshRoot();
+	const { coord, restore } = await startTrackedCoordinator(root);
 	try {
 		const sessionFile = join(root, "external-current.jsonl");
 		const launched = [];
@@ -1071,18 +1136,21 @@ test("adopted external session does not fall back to JSON runner when PTY is una
 				return { pid: null, configPath: "/no/config.json" };
 			},
 		});
-		const adopted = svc.adoptSession({ sessionFile, cwd: "/r", name: "current" });
+		const adopted = await svc.adoptSession({ sessionFile, cwd: "/r", name: "current" });
 		const res = await svc.reply(adopted.viewId, "continue", { delivery: "now" });
 		assert.equal(res.ok, false);
 		assert.match(res.error, /PTY is required/);
 		assert.equal(launched.length, 0);
 	} finally {
+		await coord.kill();
+		restore();
 		rmSync(root, { recursive: true, force: true });
 	}
 });
 
-test("reconcile finalizes stale starting/alive host snapshots", () => {
+test("reconcile finalizes stale starting/alive host snapshots", async () => {
 	const root = freshRoot();
+	const { coord, restore } = await startTrackedCoordinator(root);
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
 		const st = readState(root, "v1");
@@ -1107,11 +1175,16 @@ test("reconcile finalizes stale starting/alive host snapshots", () => {
 			rows: 24,
 			attachedClients: 0,
 		});
-		assert.equal(service(root).reconcile(), 1);
-		const next = readState(root, "v1");
-		assert.equal(next.semanticState, "failed");
+		assert.equal(await service(root).reconcile(), 1);
+		const next = await waitFor(() => {
+			const s = readState(root, "v1");
+			return s?.semanticState === "failed" ? s : null;
+		});
+		assert.ok(next, "reconcile_finalize materialized the failed verdict");
 		assert.equal(next.processState, "exited");
 	} finally {
+		await coord.kill();
+		restore();
 		rmSync(root, { recursive: true, force: true });
 	}
 });
@@ -1298,8 +1371,9 @@ test("ensureHost probes PTY support with TTL cache, not forced refresh", () => {
 	}
 });
 
-test("reconcile auto-drain uses the cached PTY probe, never forced refresh", () => {
+test("reconcile auto-drain uses the cached PTY probe, never forced refresh", async () => {
 	const root = freshRoot();
+	const { coord, restore } = await startTrackedCoordinator(root);
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
 		const st = readState(root, "v1");
@@ -1316,13 +1390,18 @@ test("reconcile auto-drain uses the cached PTY probe, never forced refresh", () 
 		});
 		const queued = svc.queueFollowUp("v1", "next step");
 		assert.equal(queued.ok, true);
-		const fixed = svc.reconcile();
+		const fixed = await svc.reconcile();
 		assert.ok(fixed >= 1, "reconcile drained the queued follow-up");
 		assert.ok(probeCalls.length >= 1, "drain path probed ptySupport");
 		for (const opts of probeCalls) {
 			assert.notEqual(opts?.refresh, true, "reconcile→drain must not force ptySupport refresh");
 		}
+		// Settle the fire-and-forget mark_queued beat against the tracked
+		// coordinator before kill (prevents an untracked twin past the rmSync).
+		await new Promise((resolve) => setTimeout(resolve, 150));
 	} finally {
+		await coord.kill();
+		restore();
 		rmSync(root, { recursive: true, force: true });
 	}
 });

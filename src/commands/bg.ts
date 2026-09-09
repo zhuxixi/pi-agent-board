@@ -51,7 +51,8 @@ async function handleBgCommand(args: string, ctx: ExtensionCommandContext, opts:
 		},
 	});
 	const model = modelRef(ctx.model as any);
-	const adopted = service.adoptSession({
+	// adoptSession is async (routes through the view-state coordinator, issue #91).
+	const adopted = await service.adoptSession({
 		sessionFile,
 		cwd: ctx.cwd,
 		model,

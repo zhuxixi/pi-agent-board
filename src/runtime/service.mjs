@@ -405,8 +405,26 @@ export function createService(opts) {
 		return false;
 	}
 
-	/** @param {string} viewId @param {string|null} runId */
-	function markQueued(viewId, runId) {
+	/**
+	 * Fire a state command for a non-run lifecycle/metadata mutation and surface
+	 * non-applied outcomes. Ambiguity contract (issue #91): timeout /
+	 * connection_reset mean the command MAY already be journaled — never fall
+	 * back to a direct write on those; only the explicit
+	 * AGENT_BOARD_COORDINATOR=off escape hatch takes the legacy branch (the
+	 * caller checks `reason === "coordinator_disabled"`).
+	 * @param {object} command
+	 * @param {string} [viewId] defaults to command.viewId
+	 */
+	async function sendLifecycleCommand(command, viewId = command.viewId) {
+		const result = await sendStateCommandImpl(root, command);
+		if (result.status !== "applied" && result.reason !== "coordinator_disabled") {
+			appendDiagnostic(root, viewId, { source: "service", level: "warn", code: "state_command_not_applied", message: `${command.kind} ${result.status} (${result.reason})`, details: { kind: command.kind, reason: result.reason } });
+		}
+		return result;
+	}
+
+	/** Legacy direct write for mark_queued — coordinator_disabled escape hatch only. */
+	function markQueuedDirect(viewId, runId) {
 		const state = readState(root, viewId) ?? blankState(viewId);
 		state.currentRunId = runId;
 		state.semanticState = "queued";
@@ -423,15 +441,91 @@ export function createService(opts) {
 		writeState(root, state);
 	}
 
-	/** @param {string} viewId @returns {{ ok: boolean, error?: string }} */
-	function markVisited(viewId) {
-		const row = loadRow(root, viewId);
-		if (!row) return { ok: false, error: "Unknown session" };
-		const state = readState(root, viewId) ?? row.state ?? blankState(viewId);
+	/** @param {string} viewId @param {string|null} runId */
+	function markQueued(viewId, runId) {
+		if (coordinatorDisabled()) {
+			markQueuedDirect(viewId, runId);
+			return;
+		}
+		// Fire-and-forget: legacy issued this write right after launch() without
+		// waiting on the runner, and the coordinator serializes arrival order the
+		// same way. N1 (Task 1): command.runId stays null — the new run's id rides
+		// in the payload and the decision branch pins currentRunId, so the generic
+		// stale-run guard cannot fire against the PREVIOUS run.
+		void sendLifecycleCommand({
+			type: "state_command",
+			viewId,
+			runId: null,
+			source: "service",
+			kind: "mark_queued",
+			expectedRevision: null,
+			payload: { runId },
+		}).catch(() => { /* ambiguity: the runner's own beats / reconcile converge */ });
+	}
+
+	/** Legacy direct write for markVisited — coordinator_disabled escape hatch only. */
+	function markVisitedDirect(row) {
+		const state = readState(root, row.meta.id) ?? row.state ?? blankState(row.meta.id);
 		state.lastVisitedAt = Date.now();
 		state.updatedAt = Date.now();
 		writeState(root, state);
+	}
+
+	/**
+	 * @param {string} viewId
+	 * @returns {Promise<{ ok: boolean, error?: string }>}
+	 */
+	async function markVisited(viewId) {
+		const row = loadRow(root, viewId);
+		if (!row) return { ok: false, error: "Unknown session" };
+		if (coordinatorDisabled()) {
+			markVisitedDirect(row);
+			return { ok: true };
+		}
+		// dashboard-user (not "service"): visiting is a user action, and the
+		// manual fence must not stop visit-recency tracking on completed rows —
+		// legacy stamped lastVisitedAt unconditionally. Whitelist: lastVisitedAt only.
+		const result = await sendLifecycleCommand({
+			type: "state_command",
+			viewId,
+			source: "dashboard-user",
+			kind: "patch_fields",
+			expectedRevision: null,
+			payload: { state: { lastVisitedAt: Date.now() } },
+		}, viewId);
+		if (result.reason === "coordinator_disabled") markVisitedDirect(row);
+		// Visit tracking is best-effort metadata — never fail the UI action.
 		return { ok: true };
+	}
+
+	/** Legacy direct write for adoptSession — coordinator_disabled escape hatch only. */
+	function adoptStateDirect(viewId, state) {
+		const target = state ?? readState(root, viewId) ?? blankState(viewId);
+		target.semanticState = "idle";
+		target.processState = "exited";
+		target.needsInput = false;
+		target.hasError = false;
+		target.question = null;
+		target.pendingQuestions = [];
+		target.error = null;
+		target.summary = "Backgrounded session";
+		target.updatedAt = Date.now();
+		target.lastActivityAt = Date.now();
+		writeState(root, target);
+	}
+
+	/** Route the adopt-idle transition through the coordinator (fenced, journaled). */
+	async function adoptIdleState(viewId, state) {
+		const result = await sendLifecycleCommand({
+			type: "state_command",
+			viewId,
+			runId: null,
+			source: "dashboard-user",
+			kind: "adopt_session",
+			expectedRevision: null,
+			payload: {},
+		}, viewId);
+		if (result.reason === "coordinator_disabled") adoptStateDirect(viewId, state);
 	}
 
 	/** Legacy direct-write completion — only reachable when the coordinator is
@@ -495,11 +589,28 @@ export function createService(opts) {
 		return { ok: false, error: result.reason ?? "state_command_failed" };
 	}
 
+	/** Legacy direct write for archiveView's busy-row stop — coordinator_disabled escape hatch only. */
+	function archiveStateDirect(row) {
+		const state = readState(root, row.meta.id) ?? row.state ?? blankState(row.meta.id);
+		state.semanticState = "stopped";
+		state.processState = "exited";
+		state.needsInput = false;
+		state.hasError = false;
+		state.question = null;
+		state.pendingQuestions = [];
+		state.error = null;
+		state.autoState = null;
+		state.summary = "Stopped";
+		state.lastActivityAt = Date.now();
+		state.updatedAt = Date.now();
+		writeState(root, state);
+	}
+
 	/**
 	 * @param {string} viewId
-	 * @returns {{ ok: boolean, error?: string }}
+	 * @returns {Promise<{ ok: boolean, error?: string }>}
 	 */
-	function archiveView(viewId) {
+	async function archiveView(viewId) {
 		const row = loadRow(root, viewId);
 		if (!row) return { ok: false, error: "Unknown session" };
 		if (row.host?.instanceId) stopHostRow(row, "archive");
@@ -509,19 +620,17 @@ export function createService(opts) {
 			if (pid) killProcess(pid);
 		}
 		if (isAgentBusy(row)) {
-			const state = readState(root, viewId) ?? row.state ?? blankState(viewId);
-			state.semanticState = "stopped";
-			state.processState = "exited";
-			state.needsInput = false;
-			state.hasError = false;
-			state.question = null;
-			state.pendingQuestions = [];
-			state.error = null;
-			state.autoState = null;
-			state.summary = "Stopped";
-			state.lastActivityAt = Date.now();
-			state.updatedAt = Date.now();
-			writeState(root, state);
+			// dashboard-user: archiving is a user action. Busy rows are allowed by
+			// the decision kind (archiving a working row stops it — legacy parity).
+			const result = await sendLifecycleCommand({
+				type: "state_command",
+				viewId,
+				source: "dashboard-user",
+				kind: "archive_view",
+				expectedRevision: null,
+				payload: {},
+			}, viewId);
+			if (result.reason === "coordinator_disabled") archiveStateDirect(row);
 		}
 		row.meta.archived = true;
 		writeMeta(root, row.meta);
@@ -596,14 +705,30 @@ export function createService(opts) {
 	/**
 	 * @param {import("../core/store.mjs").Row} row
 	 * @param {import("../core/types.mjs").RunStatus} status
+	 * @returns {Promise<void>}
 	 */
-	function writeForegroundState(row, status) {
+	async function writeForegroundState(row, status) {
 		const projected = projectViewState(status, Date.now(), readState(root, row.meta.id) ?? row.state ?? null);
 		// Foreground turns are driven by the interactive Pi process, not a detached
 		// runner, so keep currentRunId null. This prevents reconcile()/stop() from
-		// treating a foreground turn as a managed background runner pid.
+		// treating a foreground turn as a managed background runner pid. (The
+		// decision kind force-nulls it too; the caller-side null keeps the
+		// coordinator_disabled direct write at legacy parity.)
 		projected.currentRunId = null;
-		writeState(root, projected);
+		if (coordinatorDisabled()) {
+			writeState(root, projected);
+			return;
+		}
+		const result = await sendLifecycleCommand({
+			type: "state_command",
+			viewId: row.meta.id,
+			runId: null,
+			source: "service",
+			kind: "sync_foreground",
+			expectedRevision: null,
+			payload: { projection: projected },
+		}, row.meta.id);
+		if (result.reason === "coordinator_disabled") writeState(root, projected);
 	}
 
 	/** @param {string} sessionFile */
@@ -1265,7 +1390,8 @@ export function createService(opts) {
 			status.error = null;
 			status.summary = "Running…";
 			status.lastActivityAt = now;
-			writeForegroundState(row, status);
+			// Throughput path: periodic self-healing mirror, fire-and-forget.
+			void writeForegroundState(row, status);
 			return true;
 		}
 
@@ -1299,7 +1425,9 @@ export function createService(opts) {
 				// the stale in-memory fields cannot clobber the patch (#46 class).
 				// The legacy coordinator_disabled path applies in-memory instead and
 				// still needs the tail projection write (pre-coordinator behavior).
-				writeForegroundState(row, status);
+				// Awaited: this ordering IS the fence — the classification command
+				// must observe processState "exited" or its delegated rules skip.
+				await writeForegroundState(row, status);
 				classificationQueued = await queueAutoState(row.meta, status, evidence);
 				if (classificationQueued) finalizeEvidence(evidence, status, now);
 			}
@@ -1310,7 +1438,7 @@ export function createService(opts) {
 			// between the baseline write and the coordinator's decision read gets
 			// manual_fence back (classificationQueued=false), and writing the stale
 			// in-memory projection here would clobber it (#46 class).
-			if (!isManualCompletion(readState(root, row.meta.id)) && !(classificationQueued && !coordinatorDisabled())) writeForegroundState(row, status);
+			if (!isManualCompletion(readState(root, row.meta.id)) && !(classificationQueued && !coordinatorDisabled())) await writeForegroundState(row, status);
 			pruneWarmHosts({ keepViewId: row.meta.id });
 			// Async delivery (ack-gated, issue #70 A13): fire-and-forget here — the
 			// queue item's own state records the outcome, ordering is preserved by
@@ -1321,7 +1449,8 @@ export function createService(opts) {
 
 		if (reduceEvent(status, event, now, { interactive: true })) {
 			status.processState = "alive";
-			writeForegroundState(row, status);
+			// Throughput path: periodic self-healing mirror, fire-and-forget.
+			void writeForegroundState(row, status);
 			return true;
 		}
 		return false;
@@ -1579,7 +1708,7 @@ export function createService(opts) {
 			return { kind: "session", sessionFile: row.meta.sessionFile };
 		},
 
-		adoptSession(adoptOpts = {}) {
+		async adoptSession(adoptOpts = {}) {
 			const sessionFile = String(adoptOpts.sessionFile || "").trim();
 			if (!sessionFile) return { ok: false, error: "No session file to adopt" };
 			const existing = rowForSession(sessionFile);
@@ -1588,18 +1717,7 @@ export function createService(opts) {
 				if (adoptOpts.name) existing.meta.name = String(adoptOpts.name).trim() || existing.meta.name;
 				writeMeta(root, existing.meta);
 				if (!isAgentBusy(existing)) {
-					const state = readState(root, existing.meta.id) ?? existing.state ?? blankState(existing.meta.id);
-					state.semanticState = "idle";
-					state.processState = "exited";
-					state.needsInput = false;
-					state.hasError = false;
-					state.question = null;
-					state.pendingQuestions = [];
-					state.error = null;
-					state.summary = "Backgrounded session";
-					state.updatedAt = Date.now();
-					state.lastActivityAt = Date.now();
-					writeState(root, state);
+					await adoptIdleState(existing.meta.id, readState(root, existing.meta.id) ?? existing.state ?? blankState(existing.meta.id));
 				}
 				appendDiagnostic(root, existing.meta.id, { source: "service", code: "session_adopted", message: "Existing session adopted into Agent Board", details: { reused: true } });
 				return { ok: true, viewId: existing.meta.id, reused: true };
@@ -1621,12 +1739,7 @@ export function createService(opts) {
 				sessionFile,
 			});
 			const state = readState(root, id) ?? blankState(id);
-			state.semanticState = "idle";
-			state.processState = "exited";
-			state.summary = "Backgrounded session";
-			state.updatedAt = Date.now();
-			state.lastActivityAt = Date.now();
-			writeState(root, state);
+			await adoptIdleState(id, state);
 			appendDiagnostic(root, id, { source: "service", code: "session_adopted", message: "Current session adopted into Agent Board", details: { reused: false } });
 			return { ok: true, viewId: meta.id, reused: false };
 		},
@@ -1781,9 +1894,9 @@ export function createService(opts) {
 		/**
 		 * Bulk archive explicit row ids, skipping live/missing rows.
 		 * @param {string[]} viewIds
-		 * @returns {{ ok: boolean, archived: number, skipped: number }}
+		 * @returns {Promise<{ ok: boolean, archived: number, skipped: number }>}
 		 */
-		archiveMany(viewIds) {
+		async archiveMany(viewIds) {
 			const ids = [...new Set((viewIds ?? []).filter(Boolean))];
 			let archived = 0;
 			let skipped = 0;
@@ -1793,7 +1906,7 @@ export function createService(opts) {
 					skipped += 1;
 					continue;
 				}
-				const res = archiveView(viewId);
+				const res = await archiveView(viewId);
 				if (res.ok) archived += 1;
 				else skipped += 1;
 			}
@@ -1828,9 +1941,9 @@ export function createService(opts) {
 		 * Recovery: reconcile rows whose runner died without finalizing (e.g. machine crash
 		 * or the runner was killed). If a terminal status exists, project it; otherwise mark
 		 * the row failed/stale. Safe to call on every dashboard open and on session_start.
-		 * @returns {number} number of rows reconciled.
+		 * @returns {Promise<number>} number of rows reconciled.
 		 */
-		reconcile() {
+		async reconcile() {
 			const now = Date.now();
 			let fixed = 0;
 			for (const row of listRows(root)) {
@@ -1843,16 +1956,36 @@ export function createService(opts) {
 					// its runner pid may legitimately be absent — never finalize it to failed yet.
 					if (row.host.state === "starting" && now - (row.host.claimAt ?? row.host.startedAt ?? 0) < HOST_START_GRACE_MS) continue;
 						const failed = row.host.state === "starting" || row.host.state === "alive" || row.host.state === "failed" || Boolean(row.host.error) || (row.host.exitCode !== null && row.host.exitCode !== 0);
-						s.semanticState = failed ? "failed" : "idle";
-						s.processState = "exited";
-						s.hasError = failed;
-						s.needsInput = false;
-						s.question = null;
-						s.pendingQuestions = [];
-						s.error = failed ? (s.error ?? row.host.error ?? "PTY host exited unexpectedly") : null;
-						s.summary = failed ? "Failed (PTY host exited)" : "Needs instructions";
-						s.updatedAt = now;
-						writeState(root, s);
+						// F6: failed verdicts must carry a reason (legacy guaranteed an
+						// error string). The row has no currentRunId here, so only the
+						// state half participates (no status.json to sync).
+						const result = await sendLifecycleCommand({
+							type: "state_command",
+							viewId: row.meta.id,
+							runId: null,
+							source: "service",
+							kind: "reconcile_finalize",
+							expectedRevision: null,
+							payload: {
+								semanticState: failed ? "failed" : "idle",
+								summary: failed ? "Failed (PTY host exited)" : "Needs instructions",
+								reason: failed ? (s.error ?? row.host.error ?? "PTY host exited unexpectedly") : null,
+							},
+						}, row.meta.id);
+						if (result.status !== "applied") {
+							if (result.reason === "coordinator_disabled") {
+								s.semanticState = failed ? "failed" : "idle";
+								s.processState = "exited";
+								s.hasError = failed;
+								s.needsInput = false;
+								s.question = null;
+								s.pendingQuestions = [];
+								s.error = failed ? (s.error ?? row.host.error ?? "PTY host exited unexpectedly") : null;
+								s.summary = failed ? "Failed (PTY host exited)" : "Needs instructions";
+								s.updatedAt = now;
+								writeState(root, s);
+							} else continue; // rejected/ambiguous: nothing mutated, not fixed
+						}
 						appendDiagnostic(root, row.meta.id, { source: "service", level: failed ? "error" : "info", code: "host_reconciled", message: failed ? "PTY host exited before final event" : "PTY host finalized without final event", details: { hostState: row.host.state, exitCode: row.host.exitCode } });
 						fixed += 1;
 					}
@@ -1861,16 +1994,50 @@ export function createService(opts) {
 				if (row.alive) continue;
 				const status = readStatus(root, row.meta.id, s.currentRunId);
 				if (status?.endedAt) {
-					writeState(root, projectViewState(status, now, readState(root, row.meta.id) ?? row.state ?? null));
+					// The run's terminal status exists but the row was never materialized
+					// from it (crash between the two writes, or a pre-coordinator row).
+					// Project mode lets the status's own verdict govern (completed rows
+					// must not be forced to failed/idle).
+					const result = await sendLifecycleCommand({
+						type: "state_command",
+						viewId: row.meta.id,
+						runId: s.currentRunId,
+						source: "service",
+						kind: "reconcile_finalize",
+						expectedRevision: null,
+						payload: { project: true },
+					}, row.meta.id);
+					if (result.status === "applied" || result.reason === "coordinator_disabled") {
+						if (result.reason === "coordinator_disabled") writeState(root, projectViewState(status, now, readState(root, row.meta.id) ?? row.state ?? null));
+						fixed += 1;
+					}
 				} else {
-					s.semanticState = "failed";
-					s.processState = "exited";
-					s.hasError = true;
-					s.needsInput = false;
-					s.error = s.error ?? "Runner exited unexpectedly";
-					s.summary = "Failed (runner exited)";
-					s.updatedAt = now;
-					writeState(root, s);
+					const result = await sendLifecycleCommand({
+						type: "state_command",
+						viewId: row.meta.id,
+						runId: s.currentRunId,
+						source: "service",
+						kind: "reconcile_finalize",
+						expectedRevision: null,
+						payload: {
+							semanticState: "failed",
+							summary: "Failed (runner exited)",
+							reason: s.error ?? "Runner exited unexpectedly",
+						},
+					}, row.meta.id);
+					if (result.status !== "applied") {
+						if (result.reason === "coordinator_disabled") {
+							s.semanticState = "failed";
+							s.processState = "exited";
+							s.hasError = true;
+							s.needsInput = false;
+							s.error = s.error ?? "Runner exited unexpectedly";
+							s.summary = "Failed (runner exited)";
+							s.updatedAt = now;
+							writeState(root, s);
+						} else continue;
+					}
+					fixed += 1;
 				}
 				fixed += 1;
 			}

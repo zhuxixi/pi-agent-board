@@ -73,6 +73,11 @@ export const PATCHABLE_FIELDS = Object.freeze({
 	"job-runner": Object.freeze({ state: Object.freeze(["review", "evidenceSummary", "summary", "latestAssistantPreview"]), status: Object.freeze(["evidenceSummary", "summary", "latestAssistantPreview"]) }),
 	"state-runner": Object.freeze({ state: Object.freeze(["review", "evidenceSummary"]), status: Object.freeze(["evidenceSummary"]) }),
 	"service": Object.freeze({ state: Object.freeze(["lastVisitedAt"]), status: Object.freeze([]) }),
+	// lastVisitedAt (markVisited): visiting is a user action, so it routes as
+	// dashboard-user — the manual fence only fences non-human sources, and
+	// legacy stamped lastVisitedAt unconditionally (visit-recency tracking
+	// must keep working on manually-completed rows).
+	"dashboard-user": Object.freeze({ state: Object.freeze(["lastVisitedAt"]), status: Object.freeze([]) }),
 });
 
 /** Who may originate a state command. Non-human sources are fenced by manual completions. */
@@ -129,7 +134,11 @@ export function validateCommand(raw) {
 	}
 	switch (raw.kind) {
 		case "mark_queued":
-			if (typeof raw.payload?.runId !== "string" || !raw.payload.runId) return { ok: false, error: "missing_runId" };
+			// runId may be null (PTY host launch pins no run — legacy
+			// markQueued(id, null)); the key must be present, and when non-null
+			// it must be a non-empty string.
+			if (!raw.payload || !("runId" in raw.payload)) return { ok: false, error: "missing_runId" };
+			if (raw.payload.runId != null && (typeof raw.payload.runId !== "string" || !raw.payload.runId)) return { ok: false, error: "missing_runId" };
 			break;
 		case "run_started": {
 			if (raw.runId == null) return { ok: false, error: "missing_runId" };
@@ -149,6 +158,13 @@ export function validateCommand(raw) {
 			if (typeof raw.payload.newRunId !== "string" || !raw.payload.newRunId) return { ok: false, error: "missing_newRunId" };
 			break;
 		case "reconcile_finalize": {
+			// Project mode (service.mjs dead-runner path): the run's terminal status
+			// exists but the row was never materialized from it — the status itself
+			// is the verdict, so semanticState/summary are derived, not passed.
+			if (raw.payload?.project === true) {
+				if (raw.payload.reason != null && typeof raw.payload.reason !== "string") return { ok: false, error: "bad_reason" };
+				break;
+			}
 			const semanticState = raw.payload?.semanticState;
 			if (semanticState !== "failed" && semanticState !== "idle") return { ok: false, error: "bad_semanticState" };
 			// The reconciler's summary is caller-provided (legacy parity: both
@@ -342,6 +358,14 @@ export function decideStateTransition(command, currentState, currentStatus, now 
 		case "reconcile_finalize": {
 			if (currentState.processState !== "alive") return reject("no_change");
 			const at = now ?? 0;
+			if (command.payload.project === true) {
+				// Project mode: faithfully re-materialize the row from the run's
+				// terminal status (projectViewState delegation — never copied rules).
+				// A missing status means there is nothing to project — stale.
+				if (!currentStatus) return reject("stale_run");
+				const projected = projectViewState(cloneJson(currentStatus), at, currentState);
+				return { action: "apply", reason: command.kind, mutate: { state: diffFields(currentState, projected) } };
+			}
 			const failed = command.payload.semanticState === "failed";
 			const stateClone = cloneJson(currentState);
 			stateClone.semanticState = command.payload.semanticState;
