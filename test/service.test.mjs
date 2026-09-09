@@ -1406,6 +1406,45 @@ test("reconcile auto-drain uses the cached PTY probe, never forced refresh", asy
 	}
 });
 
+test("F1: reply on a manually completed row re-launches — mark_queued travels as dashboard-user", async () => {
+	const root = freshRoot();
+	const { coord, restore } = await startTrackedCoordinator(root);
+	try {
+		createView(root, { id: "v1", name: "done", cwd: "/r" });
+		const manual = readState(root, "v1");
+		manual.semanticState = "completed";
+		manual.processState = "exited";
+		manual.autoState = null;
+		manual.currentRunId = "run_old";
+		writeState(root, manual);
+
+		const svc = service(root, {
+			ptySupport: () => ({ ok: false, reason: "test" }),
+			launch: () => ({ pid: null, configPath: "/no/config.json" }),
+		});
+		const res = await svc.reply("v1", "continue on the done row", { delivery: "now" });
+		assert.equal(res.ok, true, `reply should re-launch a done row: ${JSON.stringify(res)}`);
+		assert.equal(res.hostMode, "json-runner");
+
+		// The mark_queued beat is fire-and-forget: settle it against the tracked
+		// coordinator, then assert the source attribution and the row flip.
+		const record = await waitFor(() => {
+			const r = readJournal(root).find((e) => e?.command?.kind === "mark_queued" && e?.command?.viewId === "v1");
+			return r || null;
+		});
+		assert.equal(record.command.source, "dashboard-user", "launching is user intent — mark_queued must travel as dashboard-user to lift the manual fence");
+		const state = await waitFor(() => {
+			const s = readState(root, "v1");
+			return s.semanticState === "queued" ? s : null;
+		});
+		assert.equal(state.autoState ?? null, null, "the fence signal is cleared by the user's re-launch");
+	} finally {
+		await coord.kill();
+		restore();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("markCompleted clears autoState in the run status so in-flight model passes skip refinement", async () => {
 	const root = freshRoot();
 	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", undefined);

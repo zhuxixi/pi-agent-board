@@ -219,7 +219,18 @@ export function decideStateTransition(command, currentState, currentStatus, now 
 	if (command.expectedRevision != null && command.expectedRevision !== (currentState.materializedRevision ?? 0)) {
 		return reject("revision_conflict");
 	}
-	if (command.runId && currentState.currentRunId && command.runId !== currentState.currentRunId) {
+	// Generic stale-run guard: a command for a run other than the row's current
+	// run is stale. run_started is EXEMPT — it carries its own liveness-scoped
+	// guard below (launch-order inversion, cold-start race): the runner is
+	// authoritative that its run just started, so a bootstrap landing on a
+	// not-alive row applies and re-pins currentRunId. Only two SIMULTANEOUS live
+	// runs on one view are the hazard this guard exists for.
+	if (
+		command.kind !== "run_started" &&
+		command.runId &&
+		currentState.currentRunId &&
+		command.runId !== currentState.currentRunId
+	) {
 		return reject("stale_run");
 	}
 	// Manual completions are user verdicts: only a human source may act on a
@@ -315,6 +326,21 @@ export function decideStateTransition(command, currentState, currentStatus, now 
 			};
 		}
 		case "run_started": {
+			// Liveness-scoped stale guard (the generic guard above exempts this
+			// kind): only TWO LIVE RUNS on one view are the hazard — a bootstrap for
+			// a different runId while this row already runs something else is
+			// out-of-order and rejected. When the row is NOT alive, the runner is
+			// authoritative that its run just started: apply and re-pin
+			// currentRunId. This covers the cold-start race where run_started lands
+			// before mark_queued (the runner was spawned first), and re-launches of
+			// rows still pointing at the previous run.
+			if (
+				currentState.processState === "alive" &&
+				currentState.currentRunId &&
+				currentState.currentRunId !== command.runId
+			) {
+				return reject("stale_run");
+			}
 			const statusAfter = cloneJson(command.payload.status);
 			return {
 				action: "apply",
@@ -396,10 +422,17 @@ export function decideStateTransition(command, currentState, currentStatus, now 
 			// No kind-specific guard: the generic manual_fence above is exactly the
 			// PR #1 residual-risk closure — a late host crash must not flip a row
 			// the user already completed by hand.
+			const message = command.payload?.error ?? "PTY host failed";
 			const mutate = {
 				state: {
 					semanticState: "failed",
 					processState: "exited",
+					// Legacy parity with markRowFailedDirect (runner/pty-runner-legacy.mjs):
+					// both summary and error carry the message, hasError/needsInput are
+					// stamped so row rendering and warm-host eviction match the direct era.
+					summary: message,
+					hasError: true,
+					needsInput: false,
 					error: command.payload?.error ?? null,
 				},
 			};

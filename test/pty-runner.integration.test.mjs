@@ -1368,6 +1368,9 @@ test("host spawn failure marks a non-fenced row failed through host_run_failed",
 		});
 		assert.equal(state.processState, "exited");
 		assert.match(state.error ?? "", /PTY host failed/);
+		assert.equal(state.hasError, true, "host_run_failed stamps hasError (F4 legacy parity)");
+		assert.equal(state.needsInput, false, "host_run_failed stamps needsInput (F4 legacy parity)");
+		assert.match(state.summary ?? "", /PTY host failed/, "summary carries the message like legacy markRowFailedDirect (F4)");
 		assert.ok(state.lastActivityAt > 1000, "host_run_failed stamps lastActivityAt (F5b legacy parity)");
 		assert.equal(state.materializedRevision, 2, "applied command bumps the materialized revision");
 		const record = readJournal(root).find((e) => e?.command?.kind === "host_run_failed");

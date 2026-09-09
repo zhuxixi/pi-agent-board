@@ -452,11 +452,24 @@ export function createService(opts) {
 		// same way. N1 (Task 1): command.runId stays null — the new run's id rides
 		// in the payload and the decision branch pins currentRunId, so the generic
 		// stale-run guard cannot fire against the PREVIOUS run.
+		//
+		// source is "dashboard-user" on purpose (final-review F1): launching a run
+		// from these flows is ALWAYS user intent (reply / dispatch / attach), and
+		// the manual fence exists to protect the user's verdict from AUTOMATED late
+		// writes — a user-initiated re-launch IS the user changing the verdict, so
+		// mark_queued must lift the fence for the rest of the new run (otherwise a
+		// reply on a done row would execute invisibly while the row stays
+		// completed). Automated re-launch stays guarded upstream: the job-runner's
+		// post-exit follow-up claim refuses manually-completed rows
+		// (drainQueuedFollowUp: `if (isManualCompletion(readState(...))) return;`),
+		// and the service-side drain path delivers already-queued user follow-ups
+		// with no fence by design (prompt-not-lost, issue #70 — its live-host input
+		// path never fenced either).
 		void sendLifecycleCommand({
 			type: "state_command",
 			viewId,
 			runId: null,
-			source: "service",
+			source: "dashboard-user",
 			kind: "mark_queued",
 			expectedRevision: null,
 			payload: { runId },
@@ -2009,7 +2022,6 @@ export function createService(opts) {
 					}, row.meta.id);
 					if (result.status === "applied" || result.reason === "coordinator_disabled") {
 						if (result.reason === "coordinator_disabled") writeState(root, projectViewState(status, now, readState(root, row.meta.id) ?? row.state ?? null));
-						fixed += 1;
 					}
 				} else {
 					const result = await sendLifecycleCommand({
@@ -2037,7 +2049,6 @@ export function createService(opts) {
 							writeState(root, s);
 						} else continue;
 					}
-					fixed += 1;
 				}
 				fixed += 1;
 			}

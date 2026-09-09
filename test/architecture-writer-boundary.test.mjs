@@ -35,7 +35,7 @@ const WRITE_STATE_ALLOWLIST = new Map([
 	// adoptStateDirect / completeViewDirect / archiveStateDirect) plus the
 	// disabled fallbacks inside syncRowEvent and syncForeground. Unreachable on
 	// the default path — the normal routes all submit coordinator commands.
-	["src/runtime/service.mjs", "coordinator_disabled 逃生门，设计内豁免（debug/降级）：*Direct helper 与 syncRowEvent/syncForeground 的 disabled 回退分支；默认路径不可达，见各 Direct 函数的 gating 分支"],
+	["src/runtime/service.mjs", "coordinator_disabled 逃生门，设计内豁免（debug/降级）：*Direct helper、syncRowEvent/syncForeground 的 disabled 回退分支，以及 reconcile() 的三处 coordinator_disabled 直写回退（host 探测终态 / project 模式 / runner-exited）；默认路径不可达，见各 Direct 函数与 reconcile 的 gating 分支"],
 	// Definition module, not an importer: the import scan can never flag it.
 	// Its internal createView bootstrap write is permanent by design: the fresh
 	// random viewId means no other writer can know the row exists yet, so the
@@ -81,27 +81,6 @@ function rel(file) {
 	return relative(PACKAGE_ROOT, file).split(sep).join("/");
 }
 
-test("only the coordinator imports writeState/writeStatus in production code (allowlisted exceptions)", () => {
-	const offenders = [];
-	for (const file of collectSourceFiles()) {
-		const src = readFileSync(file, "utf8");
-		if (!WRITE_IMPORT_RE.test(src)) continue;
-		const key = rel(file);
-		if (ALLOWED_WRITER_MODULES.has(key)) continue;
-		if (!WRITE_STATE_ALLOWLIST.has(key)) offenders.push(key);
-	}
-	assert.deepEqual(offenders, [], `files import writeState/writeStatus without an allowlist justification: ${offenders.join(", ")}`);
-});
-
-/** Entries checked at import level (real importers — the non-rotting check
- *  fails if the import disappears, forcing the entry to be deleted). */
-const IMPORT_LEVEL_ENTRIES = new Set([
-	"src/runtime/service.mjs",
-	"runner/job-runner-legacy.mjs",
-	"runner/state-runner.mjs",
-	"runner/pty-runner-legacy.mjs",
-]);
-
 test("only the coordinator imports writeState/writeStatus in production code (designed exceptions only)", () => {
 	const offenders = [];
 	for (const file of collectSourceFiles()) {
@@ -113,6 +92,15 @@ test("only the coordinator imports writeState/writeStatus in production code (de
 	}
 	assert.deepEqual(offenders, [], `files import writeState/writeStatus without a designed-exception justification: ${offenders.join(", ")}`);
 });
+
+/** Entries checked at import level (real importers — the non-rotting check
+ *  fails if the import disappears, forcing the entry to be deleted). */
+const IMPORT_LEVEL_ENTRIES = new Set([
+	"src/runtime/service.mjs",
+	"runner/job-runner-legacy.mjs",
+	"runner/state-runner.mjs",
+	"runner/pty-runner-legacy.mjs",
+]);
 
 test("registry entries stay honest — a file that no longer writes must lose its entry", () => {
 	for (const [key] of WRITE_STATE_ALLOWLIST) {
@@ -126,6 +114,15 @@ test("registry entries stay honest — a file that no longer writes must lose it
 	assert.ok(
 		WRITE_STATE_ALLOWLIST.has("src/core/store.mjs") && !IMPORT_LEVEL_ENTRIES.has("src/core/store.mjs"),
 		"store.mjs is a definition module — it must stay mention-level only",
+	);
+});
+
+test("mention-level pinning is reserved for the definition module alone (pin/complement symmetry)", () => {
+	const mentionLevel = [...WRITE_STATE_ALLOWLIST.keys()].filter((key) => !IMPORT_LEVEL_ENTRIES.has(key));
+	assert.deepEqual(
+		mentionLevel,
+		["src/core/store.mjs"],
+		"every non-import-level registry entry must be a definition module — real importers belong in IMPORT_LEVEL_ENTRIES",
 	);
 });
 

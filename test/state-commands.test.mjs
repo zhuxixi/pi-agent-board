@@ -344,13 +344,16 @@ test("reconcile_finalize is a no_change on an already-exited row", () => {
 
 // -- host_run_failed: the PR #1 residual-risk closure (manual fence) --
 
-test("host_run_failed fails the row and its status", () => {
+test("host_run_failed fails the row and its status (legacy-parity summary/hasError/needsInput, final-review F4)", () => {
 	const cmd = { ...ptyRunner, kind: "host_run_failed", payload: { error: "host died", exitCode: null } };
 	const d = decideStateTransition(cmd, liveState, makeStatus(), 90);
 	assert.equal(d.action, "apply");
 	assert.equal(d.mutate.state.semanticState, "failed");
 	assert.equal(d.mutate.state.processState, "exited");
 	assert.equal(d.mutate.state.error, "host died");
+	assert.equal(d.mutate.state.summary, "host died", "summary carries the message like legacy markRowFailedDirect");
+	assert.equal(d.mutate.state.hasError, true);
+	assert.equal(d.mutate.state.needsInput, false);
 	assert.equal(d.mutate.status.semanticState, "failed");
 	assert.equal(d.mutate.status.processState, "exited");
 	assert.equal(d.mutate.status.error, "host died");
@@ -360,6 +363,70 @@ test("host_run_failed is fenced by a manual completion (PR #1 residual risk #2)"
 	const cmd = { ...ptyRunner, kind: "host_run_failed", payload: { error: "host died" } };
 	const d = decideStateTransition(cmd, manualCompletedState, null, 90);
 	assert.deepEqual(d, { action: "reject", reason: "manual_fence" });
+});
+
+// -- final-review F1/F2: re-launching a manually completed row; launch-order inversion --
+
+test("F1: mark_queued as dashboard-user lifts the manual fence; the new run's lifecycle commands apply", () => {
+	// User re-launch (reply/dispatch/attach) on a done row: mark_queued travels
+	// as dashboard-user and MUST pass the fence — launching is the user changing
+	// their verdict.
+	const queued = decideStateTransition(
+		{ ...baseCmd, source: "dashboard-user", kind: "mark_queued", payload: { runId: "r2" } },
+		{ ...manualCompletedState }, null, 20,
+	);
+	assert.equal(queued.action, "apply");
+	assert.equal(queued.mutate.state.semanticState, "queued");
+	assert.equal(queued.mutate.state.currentRunId, "r2");
+	// After mark_queued the row is no longer a manual completion, so the new
+	// run's job-runner lifecycle commands pass the fence normally.
+	const queuedRow = { ...manualCompletedState, ...queued.mutate.state, materializedRevision: 3 };
+	const started = decideStateTransition(
+		{ ...baseCmd, runId: "r2", kind: "run_started", payload: { status: makeStatus({ runId: "r2", semanticState: "queued", summary: "Queued" }) } },
+		queuedRow, null, 21,
+	);
+	assert.equal(started.action, "apply");
+	assert.equal(started.mutate.state.semanticState, "working");
+	assert.equal(started.mutate.state.currentRunId, "r2");
+});
+
+test("F1: the fence still blocks non-user mark_queued (A8 invariant on manually completed rows)", () => {
+	const d = decideStateTransition(
+		{ ...baseCmd, source: "service", kind: "mark_queued", payload: { runId: "r2" } },
+		{ ...manualCompletedState }, null, 20,
+	);
+	assert.deepEqual(d, { action: "reject", reason: "manual_fence" });
+});
+
+test("F2a: run_started landing before mark_queued bootstraps a non-alive row and re-pins currentRunId", () => {
+	// Cold-start inversion: the detached runner boots faster than the service's
+	// fire-and-forget mark_queued. The row still points at the PREVIOUS run and
+	// is not alive — the runner is authoritative that its run just started.
+	const staleRow = { ...manualCompletedState, currentRunId: "r0", semanticState: "idle", autoState: {} };
+	const started = decideStateTransition(
+		{ ...baseCmd, runId: "r1", kind: "run_started", payload: { status: makeStatus() } },
+		staleRow, null, 10,
+	);
+	assert.equal(started.action, "apply");
+	assert.equal(started.mutate.state.currentRunId, "r1");
+	assert.equal(started.mutate.state.processState, "alive");
+	// The later mark_queued (same run) converges instead of being fenced by
+	// stale_run against the OLD run id.
+	const queued = decideStateTransition(
+		{ ...baseCmd, source: "dashboard-user", kind: "mark_queued", payload: { runId: "r1" } },
+		{ ...staleRow, ...started.mutate.state, materializedRevision: 3 }, null, 11,
+	);
+	assert.equal(queued.action, "apply");
+	assert.equal(queued.mutate.state.currentRunId, "r1");
+});
+
+test("F2b: run_started for a different run while the row is alive with another run is still stale_run", () => {
+	const liveOther = { ...liveState, currentRunId: "rA", processState: "alive", semanticState: "working" };
+	const d = decideStateTransition(
+		{ ...baseCmd, runId: "rB", kind: "run_started", payload: { status: makeStatus({ runId: "rB" }) } },
+		liveOther, makeStatus({ runId: "rA" }), 10,
+	);
+	assert.deepEqual(d, { action: "reject", reason: "stale_run" });
 });
 
 // -- archive_view --
