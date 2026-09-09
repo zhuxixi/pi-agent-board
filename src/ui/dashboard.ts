@@ -11,7 +11,7 @@ import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import type { Component, EditorTheme, KeybindingsManager, TUI } from "@earendil-works/pi-tui";
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { requestDashboardRender } from "../core/dashboard-render.mjs";
-import { isGenericStatusText, normalizeGenericStatusText } from "../core/derive.mjs";
+import { normalizeGenericStatusText } from "../core/derive.mjs";
 import { firstSentence, truncate } from "../core/heuristics.mjs";
 import {
 	canonicalModelRef,
@@ -31,7 +31,7 @@ import { filterRows, groupRowsByFolder, rowState, stateGlyph } from "../core/row
 import { loadSessionView } from "../core/session-view.mjs";
 import { GROUP_LABELS } from "../core/types.mjs";
 import { buildEvidencePanel } from "./dashboard-evidence.mjs";
-import { readState, writeState, type Row } from "../core/store.mjs";
+import { type Row } from "../core/store.mjs";
 import type { createService } from "../runtime/service.mjs";
 
 type Service = ReturnType<typeof createService>;
@@ -980,45 +980,12 @@ export class DashboardComponent implements Component {
 		this.mode = "confirm";
 	}
 
+	// Routes through the View State Coordinator (issue #91): the service's
+	// markCompleted submits a fenced state command. No compat fallback for stale
+	// pre-coordinator service objects — the window is transient and self-heals
+	// on the next dashboard reload.
 	private markCompleted(row: Row): Promise<{ ok: boolean; error?: string }> {
-		const service = this.deps.service as Service & { markCompleted?: (viewId: string) => Promise<{ ok: boolean; error?: string }> };
-		if (typeof service.markCompleted === "function") return service.markCompleted(row.meta.id);
-
-		// Compatibility guard for an already-open dashboard whose service object came
-		// from an older module instance. The service owns this path normally.
-		const state = readState(service.root, row.meta.id) ?? row.state ?? {
-			version: 1,
-			viewId: row.meta.id,
-			currentRunId: null,
-			semanticState: "idle",
-			processState: "exited",
-			summary: "Needs instructions",
-			lastActivityAt: Date.now(),
-			updatedAt: Date.now(),
-			needsInput: false,
-			hasError: false,
-			latestAssistantPreview: "",
-			latestTool: null,
-			question: null,
-			pendingQuestions: [],
-			error: null,
-			lastVisitedAt: null,
-			lastAgentActivityAt: null,
-			autoState: null,
-		};
-		state.semanticState = "completed";
-		state.processState = "exited";
-		state.needsInput = false;
-		state.hasError = false;
-		state.question = null;
-		state.pendingQuestions = [];
-		state.error = null;
-		state.autoState = null;
-		state.summary = completedSummary(state.summary, state.latestAssistantPreview);
-		state.lastActivityAt = Date.now();
-		state.updatedAt = Date.now();
-		writeState(service.root, state);
-		return Promise.resolve({ ok: true });
+		return this.deps.service.markCompleted(row.meta.id);
 	}
 
 	private handleDeleteKey(): void {
@@ -2014,18 +1981,6 @@ function isAgentBusy(row: Row): boolean {
 	const st = row.state?.semanticState;
 	const waitingOnTool = Array.isArray(row.state?.pendingQuestions) && row.state.pendingQuestions.length > 0;
 	return Boolean(row.alive && (st === "queued" || st === "working" || waitingOnTool));
-}
-
-function completedSummary(summary: string, _latestAssistantPreview: string): string {
-	if (!isGenericStatusText(summary)) return compactCompletedSummary(summary);
-	return "Done";
-}
-
-function compactCompletedSummary(text: string): string {
-	const cleaned = String(text || "").replace(/\s+/g, " ").trim();
-	if (!cleaned) return "Done";
-	const first = firstSentence(cleaned);
-	return truncate(first.length >= 12 ? first : cleaned, 80);
 }
 
 function displayPath(path: string): string {
