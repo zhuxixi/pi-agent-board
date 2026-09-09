@@ -236,6 +236,50 @@ test("runner marks failed when the worker exits nonzero", { timeout: 20000 }, as
 	}
 });
 
+test("exit-0 abort finalizes failed via the coordinator stopReason overlay (issue #91)", { timeout: 20000 }, async () => {
+	const root = mkdtempSync(join(tmpdir(), "agentview-run-abort-"));
+	process.env.FAKE_PI_MODE = "abort";
+	process.env.AGENT_BOARD_SUMMARY_MODEL = "off";
+	let runnerPid = null;
+	// Tracked coordinator: the run_finalized command carries the in-memory
+	// stopReason that the cancelled throttled persist never wrote to disk
+	// (issue #91 fix round 1) — the coordinator's overlay is what turns an
+	// exit-0 abort into "failed" instead of "idle".
+	const coord = await startCoordinator(root);
+	try {
+		const meta = createView(root, { id: "v", name: "x", cwd: root });
+		const config = makeConfig(root, "v", "r", meta.sessionFile, root, "do it");
+		runnerPid = launchRun(root, config, { runnerScript: RUNNER }).pid;
+		const status = await waitFor(() => {
+			const s = readStatus(root, "v", "r");
+			return s && s.endedAt ? s : null;
+		});
+		assert.ok(status);
+		assert.equal(status.exitCode, 0);
+		assert.equal(status.stopReason, "aborted");
+		assert.equal(status.semanticState, "failed");
+		const state = await waitFor(() => {
+			const s = readState(root, "v");
+			return s && s.processState === "exited" ? s : null;
+		});
+		assert.equal(state.semanticState, "failed");
+		// The fix point: the run_finalized payload must carry the in-memory
+		// stopReason (the throttled persist was cancelled on the close path, so
+		// the on-disk status the coordinator reads has stopReason null).
+		const { readJournal } = await import("../src/core/coordinator-journal.mjs");
+		const record = readJournal(root).find((r) => r.command?.kind === "run_finalized");
+		assert.ok(record, "journal carries the run_finalized command");
+		assert.equal(record.result.status, "applied");
+		assert.equal(record.command.payload.stopReason, "aborted");
+	} finally {
+		await killDetached(runnerPid);
+		await coord.kill();
+		delete process.env.FAKE_PI_MODE;
+		delete process.env.AGENT_BOARD_SUMMARY_MODEL;
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
 test("stopping the runner finalizes the run as stopped", { timeout: 20000 }, async () => {
 	const root = mkdtempSync(join(tmpdir(), "agentview-run-stop-"));
 	process.env.FAKE_PI_MODE = "hang";

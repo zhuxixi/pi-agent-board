@@ -174,6 +174,12 @@ function main() {
 	const finalizeThroughCoordinator = async ({ exitCode, stoppedByUser: stopped }) => {
 		const payload = { exitCode, stoppedByUser: stopped };
 		if (status.endedAt != null) payload.endedAt = status.endedAt;
+		// The close path cancels the pending throttled flush after the final
+		// buffer flush, so a stopReason observed in the last burst (reduceEvent
+		// sets it in memory only) never reached disk. Overlay it onto the payload:
+		// finalizeSemanticState keys on stopReason alone for exit-0 exits, and the
+		// coordinator already supports the payload overlay (issue #91).
+		if (status.stopReason != null) payload.stopReason = status.stopReason;
 		if (status.latestAssistantPreview) payload.latestAssistantPreview = status.latestAssistantPreview;
 		if (status.lastAgentActivityAt != null) payload.lastAgentActivityAt = status.lastAgentActivityAt;
 		const result = await sendStateCommand(root, {
@@ -275,6 +281,15 @@ function main() {
 	process.on("SIGINT", stop);
 
 	worker.on("error", async (err) => {
+		// Cancel any in-flight throttled flush before finalizing: if the timer
+		// callback lands during the sendStateCommand await below, the stale
+		// persist() would overwrite the coordinator-materialized terminal state
+		// and the close-path run_finalized would then bounce as stale_run
+		// (symmetric with the close path's cancel; issue #91 fix round 1).
+		if (flushTimer) {
+			clearTimeout(flushTimer);
+			flushTimer = null;
+		}
 		status.error = `Failed to launch worker: ${err instanceof Error ? err.message : String(err)}`;
 		appendDiagnostic(root, viewId, { source: "runner", runId, level: "error", code: "worker_error", message: status.error, details: {} });
 		finalizeRun(status, { exitCode: 1, stoppedByUser }, Date.now());
