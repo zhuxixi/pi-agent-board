@@ -42,6 +42,7 @@ import {
 	gcJournal,
 	readCheckpoint,
 	readJournal,
+	repairJournalTail,
 	writeCheckpoint,
 } from "../src/core/coordinator-journal.mjs";
 import { ownsEndpoint } from "../src/core/host-coordination.mjs";
@@ -94,6 +95,10 @@ async function main() {
 	startTouchTimer.unref?.();
 
 	// 2. Boot state: journal summary, processed-command ring, replay, counter init.
+	// Repair a crash-torn tail FIRST: without it the first post-restart append
+	// concatenates onto the torn line and that fsynced record becomes invisible
+	// to every readJournal / replay / revision scan below.
+	repairJournalTail(root);
 	const checkpoint = readCheckpoint(root) ?? { materializedRevision: 0, journalBytes: 0 };
 	const journal = readJournal(root);
 	/** @type {Map<string, { result: { status: string, reason: string|null }, materializedRevision: number }>} */

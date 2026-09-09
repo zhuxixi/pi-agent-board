@@ -4,7 +4,7 @@
  * talks JSONL over its socket, mirroring the pty-runner integration fixture style.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, appendFileSync, rmSync, statSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { test } from "node:test";
-import { readJournal } from "../src/core/coordinator-journal.mjs";
+import { gcJournal, journalPath, readJournal, writeCheckpoint } from "../src/core/coordinator-journal.mjs";
 import { launchAutoState } from "../src/core/launch.mjs";
 import { writeEvidence } from "../src/core/evidence.mjs";
 import * as P from "../src/core/paths.mjs";
@@ -602,4 +602,100 @@ test("state-runner routes classification through the coordinator (journal record
 	const status = readStatus(root, "v1", "run_1");
 	assert.equal(status.autoState?.kind, "done", "status patch materialized too");
 	assert.equal(status.materializedRevision, record.materializedRevision, "shared revision across both files");
+});
+
+test("duplicate commandId still returns the original result after a checkpoint+GC cycle", async (t) => {
+	const root = freshRoot();
+	let child = null;
+	t.after(async () => {
+		if (child && isAlive(child.pid)) {
+			child.kill("SIGTERM");
+			await waitForExit(child);
+		}
+		rmSync(root, { recursive: true, force: true });
+	});
+	createView(root, { id: "v1", name: "x", cwd: root });
+	child = startCoordinator(root);
+	const { client } = await readyClient(root);
+
+	const command = {
+		type: "state_command",
+		commandId: "cmd-gc-1",
+		viewId: "v1",
+		source: "dashboard-user",
+		kind: "mark_completed",
+		expectedRevision: null,
+		payload: {},
+	};
+	client.send(command);
+	const first = await client.next();
+	assert.equal(first.status, "applied");
+
+	// Simulate the checkpoint+GC cycle the coordinator runs at the size
+	// threshold: checkpoint the full journal, then reclaim it. The journal
+	// empties; dedupe for covered commandIds is the coordinator's in-memory
+	// ring's job (the accepted post-GC tradeoff).
+	const journalSize = statSync(journalPath(root)).size;
+	assert.equal(writeCheckpoint(root, { materializedRevision: first.materializedRevision, journalBytes: journalSize }), true);
+	assert.equal(gcJournal(root), 0);
+	assert.deepEqual(readJournal(root), []);
+
+	// The resent duplicate must short-circuit on the ring: original result,
+	// no re-append (journal stays empty), no second materialization.
+	client.send(command);
+	const second = await client.next();
+	assert.equal(second.status, "applied");
+	assert.equal(second.reason, first.reason);
+	assert.equal(second.materializedRevision, first.materializedRevision);
+	assert.deepEqual(readJournal(root), []);
+
+	const state = readState(root, "v1");
+	assert.equal(state.semanticState, "completed");
+	assert.equal(state.materializedRevision, first.materializedRevision);
+});
+
+test("boot repairs a torn journal tail before the first append", async (t) => {
+	const root = freshRoot();
+	let child = null;
+	t.after(async () => {
+		if (child && isAlive(child.pid)) {
+			child.kill("SIGTERM");
+			await waitForExit(child);
+		}
+		rmSync(root, { recursive: true, force: true });
+	});
+	createView(root, { id: "v1", name: "x", cwd: root });
+	// Pre-crash journal: one complete record + a torn mid-JSON line (no \n).
+	const torn = '{"command":{"commandId":"cmd-torn-0","kind":"run_fina","resu';
+	appendFileSync(journalPath(root), `${JSON.stringify({
+		command: { type: "state_command", commandId: "cmd-old", viewId: "v1", source: "dashboard-user", kind: "mark_completed", expectedRevision: null, payload: {} },
+		result: { status: "applied", reason: "manual_completion" },
+		materializedRevision: 1,
+		at: 1,
+	})}\n`);
+	appendFileSync(journalPath(root), torn);
+	assert.ok(statSync(journalPath(root)).size > JSON.stringify({}).length);
+
+	child = startCoordinator(root);
+	const { client } = await readyClient(root);
+	client.send({
+		type: "state_command",
+		commandId: "cmd-torn-1",
+		viewId: "v1",
+		source: "dashboard-user",
+		kind: "mark_completed",
+		expectedRevision: null,
+		payload: {},
+	});
+	const result = await client.next();
+	assert.equal(result.status, "applied");
+
+	// The post-restart append must be a parseable, discoverable record —
+	// without the boot repair it would merge into the torn line and vanish
+	// from every readJournal/replay scan.
+	const ids = readJournal(root).map((entry) => entry?.command?.commandId);
+	assert.ok(ids.includes("cmd-torn-1"), "new record visible after boot repair");
+	assert.ok(!ids.includes("cmd-torn-0"), "torn record dropped by repair");
+	const state = readState(root, "v1");
+	assert.equal(state.semanticState, "completed");
 });

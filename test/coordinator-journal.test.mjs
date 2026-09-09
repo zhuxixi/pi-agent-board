@@ -17,6 +17,7 @@ import {
 	journalPath,
 	readCheckpoint,
 	readJournal,
+	repairJournalTail,
 	writeCheckpoint,
 } from "../src/core/coordinator-journal.mjs";
 
@@ -189,13 +190,91 @@ test("gcJournal truncates only the checkpointed prefix", () => {
 	}
 });
 
-test("gcJournal is a no-op when the checkpoint already covers the whole journal", () => {
+test("gcJournal truncates to empty when the checkpoint covers the whole journal", () => {
 	const dir = freshDir();
 	try {
-		const size = appendCommand(dir, record("cmd-1", 1, 100));
-		writeCheckpoint(dir, { materializedRevision: 1, journalBytes: size });
-		assert.equal(gcJournal(dir), size);
-		assert.equal(readJournal(dir).length, 1);
+		appendCommand(dir, record("cmd-1", 1, 100));
+		appendCommand(dir, record("cmd-2", 2, 200));
+		const size = statSync(journalPath(dir)).size;
+		writeCheckpoint(dir, { materializedRevision: 2, journalBytes: size });
+		assert.equal(gcJournal(dir), 0);
+		assert.equal(statSync(journalPath(dir)).size, 0);
+		assert.deepEqual(readJournal(dir), []);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("checkpoint+GC cycle shrinks the journal; covered commandIds leave the journal (dedupe moves to the coordinator ring)", () => {
+	const dir = freshDir();
+	try {
+		appendCommand(dir, record("cmd-1", 1, 100));
+		appendCommand(dir, record("cmd-2", 2, 200));
+		appendCommand(dir, record("cmd-3", 3, 300));
+		writeCheckpoint(dir, { materializedRevision: 3, journalBytes: statSync(journalPath(dir)).size });
+
+		const sizeAfterGc = gcJournal(dir);
+		assert.ok(sizeAfterGc < statSync(journalPath(dir)).size + 1 && sizeAfterGc === 0, "full-coverage GC empties the file");
+		assert.deepEqual(readJournal(dir), []);
+		// The journal no longer answers idempotency lookups for covered commands:
+		// that is the accepted design tradeoff — the coordinator's in-memory ring
+		// (~1000 recent commandIds) owns post-GC dedupe, and current-state
+		// re-decision covers anything older.
+		assert.equal(findProcessedCommand(dir, "cmd-1"), null);
+
+		// The cycle repeats: new appends grow the journal from empty again.
+		appendCommand(dir, record("cmd-4", 4, 400));
+		assert.deepEqual(readJournal(dir).map((e) => e.command.commandId), ["cmd-4"]);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("repairJournalTail drops a torn tail and the next append stays parseable", () => {
+	const dir = freshDir();
+	try {
+		appendCommand(dir, record("cmd-1", 1, 100));
+		appendCommand(dir, record("cmd-2", 2, 200));
+		const intactEnd = statSync(journalPath(dir)).size;
+		// Simulate SIGKILL mid-append: partial bytes, no trailing newline.
+		appendFileSync(journalPath(dir), Buffer.from(JSON.stringify({ command: { commandId: "cmd-3", kind: "run_fina" } })));
+		const tornSize = statSync(journalPath(dir)).size;
+		assert.ok(tornSize > intactEnd);
+
+		assert.equal(repairJournalTail(dir), intactEnd);
+		assert.equal(statSync(journalPath(dir)).size, intactEnd);
+		assert.deepEqual(readJournal(dir).map((e) => e.command.commandId), ["cmd-1", "cmd-2"]);
+
+		// The post-repair append must be visible to readJournal (no torn-line merge).
+		appendCommand(dir, record("cmd-3", 3, 300));
+		assert.deepEqual(readJournal(dir).map((e) => e.command.commandId), ["cmd-1", "cmd-2", "cmd-3"]);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("repairJournalTail is a no-op on an intact journal", () => {
+	const dir = freshDir();
+	try {
+		appendCommand(dir, record("cmd-1", 1, 100));
+		appendCommand(dir, record("cmd-2", 2, 200));
+		const size = statSync(journalPath(dir)).size;
+		assert.equal(repairJournalTail(dir), size);
+		assert.equal(statSync(journalPath(dir)).size, size);
+		assert.deepEqual(readJournal(dir).map((e) => e.command.commandId), ["cmd-1", "cmd-2"]);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("repairJournalTail truncates a journal that is only a torn line to empty", () => {
+	const dir = freshDir();
+	try {
+		appendFileSync(journalPath(dir), Buffer.from(JSON.stringify({ command: { commandId: "cmd-x" } })));
+		assert.ok(statSync(journalPath(dir)).size > 0);
+		assert.equal(repairJournalTail(dir), 0);
+		assert.equal(statSync(journalPath(dir)).size, 0);
+		assert.deepEqual(readJournal(dir), []);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}

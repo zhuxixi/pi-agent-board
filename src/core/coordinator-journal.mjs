@@ -6,7 +6,11 @@
  * two can be repaired by replaying the journal on restart. The checkpoint
  * records how much of the journal (`journalBytes`) is already reflected in
  * materialized state; GC may only drop that prefix after the checkpoint write
- * itself succeeded. `screen.log`'s fs-injection and temp+rename patterns are
+ * itself succeeded. Full-coverage GC truncates the journal to empty: the
+ * covered commands leave the journal, so post-GC idempotency dedupe is owned
+ * by the coordinator's in-memory ring of recent commandIds (older commandIds
+ * fall back to current-state re-decision, whose apply paths are idempotent).
+ * `screen.log`'s fs-injection and temp+rename patterns are
  * reused so every fs call is injectable in tests.
  */
 import {
@@ -153,6 +157,9 @@ export function writeCheckpoint(root, checkpoint, fs = defaultJournalFs) {
 /**
  * Drop the journal prefix already covered by a successful checkpoint. Without
  * a checkpoint this is a no-op (nothing proves the prefix is materialized).
+ * A checkpoint covering the whole journal truncates the file to empty — every
+ * covered record is materialized, and keeping it would grow the journal (and
+ * every findProcessedCommand/boot-replay scan) without bound.
  * @param {string} root
  * @param {typeof defaultJournalFs} [fs]
  * @returns {number} journal size in bytes after the call
@@ -160,15 +167,49 @@ export function writeCheckpoint(root, checkpoint, fs = defaultJournalFs) {
 export function gcJournal(root, fs = defaultJournalFs) {
 	const file = journalPath(root);
 	const size = fileSize(file, 0, fs);
+	if (size === 0) return 0;
 	const checkpoint = readCheckpoint(root, fs);
 	if (!checkpoint || typeof checkpoint.journalBytes !== "number") return size;
 	const journalBytes = Math.floor(checkpoint.journalBytes);
 	if (journalBytes <= 0) return size;
-	if (journalBytes >= size) return size;
+	if (journalBytes >= size) {
+		// Full coverage: everything in the file is materialized per the
+		// checkpoint. Truncate to empty; dedupe for covered commandIds is the
+		// coordinator's in-memory ring's job now.
+		if (!replaceFile(file, Buffer.alloc(0), fs)) return fileSize(file, size, fs);
+		return 0;
+	}
 	// journalBytes < size means the file exists with an un-checkpointed tail.
 	const tail = readAllBytes(file, fs, journalBytes);
 	if (!replaceFile(file, tail, fs)) return fileSize(file, size, fs);
 	return fileSize(file, tail.length, fs);
+}
+
+/**
+ * Truncate a crash-torn journal tail so the next append stays parseable.
+ *
+ * `appendCommand` writes `JSON+\n` in a partial-write loop; a process killed
+ * mid-append leaves bytes without a trailing newline. Without repair, the next
+ * append concatenates onto that torn line and the merged line is unparseable — the
+ * freshly fsynced+acked record becomes invisible to every readJournal /
+ * boot-replay / revision scan. The repair is byte-exact and cheap: scan
+ * backwards for the last newline and drop everything after it (a journal with
+ * no newline at all is torn from byte 0 and truncates to empty). Complete but
+ * corrupt lines are kept — readJournal already skips them.
+ * @param {string} root
+ * @param {typeof defaultJournalFs} [fs]
+ * @returns {number} journal size in bytes after the call
+ */
+export function repairJournalTail(root, fs = defaultJournalFs) {
+	const file = journalPath(root);
+	const size = fileSize(file, 0, fs);
+	if (size === 0) return 0;
+	const data = readAllBytes(file, fs);
+	const lastNewline = data.lastIndexOf("\n");
+	if (lastNewline === data.length - 1) return size;
+	const keep = lastNewline + 1;
+	if (!replaceFile(file, data.subarray(0, keep), fs)) return fileSize(file, size, fs);
+	return keep;
 }
 
 /**
