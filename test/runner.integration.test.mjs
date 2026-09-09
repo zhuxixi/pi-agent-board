@@ -65,7 +65,7 @@ async function killDetached(pid) {
 async function waitFor(fn, timeoutMs = 15000, intervalMs = 50) {
 	const start = Date.now();
 	for (;;) {
-		const v = fn();
+		const v = await fn();
 		if (v) return v;
 		if (Date.now() - start > timeoutMs) return null;
 		await sleep(intervalMs);
@@ -367,8 +367,8 @@ test("runner does not clobber a manual completion made during post-exit model pa
 		const { createService } = await import("../src/runtime/service.mjs");
 		const svc = createService({ root });
 		let manual = null;
-		await waitFor(() => {
-			manual = svc.markCompleted("view_1");
+		await waitFor(async () => {
+			manual = await svc.markCompleted("view_1");
 			return manual.ok ? manual : null;
 		});
 		assert.deepEqual(manual, { ok: true });

@@ -27,6 +27,7 @@ import { isAlive, killProcess } from "../core/pid.mjs";
 import { acquireOwnedViewLock, tryAcquireOwnedViewLock } from "../core/locks.mjs";
 import { canFinalizeLegacyHost, canReplaceHost } from "../core/host-coordination.mjs";
 import { modelRefAvailable } from "../core/launch-options.mjs";
+import { sendStateCommand } from "../core/coordinator-client.mjs";
 import { HOST_PROBE_RETRY_MS, probeHost } from "../core/host-probe.mjs";
 import * as P from "../core/paths.mjs";
 import {
@@ -394,12 +395,9 @@ export function createService(opts) {
 		return { ok: true };
 	}
 
-	/** @param {string} viewId @returns {{ ok: boolean, error?: string }} */
-	function completeView(viewId) {
-		const row = loadRow(root, viewId);
-		if (!row) return { ok: false, error: "Unknown session" };
-		if (isAgentBusy(row)) return { ok: false, error: "Wait for the active run to finish before marking done" };
-		const state = readState(root, viewId) ?? row.state ?? blankState(viewId);
+	/** Legacy direct-write completion — only reachable when the coordinator is
+	 *  explicitly disabled (AGENT_BOARD_COORDINATOR=off tests/escape hatch). */
+	function completeViewDirect(state) {
 		state.semanticState = "completed";
 		state.processState = "exited";
 		state.needsInput = false;
@@ -414,14 +412,48 @@ export function createService(opts) {
 		// Also clear autoState in the run status so in-flight model passes
 		// (job-runner / state-runner) see the manual completion and skip refinement.
 		if (state.currentRunId) {
-			const status = readStatus(root, viewId, state.currentRunId);
+			const status = readStatus(root, state.viewId, state.currentRunId);
 			if (status) {
 				status.autoState = null;
 				writeStatus(root, status);
 			}
 		}
 		writeState(root, state);
-		return { ok: true };
+	}
+
+	/**
+	 * Explicitly mark an inactive session as done via the View State Coordinator
+	 * (issue #91): the command is journaled and materialized by the single owner,
+	 * which also rejects stale-run and fenced manual-completion overwrites.
+	 * @param {string} viewId
+	 * @returns {Promise<{ ok: boolean, error?: string }>}
+	 */
+	async function completeView(viewId) {
+		const row = loadRow(root, viewId);
+		if (!row) return { ok: false, error: "Unknown session" };
+		// Fast local pre-check for instant UI feedback; the coordinator's decision
+		// stays authoritative (its "busy" rejection maps to the same wording).
+		if (isAgentBusy(row)) return { ok: false, error: "Wait for the active run to finish before marking done" };
+		const state = readState(root, viewId) ?? row.state ?? blankState(viewId);
+		const result = await sendStateCommand(root, {
+			type: "state_command",
+			viewId,
+			runId: state.currentRunId ?? null,
+			source: "dashboard-user",
+			kind: "mark_completed",
+			expectedRevision: null,
+			payload: {},
+		});
+		if (result.status === "applied") return { ok: true };
+		if (result.reason === "busy") return { ok: false, error: "Wait for the active run to finish before marking done" };
+		if (result.reason === "coordinator_disabled") {
+			completeViewDirect(state);
+			return { ok: true };
+		}
+		// Ambiguous outcomes (timeout / connection_reset: the command MAY already be
+		// journaled) and real rejections surface verbatim — never fall back to a
+		// direct write here, it would bypass the single-writer fence.
+		return { ok: false, error: result.reason ?? "state_command_failed" };
 	}
 
 	/**
@@ -1569,7 +1601,7 @@ export function createService(opts) {
 		 * Explicitly mark an inactive session as done. Successful runs settle as
 		 * `idle` until the user reviews and confirms this action from the dashboard.
 		 * @param {string} viewId
-		 * @returns {{ ok: boolean, error?: string }}
+		 * @returns {Promise<{ ok: boolean, error?: string }>}
 		 */
 		markCompleted(viewId) {
 			return completeView(viewId);
@@ -1640,7 +1672,12 @@ export function createService(opts) {
 			return { state, summary: summarizeSteering(state) };
 		},
 
-		markCompletedMany(viewIds) {
+		/**
+		 * Bulk mark sessions done, skipping live/already-done rows.
+		 * @param {string[]} viewIds
+		 * @returns {Promise<{ ok: boolean, completed: number, skipped: number, completedIds: string[] }>}
+		 */
+		async markCompletedMany(viewIds) {
 			const ids = [...new Set((viewIds ?? []).filter(Boolean))];
 			let completed = 0;
 			let skipped = 0;
@@ -1651,7 +1688,7 @@ export function createService(opts) {
 					skipped += 1;
 					continue;
 				}
-				const res = completeView(viewId);
+				const res = await completeView(viewId);
 				if (res.ok) {
 					completed += 1;
 					completedIds.push(viewId);

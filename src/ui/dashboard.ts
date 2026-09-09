@@ -947,10 +947,11 @@ export class DashboardComponent implements Component {
 		this.pending = {
 			prompt: `Mark "${row.meta.name}" as done? (y/N)`,
 			onYes: () => {
-				const res = this.markCompleted(row);
-				if (!res.ok) this.notice(res.error ?? "Mark done failed", "error");
-				else this.notice("Marked done", "info");
-				this.refresh();
+				void this.markCompleted(row).then((res) => {
+					if (!res.ok) this.notice(res.error ?? "Mark done failed", "error");
+					else this.notice("Marked done", "info");
+					this.refresh();
+				});
 			},
 		};
 		this.mode = "confirm";
@@ -966,20 +967,21 @@ export class DashboardComponent implements Component {
 			prompt: `Mark ${doneIds.length} selected session${doneIds.length === 1 ? "" : "s"} as done?${skipped ? ` ${skipped} will be skipped.` : ""} (y/N)`,
 			returnMode: "select",
 			onYes: () => {
-				const res = this.deps.service.markCompletedMany?.(doneIds) ?? { ok: true, completed: 0, skipped: doneIds.length, completedIds: [] };
-				if (!res.ok) this.notice("Mark done failed", "error");
-				else {
-					if (res.completedIds?.length) this.selectedId = res.completedIds[0];
-					this.notice(`Moved ${res.completed} to Done${res.skipped ? ` · skipped ${res.skipped}` : ""}`, "info");
-				}
-				this.refresh();
+				void Promise.resolve(this.deps.service.markCompletedMany?.(doneIds) ?? { ok: true, completed: 0, skipped: doneIds.length, completedIds: [] }).then((res) => {
+					if (!res.ok) this.notice("Mark done failed", "error");
+					else {
+						if (res.completedIds?.length) this.selectedId = res.completedIds[0];
+						this.notice(`Moved ${res.completed} to Done${res.skipped ? ` · skipped ${res.skipped}` : ""}`, "info");
+					}
+					this.refresh();
+				});
 			},
 		};
 		this.mode = "confirm";
 	}
 
-	private markCompleted(row: Row): { ok: boolean; error?: string } {
-		const service = this.deps.service as Service & { markCompleted?: (viewId: string) => { ok: boolean; error?: string } };
+	private markCompleted(row: Row): Promise<{ ok: boolean; error?: string }> {
+		const service = this.deps.service as Service & { markCompleted?: (viewId: string) => Promise<{ ok: boolean; error?: string }> };
 		if (typeof service.markCompleted === "function") return service.markCompleted(row.meta.id);
 
 		// Compatibility guard for an already-open dashboard whose service object came
@@ -1016,7 +1018,7 @@ export class DashboardComponent implements Component {
 		state.lastActivityAt = Date.now();
 		state.updatedAt = Date.now();
 		writeState(service.root, state);
-		return { ok: true };
+		return Promise.resolve({ ok: true });
 	}
 
 	private handleDeleteKey(): void {

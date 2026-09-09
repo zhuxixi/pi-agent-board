@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { once } from "node:events";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { createService, shouldProbePtySupport } from "../src/runtime/service.mjs";
 import { readCodeRefs } from "../src/core/code-refs-store.mjs";
 import { diagnoseNodePtyFailure } from "../src/core/pty-support.mjs";
+import { readJournal } from "../src/core/coordinator-journal.mjs";
 import * as P from "../src/core/paths.mjs";
 import { createView, readHost, readState, readStatus, writeHost, writeHostPid, writeLaunchPrefs, writeState, writeStatus } from "../src/core/store.mjs";
 import { readFollowUpQueue } from "../src/core/follow-up-queue.mjs";
@@ -42,6 +45,26 @@ function service(root, overrides = {}) {
 		launchTitle: () => ({ pid: null, configPath: "/no/title-config.json" }),
 		...overrides,
 	});
+}
+
+const COORDINATOR_SCRIPT = fileURLToPath(new URL("../runner/state-coordinator.mjs", import.meta.url));
+
+/** Start a tracked coordinator for a store root so tests can kill it in finally —
+ *  sendStateCommand's own ensure path would otherwise leak an untracked detached
+ *  process. sendStateCommand's probe finds this one instead of spawning another
+ *  (a second instance would exit immediately via the lease anyway). */
+function startCoordinator(root) {
+	return spawn(process.execPath, [COORDINATOR_SCRIPT, root], {
+		stdio: ["ignore", "pipe", "pipe"],
+		env: { ...process.env, AGENT_BOARD_ROOT: root, PI_CODING_AGENT_DIR: root },
+	});
+}
+
+function setEnv(name, value) {
+	const prev = process.env[name];
+	if (value === undefined) delete process.env[name];
+	else process.env[name] = value;
+	return prev;
 }
 
 test("archiveByState archives inactive rows and skips live rows", () => {
@@ -535,7 +558,7 @@ test("syncHostedEvent persists interactive questions and resets them on new inpu
 		assert.equal(waiting.needsInput, true);
 		assert.equal(waiting.question, "Choose a mode?");
 		assert.deepEqual(waiting.pendingQuestions, [{ toolCallId: "q1", question: "Choose a mode?" }]);
-		assert.equal(svc.markCompleted("v1").ok, false);
+		assert.equal((await svc.markCompleted("v1")).ok, false);
 		assert.deepEqual(await svc.reply("v1", "safe"), { ok: false, error: "Attach to answer the pending question" });
 
 		assert.equal(svc.syncHostedEvent("v1", { type: "input", text: "safe" }), true);
@@ -617,8 +640,9 @@ test("syncForegroundEvent auto-completes foreground turn when auto-done flag is 
 	}
 });
 
-test("markCompleted explicitly moves an inactive session to completed", () => {
+test("markCompleted explicitly moves an inactive session to completed", async () => {
 	const root = freshRoot();
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
 		const s = readState(root, "v1");
@@ -628,7 +652,7 @@ test("markCompleted explicitly moves an inactive session to completed", () => {
 		s.latestAssistantPreview = "All done.";
 		writeState(root, s);
 
-		assert.deepEqual(service(root).markCompleted("v1"), { ok: true });
+		assert.deepEqual(await service(root).markCompleted("v1"), { ok: true });
 		const next = readState(root, "v1");
 		assert.equal(next.semanticState, "completed");
 		assert.equal(next.processState, "exited");
@@ -636,6 +660,36 @@ test("markCompleted explicitly moves an inactive session to completed", () => {
 		assert.equal(next.needsInput, false);
 		assert.equal(next.hasError, false);
 	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("completeView goes through the coordinator command path", async () => {
+	const root = freshRoot();
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", undefined);
+	const prevBoardRoot = setEnv("AGENT_BOARD_ROOT", root);
+	const prevPiDir = setEnv("PI_CODING_AGENT_DIR", root);
+	const coord = startCoordinator(root);
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const s = readState(root, "v1");
+		s.semanticState = "idle";
+		s.processState = "exited";
+		writeState(root, s);
+
+		assert.deepEqual(await service(root).markCompleted("v1"), { ok: true });
+
+		const records = readJournal(root);
+		const record = records.find((r) => r.command?.kind === "mark_completed" && r.command?.viewId === "v1");
+		assert.ok(record, "expected a mark_completed record in the coordinator journal");
+		assert.equal(record.command.source, "dashboard-user");
+		assert.equal(readState(root, "v1").semanticState, "completed");
+	} finally {
+		coord.kill();
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
+		setEnv("AGENT_BOARD_ROOT", prevBoardRoot);
+		setEnv("PI_CODING_AGENT_DIR", prevPiDir);
 		rmSync(root, { recursive: true, force: true });
 	}
 });
@@ -656,8 +710,9 @@ test("markVisited records a durable lastVisitedAt timestamp", () => {
 });
 
 
-test("markCompletedMany completes inactive rows and skips live/already-done rows", () => {
+test("markCompletedMany completes inactive rows and skips live/already-done rows", async () => {
 	const root = freshRoot();
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");
 	try {
 		createView(root, { id: "idle1", name: "idle1", cwd: "/r" });
 		createView(root, { id: "done1", name: "done1", cwd: "/r" });
@@ -675,7 +730,7 @@ test("markCompletedMany completes inactive rows and skips live/already-done rows
 		live.processState = "alive";
 		writeState(root, live);
 
-		assert.deepEqual(service(root).markCompletedMany(["idle1", "done1", "live1"]), {
+		assert.deepEqual(await service(root).markCompletedMany(["idle1", "done1", "live1"]), {
 			ok: true,
 			completed: 1,
 			skipped: 2,
@@ -683,6 +738,7 @@ test("markCompletedMany completes inactive rows and skips live/already-done rows
 		});
 		assert.equal(readState(root, "idle1").semanticState, "completed");
 	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
 		rmSync(root, { recursive: true, force: true });
 	}
 });
@@ -1161,8 +1217,12 @@ test("reconcile auto-drain uses the cached PTY probe, never forced refresh", () 
 	}
 });
 
-test("markCompleted clears autoState in the run status so in-flight model passes skip refinement", () => {
+test("markCompleted clears autoState in the run status so in-flight model passes skip refinement", async () => {
 	const root = freshRoot();
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", undefined);
+	const prevBoardRoot = setEnv("AGENT_BOARD_ROOT", root);
+	const prevPiDir = setEnv("PI_CODING_AGENT_DIR", root);
+	const coord = startCoordinator(root);
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
 		const s = readState(root, "v1");
@@ -1205,13 +1265,17 @@ test("markCompleted clears autoState in the run status so in-flight model passes
 			autoState: { version: 1, kind: "done", semanticState: "completed", confidence: "high", source: "heuristic", reason: "done", question: null, classifiedAt: 2, lastAgentActivityAt: null, textHash: "abc" },
 		});
 
-		assert.deepEqual(service(root).markCompleted("v1"), { ok: true });
+		assert.deepEqual(await service(root).markCompleted("v1"), { ok: true });
 		const nextStatus = readStatus(root, "v1", "run_1");
 		assert.equal(nextStatus.autoState, null);
 		const next = readState(root, "v1");
 		assert.equal(next.semanticState, "completed");
 		assert.equal(next.autoState, null);
 	} finally {
+		coord.kill();
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
+		setEnv("AGENT_BOARD_ROOT", prevBoardRoot);
+		setEnv("PI_CODING_AGENT_DIR", prevPiDir);
 		rmSync(root, { recursive: true, force: true });
 	}
 });
