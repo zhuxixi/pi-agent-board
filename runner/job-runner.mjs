@@ -205,7 +205,7 @@ function main() {
 			// Duplicate finalize or the run was already superseded — nothing to do.
 			return false;
 		}
-		appendDiagnostic(root, viewId, { source: "runner", runId, level: "warn", code: "run_finalize_command_ambiguous", message: `Run finalization outcome unknown (${result.reason}); coordinator replay will recover`, details: { reason: result.reason } });
+		appendDiagnostic(root, viewId, { source: "runner", runId, level: "warn", code: "run_finalize_command_ambiguous", message: `Run finalization outcome unknown (${result.reason}); if the command was journaled, coordinator replay will recover it; otherwise dashboard reconcile will converge the row`, details: { reason: result.reason } });
 		return false;
 	};
 
@@ -511,7 +511,7 @@ async function classifyThroughCoordinator(config, status, classification) {
 		// Designed fences — informational, not errors.
 		return false;
 	}
-	appendDiagnostic(config.root, config.viewId, { source: "runner", runId: config.runId, level: "warn", code: "auto_state_command_ambiguous", message: `Auto-state classification outcome unknown (${result.reason}); coordinator replay will recover`, details: { reason: result.reason } });
+	appendDiagnostic(config.root, config.viewId, { source: "runner", runId: config.runId, level: "warn", code: "auto_state_command_ambiguous", message: `Auto-state classification outcome unknown (${result.reason}); if the command was journaled, coordinator replay will recover it; otherwise the next classification pass will converge the row`, details: { reason: result.reason } });
 	return false;
 }
 

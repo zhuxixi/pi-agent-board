@@ -767,6 +767,44 @@ test("completeView goes through the coordinator command path", async () => {
 	}
 });
 
+test("completeView does not fall back to a direct write on ambiguous coordinator outcomes (issue #91)", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const s = readState(root, "v1");
+		s.semanticState = "idle";
+		s.processState = "exited";
+		writeState(root, s);
+		const before = readFileSync(P.statePath(root, "v1"), "utf8");
+
+		// Ambiguous result (timeout: the command MAY already be journaled). The
+		// service must surface it verbatim and never reach completeViewDirect —
+		// a direct write here would bypass the single-writer fence (#46 class).
+		const sent = [];
+		const svc = service(root, {
+			async sendStateCommand(_root, command) {
+				sent.push(command);
+				return { status: "rejected", reason: "timeout", materializedRevision: 0 };
+			},
+		});
+		assert.deepEqual(await svc.markCompleted("v1"), { ok: false, error: "timeout" });
+		assert.equal(sent.length, 1);
+		assert.equal(sent[0].kind, "mark_completed");
+		assert.equal(readFileSync(P.statePath(root, "v1"), "utf8"), before, "state.json must stay byte-identical on ambiguous outcomes");
+
+		// Same guarantee for coordinator_unavailable (never-delivered, nothing journaled).
+		const svcUnavailable = service(root, {
+			async sendStateCommand() {
+				return { status: "rejected", reason: "coordinator_unavailable", materializedRevision: 0 };
+			},
+		});
+		assert.deepEqual(await svcUnavailable.markCompleted("v1"), { ok: false, error: "coordinator_unavailable" });
+		assert.equal(readFileSync(P.statePath(root, "v1"), "utf8"), before, "state.json must stay byte-identical when the coordinator is unavailable");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("markVisited records a durable lastVisitedAt timestamp", () => {
 	const root = freshRoot();
 	try {

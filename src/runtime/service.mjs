@@ -89,6 +89,7 @@ const ATTACH_RESOLVE_TIMEOUT_MS = 120_000;
  *   signalOwnedProcess?: (identity: {pid: number, startToken: string|null}, signal: string) => void,
  *   probeHostFn?: typeof probeHost,
  *   sleepFn?: (ms: number) => Promise<void>,
+ *   sendStateCommand?: typeof sendStateCommand,
  *   availableModels?: () => Array<{ provider: string, id: string }> | undefined,
  * }} opts
  */
@@ -105,6 +106,7 @@ export function createService(opts) {
 	const nowImpl = opts.now ?? Date.now;
 	const acquireLockImpl = opts.acquireLock ?? acquireOwnedViewLock;
 	const tryAcquireLockImpl = opts.tryAcquireLock ?? tryAcquireOwnedViewLock;
+	const sendStateCommandImpl = opts.sendStateCommand ?? sendStateCommand;
 	// Identity-aware observation/signalling for host recovery (issue #70). Callers must
 	// only signal after observeProcess returned "owned" for that exact identity.
 	const observeProcessImpl = opts.observeProcess ?? defaultObserveProcess;
@@ -359,7 +361,7 @@ export function createService(opts) {
 		if (!latest.trim()) return false;
 		const classification = heuristicAutoState(latest, { lastAgentActivityAt: status.lastAgentActivityAt ?? null });
 		const commandRunId = status.runId === "foreground" ? null : status.runId;
-		const result = await sendStateCommand(root, {
+		const result = await sendStateCommandImpl(root, {
 			type: "state_command",
 			viewId: meta.id,
 			runId: commandRunId,
@@ -399,7 +401,7 @@ export function createService(opts) {
 			// Designed fences — informational, not errors.
 			return false;
 		}
-		appendDiagnostic(root, meta.id, { source: "service", runId: commandRunId, level: "warn", code: "auto_state_command_ambiguous", message: `Auto-state classification outcome unknown (${result.reason}); coordinator replay will recover`, details: { reason: result.reason } });
+		appendDiagnostic(root, meta.id, { source: "service", runId: commandRunId, level: "warn", code: "auto_state_command_ambiguous", message: `Auto-state classification outcome unknown (${result.reason}); if the command was journaled, coordinator replay will recover it; otherwise the next classification pass will converge the row`, details: { reason: result.reason } });
 		return false;
 	}
 
@@ -472,7 +474,7 @@ export function createService(opts) {
 		// stays authoritative (its "busy" rejection maps to the same wording).
 		if (isAgentBusy(row)) return { ok: false, error: "Wait for the active run to finish before marking done" };
 		const state = readState(root, viewId) ?? row.state ?? blankState(viewId);
-		const result = await sendStateCommand(root, {
+		const result = await sendStateCommandImpl(root, {
 			type: "state_command",
 			viewId,
 			runId: state.currentRunId ?? null,

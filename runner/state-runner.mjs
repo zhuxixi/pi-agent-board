@@ -74,7 +74,7 @@ async function main() {
 		// authority and a manual completion wins by design.
 		appendDiagnostic(config.root, config.viewId, { source: "service", runId: config.runId, code: "auto_state_classified_skipped", message: `Auto-state classification not applied (${result.reason})`, details: { reason: result.reason } });
 	} else if (result.reason !== "coordinator_disabled") {
-		appendDiagnostic(config.root, config.viewId, { source: "service", runId: config.runId, level: "warn", code: "auto_state_command_ambiguous", message: `Auto-state classification outcome unknown (${result.reason}); coordinator replay will recover`, details: { reason: result.reason } });
+		appendDiagnostic(config.root, config.viewId, { source: "service", runId: config.runId, level: "warn", code: "auto_state_command_ambiguous", message: `Auto-state classification outcome unknown (${result.reason}); if the command was journaled, coordinator replay will recover it; otherwise the next classification pass will converge the row`, details: { reason: result.reason } });
 	}
 
 	if (result.reason === "coordinator_disabled") {

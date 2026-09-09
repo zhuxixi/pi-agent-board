@@ -84,8 +84,8 @@ async function main() {
 			waitMs: 500,
 			identity: { pid: process.pid, startToken: captureStartToken(process.pid) },
 		});
-	} catch {
-		process.stderr.write("state-coordinator: another instance owns the lease; exiting\n");
+	} catch (err) {
+		process.stderr.write(`state-coordinator: lease unavailable (${err?.code ?? err?.message ?? "unknown"}); another instance may own it; exiting\n`);
 		process.exit(0);
 	}
 	const startTouchTimer = setInterval(() => {
