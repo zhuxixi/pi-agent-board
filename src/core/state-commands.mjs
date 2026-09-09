@@ -104,7 +104,11 @@ export const COMMAND_SOURCES = Object.freeze([
  */
 export function validateCommand(raw) {
 	if (!raw || raw.type !== "state_command") return { ok: false, error: "bad_type" };
-	if (typeof raw.commandId !== "string" || !raw.commandId) return { ok: false, error: "missing_commandId" };
+	// Transient kinds have no idempotency semantics — the shell neither dedupes
+	// nor replays them, so commandId is optional there (echoed in the reply only).
+	if ((typeof raw.commandId !== "string" || !raw.commandId) && !TRANSIENT_KINDS.includes(raw.kind)) {
+		return { ok: false, error: "missing_commandId" };
+	}
 	if (typeof raw.viewId !== "string" || !raw.viewId) return { ok: false, error: "missing_viewId" };
 	if (!STATE_COMMAND_KINDS.includes(raw.kind)) return { ok: false, error: "unknown_kind" };
 	if (!COMMAND_SOURCES.includes(raw.source)) return { ok: false, error: "unknown_source" };
@@ -313,6 +317,11 @@ export function decideStateTransition(command, currentState, currentStatus, now 
 			// Liveness semantics: only the row's current live run may move forward.
 			// Late/duplicate progress from a finished run is dropped (next run's
 			// progress supersedes it anyway — this kind is transient by design).
+			// A live run with no materialized status cannot legitimately progress
+			// (F2): the first beat always follows run_started's bootstrap write, so
+			// a missing status here means the beat is stale or out of order — and
+			// projecting onto `null` would materialize undefined processState.
+			if (!currentStatus) return reject("stale_run");
 			if (currentState.currentRunId !== command.runId || currentState.processState !== "alive") return reject("stale_run");
 			return applyStatusProjection(command, currentState, currentStatus, now);
 		}

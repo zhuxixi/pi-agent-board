@@ -14,6 +14,10 @@
  *   owns ALL side effects: durable journal append (fsync BEFORE materialize, so
  *   boot replay can repair the crash window), materialization under a per-view
  *   file lock, checkpoint + journal GC, and socket lifecycle.
+ * - Transient kinds (TRANSIENT_KINDS, run_progress) bypass the durable
+ *   machinery: validate → decide → materialize → reply, with no journal
+ *   append, no dedupe, and no checkpoint trigger — a periodic snapshot whose
+ *   next beat supersedes it. They still bump materializedRevision.
  * - Idempotency: a processed commandId returns its original result forever —
  *   from the in-memory ring first (bounded, covers the post-GC window), then
  *   from the journal (findProcessedCommand). Duplicates never re-append.
@@ -49,7 +53,7 @@ import { ownsEndpoint } from "../src/core/host-coordination.mjs";
 import { acquireOwnedViewLock, withViewLockSync } from "../src/core/locks.mjs";
 import * as P from "../src/core/paths.mjs";
 import { readState, readStatus, writeState, writeStatus } from "../src/core/store.mjs";
-import { decideStateTransition, validateCommand } from "../src/core/state-commands.mjs";
+import { TRANSIENT_KINDS, decideStateTransition, validateCommand } from "../src/core/state-commands.mjs";
 
 /** In-memory processed-command ring size (FIFO). Beyond the journal, this covers
  *  idempotency when the journal prefix has already been GC'd away. */
@@ -58,6 +62,19 @@ const PROCESSED_RING_MAX = 1000;
 const CHECKPOINT_THRESHOLD_BYTES = 262_144;
 /** Lease heartbeat — matches pty-runner's host-start lease cadence. */
 const HEARTBEAT_MS = 1000;
+/** Lifecycle kinds whose legacy write sites stamped state.lastActivityAt on
+ *  every persist (service markQueued/archive/adopt, job-runner plan-ready,
+ *  reconcile terminal sites). The decision layer stays clock-free, so the
+ *  shell adds the wall-clock stamp — into the patch BEFORE the journal
+ *  append, so boot replay re-applies the exact same fields deterministically
+ *  (there is no clock at replay time either). (Task 1 review F5.) */
+const LAST_ACTIVITY_STAMP_KINDS = new Set(["mark_queued", "archive_view", "adopt_session", "reconcile_finalize", "plan_ready"]);
+/** Kinds whose status patch may CREATE the run's status file: they carry the
+ *  full status content for a run that has no materialized status yet. Every
+ *  other kind keeps PR #1's "patch presence ≠ file requirement" semantics
+ *  (e.g. mark_completed's `status: {autoState: null}` on a legacy row without
+ *  a status file must not fabricate one). */
+const STATUS_BOOTSTRAP_KINDS = new Set(["run_started", "followup_started"]);
 
 const root = process.argv[2];
 if (!root) {
@@ -228,22 +245,38 @@ async function main() {
 			};
 		}
 		const command = checked.command;
+		const transient = TRANSIENT_KINDS.includes(command.kind);
 
-		const known = lookupProcessed(command.commandId);
-		if (known) {
-			return { commandId: command.commandId, status: known.result.status, reason: known.result.reason, materializedRevision: known.materializedRevision };
+		if (!transient) {
+			const known = lookupProcessed(command.commandId);
+			if (known) {
+				return { commandId: command.commandId, status: known.result.status, reason: known.result.reason, materializedRevision: known.materializedRevision };
+			}
 		}
 
 		const state = readState(root, command.viewId);
 		// Status consistency only binds the view's current run (spec 根治条件 5):
 		// no currentRunId → status.json plays no role in this command.
-		const statusRunId = command.runId ?? state?.currentRunId ?? null;
+		// Exception (Task 1 review F1): followup_started re-points the row at a
+		// NEW run carried in payload.newRunId (command.runId is deliberately null
+		// so the stale-run guard cannot fire against the finished parent run).
+		// Resolving the status from the parent here would overwrite the parent's
+		// status.json with the new run's bootstrap patch; resolving from newRunId
+		// finds no file and cleanly bootstraps the new run's status instead.
+		const statusRunId = command.kind === "followup_started"
+			? (typeof command.payload?.newRunId === "string" ? command.payload.newRunId : null)
+			: (command.runId ?? state?.currentRunId ?? null);
 		const status = statusRunId ? readStatus(root, command.viewId, statusRunId) : null;
 		const now = Date.now();
-		const decision = decideStateTransition(command, state, status, now);
+		const decision = stampLegacyTimestamps(command, decideStateTransition(command, state, status, now), now);
 		const currentRevision = state?.materializedRevision ?? 0;
 
 		if (decision.action === "reject") {
+			if (transient) {
+				// Transient rejections are not replayable either — nothing was
+				// mutated, and journaling them would grow the journal for noise.
+				return { commandId: command.commandId ?? null, status: "rejected", reason: decision.reason, materializedRevision: currentRevision };
+			}
 			const result = { status: "rejected", reason: decision.reason };
 			const record = { command, result, materializedRevision: currentRevision, at: now };
 			const journalBytes = appendCommand(root, record);
@@ -254,6 +287,13 @@ async function main() {
 
 		const newRevision = revisionCounter + 1;
 		const result = { status: "applied", reason: decision.reason };
+		if (transient) {
+			// No journal, no processed ring, no checkpoint: a periodic snapshot —
+			// the next beat supersedes it.
+			materialize(command.viewId, command, decision.mutate, newRevision, statusRunId);
+			revisionCounter = newRevision;
+			return { commandId: command.commandId ?? null, status: "applied", reason: decision.reason, materializedRevision: newRevision };
+		}
 		// Journal first (fsync inside), materialize second: boot replay repairs
 		// the window between the two using the stored patches.
 		const record = { command, result, materializedRevision: newRevision, at: now, mutate: decision.mutate, statusRunId };
@@ -288,11 +328,25 @@ async function main() {
 			const runId = command?.runId ?? statusRunId ?? state?.currentRunId ?? null;
 			if (mutate?.status && runId) {
 				const status = readStatus(root, viewId, runId);
-				if (status && (status.materializedRevision ?? 0) < revision) {
+				if (!status && STATUS_BOOTSTRAP_KINDS.has(command?.kind)) {
+					// run_started / followup_started carry the full status content for a
+					// run that has no status file yet — create it (F1's clean-bootstrap
+					// half). Identity fields come from the command context; the patch
+					// carries everything meaningful.
+					writeStatus(root, { version: 1, runId, viewId, ...mutate.status, materializedRevision: revision });
+				} else if (status && (status.materializedRevision ?? 0) < revision) {
 					writeStatus(root, { ...status, ...mutate.status, materializedRevision: revision });
 				}
 			}
 		});
+	}
+
+	/** Add the legacy wall-clock stamp to a decided patch (F5): see
+	 *  LAST_ACTIVITY_STAMP_KINDS. Applied before the journal append so the
+	 *  stored patches are exactly what replay re-materializes. */
+	function stampLegacyTimestamps(command, decision, now) {
+		if (decision.action !== "apply" || !LAST_ACTIVITY_STAMP_KINDS.has(command.kind)) return decision;
+		return { ...decision, mutate: { ...decision.mutate, state: { ...(decision.mutate.state ?? {}), lastActivityAt: now } } };
 	}
 
 	/** Memory ring first (covers the post-GC window), journal second. */

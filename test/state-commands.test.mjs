@@ -612,3 +612,19 @@ test("new kinds keep decisions pure: inputs are not mutated", () => {
 	decideStateTransition({ ...baseCmd, kind: "patch_fields", payload: { state: { review: { x: 1 } } } }, state, status, 50);
 	assert.equal(JSON.stringify({ state, status }), snapshot);
 });
+
+// -- Task 2: transient-command contracts (shell support lives in the coordinator) --
+
+test("run_progress without a materialized status is rejected stale_run (F2)", () => {
+	const cmd = { ...baseCmd, kind: "run_progress", payload: { statusPatch: { turns: 2 } } };
+	// A live run whose status.json was never bootstrapped cannot legitimately
+	// progress — the first beat always follows run_started's bootstrap write.
+	assert.deepEqual(decideStateTransition(cmd, liveState, null, 50), { action: "reject", reason: "stale_run" });
+});
+
+test("transient kinds may omit commandId; journaled kinds may not", () => {
+	const progress = { type: "state_command", viewId: "v1", runId: "r1", source: "job-runner", kind: "run_progress", payload: { statusPatch: { turns: 2 } } };
+	assert.equal(validateCommand(progress).ok, true, "run_progress has no idempotency semantics — commandId optional");
+	const finalized = { type: "state_command", viewId: "v1", runId: "r1", source: "job-runner", kind: "run_finalized", payload: { exitCode: 0 } };
+	assert.equal(validateCommand(finalized).ok, false, "journaled kinds still require commandId for dedupe/replay");
+});

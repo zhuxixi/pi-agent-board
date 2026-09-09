@@ -16,6 +16,7 @@ import { gcJournal, journalPath, readJournal, writeCheckpoint } from "../src/cor
 import { launchAutoState } from "../src/core/launch.mjs";
 import { writeEvidence } from "../src/core/evidence.mjs";
 import * as P from "../src/core/paths.mjs";
+import { createRunStatus } from "../src/core/events.mjs";
 import { createView, readState, readStatus, writeState, writeStatus } from "../src/core/store.mjs";
 
 const COORDINATOR_SCRIPT = fileURLToPath(new URL("../runner/state-coordinator.mjs", import.meta.url));
@@ -698,4 +699,210 @@ test("boot repairs a torn journal tail before the first append", async (t) => {
 	assert.ok(!ids.includes("cmd-torn-0"), "torn record dropped by repair");
 	const state = readState(root, "v1");
 	assert.equal(state.semanticState, "completed");
+});
+
+// -- Task 2: transient run_progress, new lifecycle kinds, F1/F2 shell contracts --
+
+/** Seed a live run r1 through the coordinator itself (also covers mark_queued +
+ *  run_started + the F5 lastActivityAt stamp + status bootstrap). */
+async function seedLiveRun(client, root) {
+	const beforeMarkQueued = Date.now();
+	client.send({ type: "state_command", commandId: "seed-mq-1", viewId: "v1", source: "service", kind: "mark_queued", payload: { runId: "r1" } });
+	const mq = await client.next();
+	assert.equal(mq.status, "applied");
+	const mqState = readState(root, "v1");
+	assert.equal(mqState.semanticState, "queued");
+	assert.equal(mqState.currentRunId, "r1");
+	assert.ok(mqState.lastActivityAt >= beforeMarkQueued, "mark_queued stamps lastActivityAt (F5 legacy parity)");
+
+	// The run is working when run_started fires — seed the status accordingly
+	// so the first run_progress beat projects a consistent (working) row.
+	const seedStatus = { ...createRunStatus({ runId: "r1", viewId: "v1", kind: "dispatch", prompt: "p" }, null, Date.now()), semanticState: "working" };
+	client.send({
+		type: "state_command", commandId: "seed-rs-1", viewId: "v1", runId: "r1", source: "job-runner",
+		kind: "run_started",
+		payload: { status: seedStatus },
+	});
+	const rs = await client.next();
+	assert.equal(rs.status, "applied");
+	const status = readStatus(root, "v1", "r1");
+	assert.ok(status, "run_started bootstraps the run's status file");
+	assert.equal(status.runId, "r1");
+	assert.equal(status.processState, "alive");
+	return { mqRevision: mq.materializedRevision, startedRevision: rs.materializedRevision };
+}
+
+test("transient run_progress applies, stamps the revision, and never touches the journal", async (t) => {
+	const root = freshRoot();
+	let child = null;
+	t.after(async () => {
+		if (child && isAlive(child.pid)) { child.kill("SIGTERM"); await waitForExit(child); }
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	});
+	createView(root, { id: "v1", name: "x", cwd: root });
+	child = startCoordinator(root);
+	const { client } = await readyClient(root);
+	const { startedRevision } = await seedLiveRun(client, root);
+
+	const journalLinesBefore = readJournal(root).length;
+	client.send({
+		type: "state_command", commandId: "cmd-rp-1", viewId: "v1", runId: "r1", source: "job-runner",
+		kind: "run_progress",
+		payload: { statusPatch: { latestAssistantPreview: "beat-1", turns: 2, lastActivityAt: Date.now() } },
+	});
+	const progress = await client.next();
+	assert.equal(progress.type, "state_command_result");
+	assert.equal(progress.status, "applied");
+	assert.equal(progress.materializedRevision, startedRevision + 1, "transient commands still bump the revision");
+	assert.equal(readJournal(root).length, journalLinesBefore, "transient commands must not append journal records");
+
+	const state = readState(root, "v1");
+	assert.equal(state.materializedRevision, progress.materializedRevision);
+	assert.equal(state.latestAssistantPreview, "beat-1");
+	assert.equal(state.semanticState, "working");
+	const status = readStatus(root, "v1", "r1");
+	assert.equal(status.latestAssistantPreview, "beat-1");
+	assert.equal(status.turns, 2);
+});
+
+test("followup_started bootstraps the NEW run's status and never touches the parent's (F1)", async (t) => {
+	const root = freshRoot();
+	let child = null;
+	t.after(async () => {
+		if (child && isAlive(child.pid)) { child.kill("SIGTERM"); await waitForExit(child); }
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	});
+	createView(root, { id: "v1", name: "x", cwd: root });
+	child = startCoordinator(root);
+	const { client } = await readyClient(root);
+	await seedLiveRun(client, root);
+
+	// Finalize the parent run, then let a classification land (the real post-exit
+	// sequence) so the row is not manual-completion-fenced for the follow-up.
+	client.send({
+		type: "state_command", commandId: "seed-rf-1", viewId: "v1", runId: "r1", source: "job-runner",
+		kind: "run_finalized", payload: { exitCode: 0, endedAt: Date.now() },
+	});
+	assert.equal((await client.next()).status, "applied");
+	client.send({
+		type: "state_command", commandId: "seed-ac-1", viewId: "v1", runId: "r1", source: "state-runner",
+		kind: "auto_state_classified", payload: { classification: classification(Date.now()) },
+	});
+	assert.equal((await client.next()).status, "applied");
+
+	const parentBefore = JSON.stringify(readStatus(root, "v1", "r1"));
+	const startedAt = Date.now();
+	client.send({
+		type: "state_command", commandId: "cmd-fu-1", viewId: "v1", source: "service",
+		kind: "followup_started",
+		payload: {
+			newRunId: "r2",
+			statusPatch: createRunStatus({ runId: "r2", viewId: "v1", kind: "reply", prompt: "go" }, null, startedAt),
+		},
+	});
+	const result = await client.next();
+	assert.equal(result.status, "applied");
+
+	const newStatus = readStatus(root, "v1", "r2");
+	assert.ok(newStatus, "the NEW run's status file is bootstrapped");
+	assert.equal(newStatus.runId, "r2");
+	assert.equal(newStatus.processState, "alive");
+	assert.equal(JSON.stringify(readStatus(root, "v1", "r1")), parentBefore, "the parent run's status file must not be modified (F1)");
+
+	const state = readState(root, "v1");
+	assert.equal(state.currentRunId, "r2");
+	assert.equal(state.processState, "alive");
+});
+
+test("run_progress from two concurrent clients is serialized without torn writes", async (t) => {
+	const root = freshRoot();
+	let child = null;
+	t.after(async () => {
+		if (child && isAlive(child.pid)) { child.kill("SIGTERM"); await waitForExit(child); }
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	});
+	createView(root, { id: "v1", name: "x", cwd: root });
+	child = startCoordinator(root);
+	const { client: first } = await readyClient(root);
+	const { client: second } = await readyClient(root);
+	await seedLiveRun(first, root);
+
+	// Fire interleaved beats from both clients; commandIds omitted — transient
+	// kinds have no idempotency semantics (shell must not dedupe on them).
+	const sends = [];
+	for (let i = 1; i <= 10; i++) {
+		const client = i % 2 === 0 ? second : first;
+		client.send({
+			type: "state_command", viewId: "v1", runId: "r1", source: "job-runner",
+			kind: "run_progress",
+			payload: { statusPatch: { latestAssistantPreview: `beat-${i}`, turns: i, lastActivityAt: Date.now() + i } },
+		});
+		sends.push(client.next());
+	}
+	const results = await Promise.all(sends);
+	assert.equal(results.length, 10);
+	const revisions = results.map((r) => r.materializedRevision);
+	assert.equal(new Set(revisions).size, 10, "every beat gets its own revision (serialized, none lost)");
+	const sorted = revisions.slice().sort((a, b) => a - b);
+	for (let i = 1; i < sorted.length; i++) assert.equal(sorted[i], sorted[i - 1] + 1, "revisions are consecutive — none lost, none duplicated");
+
+	const state = readState(root, "v1");
+	const maxResult = results.reduce((a, b) => (b.materializedRevision > a.materializedRevision ? b : a));
+	assert.equal(state.materializedRevision, maxResult.materializedRevision, "state.json carries the highest applied revision");
+	const winner = results.find((r) => r.materializedRevision === maxResult.materializedRevision);
+	assert.equal(state.latestAssistantPreview, `beat-${results.indexOf(winner) + 1}`, "last materialized beat wins, no torn merge");
+	const status = readStatus(root, "v1", "r1");
+	assert.equal(status.turns, Number(state.latestAssistantPreview.split("-")[1]), "status matches the same winning beat");
+});
+
+test("run_progress with no materialized status is rejected stale_run and not journaled (F2)", async (t) => {
+	const root = freshRoot();
+	let child = null;
+	t.after(async () => {
+		if (child && isAlive(child.pid)) { child.kill("SIGTERM"); await waitForExit(child); }
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	});
+	createView(root, { id: "v1", name: "x", cwd: root });
+	child = startCoordinator(root);
+	const { client } = await readyClient(root);
+
+	// mark_queued only: state says a run is queued, but run_started never
+	// bootstrapped a status file for it.
+	client.send({ type: "state_command", commandId: "cmd-mq-only", viewId: "v1", source: "service", kind: "mark_queued", payload: { runId: "r1" } });
+	assert.equal((await client.next()).status, "applied");
+	const journalLinesBefore = readJournal(root).length;
+
+	client.send({
+		type: "state_command", viewId: "v1", runId: "r1", source: "job-runner",
+		kind: "run_progress", payload: { statusPatch: { turns: 1 } },
+	});
+	const result = await client.next();
+	assert.equal(result.status, "rejected");
+	assert.equal(result.reason, "stale_run");
+	assert.equal(readJournal(root).length, journalLinesBefore, "transient rejections are not journaled either");
+});
+
+test("host_run_failed applies through the coordinator and fences manual completions", async (t) => {
+	const root = freshRoot();
+	let child = null;
+	t.after(async () => {
+		if (child && isAlive(child.pid)) { child.kill("SIGTERM"); await waitForExit(child); }
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	});
+	createView(root, { id: "v1", name: "x", cwd: root });
+	child = startCoordinator(root);
+	const { client } = await readyClient(root);
+	await seedLiveRun(client, root);
+
+	client.send({
+		type: "state_command", commandId: "cmd-hrf-1", viewId: "v1", runId: "r1", source: "pty-runner",
+		kind: "host_run_failed", payload: { error: "PTY host died unexpectedly", exitCode: 1 },
+	});
+	const result = await client.next();
+	assert.equal(result.status, "applied");
+	const state = readState(root, "v1");
+	assert.equal(state.semanticState, "failed");
+	assert.equal(state.processState, "exited");
+	assert.equal(state.error, "PTY host died unexpectedly");
+	assert.equal(readStatus(root, "v1", "r1").semanticState, "failed");
 });
