@@ -12,6 +12,7 @@ import { isAlive } from "../src/core/pid.mjs";
 import * as P from "../src/core/paths.mjs";
 import { rowView } from "../src/core/rows.mjs";
 import { createView, loadRow, readPid, readState, readStatus } from "../src/core/store.mjs";
+import { startCoordinator } from "../test-support/ensure-coordinator-helper.mjs";
 
 const ROOT_DIR = fileURLToPath(new URL("../", import.meta.url));
 const RUNNER = join(ROOT_DIR, "runner", "job-runner.mjs");
@@ -341,6 +342,10 @@ test("runner does not clobber a manual completion made during post-exit model pa
 	process.env.FAKE_PI_MODE = "completed";
 	process.env.FAKE_PI_SUMMARY_DELAY_MS = "2000";
 	let runnerPid = null;
+	// Tracked coordinator: markCompleted goes through the real coordinator path,
+	// and sendStateCommand's own ensure path would spawn an UNTRACKED detached
+	// coordinator that outlives the rmSync below. The probe finds this one.
+	const coord = await startCoordinator(root);
 	try {
 		const meta = createView(root, { id: "view_1", name: "fix", cwd: root });
 		const config = makeConfig(root, "view_1", "run_1", meta.sessionFile, root, "fix the bug");
@@ -388,6 +393,7 @@ test("runner does not clobber a manual completion made during post-exit model pa
 		assert.equal(state.autoState, null);
 	} finally {
 		await killDetached(runnerPid);
+		await coord.kill();
 		delete process.env.FAKE_PI_MODE;
 		delete process.env.FAKE_PI_SUMMARY_DELAY_MS;
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });

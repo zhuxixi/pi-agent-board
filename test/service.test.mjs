@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import { createService, shouldProbePtySupport } from "../src/runtime/service.mjs";
 import { readCodeRefs } from "../src/core/code-refs-store.mjs";
@@ -13,6 +12,7 @@ import { readJournal } from "../src/core/coordinator-journal.mjs";
 import * as P from "../src/core/paths.mjs";
 import { createView, readHost, readState, readStatus, writeHost, writeHostPid, writeLaunchPrefs, writeState, writeStatus } from "../src/core/store.mjs";
 import { readFollowUpQueue } from "../src/core/follow-up-queue.mjs";
+import { startCoordinator } from "../test-support/ensure-coordinator-helper.mjs";
 
 function freshRoot() {
 	return mkdtempSync(join(tmpdir(), "agentview-service-"));
@@ -44,19 +44,6 @@ function service(root, overrides = {}) {
 		launchHost: () => ({ pid: null, configPath: "/no/host-config.json" }),
 		launchTitle: () => ({ pid: null, configPath: "/no/title-config.json" }),
 		...overrides,
-	});
-}
-
-const COORDINATOR_SCRIPT = fileURLToPath(new URL("../runner/state-coordinator.mjs", import.meta.url));
-
-/** Start a tracked coordinator for a store root so tests can kill it in finally —
- *  sendStateCommand's own ensure path would otherwise leak an untracked detached
- *  process. sendStateCommand's probe finds this one instead of spawning another
- *  (a second instance would exit immediately via the lease anyway). */
-function startCoordinator(root) {
-	return spawn(process.execPath, [COORDINATOR_SCRIPT, root], {
-		stdio: ["ignore", "pipe", "pipe"],
-		env: { ...process.env, AGENT_BOARD_ROOT: root, PI_CODING_AGENT_DIR: root },
 	});
 }
 
@@ -543,6 +530,9 @@ test("syncForegroundEvent marks a managed attached session working when user inp
 
 test("syncHostedEvent persists interactive questions and resets them on new input", async () => {
 	const root = freshRoot();
+	// markCompleted here only exercises the busy reject; pin the coordinator off
+	// so the real-coordinator ensure path cannot leak a detached process.
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
 		const svc = service(root);
@@ -568,6 +558,7 @@ test("syncHostedEvent persists interactive questions and resets them on new inpu
 		assert.equal(resumed.question, null);
 		assert.deepEqual(resumed.pendingQuestions, []);
 	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
 		rmSync(root, { recursive: true, force: true });
 	}
 });
@@ -670,7 +661,7 @@ test("completeView goes through the coordinator command path", async () => {
 	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", undefined);
 	const prevBoardRoot = setEnv("AGENT_BOARD_ROOT", root);
 	const prevPiDir = setEnv("PI_CODING_AGENT_DIR", root);
-	const coord = startCoordinator(root);
+	const coord = await startCoordinator(root);
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
 		const s = readState(root, "v1");
@@ -686,14 +677,13 @@ test("completeView goes through the coordinator command path", async () => {
 		assert.equal(record.command.source, "dashboard-user");
 		assert.equal(readState(root, "v1").semanticState, "completed");
 	} finally {
-		coord.kill();
+		await coord.kill();
 		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
 		setEnv("AGENT_BOARD_ROOT", prevBoardRoot);
 		setEnv("PI_CODING_AGENT_DIR", prevPiDir);
 		rmSync(root, { recursive: true, force: true });
 	}
 });
-
 
 test("markVisited records a durable lastVisitedAt timestamp", () => {
 	const root = freshRoot();
@@ -1222,7 +1212,7 @@ test("markCompleted clears autoState in the run status so in-flight model passes
 	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", undefined);
 	const prevBoardRoot = setEnv("AGENT_BOARD_ROOT", root);
 	const prevPiDir = setEnv("PI_CODING_AGENT_DIR", root);
-	const coord = startCoordinator(root);
+	const coord = await startCoordinator(root);
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
 		const s = readState(root, "v1");
@@ -1272,7 +1262,7 @@ test("markCompleted clears autoState in the run status so in-flight model passes
 		assert.equal(next.semanticState, "completed");
 		assert.equal(next.autoState, null);
 	} finally {
-		coord.kill();
+		await coord.kill();
 		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
 		setEnv("AGENT_BOARD_ROOT", prevBoardRoot);
 		setEnv("PI_CODING_AGENT_DIR", prevPiDir);
