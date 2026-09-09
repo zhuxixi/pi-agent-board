@@ -212,6 +212,10 @@ test("runner marks failed when the worker exits nonzero", { timeout: 20000 }, as
 	process.env.FAKE_PI_MODE = "fail";
 	process.env.AGENT_BOARD_SUMMARY_MODEL = "off";
 	let runnerPid = null;
+	// Tracked coordinator: the runner's terminal state routes through the View
+	// State Coordinator now; without this fixture the client's ensure path spawns
+	// an untracked detached coordinator that outlives the rmSync below.
+	const coord = await startCoordinator(root);
 	try {
 		const meta = createView(root, { id: "v", name: "x", cwd: root });
 		const config = makeConfig(root, "v", "r", meta.sessionFile, root, "do it");
@@ -225,6 +229,7 @@ test("runner marks failed when the worker exits nonzero", { timeout: 20000 }, as
 		assert.notEqual(status.exitCode, 0);
 	} finally {
 		await killDetached(runnerPid);
+		await coord.kill();
 		delete process.env.FAKE_PI_MODE;
 		delete process.env.AGENT_BOARD_SUMMARY_MODEL;
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
@@ -236,6 +241,10 @@ test("stopping the runner finalizes the run as stopped", { timeout: 20000 }, asy
 	process.env.FAKE_PI_MODE = "hang";
 	process.env.AGENT_BOARD_SUMMARY_MODEL = "off";
 	let runnerPid = null;
+	// Tracked coordinator: the runner's terminal state routes through the View
+	// State Coordinator now; without this fixture the client's ensure path spawns
+	// an untracked detached coordinator that outlives the rmSync below.
+	const coord = await startCoordinator(root);
 	try {
 		const meta = createView(root, { id: "v", name: "x", cwd: root });
 		const config = makeConfig(root, "v", "r", meta.sessionFile, root, "do it");
@@ -260,6 +269,7 @@ test("stopping the runner finalizes the run as stopped", { timeout: 20000 }, asy
 		assert.equal(status.semanticState, "stopped");
 	} finally {
 		await killDetached(runnerPid);
+		await coord.kill();
 		delete process.env.FAKE_PI_MODE;
 		delete process.env.AGENT_BOARD_SUMMARY_MODEL;
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
@@ -415,6 +425,23 @@ test("runner does not clobber a manual completion made during post-exit model pa
 		const state = readState(root, "view_1");
 		assert.equal(state.semanticState, "completed");
 		assert.equal(state.autoState, null);
+
+		// Issue #91 (A8 path 3): the terminal state is materialized by the
+		// coordinator, not by the runner's direct persist. The journal must carry
+		// the applied run_finalized command, and state.json must carry its
+		// revision or newer (later classification commands may bump it — they
+		// lose to the manual fence, but rejections do not move the revision).
+		const { readJournal } = await import("../src/core/coordinator-journal.mjs");
+		const records = readJournal(root);
+		const finalizeRecord = records.find((r) => r.command?.kind === "run_finalized");
+		assert.ok(finalizeRecord, "journal carries the run_finalized command");
+		assert.equal(finalizeRecord.result.status, "applied");
+		assert.equal(finalizeRecord.command.source, "job-runner");
+		assert.equal(finalizeRecord.command.runId, "run_1");
+		assert.ok(
+			state.materializedRevision >= finalizeRecord.materializedRevision,
+			"state.json is materialized at the run_finalized revision or newer",
+		);
 	} finally {
 		await killDetached(runnerPid);
 		await coord.kill();

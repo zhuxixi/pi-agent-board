@@ -9,7 +9,7 @@ import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { createConnection } from "node:net";
 import { resolve } from "node:path";
-import { applyAutoStateToStatus, autoStateEnabled, heuristicAutoState } from "../core/auto-state.mjs";
+import { applyAutoStateToStatus, autoStateEnabled, heuristicAutoState, isManualCompletion } from "../core/auto-state.mjs";
 import { appendLine, atomicWriteJson, removeFile } from "../core/atomic.mjs";
 import { finalizeRun, projectViewState, reduceEvent } from "../core/events.mjs";
 import { clearDiagnostics, appendDiagnostic, tailDiagnostics } from "../core/diagnostics.mjs";
@@ -27,7 +27,7 @@ import { isAlive, killProcess } from "../core/pid.mjs";
 import { acquireOwnedViewLock, tryAcquireOwnedViewLock } from "../core/locks.mjs";
 import { canFinalizeLegacyHost, canReplaceHost } from "../core/host-coordination.mjs";
 import { modelRefAvailable } from "../core/launch-options.mjs";
-import { sendStateCommand } from "../core/coordinator-client.mjs";
+import { sendStateCommand, coordinatorDisabled } from "../core/coordinator-client.mjs";
 import { HOST_PROBE_RETRY_MS, probeHost } from "../core/host-probe.mjs";
 import * as P from "../core/paths.mjs";
 import {
@@ -338,17 +338,36 @@ export function createService(opts) {
 	/**
 	 * Apply immediate heuristic auto-state and, when configured, queue a detached
 	 * model pass to refine the row without blocking the live Pi child.
+	 *
+	 * Issue #91 (A8, service source): the classification lands through the View
+	 * State Coordinator — the single writer of state.json/status.json. On apply,
+	 * projection-relevant fields are refreshed from the materialized state so the
+	 * caller's foreground projection (writeForegroundState) cannot clobber the
+	 * patch with stale in-memory values. Ambiguous transport outcomes (timeout /
+	 * connection_reset) never fall back to a direct write — the command may
+	 * already be journaled, and the coordinator's boot replay is the recovery
+	 * path. coordinator_disabled keeps the pre-coordinator in-memory apply.
 	 * @param {import("../core/types.mjs").ViewMeta} meta
-	 * @param {import("../core/types.mjs").RunStatus} status
+	 * @param {import("../core/types.mjs").RunStatus} status refreshed in place on apply
 	 * @param {import("../core/types.mjs").EvidenceSnapshot} evidence
-	 * @returns {boolean}
+	 * @returns {Promise<boolean>} whether the classification was applied
 	 */
-	function queueAutoState(meta, status, evidence) {
+	async function queueAutoState(meta, status, evidence) {
 		if (!autoStateEnabled()) return false;
 		if (status.processState === "alive" || status.semanticState === "failed" || status.semanticState === "stopped") return false;
 		const latest = latestEvidenceText(evidence) || status.latestAssistantPreview || status.summary || "";
 		if (!latest.trim()) return false;
-		const changed = applyAutoStateToStatus(status, heuristicAutoState(latest, { lastAgentActivityAt: status.lastAgentActivityAt ?? null }), Date.now());
+		const classification = heuristicAutoState(latest, { lastAgentActivityAt: status.lastAgentActivityAt ?? null });
+		const commandRunId = status.runId === "foreground" ? null : status.runId;
+		const result = await sendStateCommand(root, {
+			type: "state_command",
+			viewId: meta.id,
+			runId: commandRunId,
+			source: "service",
+			kind: "auto_state_classified",
+			expectedRevision: null,
+			payload: { classification },
+		});
 		if (opts.autoStateRunnerScript) {
 			try {
 				launchAutoStateImpl(root, {
@@ -363,7 +382,25 @@ export function createService(opts) {
 				appendDiagnostic(root, meta.id, { source: "service", level: "warn", code: "auto_state_launch_failed", message: "Auto-state classifier could not be launched", details: { error: err instanceof Error ? err.message : String(err) } });
 			}
 		}
-		return changed;
+		if (result.status === "applied") {
+			const fresh = readState(root, meta.id);
+			if (fresh) {
+				status.semanticState = fresh.semanticState;
+				status.summary = fresh.summary;
+				status.question = fresh.question;
+				status.autoState = fresh.autoState ?? null;
+			}
+			return true;
+		}
+		if (result.reason === "coordinator_disabled") {
+			return applyAutoStateToStatus(status, classification, Date.now());
+		}
+		if (result.reason === "manual_fence" || result.reason === "no_change" || result.reason === "stale_run") {
+			// Designed fences — informational, not errors.
+			return false;
+		}
+		appendDiagnostic(root, meta.id, { source: "service", runId: commandRunId, level: "warn", code: "auto_state_command_ambiguous", message: `Auto-state classification outcome unknown (${result.reason}); coordinator replay will recover`, details: { reason: result.reason } });
+		return false;
 	}
 
 	/** @param {string} viewId @param {string|null} runId */
@@ -1196,8 +1233,15 @@ export function createService(opts) {
 		}
 	}
 
-	/** @param {import("../core/store.mjs").Row} row @param {any} event */
-	function syncRowEvent(row, event) {
+	/**
+	 * Mirror a foreground/hosted session event into the row state. Async since
+	 * issue #91: the terminal classification routes through the View State
+	 * Coordinator command socket (fire-and-forget callers are fine — the returned
+	 * promise resolves after the classification outcome is known).
+	 * @param {import("../core/store.mjs").Row} row @param {any} event
+	 * @returns {Promise<boolean>} whether a managed row was updated
+	 */
+	async function syncRowEvent(row, event) {
 		const now = Date.now();
 		const status = statusFromRow(row);
 		let evidence = readEvidence(root, row.meta.id);
@@ -1224,21 +1268,47 @@ export function createService(opts) {
 		}
 
 		if (event.type === "agent_end") {
+			// #46-class fence (issue #91): a manual completion is a user verdict that
+			// outlives the turn. A late/duplicate agent_end after markCompleted must
+			// not resurrect the row via finalizeRun + projection — skip all semantic
+			// writes (baseline, steering, classification) and keep evidence only.
+			// The fence read is repeated after the classification await below; the
+			// window between the two reads is covered by the coordinator's own
+			// manual_fence rejection plus the guarded tail write.
+			if (isManualCompletion(readState(root, row.meta.id))) {
+				status.evidenceSummary = summarizeEvidence(evidence);
+				writeEvidence(root, evidence);
+				return false;
+			}
 			finalizeRun(status, { exitCode: 0 }, now);
 			finalizeEvidence(evidence, status, now);
 			const steering = readSteering(root, row.meta.id);
+			let classificationQueued = false;
 			if (steering.status === "plan_requested" || steering.status === "changes_requested") {
 				recordPlanReady(root, row.meta.id, { planText: latestEvidenceText(evidence) || status.latestAssistantPreview || evidence.summary || "Plan ready", runId: status.runId });
 				status.semanticState = "needs_input";
 				status.question = "Approve this plan?";
 				status.summary = "Plan ready for approval";
-			} else if (queueAutoState(row.meta, status, evidence)) {
-				finalizeEvidence(evidence, status, now);
+			} else {
+				// Baseline the exited projection BEFORE the classification command:
+				// the coordinator's delegated auto-state rules key on processState,
+				// and its materialized patch lands after this write and wins. When
+				// the coordinator applies, the projection write below is skipped so
+				// the stale in-memory fields cannot clobber the patch (#46 class).
+				// The legacy coordinator_disabled path applies in-memory instead and
+				// still needs the tail projection write (pre-coordinator behavior).
+				writeForegroundState(row, status);
+				classificationQueued = await queueAutoState(row.meta, status, evidence);
+				if (classificationQueued) finalizeEvidence(evidence, status, now);
 			}
 			status.evidenceSummary = summarizeEvidence(evidence);
 			writeEvidence(root, evidence);
 			updateCodeRefsFromEvidence(root, row.meta.id, evidence, row.meta);
-			writeForegroundState(row, status);
+			// Re-read the fence after the classification await: a completion landing
+			// between the baseline write and the coordinator's decision read gets
+			// manual_fence back (classificationQueued=false), and writing the stale
+			// in-memory projection here would clobber it (#46 class).
+			if (!isManualCompletion(readState(root, row.meta.id)) && !(classificationQueued && !coordinatorDisabled())) writeForegroundState(row, status);
 			pruneWarmHosts({ keepViewId: row.meta.id });
 			// Async delivery (ack-gated, issue #70 A13): fire-and-forget here — the
 			// queue item's own state records the outcome, ordering is preserved by
@@ -1819,20 +1889,20 @@ export function createService(opts) {
 		 * looking stale after the user types a follow-up in the real Pi session.
 		 * @param {string|undefined} sessionFile
 		 * @param {any} event
-		 * @returns {boolean} whether a managed row was updated
+		 * @returns {Promise<boolean>} whether a managed row was updated
 		 */
 		syncForegroundEvent(sessionFile, event) {
-			if (!sessionFile || !event?.type) return false;
+			if (!sessionFile || !event?.type) return Promise.resolve(false);
 			const row = rowForSession(sessionFile);
-			if (!row) return false;
+			if (!row) return Promise.resolve(false);
 			return syncRowEvent(row, event);
 		},
 
 		/** @param {string|undefined} viewId @param {any} event */
 		syncHostedEvent(viewId, event) {
-			if (!viewId || !event?.type) return false;
+			if (!viewId || !event?.type) return Promise.resolve(false);
 			const row = loadRow(root, viewId);
-			if (!row) return false;
+			if (!row) return Promise.resolve(false);
 			return syncRowEvent(row, event);
 		},
 

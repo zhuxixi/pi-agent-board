@@ -505,7 +505,7 @@ test("dispatch creates per-instance config and endpoint paths", () => {
 	}
 });
 
-test("syncForegroundEvent marks a managed attached session working when user inputs", () => {
+test("syncForegroundEvent marks a managed attached session working when user inputs", async () => {
 	const root = freshRoot();
 	try {
 		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
@@ -516,7 +516,7 @@ test("syncForegroundEvent marks a managed attached session working when user inp
 		s.question = "Proceed?";
 		writeState(root, s);
 
-		assert.equal(service(root).syncForegroundEvent(meta.sessionFile, { type: "input", text: "yes" }), true);
+		assert.equal(await service(root).syncForegroundEvent(meta.sessionFile, { type: "input", text: "yes" }), true);
 		const next = readState(root, "v1");
 		assert.equal(next.semanticState, "working");
 		assert.equal(next.processState, "alive");
@@ -536,7 +536,7 @@ test("syncHostedEvent persists interactive questions and resets them on new inpu
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
 		const svc = service(root);
-		assert.equal(svc.syncHostedEvent("v1", {
+		assert.equal(await svc.syncHostedEvent("v1", {
 			type: "tool_execution_start",
 			toolCallId: "q1",
 			toolName: "ask_questions",
@@ -551,7 +551,7 @@ test("syncHostedEvent persists interactive questions and resets them on new inpu
 		assert.equal((await svc.markCompleted("v1")).ok, false);
 		assert.deepEqual(await svc.reply("v1", "safe"), { ok: false, error: "Attach to answer the pending question" });
 
-		assert.equal(svc.syncHostedEvent("v1", { type: "input", text: "safe" }), true);
+		assert.equal(await svc.syncHostedEvent("v1", { type: "input", text: "safe" }), true);
 		const resumed = readState(root, "v1");
 		assert.equal(resumed.semanticState, "working");
 		assert.equal(resumed.needsInput, false);
@@ -563,7 +563,7 @@ test("syncHostedEvent persists interactive questions and resets them on new inpu
 	}
 });
 
-test("syncHostedEvent persists code refs (github.json) from bash gh commands", { skip: !gitAvailable() }, () => {
+test("syncHostedEvent persists code refs (github.json) from bash gh commands", { skip: !gitAvailable() }, async () => {
 	const root = freshRoot();
 	const repo = freshRoot();
 	try {
@@ -571,7 +571,7 @@ test("syncHostedEvent persists code refs (github.json) from bash gh commands", {
 		execFileSync("git", ["-C", repo, "remote", "add", "origin", "https://github.com/acme/widget.git"], { stdio: "ignore" });
 		createView(root, { id: "v1", name: "a", cwd: repo, repoRoot: repo });
 		const svc = service(root);
-		assert.equal(svc.syncHostedEvent("v1", {
+		assert.equal(await svc.syncHostedEvent("v1", {
 			type: "tool_execution_start",
 			toolCallId: "t1",
 			toolName: "bash",
@@ -587,15 +587,20 @@ test("syncHostedEvent persists code refs (github.json) from bash gh commands", {
 
 test("syncForegroundEvent finalizes attached foreground turn from assistant output", async () => {
 	const root = freshRoot();
+	// Foreground classification now routes through the coordinator; pin it off so
+	// the legacy direct-apply path keeps this unit-level assertions exact and no
+	// detached coordinator can leak past the rmSync. The real-coordinator
+	// foreground path has its own integration test below.
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");
 	try {
 		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
 		const svc = service(root);
-		svc.syncForegroundEvent(meta.sessionFile, { type: "agent_start" });
-		svc.syncForegroundEvent(meta.sessionFile, {
+		await svc.syncForegroundEvent(meta.sessionFile, { type: "agent_start" });
+		await svc.syncForegroundEvent(meta.sessionFile, {
 			type: "message_end",
 			message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "All done." }] },
 		});
-		svc.syncForegroundEvent(meta.sessionFile, { type: "agent_end" });
+		await svc.syncForegroundEvent(meta.sessionFile, { type: "agent_end" });
 
 		const next = readState(root, "v1");
 		assert.equal(next.semanticState, "idle");
@@ -604,6 +609,7 @@ test("syncForegroundEvent finalizes attached foreground turn from assistant outp
 		assert.equal(next.autoState?.kind, "in_progress");
 		assert.equal(svc.row("v1").alive, false);
 	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
 		rmSync(root, { recursive: true, force: true });
 	}
 });
@@ -611,22 +617,98 @@ test("syncForegroundEvent finalizes attached foreground turn from assistant outp
 test("syncForegroundEvent auto-completes foreground turn when auto-done flag is off", async () => {
 	const root = freshRoot();
 	process.env.AGENT_BOARD_AUTO_STATE_NO_DONE = "0";
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");
 	try {
 		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
 		const svc = service(root);
-		svc.syncForegroundEvent(meta.sessionFile, { type: "agent_start" });
-		svc.syncForegroundEvent(meta.sessionFile, {
+		await svc.syncForegroundEvent(meta.sessionFile, { type: "agent_start" });
+		await svc.syncForegroundEvent(meta.sessionFile, {
 			type: "message_end",
 			message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "All done." }] },
 		});
-		svc.syncForegroundEvent(meta.sessionFile, { type: "agent_end" });
+		await svc.syncForegroundEvent(meta.sessionFile, { type: "agent_end" });
 
 		const next = readState(root, "v1");
 		assert.equal(next.semanticState, "completed");
 		assert.equal(next.processState, "exited");
 		assert.equal(next.autoState?.kind, "done");
 	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
 		delete process.env.AGENT_BOARD_AUTO_STATE_NO_DONE;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("late foreground agent_end after a manual completion is fenced (#46 class, issue #91)", async () => {
+	const root = freshRoot();
+	// The fence is coordinator-independent (a plain disk read); coordinator off
+	// keeps this unit-level and avoids spawning a coordinator for it.
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");
+	try {
+		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const svc = service(root);
+		await svc.syncForegroundEvent(meta.sessionFile, { type: "agent_start" });
+		await svc.syncForegroundEvent(meta.sessionFile, {
+			type: "message_end",
+			message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "All done." }] },
+		});
+		await svc.syncForegroundEvent(meta.sessionFile, { type: "agent_end" });
+		assert.equal((await svc.markCompleted("v1")).ok, true);
+		const completed = readState(root, "v1");
+		assert.equal(completed.semanticState, "completed");
+
+		// A stale/duplicate agent_end after the manual completion must not
+		// resurrect the row via finalizeRun + projection.
+		await svc.syncForegroundEvent(meta.sessionFile, { type: "agent_end" });
+
+		const next = readState(root, "v1");
+		assert.equal(next.semanticState, "completed");
+		assert.equal(next.autoState ?? null, null, "manual fence signal (completed + autoState null) must survive");
+		assert.equal(next.summary, completed.summary, "completion summary must survive the late event");
+	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("syncForegroundEvent routes foreground classification through the coordinator (A8, service source)", async () => {
+	const root = freshRoot();
+	process.env.AGENT_BOARD_AUTO_STATE_NO_DONE = "0";
+	process.env.AGENT_BOARD_SUMMARY_MODEL = "off";
+	// Tracked coordinator: prevents a detached-coordinator leak past the rmSync
+	// (the client's ensure path would otherwise spawn one).
+	const coord = await startCoordinator(root);
+	try {
+		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const svc = service(root);
+		await svc.syncForegroundEvent(meta.sessionFile, { type: "agent_start" });
+		await svc.syncForegroundEvent(meta.sessionFile, {
+			type: "message_end",
+			message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "All done." }] },
+		});
+		await svc.syncForegroundEvent(meta.sessionFile, { type: "agent_end" });
+
+		// The classification is materialized by the coordinator (not by the
+		// service's direct write): the journal carries the service-sourced
+		// command, and state.json carries its revision with CONSISTENT fields —
+		// the foreground projection must not clobber semanticState back to the
+		// pre-classification value while keeping autoState (#46-class mix).
+		const records = readJournal(root);
+		const classifyRecord = records.find(
+			(r) => r.command?.kind === "auto_state_classified" && r.command?.source === "service",
+		);
+		assert.ok(classifyRecord, "journal carries the service-sourced classification");
+		assert.equal(classifyRecord.result.status, "applied");
+
+		const next = readState(root, "v1");
+		assert.ok(next.materializedRevision >= classifyRecord.materializedRevision);
+		assert.equal(next.semanticState, "completed");
+		assert.equal(next.autoState?.kind, "done");
+		assert.equal(next.autoState?.source, "heuristic");
+	} finally {
+		await coord.kill();
+		delete process.env.AGENT_BOARD_AUTO_STATE_NO_DONE;
+		delete process.env.AGENT_BOARD_SUMMARY_MODEL;
 		rmSync(root, { recursive: true, force: true });
 	}
 });

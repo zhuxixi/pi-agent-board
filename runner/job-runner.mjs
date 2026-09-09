@@ -23,7 +23,7 @@ import { launchRun } from "../src/core/launch.mjs";
 import * as P from "../src/core/paths.mjs";
 import { readState, readStatus, readMeta, writeState, writeStatus } from "../src/core/store.mjs";
 import { readSteering, recordPlanReady } from "../src/core/steering.mjs";
-import { sendStateCommand } from "../src/core/coordinator-client.mjs";
+import { sendStateCommand, coordinatorDisabled } from "../src/core/coordinator-client.mjs";
 import { buildApprovePlanPrompt, buildPlanChangesPrompt, buildPlanRequestPrompt } from "../src/core/steering-prompts.mjs";
 
 const WRITE_THROTTLE_MS = 250;
@@ -126,6 +126,83 @@ function main() {
 		return true;
 	};
 
+	/**
+	 * Runner-owned evidence artifacts (evidence files + code-refs). Written
+	 * directly — the coordinator owns state.json/status.json, not these.
+	 */
+	const persistEvidenceArtifacts = () => {
+		status.evidenceSummary = summarizeEvidence(evidence);
+		writeRunEvidence(root, evidence);
+		writeEvidence(root, evidence);
+		updateCodeRefsFromEvidence(root, viewId, evidence, meta);
+	};
+
+	/**
+	 * Refresh the evidence mirrors (status.evidenceSummary / state.review) from
+	 * FRESH post-decision reads, fenced on manual completions — the semantic
+	 * fields come from disk, so this can never overwrite a coordinator-materialized
+	 * patch or the user's verdict. Same deferral pattern as
+	 * runner/state-runner.mjs; PR #2 moves the mirrors behind the coordinator too.
+	 */
+	const refreshEvidenceMirrors = () => {
+		status.evidenceSummary = summarizeEvidence(evidence);
+		const freshStatus = readStatus(root, viewId, runId);
+		if (freshStatus && !isManualCompletion(freshStatus)) {
+			freshStatus.evidenceSummary = status.evidenceSummary;
+			writeStatus(root, freshStatus);
+		}
+		const freshState = readState(root, viewId);
+		if (freshState && !isManualCompletion(freshState)) {
+			freshState.review = status.evidenceSummary;
+			writeState(root, freshState);
+		}
+	};
+
+	/**
+	 * Materialize the run's terminal state through the View State Coordinator
+	 * (issue #91, A8 path 3): the runner submits minimal facts and the
+	 * coordinator computes terminal semantics via finalizeRun, so a manual
+	 * completion landing before the command is fenced by the coordinator
+	 * (manual_fence), not by a file re-read (#46 class). Evidence artifacts stay
+	 * direct (runner-owned). Ambiguous outcomes (timeout / connection_reset)
+	 * NEVER fall back to a direct write: the command may already be journaled,
+	 * and the coordinator's boot replay is the recovery path.
+	 * coordinator_disabled keeps the pre-coordinator direct persist.
+	 * @param {{ exitCode: number|null, stoppedByUser: boolean }} facts
+	 * @returns {Promise<boolean>} whether the final state is known materialized
+	 */
+	const finalizeThroughCoordinator = async ({ exitCode, stoppedByUser: stopped }) => {
+		const payload = { exitCode, stoppedByUser: stopped };
+		if (status.endedAt != null) payload.endedAt = status.endedAt;
+		if (status.latestAssistantPreview) payload.latestAssistantPreview = status.latestAssistantPreview;
+		if (status.lastAgentActivityAt != null) payload.lastAgentActivityAt = status.lastAgentActivityAt;
+		const result = await sendStateCommand(root, {
+			type: "state_command",
+			viewId,
+			runId,
+			source: "job-runner",
+			kind: "run_finalized",
+			expectedRevision: null,
+			payload,
+		});
+		if (result.status === "applied") {
+			const fresh = readStatus(root, viewId, runId);
+			if (fresh) Object.assign(status, fresh);
+			refreshEvidenceMirrors();
+			return true;
+		}
+		if (result.reason === "coordinator_disabled") {
+			persist(true);
+			return true;
+		}
+		if (result.reason === "stale_run") {
+			// Duplicate finalize or the run was already superseded — nothing to do.
+			return false;
+		}
+		appendDiagnostic(root, viewId, { source: "runner", runId, level: "warn", code: "run_finalize_command_ambiguous", message: `Run finalization outcome unknown (${result.reason}); coordinator replay will recover`, details: { reason: result.reason } });
+		return false;
+	};
+
 	const scheduleFlush = () => {
 		if (flushTimer) {
 			dirty = true;
@@ -197,16 +274,17 @@ function main() {
 	process.on("SIGTERM", stop);
 	process.on("SIGINT", stop);
 
-	worker.on("error", (err) => {
+	worker.on("error", async (err) => {
 		status.error = `Failed to launch worker: ${err instanceof Error ? err.message : String(err)}`;
 		appendDiagnostic(root, viewId, { source: "runner", runId, level: "error", code: "worker_error", message: status.error, details: {} });
 		finalizeRun(status, { exitCode: 1, stoppedByUser }, Date.now());
 		finalizeEvidence(evidence, status, Date.now());
-		persist(true);
+		persistEvidenceArtifacts();
+		await finalizeThroughCoordinator({ exitCode: 1, stoppedByUser });
 		process.exit(1);
 	});
 
-	worker.on("close", (code) => {
+	worker.on("close", async (code) => {
 		if (buffer.trim()) onLine(buffer);
 		if (flushTimer) {
 			clearTimeout(flushTimer);
@@ -219,21 +297,27 @@ function main() {
 		// dashboard flips to its final state at once. Then try to classify the final
 		// bucket and upgrade the summary with cheap model passes. Slow/unreachable
 		// model calls must never stall the row indefinitely.
-		persist(true);
+		//
+		// Issue #91 (A8 path 3): the terminal status/state materialize through the
+		// View State Coordinator (finalizeThroughCoordinator) — only evidence
+		// artifacts are written directly here. The in-flight hot-path flush was
+		// cancelled above, so no throttled write can race the coordinator's patch.
+		persistEvidenceArtifacts();
+		await finalizeThroughCoordinator({ exitCode: code ?? 0, stoppedByUser });
 		applyHeuristicAutoState(config, status, evidence)
 			.then((changed) => {
 				if (changed) {
 					finalizeEvidence(evidence, status, Date.now());
-					status.evidenceSummary = summarizeEvidence(evidence);
-					persistUnlessManual(true);
+					if (coordinatorDisabled()) persistUnlessManual(true);
+					else refreshEvidenceMirrors();
 				}
 				return maybeModelAutoState(config, status, evidence);
 			})
 			.then((changed) => {
 				if (changed) {
 					finalizeEvidence(evidence, status, Date.now());
-					status.evidenceSummary = summarizeEvidence(evidence);
-					persistUnlessManual(true);
+					if (coordinatorDisabled()) persistUnlessManual(true);
+					else refreshEvidenceMirrors();
 				}
 				return maybeModelSummary(config, status);
 			})
