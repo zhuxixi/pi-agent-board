@@ -162,6 +162,37 @@ test("resolver finalizes a provably-dead legacy alive host and self-heals onto a
 	}
 });
 
+test("resolver replaces an exited host whose claimPid is still alive (issue #99)", async () => {
+	const root = freshRoot();
+	try {
+		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeFileSync(meta.sessionFile, "");
+		// The bug's exact shape: the host ran to completion (exited, exitCode 0,
+		// stopReason child_exit) but its claimPid — the dashboard process that
+		// wrote the claim — is STILL ALIVE (hostRecord defaults claimPid to
+		// process.pid). Before the fix, canReplaceHost saw the live claim as
+		// "unknown" and the resolver pended to "host start timed out".
+		hostRecord(root, "v1", {
+			instanceId: "i1",
+			state: "exited",
+			runnerPid: 999999,
+			childPid: null,
+			endedAt: Date.now(),
+			exitCode: 0,
+			stopReason: "child_exit",
+		});
+		const probe = scriptProbe(["ready"]);
+		const spawns = [];
+		const svc = resolverService(root, healServiceOverrides(probe, spawns));
+		const result = await svc.resolveAttachTarget("v1", { timeoutMs: 2_000 });
+		assert.equal(result.kind, "pty", `must replace the exited host despite the live claimPid: ${JSON.stringify(result)}`);
+		assert.equal(spawns.length, 1, "exactly one fresh claim spawn");
+		assert.notEqual(result.instanceId, "i1", "attaches to the replacement instance");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("resolver keeps pending for a legacy alive host whose runner pid is still alive (issue #87 conservative path)", async () => {
 	const root = freshRoot();
 	try {

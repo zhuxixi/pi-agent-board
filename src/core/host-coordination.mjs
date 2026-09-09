@@ -57,25 +57,27 @@ export function processIdentityState(identity, observed, spawnedAt) {
 const SAFE_TO_RELEASE = new Set(["not_started", "dead", "foreign"]);
 
 /**
- * Whether an exited/failed host can be replaced by a new claim. Every role
- * (runner, child, provisional-claim launcher) must be provably gone; any
- * `unknown` observation or an active launch lease blocks replacement.
+ * Whether an exited/failed host can be replaced by a new claim. The runner and
+ * child roles must be provably gone; any `unknown` observation or an active
+ * launch lease blocks replacement. The claim role does NOT participate: claim
+ * protection (a launcher mid-transaction between claim and spawn) only matters
+ * while the host is `starting`, and this gate only ever sees terminal hosts —
+ * a terminal host cannot still be being launched (issue #99: a live claimPid —
+ * the dashboard process that wrote the claim — must not block re-attach).
  * @param {{
  *   host: HostStatus|null|undefined,
  *   runnerObservation: string,
  *   childObservation: string,
- *   claimObservation: string,
  *   launchLeaseActive: boolean,
  * }} input
  * @returns {boolean}
  */
-export function canReplaceHost({ host, runnerObservation, childObservation, claimObservation, launchLeaseActive }) {
+export function canReplaceHost({ host, runnerObservation, childObservation, launchLeaseActive }) {
 	if (!host || (host.state !== "exited" && host.state !== "failed")) return false;
 	if (launchLeaseActive) return false;
 	return (
 		SAFE_TO_RELEASE.has(runnerObservation) &&
-		SAFE_TO_RELEASE.has(childObservation) &&
-		SAFE_TO_RELEASE.has(claimObservation)
+		SAFE_TO_RELEASE.has(childObservation)
 	);
 }
 
