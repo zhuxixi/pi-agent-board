@@ -320,6 +320,68 @@ test("stopping the runner finalizes the run as stopped", { timeout: 20000 }, asy
 	}
 });
 
+test("during-run progress materializes through the coordinator without journal growth", { timeout: 20000 }, async () => {
+	const root = mkdtempSync(join(tmpdir(), "agentview-run-progress-"));
+	process.env.FAKE_PI_MODE = "hang";
+	process.env.AGENT_BOARD_SUMMARY_MODEL = "off";
+	let runnerPid = null;
+	// Tracked coordinator: run_started/progress beats route through it; the
+	// tracked fixture prevents an untracked detached twin past the rmSync.
+	const coord = await startCoordinator(root);
+	try {
+		const meta = createView(root, { id: "v", name: "x", cwd: root });
+		const config = makeConfig(root, "v", "r", meta.sessionFile, root, "do it");
+		runnerPid = launchRun(root, config, { runnerScript: RUNNER }).pid;
+
+		// run_started materialized: status.json working + row pinned to the run.
+		const working = await waitFor(() => {
+			const s = readStatus(root, "v", "r");
+			return s && s.semanticState === "working" ? s : null;
+		});
+		assert.ok(working, "run_started materialized a working status");
+		const startedState = await waitFor(() => {
+			const s = readState(root, "v");
+			return s && s.currentRunId === "r" && s.processState === "alive" && s.semanticState === "working" ? s : null;
+		});
+		assert.ok(startedState, "run_started pinned the row to the live run");
+		const revAfterStart = startedState.materializedRevision ?? 0;
+
+		// The pid beat lands through the coordinator (the runner never writes
+		// status.json directly anymore — run_started carried pid null).
+		const withPid = await waitFor(() => {
+			const s = readStatus(root, "v", "r");
+			return s && s.pid > 0 ? s : null;
+		});
+		assert.ok(withPid, "pid beat materialized through the coordinator");
+
+		// An event-driven beat advanced the shared materializedRevision.
+		const beatState = await waitFor(() => {
+			const s = readState(root, "v");
+			return s && (s.materializedRevision ?? 0) > revAfterStart ? s : null;
+		});
+		assert.ok(beatState, "progress beats bump materializedRevision");
+
+		// Transient by design: ZERO run_progress records in the journal, and
+		// every journal line stays parseable (torn-tail repair intact).
+		const { readJournal, journalPath } = await import("../src/core/coordinator-journal.mjs");
+		const progressRecords = readJournal(root).filter((r) => r.command?.kind === "run_progress");
+		assert.equal(progressRecords.length, 0, "run_progress is transient — never journaled");
+		const { readFileSync } = await import("node:fs");
+		const raw = readFileSync(journalPath(root), "utf8").trim();
+		const lines = raw ? raw.split("\n") : [];
+		assert.ok(lines.length >= 1, "journal carries the journaled commands");
+		for (const line of lines) {
+			assert.doesNotThrow(() => JSON.parse(line), "journal line parseable");
+		}
+	} finally {
+		await killDetached(runnerPid);
+		await coord.kill();
+		delete process.env.FAKE_PI_MODE;
+		delete process.env.AGENT_BOARD_SUMMARY_MODEL;
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
 test("runner keeps a completed fake worker idle when auto-done is disabled", { timeout: 20000 }, async () => {
 	const root = mkdtempSync(join(tmpdir(), "agentview-run-nodone-"));
 	process.env.FAKE_PI_MODE = "completed";

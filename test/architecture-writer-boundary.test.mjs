@@ -36,11 +36,10 @@ const WRITE_STATE_ALLOWLIST = new Map([
 	// a PR #2 migration item. The non-rotting test passes trivially here (the
 	// exported definitions always mention the writers) — by design.
 	["src/core/store.mjs", "定义模块（非 importer）：createView bootstrap 初始化写在本模块内部，PR #2 迁移；此条目仅作记录，导入扫描永不命中"],
-	// During-run throttled persist (WRITE_THROTTLE_MS=250), refreshEvidenceMirrors,
-	// plan-ready prompt write ("Approve this plan?") and follow-up next-run
-	// bootstrap. No markCompleted race: the coordinator's busy/manual fences own
-	// that decision (Task 8).
-	["runner/job-runner.mjs", "PR #1: during-run 热路径节流写（250ms）+ refreshEvidenceMirrors + plan-ready/follow-up bootstrap 写；markCompleted 竞争已由 coordinator busy/manual 围栏治理，其余待 PR #2 迁移"],
+	// AGENT_BOARD_COORDINATOR=off escape hatch only (documented designed
+	// exception): boot/throttle/plan-ready/follow-up direct writes live here so
+	// job-runner.mjs itself stays write-free. PR #2 Task 3.
+	["runner/job-runner-legacy.mjs", "PR #2: coordinator_disabled 逃生门的全部直写（boot/热路径/plan-ready/follow-up bootstrap 的 legacy 分支），设计内豁免"],
 	// Two groups, both manually-fenced: (1) the full legacy classify-persist
 	// inside the coordinator_disabled escape hatch; (2) post-decision evidence
 	// mirrors (status.evidenceSummary / state.review) written from FRESH reads
