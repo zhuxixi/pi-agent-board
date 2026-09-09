@@ -174,6 +174,40 @@ test("coordinator applies mark_completed and materializes state with revision", 
 	assert.equal(state.materializedRevision, result.materializedRevision);
 });
 
+test("legacy view without materializedRevision gets revision 1 on first coordinator touch", async (t) => {
+	const root = freshRoot();
+	let child = null;
+	t.after(async () => {
+		if (child && isAlive(child.pid)) {
+			child.kill("SIGTERM");
+			await waitForExit(child);
+		}
+		rmSync(root, { recursive: true, force: true });
+	});
+	// createView rows carry no materializedRevision — the legacy precondition.
+	createView(root, { id: "v1", name: "x", cwd: root });
+	assert.equal(readState(root, "v1").materializedRevision, undefined);
+	child = startCoordinator(root);
+	const { client } = await readyClient(root);
+
+	client.send({
+		type: "state_command",
+		commandId: "cmd-legacy-1",
+		viewId: "v1",
+		source: "dashboard-user",
+		kind: "mark_completed",
+		expectedRevision: null,
+		payload: {},
+	});
+	const result = await client.next();
+	assert.equal(result.type, "state_command_result");
+	assert.equal(result.status, "applied");
+	// Legacy adoption stamps as part of the first applied command's single
+	// materialization write: exactly 1, not 2 (no separate adoption write).
+	assert.equal(result.materializedRevision, 1);
+	assert.equal(readState(root, "v1").materializedRevision, 1);
+});
+
 test("duplicate commandId returns the original result without re-applying", async (t) => {
 	const root = freshRoot();
 	let child = null;
