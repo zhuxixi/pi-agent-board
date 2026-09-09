@@ -2008,7 +2008,6 @@ function observeHostForReplace(host) {
 		host,
 		runnerObservation: conservativeObservation(host?.runnerPid ?? null),
 		childObservation: conservativeObservation(host?.childPid ?? null),
-		claimObservation: conservativeObservation(host?.claimPid ?? null),
 		launchLeaseActive: false,
 	};
 }

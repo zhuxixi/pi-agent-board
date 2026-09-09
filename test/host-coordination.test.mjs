@@ -29,9 +29,37 @@ test("process identity states", () => {
 
 test("canReplaceHost refuses unknown observations", () => {
 	const host = { state: "failed" };
-	assert.equal(canReplaceHost({ host, runnerObservation: "unknown", childObservation: "dead", claimObservation: "dead", launchLeaseActive: false }), false);
-	assert.equal(canReplaceHost({ host, runnerObservation: "dead", childObservation: "not_started", claimObservation: "dead", launchLeaseActive: false }), true);
-	assert.equal(canReplaceHost({ host, runnerObservation: "dead", childObservation: "dead", claimObservation: "dead", launchLeaseActive: true }), false);
+	assert.equal(canReplaceHost({ host, runnerObservation: "unknown", childObservation: "dead", launchLeaseActive: false }), false);
+	assert.equal(canReplaceHost({ host, runnerObservation: "dead", childObservation: "not_started", launchLeaseActive: false }), true);
+	assert.equal(canReplaceHost({ host, runnerObservation: "dead", childObservation: "dead", launchLeaseActive: true }), false);
+});
+
+test("canReplaceHost allows replacing a terminal host whose claimPid is still alive (issue #99)", () => {
+	// The bug: an exited/failed host keeps its claimPid (the dashboard process
+	// that wrote the claim), and a live pid observed as "unknown" used to block
+	// replacement forever — attach pended to "host start timed out". Claim
+	// protection only matters while a claim is mid-transaction (state
+	// "starting"); a terminal host cannot still be being launched.
+	assert.equal(canReplaceHost({ host: { state: "exited" }, runnerObservation: "dead", childObservation: "dead", launchLeaseActive: false }), true);
+	assert.equal(canReplaceHost({ host: { state: "failed" }, runnerObservation: "dead", childObservation: "dead", launchLeaseActive: false }), true);
+});
+
+test("canReplaceHost still refuses unknown runner/child observations (issue #99 conservatism)", () => {
+	assert.equal(canReplaceHost({ host: { state: "exited" }, runnerObservation: "unknown", childObservation: "dead", launchLeaseActive: false }), false);
+	assert.equal(canReplaceHost({ host: { state: "exited" }, runnerObservation: "dead", childObservation: "unknown", launchLeaseActive: false }), false);
+	assert.equal(canReplaceHost({ host: { state: "failed" }, runnerObservation: "unknown", childObservation: "unknown", launchLeaseActive: false }), false);
+});
+
+test("canReplaceHost refuses non-terminal hosts and null host (issue #99)", () => {
+	for (const state of ["starting", "alive", "stopping"]) {
+		assert.equal(canReplaceHost({ host: { state }, runnerObservation: "dead", childObservation: "dead", launchLeaseActive: false }), false, `state ${state} must refuse`);
+	}
+	assert.equal(canReplaceHost({ host: null, runnerObservation: "dead", childObservation: "dead", launchLeaseActive: false }), false);
+});
+
+test("canReplaceHost SAFE_TO_RELEASE boundary regression (issue #99)", () => {
+	assert.equal(canReplaceHost({ host: { state: "exited" }, runnerObservation: "foreign", childObservation: "dead", launchLeaseActive: false }), true, "foreign runner (pid reuse) is releasable");
+	assert.equal(canReplaceHost({ host: { state: "exited" }, runnerObservation: "not_started", childObservation: "not_started", launchLeaseActive: false }), true);
 });
 
 test("canFinalizeLegacyHost requires legacy record + dead pid + unreachable endpoint", () => {
