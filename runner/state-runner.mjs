@@ -9,10 +9,11 @@
 import { spawn } from "node:child_process";
 import { readJson } from "../src/core/atomic.mjs";
 import { appendDiagnostic } from "../src/core/diagnostics.mjs";
-import { applyAutoStateToStatus, applyAutoStateToViewState, autoStateEnabled, autoStateFromModelOrHeuristic, autoStateModel, buildAutoStatePrompt, heuristicAutoState } from "../src/core/auto-state.mjs";
+import { applyAutoStateToStatus, applyAutoStateToViewState, autoStateEnabled, autoStateFromModelOrHeuristic, autoStateModel, buildAutoStatePrompt, heuristicAutoState, isManualCompletion } from "../src/core/auto-state.mjs";
 import { finalizeEvidence, readEvidence, summarizeEvidence, writeEvidence } from "../src/core/evidence.mjs";
 import { updateCodeRefsFromEvidence } from "../src/core/code-refs-store.mjs";
 import { readState, readStatus, readMeta, writeState, writeStatus } from "../src/core/store.mjs";
+import { sendStateCommand } from "../src/core/coordinator-client.mjs";
 
 async function main() {
 	const configPath = process.argv[2];
@@ -26,6 +27,10 @@ async function main() {
 
 	const state = readState(config.root, config.viewId);
 	if (!state || state.processState === "alive" || state.semanticState === "failed" || state.semanticState === "stopped") process.exit(0);
+	// Cheap pre-check (optimization only): skip a pointless command when the
+	// manual verdict is already materialized. The coordinator's manual_fence
+	// stays the authoritative guard for races after this read.
+	if (isManualCompletion(state)) process.exit(0);
 
 	const evidence = readEvidence(config.root, config.viewId);
 	const latest = latestEvidenceText(evidence) || state.latestAssistantPreview || state.summary || "";
@@ -45,25 +50,78 @@ async function main() {
 		classification = autoStateFromModelOrHeuristic(out, latest, { lastAgentActivityAt: state.lastAgentActivityAt ?? null });
 	}
 
-	let changed = false;
+	// Issue #91 (A8 path 2): the classification lands through the View State
+	// Coordinator — the single writer of state.json/status.json. A manual
+	// completion is fenced by the coordinator (manual_fence), so this late pass
+	// can no longer clobber the user's verdict (#46 class). Ambiguous transport
+	// outcomes (timeout / connection_reset) NEVER fall back to a direct write:
+	// the command may already be journaled, and the coordinator's boot replay
+	// is the recovery path.
+	const result = await sendStateCommand(config.root, {
+		type: "state_command",
+		viewId: config.viewId,
+		runId: config.runId ?? null,
+		source: "state-runner",
+		kind: "auto_state_classified",
+		expectedRevision: null,
+		payload: { classification },
+	});
+
+	if (result.status === "applied") {
+		appendDiagnostic(config.root, config.viewId, { source: "service", runId: config.runId, code: "auto_state_classified", message: "Auto-state classifier updated row state", details: { kind: classification.kind, confidence: classification.confidence, source: classification.source, reason: classification.reason } });
+	} else if (result.reason === "manual_fence" || result.reason === "no_change" || result.reason === "stale_run") {
+		// Designed fences — informational, not errors: the coordinator is the
+		// authority and a manual completion wins by design.
+		appendDiagnostic(config.root, config.viewId, { source: "service", runId: config.runId, code: "auto_state_classified_skipped", message: `Auto-state classification not applied (${result.reason})`, details: { reason: result.reason } });
+	} else if (result.reason !== "coordinator_disabled") {
+		appendDiagnostic(config.root, config.viewId, { source: "service", runId: config.runId, level: "warn", code: "auto_state_command_ambiguous", message: `Auto-state classification outcome unknown (${result.reason}); coordinator replay will recover`, details: { reason: result.reason } });
+	}
+
+	if (result.reason === "coordinator_disabled") {
+		// Legacy escape hatch (AGENT_BOARD_COORDINATOR=off): pre-coordinator
+		// direct-write behavior, unchanged.
+		let changed = false;
+		if (config.runId) {
+			const status = readStatus(config.root, config.viewId, config.runId);
+			if (status) {
+				changed = applyAutoStateToStatus(status, classification, Date.now()) || changed;
+				status.evidenceSummary = summarizeEvidence(finalizeEvidence(evidence, status, Date.now()));
+				writeStatus(config.root, status);
+			}
+		}
+		const latestState = readState(config.root, config.viewId) ?? state;
+		changed = applyAutoStateToViewState(latestState, classification, Date.now()) || changed;
+		finalizeEvidence(evidence, { semanticState: latestState.semanticState, usage: null }, Date.now());
+		latestState.review = summarizeEvidence(evidence);
+		writeEvidence(config.root, evidence);
+		updateCodeRefsFromEvidence(config.root, config.viewId, evidence, meta);
+		writeState(config.root, latestState);
+		if (changed) {
+			appendDiagnostic(config.root, config.viewId, { source: "service", runId: config.runId, code: "auto_state_classified", message: "Auto-state classifier updated row state", details: { kind: classification.kind, confidence: classification.confidence, source: classification.source, reason: classification.reason } });
+		}
+		process.exit(0);
+	}
+
+	// Evidence pipeline (coordinator-independent) stays direct. The mirrors are
+	// written from FRESH reads taken after the coordinator's decision and are
+	// fenced on manual completions, so they can never overwrite a
+	// just-materialized patch or the user's verdict; PR #2 moves them behind
+	// the coordinator too.
 	if (config.runId) {
-		const status = readStatus(config.root, config.viewId, config.runId);
-		if (status) {
-			changed = applyAutoStateToStatus(status, classification, Date.now()) || changed;
-			status.evidenceSummary = summarizeEvidence(finalizeEvidence(evidence, status, Date.now()));
-			writeStatus(config.root, status);
+		const postStatus = readStatus(config.root, config.viewId, config.runId);
+		if (postStatus && !isManualCompletion(postStatus)) {
+			postStatus.evidenceSummary = summarizeEvidence(finalizeEvidence(evidence, postStatus, Date.now()));
+			writeStatus(config.root, postStatus);
 		}
 	}
-	const latestState = readState(config.root, config.viewId) ?? state;
-	changed = applyAutoStateToViewState(latestState, classification, Date.now()) || changed;
-	finalizeEvidence(evidence, { semanticState: latestState.semanticState, usage: null }, Date.now());
-	latestState.review = summarizeEvidence(evidence);
+	const postState = readState(config.root, config.viewId);
+	finalizeEvidence(evidence, { semanticState: postState?.semanticState ?? state.semanticState, usage: null }, Date.now());
+	if (postState && !isManualCompletion(postState)) {
+		postState.review = summarizeEvidence(evidence);
+		writeState(config.root, postState);
+	}
 	writeEvidence(config.root, evidence);
 	updateCodeRefsFromEvidence(config.root, config.viewId, evidence, meta);
-	writeState(config.root, latestState);
-	if (changed) {
-		appendDiagnostic(config.root, config.viewId, { source: "service", runId: config.runId, code: "auto_state_classified", message: "Auto-state classifier updated row state", details: { kind: classification.kind, confidence: classification.confidence, source: classification.source, reason: classification.reason } });
-	}
 }
 
 /** @param {import("../src/core/types.mjs").EvidenceSnapshot} evidence */

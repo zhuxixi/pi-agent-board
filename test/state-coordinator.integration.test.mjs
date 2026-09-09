@@ -13,10 +13,13 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { test } from "node:test";
 import { readJournal } from "../src/core/coordinator-journal.mjs";
+import { launchAutoState } from "../src/core/launch.mjs";
+import { writeEvidence } from "../src/core/evidence.mjs";
 import * as P from "../src/core/paths.mjs";
 import { createView, readState, readStatus, writeState, writeStatus } from "../src/core/store.mjs";
 
 const COORDINATOR_SCRIPT = fileURLToPath(new URL("../runner/state-coordinator.mjs", import.meta.url));
+const STATE_RUNNER_SCRIPT = fileURLToPath(new URL("../runner/state-runner.mjs", import.meta.url));
 
 function freshRoot() {
 	return mkdtempSync(join(tmpdir(), "agentview-coord-"));
@@ -435,4 +438,134 @@ test("second coordinator instance exits immediately (lease held)", async (t) => 
 	const exitCode = await waitForExit(second, 2000);
 	assert.notEqual(exitCode, null, "second instance exited within 2s");
 	assert.equal(readState(root, "v1").semanticState, "queued", "second instance left state untouched");
+});
+
+ test("A8: manual completion fences a late model classification (end-to-end)", async (t) => {
+	const root = freshRoot();
+	let child = null;
+	t.after(async () => {
+		if (child && isAlive(child.pid)) {
+			child.kill("SIGTERM");
+			await waitForExit(child);
+		}
+		rmSync(root, { recursive: true, force: true });
+	});
+	createView(root, { id: "v1", name: "x", cwd: root });
+	// Exited run the late classification would target; autoState pre-set so the
+	// manual completion's clearing behavior is observable.
+	writeStatus(root, {
+		version: 1, viewId: "v1", runId: "r1", semanticState: "idle", processState: "exited",
+		autoState: classification(), needsInput: false, hasError: false, error: null,
+	});
+	const st = readState(root, "v1");
+	st.currentRunId = "r1";
+	writeState(root, st);
+	child = startCoordinator(root);
+	const { client } = await readyClient(root);
+
+	// 1. Dashboard path: the user marks the row done manually.
+	client.send({
+		type: "state_command", commandId: "a8-manual-1", viewId: "v1", runId: "r1",
+		source: "dashboard-user", kind: "mark_completed", expectedRevision: null, payload: {},
+	});
+	const manual = await client.next();
+	assert.equal(manual.status, "applied");
+	assert.equal(readState(root, "v1").autoState, null, "manual completion cleared autoState");
+
+	// 2. Late state-runner classification arrives after the manual verdict.
+	client.send({
+		type: "state_command", commandId: "a8-late-1", viewId: "v1", runId: "r1",
+		source: "state-runner", kind: "auto_state_classified", expectedRevision: null,
+		payload: { classification: classification() },
+	});
+	const late = await client.next();
+	assert.equal(late.status, "rejected", "late classification is rejected");
+	assert.equal(late.reason, "manual_fence");
+
+	const fenced = readState(root, "v1");
+	assert.equal(fenced.semanticState, "completed", "manual verdict survives");
+	assert.equal(fenced.autoState, null, "classification did not land");
+	assert.equal(readStatus(root, "v1", "r1").autoState, null, "status fence holds too");
+
+	// 3. Coordinator restart: the journal replay must keep the fence. Both a
+	// replayed identical command (dedup) and a fresh late command (re-decided
+	// against the materialized state) stay rejected.
+	child.kill("SIGTERM");
+	await waitForExit(child);
+	child = startCoordinator(root);
+	const { client: client2 } = await readyClient(root);
+
+	client2.send({
+		type: "state_command", commandId: "a8-late-1", viewId: "v1", runId: "r1",
+		source: "state-runner", kind: "auto_state_classified", expectedRevision: null,
+		payload: { classification: classification() },
+	});
+	const replayed = await client2.next();
+	assert.equal(replayed.status, "rejected", "replayed command returns the original result");
+	assert.equal(replayed.reason, "manual_fence");
+
+	client2.send({
+		type: "state_command", commandId: "a8-late-2", viewId: "v1", runId: "r1",
+		source: "state-runner", kind: "auto_state_classified", expectedRevision: null,
+		payload: { classification: classification() },
+	});
+	const fresh = await client2.next();
+	assert.equal(fresh.status, "rejected", "fresh late command re-decided against materialized state");
+	assert.equal(fresh.reason, "manual_fence");
+
+	assert.equal(readState(root, "v1").semanticState, "completed");
+	assert.equal(readState(root, "v1").autoState, null);
+});
+
+test("state-runner routes classification through the coordinator (journal record, no direct semantic write)", async (t) => {
+	const root = freshRoot();
+	let child = null;
+	let runnerPid = null;
+	t.after(async () => {
+		if (runnerPid && isAlive(runnerPid)) {
+			try { process.kill(runnerPid, "SIGKILL"); } catch { /* already gone */ }
+		}
+		if (child && isAlive(child.pid)) {
+			child.kill("SIGTERM");
+			await waitForExit(child);
+		}
+		delete process.env.AGENT_BOARD_AUTO_STATE_MODEL;
+		delete process.env.AGENT_BOARD_AUTO_STATE_NO_DONE;
+		rmSync(root, { recursive: true, force: true });
+	});
+	process.env.AGENT_BOARD_AUTO_STATE_MODEL = "off"; // heuristic path: no model call
+	process.env.AGENT_BOARD_AUTO_STATE_NO_DONE = "0"; // enable auto-done so the fixture classifies "done"
+	createView(root, { id: "v1", name: "x", cwd: root });
+	writeStatus(root, { version: 1, viewId: "v1", runId: "run_1", semanticState: "idle", processState: "exited" });
+	const st = readState(root, "v1");
+	st.currentRunId = "run_1";
+	writeState(root, st);
+	writeEvidence(root, { viewId: "v1", runId: "run_1", assistantEvidence: [{ text: "All done, tests pass.", at: Date.now() }] });
+
+	// Tracked coordinator BEFORE the runner starts: the client's probe must find
+	// this one (a lazily spawned detached twin would leak past the rmSync).
+	child = startCoordinator(root);
+	await readyClient(root);
+
+	const launched = launchAutoState(root, {
+		root, viewId: "v1", runId: "run_1", cwd: root,
+		piCommand: process.execPath, piArgsPrefix: [],
+	}, { runnerScript: STATE_RUNNER_SCRIPT });
+	runnerPid = launched.pid;
+	assert.ok(runnerPid, "state-runner spawned");
+	await waitFor(() => (isAlive(runnerPid) ? null : true), 10000);
+
+	const record = readJournal(root).find(
+		(r) => r?.command?.kind === "auto_state_classified" && r?.command?.source === "state-runner",
+	);
+	assert.ok(record, "classification journaled as a coordinator command");
+	assert.equal(record.result?.status, "applied");
+	assert.ok(record.materializedRevision >= 1, "revision stamped");
+
+	const state = readState(root, "v1");
+	assert.equal(state.autoState?.kind, "done", "classification materialized by the coordinator");
+	assert.equal(state.materializedRevision, record.materializedRevision, "state carries the journal revision");
+	const status = readStatus(root, "v1", "run_1");
+	assert.equal(status.autoState?.kind, "done", "status patch materialized too");
+	assert.equal(status.materializedRevision, record.materializedRevision, "shared revision across both files");
 });

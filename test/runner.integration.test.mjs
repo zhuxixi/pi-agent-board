@@ -96,6 +96,10 @@ test("runner auto-classifies a completed fake worker and writes durable artifact
 	process.env.AGENT_BOARD_SUMMARY_MODEL = "off";
 	process.env.AGENT_BOARD_AUTO_STATE_NO_DONE = "0";
 	let runnerPid = null;
+	// Tracked coordinator: the heuristic + model classifications now route through
+	// the View State Coordinator; without this fixture the client's ensure path
+	// spawns an untracked detached coordinator that outlives the rmSync below.
+	const coord = await startCoordinator(root);
 	try {
 		const meta = createView(root, { id: "view_1", name: "fix", cwd: root });
 		const config = makeConfig(root, "view_1", "run_1", meta.sessionFile, root, "fix the bug");
@@ -124,12 +128,18 @@ test("runner auto-classifies a completed fake worker and writes durable artifact
 		assert.ok(existsSync(P.eventsPath(root, "view_1", "run_1")), "events.jsonl exists");
 		assert.ok(existsSync(meta.sessionFile), "fake worker persisted the session file");
 
+		// Deterministic barrier (cf. github-refs test): the classification now
+		// lands via a coordinator round-trip, so wait for the runner to exit
+		// before asserting on autoState.
+		await waitFor(() => (isAlive(runnerPid) ? null : true), 15000);
+
 		const state = readState(root, "view_1");
 		assert.equal(state.semanticState, "completed");
 		assert.equal(state.autoState?.kind, "done");
 		assert.equal(state.currentRunId, "run_1");
 	} finally {
 		await killDetached(runnerPid);
+		await coord.kill();
 		delete process.env.FAKE_PI_MODE;
 		delete process.env.AGENT_BOARD_SUMMARY_MODEL;
 		delete process.env.AGENT_BOARD_AUTO_STATE_NO_DONE;
@@ -143,6 +153,9 @@ test("runner classifies a question as needs_input", { timeout: 20000 }, async ()
 	process.env.FAKE_PI_MODE = "needs_input";
 	process.env.AGENT_BOARD_SUMMARY_MODEL = "off";
 	let runnerPid = null;
+	// Tracked coordinator: the classification routes through the coordinator now
+	// (see the auto-classifies test); prevents a detached-coordinator leak.
+	const coord = await startCoordinator(root);
 	try {
 		const meta = createView(root, { id: "v", name: "x", cwd: root });
 		const config = makeConfig(root, "v", "r", meta.sessionFile, root, "do it");
@@ -156,6 +169,7 @@ test("runner classifies a question as needs_input", { timeout: 20000 }, async ()
 		assert.ok(status.question, "extracted a question");
 	} finally {
 		await killDetached(runnerPid);
+		await coord.kill();
 		delete process.env.FAKE_PI_MODE;
 		delete process.env.AGENT_BOARD_SUMMARY_MODEL;
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
@@ -168,6 +182,8 @@ test("runner protects dash-prefixed prompts passed via argv", { timeout: 20000 }
 	process.env.FAKE_PI_FAIL_ON_DASH_PROMPT = "1";
 	process.env.AGENT_BOARD_SUMMARY_MODEL = "off";
 	process.env.AGENT_BOARD_AUTO_STATE_NO_DONE = "0";
+	// Legacy direct-write branch coverage (classification assertions unchanged).
+	process.env.AGENT_BOARD_COORDINATOR = "off";
 	let runnerPid = null;
 	try {
 		const meta = createView(root, { id: "v", name: "x", cwd: root });
@@ -186,6 +202,7 @@ test("runner protects dash-prefixed prompts passed via argv", { timeout: 20000 }
 		delete process.env.FAKE_PI_FAIL_ON_DASH_PROMPT;
 		delete process.env.AGENT_BOARD_SUMMARY_MODEL;
 		delete process.env.AGENT_BOARD_AUTO_STATE_NO_DONE;
+		delete process.env.AGENT_BOARD_COORDINATOR;
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
 });
@@ -254,6 +271,8 @@ test("runner keeps a completed fake worker idle when auto-done is disabled", { t
 	process.env.FAKE_PI_MODE = "completed";
 	process.env.AGENT_BOARD_SUMMARY_MODEL = "off";
 	delete process.env.AGENT_BOARD_AUTO_STATE_NO_DONE;
+	// Legacy direct-write branch coverage (autoState assertions unchanged).
+	process.env.AGENT_BOARD_COORDINATOR = "off";
 	let runnerPid = null;
 	try {
 		const meta = createView(root, { id: "view_1", name: "fix", cwd: root });
@@ -278,6 +297,7 @@ test("runner keeps a completed fake worker idle when auto-done is disabled", { t
 		await killDetached(runnerPid);
 		delete process.env.FAKE_PI_MODE;
 		delete process.env.AGENT_BOARD_SUMMARY_MODEL;
+		delete process.env.AGENT_BOARD_COORDINATOR;
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
 });
@@ -289,6 +309,9 @@ test("runner extracts github issue/pr refs end-to-end into github.json and the r
 	process.env.AGENT_BOARD_SUMMARY_MODEL = "off";
 	process.env.AGENT_BOARD_AUTO_STATE_NO_DONE = "0";
 	let runnerPid = null;
+	// Tracked coordinator: the heuristic classification routes through the
+	// coordinator now; prevents a detached-coordinator leak past the rmSync.
+	const coord = await startCoordinator(boardRoot);
 	try {
 		const meta = createView(boardRoot, { id: "view_1", name: "fix", cwd: repo });
 		const config = makeConfig(boardRoot, "view_1", "run_1", meta.sessionFile, repo, "assign issue 40 and open a PR");
@@ -329,6 +352,7 @@ test("runner extracts github issue/pr refs end-to-end into github.json and the r
 		assert.equal(rowView(row).refsBadge, "#40 ▸#45");
 	} finally {
 		await killDetached(runnerPid);
+		await coord.kill();
 		delete process.env.FAKE_PI_MODE;
 		delete process.env.AGENT_BOARD_SUMMARY_MODEL;
 		delete process.env.AGENT_BOARD_AUTO_STATE_NO_DONE;
