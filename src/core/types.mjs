@@ -120,6 +120,7 @@ export const GROUP_LABELS = {
  * @property {SteeringSummary} [steering] Compact plan/approval steering summary.
  * @property {CodeRefsSummary} [codeRefs] Compact issue/PR reference summary.
  * @property {AutoStateClassification|null} [autoState] Latest automatic terminal-state classification.
+ * @property {number} [materializedRevision] Coordinator-stamped monotonic revision (issue #91). Absent on legacy rows until the View State Coordinator first materializes the view.
  */
 
 /**
@@ -188,6 +189,7 @@ export const GROUP_LABELS = {
  * @property {EvidenceUsage|null} [usage]
  * @property {string|null} [stallReason]
  * @property {ReviewSummary|null} [evidenceSummary]
+ * @property {number} [materializedRevision] Coordinator-stamped monotonic revision shared with the view's state.json (issue #91). Absent on legacy rows until first coordinator materialization.
  * @property {AutoStateClassification|null} [autoState]
  */
 

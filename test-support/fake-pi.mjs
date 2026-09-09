@@ -3,7 +3,7 @@
  * Fake `pi` worker for hermetic tests. Emulates `pi --mode json -p --session <file> <prompt>`:
  * emits a realistic JSON event stream to stdout and (optionally) persists a session file,
  * without any model/network/TTY. Behavior is controlled by $FAKE_PI_MODE:
- *   completed (default) | needs_input | fail | slow | hang | github-refs
+ *   completed (default) | needs_input | fail | slow | hang | github-refs | abort
  *
  * `github-refs` emits a bash tool execution for `gh issue edit 40 --add-assignee @me`
  * followed by an assistant message containing a github.com pull URL, so the runner's
@@ -108,6 +108,19 @@ async function main() {
 			],
 		},
 	});
+
+	if (mode === "abort") {
+		// Exit-0 abort: the worker reports a stopReason-bearing final assistant
+		// message and exits 0. Exercises the run_finalized stopReason overlay
+		// (issue #91): finalizeSemanticState keys on stopReason alone when the
+		// exit code is 0, so a dropped stopReason lands the run on "idle"
+		// instead of "failed".
+		emit({
+			type: "message_end",
+			message: { role: "assistant", model: "fake/model", stopReason: "aborted", content: [] },
+		});
+		process.exit(0);
+	}
 
 	if (mode === "fail") {
 		process.stderr.write("fake-pi: simulated failure\n");

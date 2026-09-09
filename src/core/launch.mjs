@@ -120,3 +120,18 @@ export function launchAutoState(root, config, opts) {
 
 	return { pid: child.pid ?? null, configPath };
 }
+
+/**
+ * Launch the detached view-state coordinator for a board root (issue #91, spec
+ * D3). No config file: the coordinator takes the root as its only argument.
+ * Idempotent by lease — a second instance loses the coordinator lease and
+ * exits silently, so callers may spawn freely on probe failure.
+ * @param {string} root
+ * @param {{ runnerScript: string, node?: string }} opts
+ * @returns {{ pid: number|null }}
+ */
+export function launchCoordinator(root, opts) {
+	const node = opts.node ?? resolveNode();
+	const child = spawnDetached(node, [opts.runnerScript, root], root);
+	return { pid: child.pid ?? null };
+}

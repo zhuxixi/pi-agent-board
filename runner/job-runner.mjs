@@ -23,6 +23,7 @@ import { launchRun } from "../src/core/launch.mjs";
 import * as P from "../src/core/paths.mjs";
 import { readState, readStatus, readMeta, writeState, writeStatus } from "../src/core/store.mjs";
 import { readSteering, recordPlanReady } from "../src/core/steering.mjs";
+import { sendStateCommand, coordinatorDisabled } from "../src/core/coordinator-client.mjs";
 import { buildApprovePlanPrompt, buildPlanChangesPrompt, buildPlanRequestPrompt } from "../src/core/steering-prompts.mjs";
 
 const WRITE_THROTTLE_MS = 250;
@@ -125,6 +126,89 @@ function main() {
 		return true;
 	};
 
+	/**
+	 * Runner-owned evidence artifacts (evidence files + code-refs). Written
+	 * directly — the coordinator owns state.json/status.json, not these.
+	 */
+	const persistEvidenceArtifacts = () => {
+		status.evidenceSummary = summarizeEvidence(evidence);
+		writeRunEvidence(root, evidence);
+		writeEvidence(root, evidence);
+		updateCodeRefsFromEvidence(root, viewId, evidence, meta);
+	};
+
+	/**
+	 * Refresh the evidence mirrors (status.evidenceSummary / state.review) from
+	 * FRESH post-decision reads, fenced on manual completions — the semantic
+	 * fields come from disk, so this can never overwrite a coordinator-materialized
+	 * patch or the user's verdict. Same deferral pattern as
+	 * runner/state-runner.mjs; PR #2 moves the mirrors behind the coordinator too.
+	 */
+	const refreshEvidenceMirrors = () => {
+		status.evidenceSummary = summarizeEvidence(evidence);
+		const freshStatus = readStatus(root, viewId, runId);
+		if (freshStatus && !isManualCompletion(freshStatus)) {
+			freshStatus.evidenceSummary = status.evidenceSummary;
+			writeStatus(root, freshStatus);
+		}
+		const freshState = readState(root, viewId);
+		if (freshState && !isManualCompletion(freshState)) {
+			freshState.review = status.evidenceSummary;
+			writeState(root, freshState);
+		}
+	};
+
+	/**
+	 * Materialize the run's terminal state through the View State Coordinator
+	 * (issue #91, A8 path 3): the runner submits minimal facts and the
+	 * coordinator computes terminal semantics via finalizeRun, so a manual
+	 * completion landing before the command is fenced by the coordinator
+	 * (manual_fence), not by a file re-read (#46 class). Evidence artifacts stay
+	 * direct (runner-owned). Ambiguous outcomes (timeout / connection_reset)
+	 * NEVER fall back to a direct write: the command may already be journaled,
+	 * and the coordinator's boot replay is the recovery path.
+	 * coordinator_disabled keeps the pre-coordinator direct persist.
+	 * @param {{ exitCode: number|null, stoppedByUser: boolean }} facts
+	 * @returns {Promise<boolean>} whether the final state is known materialized
+	 */
+	const finalizeThroughCoordinator = async ({ exitCode, stoppedByUser: stopped }) => {
+		const payload = { exitCode, stoppedByUser: stopped };
+		if (status.endedAt != null) payload.endedAt = status.endedAt;
+		// The close path cancels the pending throttled flush after the final
+		// buffer flush, so a stopReason observed in the last burst (reduceEvent
+		// sets it in memory only) never reached disk. Overlay it onto the payload:
+		// finalizeSemanticState keys on stopReason alone for exit-0 exits, and the
+		// coordinator already supports the payload overlay (issue #91).
+		if (status.stopReason != null) payload.stopReason = status.stopReason;
+		if (status.latestAssistantPreview) payload.latestAssistantPreview = status.latestAssistantPreview;
+		if (status.lastAgentActivityAt != null) payload.lastAgentActivityAt = status.lastAgentActivityAt;
+		const result = await sendStateCommand(root, {
+			type: "state_command",
+			viewId,
+			runId,
+			source: "job-runner",
+			kind: "run_finalized",
+			expectedRevision: null,
+			payload,
+		});
+		if (result.status === "applied") {
+			const fresh = readStatus(root, viewId, runId);
+			if (fresh) Object.assign(status, fresh);
+			refreshEvidenceMirrors();
+			return true;
+		}
+		if (result.reason === "coordinator_disabled") {
+			persist(true);
+			return true;
+		}
+		if (result.reason === "stale_run") {
+			// Duplicate finalize or the run was already superseded — nothing to do.
+			return false;
+		}
+		appendDiagnostic(root, viewId, { source: "runner", runId, level: "warn", code: "run_finalize_command_ambiguous", message: `Run finalization outcome unknown (${result.reason}); if the command was journaled, coordinator replay will recover it; otherwise dashboard reconcile will converge the row`, details: { reason: result.reason } });
+		return false;
+	};
+
 	const scheduleFlush = () => {
 		if (flushTimer) {
 			dirty = true;
@@ -196,16 +280,26 @@ function main() {
 	process.on("SIGTERM", stop);
 	process.on("SIGINT", stop);
 
-	worker.on("error", (err) => {
+	worker.on("error", async (err) => {
+		// Cancel any in-flight throttled flush before finalizing: if the timer
+		// callback lands during the sendStateCommand await below, the stale
+		// persist() would overwrite the coordinator-materialized terminal state
+		// and the close-path run_finalized would then bounce as stale_run
+		// (symmetric with the close path's cancel; issue #91 fix round 1).
+		if (flushTimer) {
+			clearTimeout(flushTimer);
+			flushTimer = null;
+		}
 		status.error = `Failed to launch worker: ${err instanceof Error ? err.message : String(err)}`;
 		appendDiagnostic(root, viewId, { source: "runner", runId, level: "error", code: "worker_error", message: status.error, details: {} });
 		finalizeRun(status, { exitCode: 1, stoppedByUser }, Date.now());
 		finalizeEvidence(evidence, status, Date.now());
-		persist(true);
+		persistEvidenceArtifacts();
+		await finalizeThroughCoordinator({ exitCode: 1, stoppedByUser });
 		process.exit(1);
 	});
 
-	worker.on("close", (code) => {
+	worker.on("close", async (code) => {
 		if (buffer.trim()) onLine(buffer);
 		if (flushTimer) {
 			clearTimeout(flushTimer);
@@ -218,18 +312,27 @@ function main() {
 		// dashboard flips to its final state at once. Then try to classify the final
 		// bucket and upgrade the summary with cheap model passes. Slow/unreachable
 		// model calls must never stall the row indefinitely.
-		persist(true);
-		if (applyHeuristicAutoState(config, status, evidence)) {
-			finalizeEvidence(evidence, status, Date.now());
-			status.evidenceSummary = summarizeEvidence(evidence);
-			persistUnlessManual(true);
-		}
-		maybeModelAutoState(config, status, evidence)
+		//
+		// Issue #91 (A8 path 3): the terminal status/state materialize through the
+		// View State Coordinator (finalizeThroughCoordinator) — only evidence
+		// artifacts are written directly here. The in-flight hot-path flush was
+		// cancelled above, so no throttled write can race the coordinator's patch.
+		persistEvidenceArtifacts();
+		await finalizeThroughCoordinator({ exitCode: code ?? 0, stoppedByUser });
+		applyHeuristicAutoState(config, status, evidence)
 			.then((changed) => {
 				if (changed) {
 					finalizeEvidence(evidence, status, Date.now());
-					status.evidenceSummary = summarizeEvidence(evidence);
-					persistUnlessManual(true);
+					if (coordinatorDisabled()) persistUnlessManual(true);
+					else refreshEvidenceMirrors();
+				}
+				return maybeModelAutoState(config, status, evidence);
+			})
+			.then((changed) => {
+				if (changed) {
+					finalizeEvidence(evidence, status, Date.now());
+					if (coordinatorDisabled()) persistUnlessManual(true);
+					else refreshEvidenceMirrors();
 				}
 				return maybeModelSummary(config, status);
 			})
@@ -369,22 +472,59 @@ function canAutoState(config, status, evidence) {
 	return Boolean((latestEvidenceText(evidence) || status.latestAssistantPreview || status.summary || "").trim());
 }
 
-function applyHeuristicAutoState(config, status, evidence) {
+/**
+ * Submit one classification to the View State Coordinator (issue #91, A8 path 2).
+ * The coordinator owns semantic state: applied patches are materialized by it and
+ * this runner only refreshes its in-memory status from disk so any remaining
+ * direct persist (PR #1 hot path) starts from authoritative fields. Designed
+ * fences (manual_fence / no_change / stale_run) are informational, not errors.
+ * Ambiguous transport outcomes (timeout / connection_reset) never fall back to a
+ * direct write — the command may already be journaled, and the coordinator's
+ * boot replay is the recovery path.
+ * @param {import("../src/core/types.mjs").RunConfig} config
+ * @param {import("../src/core/types.mjs").RunStatus} status mutated in place on apply (fresh coordinator fields)
+ * @param {import("../src/core/types.mjs").AutoStateClassification} classification
+ * @returns {Promise<boolean>} whether the classification was applied
+ */
+async function classifyThroughCoordinator(config, status, classification) {
+	const result = await sendStateCommand(config.root, {
+		type: "state_command",
+		viewId: config.viewId,
+		runId: config.runId,
+		source: "job-runner",
+		kind: "auto_state_classified",
+		expectedRevision: null,
+		payload: { classification },
+	});
+	if (result.status === "applied") {
+		appendDiagnostic(config.root, config.viewId, { source: "runner", runId: config.runId, code: "auto_state_classified", message: "Auto-state classifier updated terminal state", details: { kind: classification.kind, confidence: classification.confidence, source: classification.source, reason: classification.reason } });
+		const fresh = readStatus(config.root, config.viewId, config.runId);
+		if (fresh) Object.assign(status, fresh);
+		return true;
+	}
+	if (result.reason === "coordinator_disabled") {
+		// Legacy escape hatch (AGENT_BOARD_COORDINATOR=off): apply locally; the
+		// caller's persistUnlessManual keeps the pre-coordinator fence for this path.
+		return applyAutoStateToStatus(status, classification, Date.now());
+	}
+	if (result.reason === "manual_fence" || result.reason === "no_change" || result.reason === "stale_run") {
+		// Designed fences — informational, not errors.
+		return false;
+	}
+	appendDiagnostic(config.root, config.viewId, { source: "runner", runId: config.runId, level: "warn", code: "auto_state_command_ambiguous", message: `Auto-state classification outcome unknown (${result.reason}); if the command was journaled, coordinator replay will recover it; otherwise the next classification pass will converge the row`, details: { reason: result.reason } });
+	return false;
+}
+
+async function applyHeuristicAutoState(config, status, evidence) {
 	if (!canAutoState(config, status, evidence)) return false;
-	// Fresh read of state.json (not status.json): completeView writes the manual
-	// completion signal (semanticState "completed" + autoState null) to state.json
-	// and only clears autoState in status.json, so status.json can never carry
-	// the completed+null pair. If the user marked the row done while the worker
-	// was exiting, skip classification so the persist path can't clobber it.
+	// Cheap pre-check kept as an optimization (avoids a pointless command);
+	// correctness no longer depends on it — the coordinator fences manual
+	// completions authoritatively (manual_fence).
 	const latestState = readState(config.root, config.viewId);
 	if (isManualCompletion(latestState)) return false;
 	const latest = latestEvidenceText(evidence) || status.latestAssistantPreview || status.summary || "";
 	const classification = heuristicAutoState(latest, { lastAgentActivityAt: status.lastAgentActivityAt ?? null });
-	const changed = applyAutoStateToStatus(status, classification, Date.now());
-	if (changed) {
-		appendDiagnostic(config.root, config.viewId, { source: "runner", runId: config.runId, code: "auto_state_classified", message: "Auto-state classifier updated terminal state", details: { kind: classification.kind, confidence: classification.confidence, source: classification.source, reason: classification.reason } });
-	}
-	return changed;
+	return classifyThroughCoordinator(config, status, classification);
 }
 
 async function maybeModelAutoState(config, status, evidence) {
@@ -398,19 +538,14 @@ async function maybeModelAutoState(config, status, evidence) {
 		[...config.piArgsPrefix, "--mode", "json", "-p", "--no-session", "--model", model, prompt],
 		15000,
 	);
-	// Fresh read: the user may have marked the row done manually during the model
-	// call. completeView clears autoState in both state.json and status.json, so a
-	// manual completion is detectable here; applying the classification to the stale
-	// in-memory status would clobber the user's verdict.
+	// The user may have marked the row done manually during the model call. The
+	// cheap pre-check avoids a pointless command; the coordinator's manual_fence
+	// is the authoritative guard for races after this read.
 	const fresh = readStatus(config.root, config.viewId, config.runId);
 	if (!fresh || isManualCompletion(fresh)) return false;
 	Object.assign(status, fresh);
 	const classification = autoStateFromModelOrHeuristic(out, latest, { lastAgentActivityAt: status.lastAgentActivityAt ?? null });
-	const changed = applyAutoStateToStatus(status, classification, Date.now());
-	if (changed) {
-		appendDiagnostic(config.root, config.viewId, { source: "runner", runId: config.runId, code: "auto_state_classified", message: "Auto-state classifier refined terminal state", details: { kind: classification.kind, confidence: classification.confidence, source: classification.source, reason: classification.reason } });
-	}
-	return changed;
+	return classifyThroughCoordinator(config, status, classification);
 }
 
 /** Default cheap model for terminal summaries. Override/disable via $AGENT_BOARD_SUMMARY_MODEL. */

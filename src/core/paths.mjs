@@ -89,6 +89,22 @@ export function hostEndpointPathFor(platform, root, viewId, instanceId) {
 }
 /** @param {string} root @param {string} viewId */
 export const screenLogPath = (root, viewId) => path.join(viewDir(root, viewId), "screen.log");
+/**
+ * Well-known endpoint for the board-root View State Coordinator (issue #91, spec D3).
+ * Exactly one coordinator may own a root (token-fenced lease), so one stable path
+ * suffices; a stale POSIX socket left by a crashed coordinator is unlinked by the
+ * new lease owner before bind. win32 pipe names embed a 16-hex hash of the root to
+ * stay under the 256-char limit and keep per-root isolation.
+ * @param {"win32"|"linux"|"darwin"} platform
+ * @param {string} root
+ */
+export function coordinatorEndpointPathFor(platform, root) {
+	if (platform === "win32") {
+		const hash = createHash("sha256").update(String(root)).digest("hex").slice(0, 16);
+		return `\\\\.\\pipe\\agent-board-coordinator-${hash}`;
+	}
+	return path.join(root, "coordinator.sock");
+}
 /** @param {string} root @param {string} viewId */
 export const hostPidPath = (root, viewId) => path.join(viewDir(root, viewId), "host-pid.json");
 /** @param {string} root @param {string} viewId */
