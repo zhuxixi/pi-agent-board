@@ -11,7 +11,7 @@ import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import type { Component, EditorTheme, KeybindingsManager, TUI } from "@earendil-works/pi-tui";
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { requestDashboardRender } from "../core/dashboard-render.mjs";
-import { isGenericStatusText, normalizeGenericStatusText } from "../core/derive.mjs";
+import { normalizeGenericStatusText } from "../core/derive.mjs";
 import { firstSentence, truncate } from "../core/heuristics.mjs";
 import {
 	canonicalModelRef,
@@ -31,7 +31,7 @@ import { filterRows, groupRowsByFolder, rowState, stateGlyph } from "../core/row
 import { loadSessionView } from "../core/session-view.mjs";
 import { GROUP_LABELS } from "../core/types.mjs";
 import { buildEvidencePanel } from "./dashboard-evidence.mjs";
-import { readState, writeState, type Row } from "../core/store.mjs";
+import { type Row } from "../core/store.mjs";
 import type { createService } from "../runtime/service.mjs";
 
 type Service = ReturnType<typeof createService>;
@@ -847,44 +847,49 @@ export class DashboardComponent implements Component {
 		const launchCwd = launchOpts?.cwd ?? this.deps.defaultCwd;
 		const launchModel = launchOpts?.model ?? (this.launch?.model ? canonicalModelRef(this.launch.model) : null);
 		const launchThinking = launchOpts?.thinkingLevel ?? this.launch?.thinking ?? this.deps.currentThinkingLevel;
-		const res = this.deps.service.dispatch(text, {
-			cwd: launchCwd,
-			model: launchModel,
-			thinkingLevel: launchThinking,
+		// dispatch is async (mark_queued routes through the view-state coordinator
+		// before the runner spawns, issue #91); notices/attach land when it settles.
+		void Promise.resolve(
+			this.deps.service.dispatch(text, {
+				cwd: launchCwd,
+				model: launchModel,
+				thinkingLevel: launchThinking,
+			}),
+		).then((res) => {
+			if (!res.ok) this.notice(res.error ?? "Dispatch failed", "error");
+			else {
+				this.lastLaunchPrefs = { ...this.deps.service.getLaunchPrefs?.(), cwd: launchCwd, model: launchModel, thinkingLevel: launchThinking };
+				try {
+					recordCwdLaunch(this.deps.root, launchCwd);
+				} catch {
+					/* best effort: stats must never block dispatch */
+				}
+				try {
+					this.deps.service.saveLaunchPrefs?.(this.lastLaunchPrefs);
+				} catch {
+					/* best effort */
+				}
+				this.selectedId = res.viewId ?? this.selectedId;
+				if (launchOpts?.attach && res.hostMode === "pty" && res.viewId) {
+					this.setInput("");
+					this.launch = null;
+					this.mode = "list";
+					this.inputNotice = null;
+					this.done({ action: "attach", viewId: res.viewId, stopFirst: false });
+					return;
+				}
+				if (res.hostMode === "json-runner") {
+					this.notice(launchOpts?.attach ? `Start & attach needs PTY; launched in background: ${res.fallbackReason ?? "PTY unavailable"}` : `Dispatched with non-live fallback: ${res.fallbackReason ?? "PTY unavailable"}`, "warn");
+				} else {
+					this.notice(`Dispatched: ${truncate(text, 40)}`, "info");
+				}
+			}
+			this.setInput("");
+			this.launch = null;
+			this.mode = "list";
+			this.inputNotice = null;
+			this.refresh();
 		});
-		if (!res.ok) this.notice(res.error ?? "Dispatch failed", "error");
-		else {
-			this.lastLaunchPrefs = { ...this.deps.service.getLaunchPrefs?.(), cwd: launchCwd, model: launchModel, thinkingLevel: launchThinking };
-			try {
-				recordCwdLaunch(this.deps.root, launchCwd);
-			} catch {
-				/* best effort: stats must never block dispatch */
-			}
-			try {
-				this.deps.service.saveLaunchPrefs?.(this.lastLaunchPrefs);
-			} catch {
-				/* best effort */
-			}
-			this.selectedId = res.viewId ?? this.selectedId;
-			if (launchOpts?.attach && res.hostMode === "pty" && res.viewId) {
-				this.setInput("");
-				this.launch = null;
-				this.mode = "list";
-				this.inputNotice = null;
-				this.done({ action: "attach", viewId: res.viewId, stopFirst: false });
-				return;
-			}
-			if (res.hostMode === "json-runner") {
-				this.notice(launchOpts?.attach ? `Start & attach needs PTY; launched in background: ${res.fallbackReason ?? "PTY unavailable"}` : `Dispatched with non-live fallback: ${res.fallbackReason ?? "PTY unavailable"}`, "warn");
-			} else {
-				this.notice(`Dispatched: ${truncate(text, 40)}`, "info");
-			}
-		}
-		this.setInput("");
-		this.launch = null;
-		this.mode = "list";
-		this.inputNotice = null;
-		this.refresh();
 	}
 
 	private async submitReply(): Promise<void> {
@@ -980,45 +985,12 @@ export class DashboardComponent implements Component {
 		this.mode = "confirm";
 	}
 
+	// Routes through the View State Coordinator (issue #91): the service's
+	// markCompleted submits a fenced state command. No compat fallback for stale
+	// pre-coordinator service objects — the window is transient and self-heals
+	// on the next dashboard reload.
 	private markCompleted(row: Row): Promise<{ ok: boolean; error?: string }> {
-		const service = this.deps.service as Service & { markCompleted?: (viewId: string) => Promise<{ ok: boolean; error?: string }> };
-		if (typeof service.markCompleted === "function") return service.markCompleted(row.meta.id);
-
-		// Compatibility guard for an already-open dashboard whose service object came
-		// from an older module instance. The service owns this path normally.
-		const state = readState(service.root, row.meta.id) ?? row.state ?? {
-			version: 1,
-			viewId: row.meta.id,
-			currentRunId: null,
-			semanticState: "idle",
-			processState: "exited",
-			summary: "Needs instructions",
-			lastActivityAt: Date.now(),
-			updatedAt: Date.now(),
-			needsInput: false,
-			hasError: false,
-			latestAssistantPreview: "",
-			latestTool: null,
-			question: null,
-			pendingQuestions: [],
-			error: null,
-			lastVisitedAt: null,
-			lastAgentActivityAt: null,
-			autoState: null,
-		};
-		state.semanticState = "completed";
-		state.processState = "exited";
-		state.needsInput = false;
-		state.hasError = false;
-		state.question = null;
-		state.pendingQuestions = [];
-		state.error = null;
-		state.autoState = null;
-		state.summary = completedSummary(state.summary, state.latestAssistantPreview);
-		state.lastActivityAt = Date.now();
-		state.updatedAt = Date.now();
-		writeState(service.root, state);
-		return Promise.resolve({ ok: true });
+		return this.deps.service.markCompleted(row.meta.id);
 	}
 
 	private handleDeleteKey(): void {
@@ -1027,10 +999,13 @@ export class DashboardComponent implements Component {
 		const now = Date.now();
 		if (this.deleteArm !== null && this.deleteArm.id === row.meta.id && now - this.deleteArm.at <= DELETE_DOUBLE_PRESS_MS) {
 			this.deleteArm = null;
-			const res = this.deps.service.archive(row.meta.id);
-			if (!res.ok) this.notice(res.error ?? "Delete failed", "error");
-			else this.notice(`Deleted "${row.meta.name}"`, "info");
-			this.refresh();
+			// archive is async (routes through the view-state coordinator, issue #91);
+			// the notice + refresh land when the command settles.
+			void Promise.resolve(this.deps.service.archive(row.meta.id)).then((res) => {
+				if (!res.ok) this.notice(res.error ?? "Delete failed", "error");
+				else this.notice(`Deleted "${row.meta.name}"`, "info");
+				this.refresh();
+			});
 			return;
 		}
 		this.deleteArm = { id: row.meta.id, at: now };
@@ -1065,11 +1040,13 @@ export class DashboardComponent implements Component {
 			prompt: `Delete ${rows.length} done session${rows.length === 1 ? "" : "s"}? Session files are preserved. (y/N)`,
 			returnMode: "select",
 			onYes: () => {
-				const res = this.deps.service.archiveMany?.(rows.map((row) => row.meta.id)) ?? { ok: true, archived: 0, skipped: rows.length };
-				if (!res.ok) this.notice("Delete failed", "error");
-				else this.notice(`Deleted ${res.archived}${res.skipped ? ` · skipped ${res.skipped}` : ""}`, "info");
-				this.exitSelectionMode(true);
-				this.refresh();
+				// archiveMany is async (coordinator-routed, issue #91).
+				void Promise.resolve(this.deps.service.archiveMany?.(rows.map((row) => row.meta.id)) ?? { ok: true, archived: 0, skipped: rows.length }).then((res) => {
+					if (!res.ok) this.notice("Delete failed", "error");
+					else this.notice(`Deleted ${res.archived}${res.skipped ? ` · skipped ${res.skipped}` : ""}`, "info");
+					this.exitSelectionMode(true);
+					this.refresh();
+				});
 			},
 		};
 		this.mode = "confirm";
@@ -2009,18 +1986,6 @@ function isAgentBusy(row: Row): boolean {
 	const st = row.state?.semanticState;
 	const waitingOnTool = Array.isArray(row.state?.pendingQuestions) && row.state.pendingQuestions.length > 0;
 	return Boolean(row.alive && (st === "queued" || st === "working" || waitingOnTool));
-}
-
-function completedSummary(summary: string, _latestAssistantPreview: string): string {
-	if (!isGenericStatusText(summary)) return compactCompletedSummary(summary);
-	return "Done";
-}
-
-function compactCompletedSummary(text: string): string {
-	const cleaned = String(text || "").replace(/\s+/g, " ").trim();
-	if (!cleaned) return "Done";
-	const first = firstSentence(cleaned);
-	return truncate(first.length >= 12 ? first : cleaned, 80);
 }
 
 function displayPath(path: string): string {

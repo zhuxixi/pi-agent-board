@@ -54,6 +54,35 @@ function setEnv(name, value) {
 	return prev;
 }
 
+/** Poll until `fn` returns truthy (fire-and-forget beats materialize asynchronously). */
+async function waitFor(fn, timeoutMs = 5000) {
+	const deadline = Date.now() + timeoutMs;
+	for (;;) {
+		const value = fn();
+		if (value) return value;
+		if (Date.now() > deadline) return null;
+		await new Promise((resolve) => setTimeout(resolve, 25));
+	}
+}
+
+/** Pin the isolation env the coordinator/client pair needs, then start a tracked coordinator. */
+async function startTrackedCoordinator(root) {
+	const prev = {
+		coordinator: setEnv("AGENT_BOARD_COORDINATOR", undefined),
+		boardRoot: setEnv("AGENT_BOARD_ROOT", root),
+		piDir: setEnv("PI_CODING_AGENT_DIR", root),
+	};
+	const coord = await startCoordinator(root);
+	return {
+		coord,
+		restore() {
+			setEnv("AGENT_BOARD_COORDINATOR", prev.coordinator);
+			setEnv("AGENT_BOARD_ROOT", prev.boardRoot);
+			setEnv("PI_CODING_AGENT_DIR", prev.piDir);
+		},
+	};
+}
+
 test("archiveByState archives inactive rows and skips live rows", () => {
 	const root = freshRoot();
 	try {
@@ -80,8 +109,9 @@ test("archiveByState archives inactive rows and skips live rows", () => {
 	}
 });
 
-test("archive deletes an active or stuck queued row after confirmation", () => {
+test("archive deletes an active or stuck queued row after confirmation", async () => {
 	const root = freshRoot();
+	const { coord, restore } = await startTrackedCoordinator(root);
 	try {
 		createView(root, { id: "stuck", name: "stuck", cwd: "/r" });
 		const state = readState(root, "stuck");
@@ -90,12 +120,14 @@ test("archive deletes an active or stuck queued row after confirmation", () => {
 		state.summary = "Queued";
 		writeState(root, state);
 
-		assert.deepEqual(service(root).archive("stuck"), { ok: true });
+		assert.deepEqual(await service(root).archive("stuck"), { ok: true });
 		assert.deepEqual(service(root).rows().map((r) => r.meta.id), []);
 		const archived = readState(root, "stuck");
 		assert.equal(archived.semanticState, "stopped");
 		assert.equal(archived.processState, "exited");
 	} finally {
+		await coord.kill();
+		restore();
 		rmSync(root, { recursive: true, force: true });
 	}
 });
@@ -151,8 +183,9 @@ test("attachTarget uses any live PTY host for fast attach", () => {
 	}
 });
 
-test("dispatch schedules detached GPT title generation", () => {
+test("dispatch schedules detached GPT title generation", async () => {
 	const root = freshRoot();
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");
 	let titled = null;
 	try {
 		const svc = service(root, {
@@ -162,13 +195,72 @@ test("dispatch schedules detached GPT title generation", () => {
 				return { pid: null, configPath: "/no/title-config.json" };
 			},
 		});
-		const res = svc.dispatch("fix websocket reconnect bug", { cwd: "/tmp/project-a" });
+		const res = await svc.dispatch("fix websocket reconnect bug", { cwd: "/tmp/project-a" });
 		assert.equal(res.ok, true);
 		assert.equal(titled.prompt, "fix websocket reconnect bug");
 		assert.equal(titled.viewId, res.viewId);
 		assert.equal(titled.fallbackName, "fix-websocket-reconnect-bug");
 		assert.equal(titled.cwd, "/tmp/project-a");
 	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+/**
+ * Launch-order regression (final review F2 residual, fix round 2): dispatch must
+ * AWAIT mark_queued before spawning the runner. Pre-fix the command was fired
+ * after launch() fire-and-forget, so a fast-booting runner's run_started could
+ * hit the manual fence while the row was still completed → permanent zombie
+ * (queued + alive with no status; beats/finalize reject stale_run forever).
+ */
+test("dispatch awaits mark_queued before spawning the runner", async () => {
+	const root = freshRoot();
+	try {
+		const order = [];
+		const svc = service(root, {
+			ptySupport: () => ({ ok: false, reason: "test" }),
+			sendStateCommand: async (_root, cmd) => {
+				order.push(`cmd:${cmd.kind}`);
+				return { status: "applied", reason: cmd.kind, materializedRevision: 1 };
+			},
+			launch: () => {
+				order.push("launch");
+				return { pid: null, configPath: "/no/config.json" };
+			},
+		});
+		const res = await svc.dispatch("ship it", { cwd: "/tmp/project-a" });
+		assert.equal(res.ok, true);
+		assert.equal(res.hostMode, "json-runner");
+		assert.deepEqual(order, ["cmd:mark_queued", "launch"], "mark_queued must settle before the runner spawns");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("host launch awaits mark_queued before spawning the PTY host", async () => {
+	const root = freshRoot();
+	const oldForce = process.env.AGENT_BOARD_FORCE_PTY;
+	try {
+		process.env.AGENT_BOARD_FORCE_PTY = "1";
+		const order = [];
+		const svc = service(root, {
+			sendStateCommand: async (_root, cmd) => {
+				order.push(`cmd:${cmd.kind}`);
+				return { status: "applied", reason: cmd.kind, materializedRevision: 1 };
+			},
+			launchHost: () => {
+				order.push("launchHost");
+				return { pid: process.pid, configPath: "/no/host-config.json" };
+			},
+		});
+		const res = await svc.dispatch("ship it", { cwd: "/tmp/project-a" });
+		assert.equal(res.ok, true);
+		assert.equal(res.hostMode, "pty");
+		assert.deepEqual(order, ["cmd:mark_queued", "launchHost"], "mark_queued must settle before the host spawns");
+	} finally {
+		if (oldForce === undefined) delete process.env.AGENT_BOARD_FORCE_PTY;
+		else process.env.AGENT_BOARD_FORCE_PTY = oldForce;
 		rmSync(root, { recursive: true, force: true });
 	}
 });
@@ -187,8 +279,9 @@ test("failed PTY support respects expiry and explicit refresh", () => {
 	assert.equal(shouldProbePtySupport(cached, { refresh: true }, 1_500), true);
 });
 
-test("dispatch refreshes PTY support so a fixed install can recover without restarting Pi", () => {
+test("dispatch refreshes PTY support so a fixed install can recover without restarting Pi", async () => {
 	const root = freshRoot();
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");
 	let healthy = false;
 	const calls = [];
 	let hostLaunches = 0;
@@ -210,24 +303,26 @@ test("dispatch refreshes PTY support so a fixed install can recover without rest
 				return { pid: null, configPath: "/no/config.json" };
 			},
 		});
-		const first = svc.dispatch("first", { cwd: "/tmp/project-a" });
+		const first = await svc.dispatch("first", { cwd: "/tmp/project-a" });
 		assert.equal(first.ok, true);
 		assert.equal(first.hostMode, "json-runner");
 		assert.equal(jsonLaunches, 1);
 		healthy = true;
-		const second = svc.dispatch("second", { cwd: "/tmp/project-a" });
+		const second = await svc.dispatch("second", { cwd: "/tmp/project-a" });
 		assert.equal(second.ok, true);
 		assert.equal(second.hostMode, "pty");
 		assert.equal(hostLaunches, 1);
 		assert.equal(calls.length, 2);
 		assert.equal(calls.every((opts) => opts.refresh === true), true);
 	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
 		rmSync(root, { recursive: true, force: true });
 	}
 });
 
-test("dispatch carries cwd, model, and thinking into the hosted session config", () => {
+test("dispatch carries cwd, model, and thinking into the hosted session config", async () => {
 	const root = freshRoot();
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");
 	const oldForce = process.env.AGENT_BOARD_FORCE_PTY;
 	try {
 		process.env.AGENT_BOARD_FORCE_PTY = "1";
@@ -238,7 +333,7 @@ test("dispatch carries cwd, model, and thinking into the hosted session config",
 				return { pid: process.pid, configPath: "/no/host-config.json" };
 			},
 		});
-		const res = svc.dispatch("ship it", {
+		const res = await svc.dispatch("ship it", {
 			cwd: "/tmp/project-a",
 			model: "anthropic/claude-sonnet-4-8",
 			thinkingLevel: "high",
@@ -252,18 +347,19 @@ test("dispatch carries cwd, model, and thinking into the hosted session config",
 		assert.equal(row.meta.defaultModel, "anthropic/claude-sonnet-4-8");
 		assert.equal(row.meta.defaultThinking, "high");
 	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
 		if (oldForce === undefined) delete process.env.AGENT_BOARD_FORCE_PTY;
 		else process.env.AGENT_BOARD_FORCE_PTY = oldForce;
 		rmSync(root, { recursive: true, force: true });
 	}
 });
 
-test("dispatch rejects explicit worktree requests", { skip: !gitAvailable() }, () => {
+test("dispatch rejects explicit worktree requests", { skip: !gitAvailable() }, async () => {
 	const root = freshRoot();
 	const repo = freshRoot();
 	try {
 		initRepo(repo);
-		const res = service(root).dispatch("ship it", { cwd: repo, worktree: true });
+		const res = await service(root).dispatch("ship it", { cwd: repo, worktree: true });
 		assert.deepEqual(res, { ok: false, error: "Worktree mode is currently disabled." });
 	} finally {
 		rmSync(root, { recursive: true, force: true });
@@ -271,32 +367,36 @@ test("dispatch rejects explicit worktree requests", { skip: !gitAvailable() }, (
 	}
 });
 
-test("dispatch allows a second active session in the same repo", { skip: !gitAvailable() }, () => {
+test("dispatch allows a second active session in the same repo", { skip: !gitAvailable() }, async () => {
 	const root = freshRoot();
 	const repo = freshRoot();
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");
 	try {
 		initRepo(repo);
 		const svc = service(root);
-		const first = svc.dispatch("first", { cwd: repo });
+		const first = await svc.dispatch("first", { cwd: repo });
 		assert.equal(first.ok, true);
-		const second = svc.dispatch("second", { cwd: repo });
+		const second = await svc.dispatch("second", { cwd: repo });
 		assert.equal(second.ok, true);
 	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
 		rmSync(root, { recursive: true, force: true });
 		rmSync(repo, { recursive: true, force: true });
 	}
 });
 
-test("dispatch allows a second active session in the same non-git folder", () => {
+test("dispatch allows a second active session in the same non-git folder", async () => {
 	const root = freshRoot();
 	const folder = freshRoot();
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");
 	try {
 		const svc = service(root);
-		const first = svc.dispatch("first", { cwd: folder });
+		const first = await svc.dispatch("first", { cwd: folder });
 		assert.equal(first.ok, true);
-		const second = svc.dispatch("second", { cwd: folder });
+		const second = await svc.dispatch("second", { cwd: folder });
 		assert.equal(second.ok, true);
 	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
 		rmSync(root, { recursive: true, force: true });
 		rmSync(folder, { recursive: true, force: true });
 	}
@@ -473,8 +573,9 @@ test("reply with a pending host enqueues the prompt instead of dropping it", asy
 	}
 });
 
-test("dispatch creates per-instance config and endpoint paths", () => {
+test("dispatch creates per-instance config and endpoint paths", async () => {
 	const root = freshRoot();
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");
 	const oldForce = process.env.AGENT_BOARD_FORCE_PTY;
 	try {
 		process.env.AGENT_BOARD_FORCE_PTY = "1";
@@ -485,7 +586,7 @@ test("dispatch creates per-instance config and endpoint paths", () => {
 				return { pid: process.pid, configPath: config.configPath };
 			},
 		});
-		const res = svc.dispatch("ship it", { cwd: "/tmp/project-a" });
+		const res = await svc.dispatch("ship it", { cwd: "/tmp/project-a" });
 		assert.equal(res.ok, true);
 		assert.equal(res.hostMode, "pty");
 		assert.ok(captured, "launchHostImpl must have been called");
@@ -499,14 +600,62 @@ test("dispatch creates per-instance config and endpoint paths", () => {
 		assert.equal(host.socketPath, captured.socketPath);
 		assert.equal(host.runnerPid, process.pid);
 	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
 		if (oldForce === undefined) delete process.env.AGENT_BOARD_FORCE_PTY;
 		else process.env.AGENT_BOARD_FORCE_PTY = oldForce;
 		rmSync(root, { recursive: true, force: true });
 	}
 });
 
+test("reconcile does not count a rejected project-mode row as fixed (fix round 2)", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		// Crash-window shape: looksActive snapshot (working) whose run has a
+		// terminal status the row was never materialized from → project branch.
+		const s = readState(root, "v1");
+		s.semanticState = "working";
+		s.processState = "exited";
+		s.currentRunId = "r1";
+		writeState(root, s);
+		writeStatus(root, {
+			version: 1,
+			runId: "r1",
+			viewId: "v1",
+			pid: null,
+			startedAt: 1,
+			endedAt: 2,
+			exitCode: 0,
+			kind: "dispatch",
+			prompt: "x",
+			model: null,
+			semanticState: "completed",
+			processState: "exited",
+			summary: "All done.",
+			lastActivityAt: 2,
+			currentTool: null,
+			latestAssistantPreview: "All done.",
+			question: null,
+			pendingQuestions: [],
+			needsInput: false,
+			hasError: false,
+			autoState: null,
+		});
+		const svc = service(root, {
+			sendStateCommand: async () => ({ status: "rejected", reason: "manual_fence" }),
+		});
+		const fixed = await svc.reconcile();
+		assert.equal(fixed, 0, "a rejected project-mode row mutated nothing — it must not count as fixed");
+		const next = readState(root, "v1");
+		assert.equal(next.semanticState, "working", "rejected command must not mutate the row");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("syncForegroundEvent marks a managed attached session working when user inputs", async () => {
 	const root = freshRoot();
+	const { coord, restore } = await startTrackedCoordinator(root);
 	try {
 		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
 		const s = readState(root, "v1");
@@ -517,13 +666,24 @@ test("syncForegroundEvent marks a managed attached session working when user inp
 		writeState(root, s);
 
 		assert.equal(await service(root).syncForegroundEvent(meta.sessionFile, { type: "input", text: "yes" }), true);
-		const next = readState(root, "v1");
-		assert.equal(next.semanticState, "working");
+		// The working-state mirror is a fire-and-forget sync_foreground beat — poll
+		// for the coordinator to materialize it instead of asserting synchronously.
+		const next = await waitFor(() => {
+			const s = readState(root, "v1");
+			return s?.semanticState === "working" ? s : null;
+		});
+		assert.ok(next, "sync_foreground beat materialized the working state");
 		assert.equal(next.processState, "alive");
 		assert.equal(next.currentRunId, null);
 		assert.equal(next.question, null);
 		assert.equal(service(root).row("v1").alive, true);
+		// Let the in-flight fire-and-forget beat settle against the tracked
+		// coordinator before kill — otherwise its ensure path can spawn an
+		// untracked twin that outlives the rmSync below.
+		await new Promise((resolve) => setTimeout(resolve, 150));
 	} finally {
+		await coord.kill();
+		restore();
 		rmSync(root, { recursive: true, force: true });
 	}
 });
@@ -805,16 +965,22 @@ test("completeView does not fall back to a direct write on ambiguous coordinator
 	}
 });
 
-test("markVisited records a durable lastVisitedAt timestamp", () => {
+test("markVisited records a durable lastVisitedAt timestamp", async () => {
 	const root = freshRoot();
+	const { coord, restore } = await startTrackedCoordinator(root);
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
 		const before = readState(root, "v1");
 		assert.equal(before.lastVisitedAt, null);
-		assert.deepEqual(service(root).markVisited("v1"), { ok: true });
-		const after = readState(root, "v1");
-		assert.equal(typeof after.lastVisitedAt, "number");
+		assert.deepEqual(await service(root).markVisited("v1"), { ok: true });
+		const after = await waitFor(() => {
+			const s = readState(root, "v1");
+			return typeof s?.lastVisitedAt === "number" ? s : null;
+		});
+		assert.ok(after, "lastVisitedAt materialized through the coordinator");
 	} finally {
+		await coord.kill();
+		restore();
 		rmSync(root, { recursive: true, force: true });
 	}
 });
@@ -854,7 +1020,7 @@ test("markCompletedMany completes inactive rows and skips live/already-done rows
 });
 
 
-test("archiveMany archives explicit completed rows and skips live ones", () => {
+test("archiveMany archives explicit completed rows and skips live ones", async () => {
 	const root = freshRoot();
 	try {
 		createView(root, { id: "done1", name: "done1", cwd: "/r" });
@@ -871,7 +1037,7 @@ test("archiveMany archives explicit completed rows and skips live ones", () => {
 		live.processState = "alive";
 		writeState(root, live);
 
-		assert.deepEqual(service(root).archiveMany(["done1", "done2", "live1"]), { ok: true, archived: 2, skipped: 1 });
+		assert.deepEqual(await service(root).archiveMany(["done1", "done2", "live1"]), { ok: true, archived: 2, skipped: 1 });
 		assert.deepEqual(service(root).rows().map((r) => r.meta.id), ["live1"]);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
@@ -913,19 +1079,22 @@ test("busy replies queue and drain when idle", async () => {
 	}
 });
 
-test("adoptSession creates and reuses rows for an existing session file", () => {
+test("adoptSession creates and reuses rows for an existing session file", async () => {
 	const root = freshRoot();
+	const { coord, restore } = await startTrackedCoordinator(root);
 	try {
 		const sessionFile = join(root, "current.jsonl");
 		const svc = service(root);
-		const first = svc.adoptSession({ sessionFile, cwd: "/r", name: "current" });
+		const first = await svc.adoptSession({ sessionFile, cwd: "/r", name: "current" });
 		assert.equal(first.ok, true);
 		assert.equal(first.reused, false);
-		const second = svc.adoptSession({ sessionFile, cwd: "/r", name: "current renamed" });
+		const second = await svc.adoptSession({ sessionFile, cwd: "/r", name: "current renamed" });
 		assert.equal(second.ok, true);
 		assert.equal(second.reused, true);
 		assert.equal(second.viewId, first.viewId);
 	} finally {
+		await coord.kill();
+		restore();
 		rmSync(root, { recursive: true, force: true });
 	}
 });
@@ -1001,30 +1170,37 @@ test("idle non-PTY plan request launches with plan run kind", async () => {
 	}
 });
 
-test("adoptSession resets reused inactive failed row to idle so queued bg prompts can drain", () => {
+test("adoptSession resets reused inactive failed row to idle so queued bg prompts can drain", async () => {
 	const root = freshRoot();
+	const { coord, restore } = await startTrackedCoordinator(root);
 	try {
 		const sessionFile = join(root, "current.jsonl");
 		const svc = service(root);
-		const first = svc.adoptSession({ sessionFile, cwd: "/r", name: "current" });
+		const first = await svc.adoptSession({ sessionFile, cwd: "/r", name: "current" });
 		const state = readState(root, first.viewId);
 		state.semanticState = "failed";
 		state.processState = "exited";
 		state.hasError = true;
 		state.error = "old failure";
 		writeState(root, state);
-		const reused = svc.adoptSession({ sessionFile, cwd: "/r", name: "current" });
+		const reused = await svc.adoptSession({ sessionFile, cwd: "/r", name: "current" });
 		assert.equal(reused.reused, true);
-		const next = readState(root, first.viewId);
-		assert.equal(next.semanticState, "idle");
+		const next = await waitFor(() => {
+			const s = readState(root, first.viewId);
+			return s?.semanticState === "idle" ? s : null;
+		});
+		assert.ok(next, "adopt_session materialized the idle reset");
 		assert.equal(next.hasError, false);
 	} finally {
+		await coord.kill();
+		restore();
 		rmSync(root, { recursive: true, force: true });
 	}
 });
 
-test("reconcile finalizes host-backed row when PTY host exits without agent_end", () => {
+test("reconcile finalizes host-backed row when PTY host exits without agent_end", async () => {
 	const root = freshRoot();
+	const { coord, restore } = await startTrackedCoordinator(root);
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
 		const st = readState(root, "v1");
@@ -1049,18 +1225,23 @@ test("reconcile finalizes host-backed row when PTY host exits without agent_end"
 			rows: 24,
 			attachedClients: 0,
 		});
-		const fixed = service(root).reconcile();
-		assert.equal(fixed, 1);
-		const next = readState(root, "v1");
+		assert.equal(await service(root).reconcile(), 1);
+		const next = await waitFor(() => {
+			const s = readState(root, "v1");
+			return s?.processState === "exited" ? s : null;
+		});
+		assert.ok(next, "reconcile_finalize materialized through the coordinator");
 		assert.equal(next.semanticState, "idle");
-		assert.equal(next.processState, "exited");
 	} finally {
+		await coord.kill();
+		restore();
 		rmSync(root, { recursive: true, force: true });
 	}
 });
 
 test("adopted external session does not fall back to JSON runner when PTY is unavailable", async () => {
 	const root = freshRoot();
+	const { coord, restore } = await startTrackedCoordinator(root);
 	try {
 		const sessionFile = join(root, "external-current.jsonl");
 		const launched = [];
@@ -1071,18 +1252,21 @@ test("adopted external session does not fall back to JSON runner when PTY is una
 				return { pid: null, configPath: "/no/config.json" };
 			},
 		});
-		const adopted = svc.adoptSession({ sessionFile, cwd: "/r", name: "current" });
+		const adopted = await svc.adoptSession({ sessionFile, cwd: "/r", name: "current" });
 		const res = await svc.reply(adopted.viewId, "continue", { delivery: "now" });
 		assert.equal(res.ok, false);
 		assert.match(res.error, /PTY is required/);
 		assert.equal(launched.length, 0);
 	} finally {
+		await coord.kill();
+		restore();
 		rmSync(root, { recursive: true, force: true });
 	}
 });
 
-test("reconcile finalizes stale starting/alive host snapshots", () => {
+test("reconcile finalizes stale starting/alive host snapshots", async () => {
 	const root = freshRoot();
+	const { coord, restore } = await startTrackedCoordinator(root);
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
 		const st = readState(root, "v1");
@@ -1107,11 +1291,16 @@ test("reconcile finalizes stale starting/alive host snapshots", () => {
 			rows: 24,
 			attachedClients: 0,
 		});
-		assert.equal(service(root).reconcile(), 1);
-		const next = readState(root, "v1");
-		assert.equal(next.semanticState, "failed");
+		assert.equal(await service(root).reconcile(), 1);
+		const next = await waitFor(() => {
+			const s = readState(root, "v1");
+			return s?.semanticState === "failed" ? s : null;
+		});
+		assert.ok(next, "reconcile_finalize materialized the failed verdict");
 		assert.equal(next.processState, "exited");
 	} finally {
+		await coord.kill();
+		restore();
 		rmSync(root, { recursive: true, force: true });
 	}
 });
@@ -1298,8 +1487,9 @@ test("ensureHost probes PTY support with TTL cache, not forced refresh", () => {
 	}
 });
 
-test("reconcile auto-drain uses the cached PTY probe, never forced refresh", () => {
+test("reconcile auto-drain uses the cached PTY probe, never forced refresh", async () => {
 	const root = freshRoot();
+	const { coord, restore } = await startTrackedCoordinator(root);
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
 		const st = readState(root, "v1");
@@ -1316,13 +1506,57 @@ test("reconcile auto-drain uses the cached PTY probe, never forced refresh", () 
 		});
 		const queued = svc.queueFollowUp("v1", "next step");
 		assert.equal(queued.ok, true);
-		const fixed = svc.reconcile();
+		const fixed = await svc.reconcile();
 		assert.ok(fixed >= 1, "reconcile drained the queued follow-up");
 		assert.ok(probeCalls.length >= 1, "drain path probed ptySupport");
 		for (const opts of probeCalls) {
 			assert.notEqual(opts?.refresh, true, "reconcile→drain must not force ptySupport refresh");
 		}
+		// Settle the fire-and-forget mark_queued beat against the tracked
+		// coordinator before kill (prevents an untracked twin past the rmSync).
+		await new Promise((resolve) => setTimeout(resolve, 150));
 	} finally {
+		await coord.kill();
+		restore();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("F1: reply on a manually completed row re-launches — mark_queued travels as dashboard-user", async () => {
+	const root = freshRoot();
+	const { coord, restore } = await startTrackedCoordinator(root);
+	try {
+		createView(root, { id: "v1", name: "done", cwd: "/r" });
+		const manual = readState(root, "v1");
+		manual.semanticState = "completed";
+		manual.processState = "exited";
+		manual.autoState = null;
+		manual.currentRunId = "run_old";
+		writeState(root, manual);
+
+		const svc = service(root, {
+			ptySupport: () => ({ ok: false, reason: "test" }),
+			launch: () => ({ pid: null, configPath: "/no/config.json" }),
+		});
+		const res = await svc.reply("v1", "continue on the done row", { delivery: "now" });
+		assert.equal(res.ok, true, `reply should re-launch a done row: ${JSON.stringify(res)}`);
+		assert.equal(res.hostMode, "json-runner");
+
+		// The mark_queued beat is fire-and-forget: settle it against the tracked
+		// coordinator, then assert the source attribution and the row flip.
+		const record = await waitFor(() => {
+			const r = readJournal(root).find((e) => e?.command?.kind === "mark_queued" && e?.command?.viewId === "v1");
+			return r || null;
+		});
+		assert.equal(record.command.source, "dashboard-user", "launching is user intent — mark_queued must travel as dashboard-user to lift the manual fence");
+		const state = await waitFor(() => {
+			const s = readState(root, "v1");
+			return s.semanticState === "queued" ? s : null;
+		});
+		assert.equal(state.autoState ?? null, null, "the fence signal is cleared by the user's re-launch");
+	} finally {
+		await coord.kill();
+		restore();
 		rmSync(root, { recursive: true, force: true });
 	}
 });

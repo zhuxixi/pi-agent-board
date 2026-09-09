@@ -102,26 +102,42 @@ async function main() {
 		process.exit(0);
 	}
 
-	// Evidence pipeline (coordinator-independent) stays direct. The mirrors are
-	// written from FRESH reads taken after the coordinator's decision and are
-	// fenced on manual completions, so they can never overwrite a
-	// just-materialized patch or the user's verdict; PR #2 moves them behind
-	// the coordinator too.
-	if (config.runId) {
-		const postStatus = readStatus(config.root, config.viewId, config.runId);
-		if (postStatus && !isManualCompletion(postStatus)) {
-			postStatus.evidenceSummary = summarizeEvidence(finalizeEvidence(evidence, postStatus, Date.now()));
-			writeStatus(config.root, postStatus);
-		}
-	}
+	// Evidence pipeline (coordinator-independent) stays direct: finalize the
+	// evidence snapshot from a FRESH state read (reads are not writes — the
+	// coordinator owns state.json/status.json writes, not reads), then persist
+	// the evidence artifacts and code-refs.
 	const postState = readState(config.root, config.viewId);
 	finalizeEvidence(evidence, { semanticState: postState?.semanticState ?? state.semanticState, usage: null }, Date.now());
-	if (postState && !isManualCompletion(postState)) {
-		postState.review = summarizeEvidence(evidence);
-		writeState(config.root, postState);
-	}
 	writeEvidence(config.root, evidence);
 	updateCodeRefsFromEvidence(config.root, config.viewId, evidence, meta);
+
+	// Issue #91 PR #2 (Task 4): the evidence mirrors move behind the coordinator
+	// too — one patch_fields command materializes review/evidenceSummary on both
+	// files under a shared materializedRevision (previously two separately
+	// fenced direct writes). The coordinator's generic manual_fence / stale_run
+	// guards are authoritative; ambiguous outcomes (timeout / connection_reset)
+	// NEVER fall back to a direct write — if the command was journaled, boot
+	// replay recovers it, and the next classification pass re-derives mirrors
+	// from the evidence files either way.
+	const mirrorSummary = summarizeEvidence(evidence);
+	const patch = await sendStateCommand(config.root, {
+		type: "state_command",
+		viewId: config.viewId,
+		runId: config.runId ?? null,
+		source: "state-runner",
+		kind: "patch_fields",
+		expectedRevision: null,
+		payload: { state: { review: mirrorSummary }, status: { evidenceSummary: mirrorSummary } },
+	});
+	if (patch.status === "applied") {
+		// Quiet success — mirrors materialized by the coordinator.
+	} else if (patch.reason === "manual_fence" || patch.reason === "stale_run" || patch.reason === "no_change") {
+		// Designed fences — informational: a manual verdict or a newer run owns
+		// the row, or the mirrors already match.
+		appendDiagnostic(config.root, config.viewId, { source: "service", runId: config.runId, code: "evidence_mirror_patch_skipped", message: `Evidence mirror patch not applied (${patch.reason})`, details: { reason: patch.reason } });
+	} else {
+		appendDiagnostic(config.root, config.viewId, { source: "service", runId: config.runId, level: "warn", code: "evidence_mirror_patch_ambiguous", message: `Evidence mirror patch outcome unknown (${patch.reason}); if the command was journaled, coordinator replay will recover it; the next classification pass re-derives the mirrors from the evidence files`, details: { reason: patch.reason } });
+	}
 }
 
 /** @param {import("../src/core/types.mjs").EvidenceSnapshot} evidence */

@@ -14,9 +14,16 @@
  *   run on deep clones; changed fields are diffed into field patches.
  * - `run_finalized` → events.mjs finalizeRun + projectViewState run on a deep
  *   clone of the on-disk status; diffs produce the status/state patches.
+ * - `run_progress` / `followup_started` → payload.statusPatch merges onto the
+ *   status clone, then projectViewState recomputes the state side (shared
+ *   applyStatusProjection helper).
+ * - `reconcile_finalize` → stamps finalizeRun's exact field names on the
+ *   status (endedAt/exitCode/processState/pid) but does NOT run finalizeRun:
+ *   the reconciler's explicitly observed semanticState governs, and a full
+ *   finalize would recompute it from a possibly stale preview.
  *
  * Reject reasons: "unknown_view" | "revision_conflict" | "stale_run" |
- * "manual_fence" | "busy" | "no_change".
+ * "manual_fence" | "busy" | "no_change" | "field_not_allowed".
  */
 import {
 	applyAutoStateToStatus,
@@ -25,12 +32,53 @@ import {
 } from "./auto-state.mjs";
 import { finalizeRun, projectViewState } from "./events.mjs";
 
-/** Command kinds accepted in PR #1 (view-state coordinator scope). */
+/** Command kinds accepted by the View State Coordinator (issue #91 scope). */
 export const STATE_COMMAND_KINDS = Object.freeze([
 	"mark_completed",
 	"auto_state_classified",
 	"run_finalized",
+	"mark_queued",
+	"run_started",
+	"run_progress",
+	"reconcile_finalize",
+	"host_run_failed",
+	"archive_view",
+	"adopt_session",
+	"sync_foreground",
+	"plan_ready",
+	"followup_started",
+	"patch_fields",
 ]);
+
+/**
+ * Kinds the coordinator applies WITHOUT journaling (plan D3/Task-3 decision:
+ * run_progress is a periodic self-healing snapshot — ~4 writes/sec/run would
+ * bloat the journal unboundedly; a lost beat is overwritten by the next one).
+ * Transient commands still materialize and bump materializedRevision, but they
+ * are not replayed and not deduped.
+ */
+export const TRANSIENT_KINDS = Object.freeze(["run_progress"]);
+
+/**
+ * Per-source whitelist for `patch_fields` (metadata/evidence-mirror merges).
+ * Anything not listed here is rejected with "field_not_allowed" — semantic
+ * fields must travel through their dedicated kinds so the guard table in the
+ * plan stays exhaustive.
+ * @typedef {{ state: string[], status: string[] }} PatchableFields
+ * @type {Record<string, PatchableFields>}
+ */
+export const PATCHABLE_FIELDS = Object.freeze({
+	// summary/latestAssistantPreview: the post-exit model-summary persist routes
+	// through patch_fields (controller ruling R1 — plan oversight, Task 3).
+	"job-runner": Object.freeze({ state: Object.freeze(["review", "evidenceSummary", "summary", "latestAssistantPreview"]), status: Object.freeze(["evidenceSummary", "summary", "latestAssistantPreview"]) }),
+	"state-runner": Object.freeze({ state: Object.freeze(["review", "evidenceSummary"]), status: Object.freeze(["evidenceSummary"]) }),
+	"service": Object.freeze({ state: Object.freeze(["lastVisitedAt"]), status: Object.freeze([]) }),
+	// lastVisitedAt (markVisited): visiting is a user action, so it routes as
+	// dashboard-user — the manual fence only fences non-human sources, and
+	// legacy stamped lastVisitedAt unconditionally (visit-recency tracking
+	// must keep working on manually-completed rows).
+	"dashboard-user": Object.freeze({ state: Object.freeze(["lastVisitedAt"]), status: Object.freeze([]) }),
+});
 
 /** Who may originate a state command. Non-human sources are fenced by manual completions. */
 export const COMMAND_SOURCES = Object.freeze([
@@ -38,6 +86,7 @@ export const COMMAND_SOURCES = Object.freeze([
 	"service",
 	"job-runner",
 	"state-runner",
+	"pty-runner",
 ]);
 
 /**
@@ -60,7 +109,11 @@ export const COMMAND_SOURCES = Object.freeze([
  */
 export function validateCommand(raw) {
 	if (!raw || raw.type !== "state_command") return { ok: false, error: "bad_type" };
-	if (typeof raw.commandId !== "string" || !raw.commandId) return { ok: false, error: "missing_commandId" };
+	// Transient kinds have no idempotency semantics — the shell neither dedupes
+	// nor replays them, so commandId is optional there (echoed in the reply only).
+	if ((typeof raw.commandId !== "string" || !raw.commandId) && !TRANSIENT_KINDS.includes(raw.kind)) {
+		return { ok: false, error: "missing_commandId" };
+	}
 	if (typeof raw.viewId !== "string" || !raw.viewId) return { ok: false, error: "missing_viewId" };
 	if (!STATE_COMMAND_KINDS.includes(raw.kind)) return { ok: false, error: "unknown_kind" };
 	if (!COMMAND_SOURCES.includes(raw.source)) return { ok: false, error: "unknown_source" };
@@ -78,6 +131,68 @@ export function validateCommand(raw) {
 		if (raw.payload.lastAgentActivityAt != null && typeof raw.payload.lastAgentActivityAt !== "number") return { ok: false, error: "bad_lastAgentActivityAt" };
 		if (raw.payload.stoppedByUser != null && typeof raw.payload.stoppedByUser !== "boolean") return { ok: false, error: "bad_stoppedByUser" };
 		if (raw.payload.stopReason != null && typeof raw.payload.stopReason !== "string") return { ok: false, error: "bad_stopReason" };
+	}
+	switch (raw.kind) {
+		case "mark_queued":
+			// runId may be null (PTY host launch pins no run — legacy
+			// markQueued(id, null)); the key must be present, and when non-null
+			// it must be a non-empty string.
+			if (!raw.payload || !("runId" in raw.payload)) return { ok: false, error: "missing_runId" };
+			if (raw.payload.runId != null && (typeof raw.payload.runId !== "string" || !raw.payload.runId)) return { ok: false, error: "missing_runId" };
+			break;
+		case "run_started": {
+			if (raw.runId == null) return { ok: false, error: "missing_runId" };
+			const status = raw.payload?.status;
+			if (!status || typeof status !== "object") return { ok: false, error: "missing_status" };
+			if (typeof status.runId !== "string" || status.runId !== raw.runId) return { ok: false, error: "bad_status" };
+			break;
+		}
+		case "run_progress":
+			if (!raw.payload || typeof raw.payload.statusPatch !== "object" || raw.payload.statusPatch == null) return { ok: false, error: "missing_statusPatch" };
+			break;
+		case "followup_started":
+			// The command carries NO runId (a null runId skips the generic stale-run
+			// guard against the finished parent run); the NEW run's id travels here
+			// and governs the state-side currentRunId (ruling R2).
+			if (!raw.payload || typeof raw.payload.statusPatch !== "object" || raw.payload.statusPatch == null) return { ok: false, error: "missing_statusPatch" };
+			if (typeof raw.payload.newRunId !== "string" || !raw.payload.newRunId) return { ok: false, error: "missing_newRunId" };
+			break;
+		case "reconcile_finalize": {
+			// Project mode (service.mjs dead-runner path): the run's terminal status
+			// exists but the row was never materialized from it — the status itself
+			// is the verdict, so semanticState/summary are derived, not passed.
+			if (raw.payload?.project === true) {
+				if (raw.payload.reason != null && typeof raw.payload.reason !== "string") return { ok: false, error: "bad_reason" };
+				break;
+			}
+			const semanticState = raw.payload?.semanticState;
+			if (semanticState !== "failed" && semanticState !== "idle") return { ok: false, error: "bad_semanticState" };
+			// The reconciler's summary is caller-provided (legacy parity: both
+			// service reconcile sites always stamp a summary, ruling R4).
+			if (typeof raw.payload?.summary !== "string" || !raw.payload.summary) return { ok: false, error: "missing_summary" };
+			if (raw.payload.reason != null && typeof raw.payload.reason !== "string") return { ok: false, error: "bad_reason" };
+			if (raw.payload.exitCode != null && typeof raw.payload.exitCode !== "number") return { ok: false, error: "bad_exitCode" };
+			break;
+		}
+		case "host_run_failed":
+			if (raw.payload?.error != null && typeof raw.payload.error !== "string") return { ok: false, error: "bad_error" };
+			if (raw.payload?.exitCode != null && typeof raw.payload.exitCode !== "number") return { ok: false, error: "bad_exitCode" };
+			break;
+		case "sync_foreground":
+			if (!raw.payload?.projection || typeof raw.payload.projection !== "object") return { ok: false, error: "missing_projection" };
+			break;
+		case "plan_ready":
+			// The producer (job-runner's plan-ready pass) fires post-finalization and
+			// re-points the row at the plan-producing run (ruling R3).
+			if (raw.payload?.question != null && typeof raw.payload.question !== "string") return { ok: false, error: "bad_question" };
+			if (typeof raw.payload?.runId !== "string" || !raw.payload.runId) return { ok: false, error: "missing_runId" };
+			break;
+		case "patch_fields": {
+			const hasState = raw.payload?.state != null && typeof raw.payload.state === "object";
+			const hasStatus = raw.payload?.status != null && typeof raw.payload.status === "object";
+			if (!hasState && !hasStatus) return { ok: false, error: "missing_payload" };
+			break;
+		}
 	}
 	return { ok: true, command: raw };
 }
@@ -104,7 +219,18 @@ export function decideStateTransition(command, currentState, currentStatus, now 
 	if (command.expectedRevision != null && command.expectedRevision !== (currentState.materializedRevision ?? 0)) {
 		return reject("revision_conflict");
 	}
-	if (command.runId && currentState.currentRunId && command.runId !== currentState.currentRunId) {
+	// Generic stale-run guard: a command for a run other than the row's current
+	// run is stale. run_started is EXEMPT — it carries its own liveness-scoped
+	// guard below (launch-order inversion, cold-start race): the runner is
+	// authoritative that its run just started, so a bootstrap landing on a
+	// not-alive row applies and re-pins currentRunId. Only two SIMULTANEOUS live
+	// runs on one view are the hazard this guard exists for.
+	if (
+		command.kind !== "run_started" &&
+		command.runId &&
+		currentState.currentRunId &&
+		command.runId !== currentState.currentRunId
+	) {
 		return reject("stale_run");
 	}
 	// Manual completions are user verdicts: only a human source may act on a
@@ -179,6 +305,243 @@ export function decideStateTransition(command, currentState, currentStatus, now 
 				},
 			};
 		}
+		case "mark_queued": {
+			return {
+				action: "apply",
+				reason: command.kind,
+				mutate: {
+					state: {
+						currentRunId: command.payload.runId,
+						semanticState: "queued",
+						processState: "alive",
+						summary: "Queued",
+						needsInput: false,
+						hasError: false,
+						question: null,
+						pendingQuestions: [],
+						error: null,
+						autoState: null,
+					},
+				},
+			};
+		}
+		case "run_started": {
+			// Liveness-scoped stale guard (the generic guard above exempts this
+			// kind): only TWO LIVE RUNS on one view are the hazard — a bootstrap for
+			// a different runId while this row already runs something else is
+			// out-of-order and rejected. When the row is NOT alive, the runner is
+			// authoritative that its run just started: apply and re-pin
+			// currentRunId. This covers the cold-start race where run_started lands
+			// before mark_queued (the runner was spawned first), and re-launches of
+			// rows still pointing at the previous run.
+			if (
+				currentState.processState === "alive" &&
+				currentState.currentRunId &&
+				currentState.currentRunId !== command.runId
+			) {
+				return reject("stale_run");
+			}
+			const statusAfter = cloneJson(command.payload.status);
+			return {
+				action: "apply",
+				reason: command.kind,
+				mutate: {
+					state: {
+						processState: "alive",
+						semanticState: "working",
+						currentRunId: command.runId,
+					},
+					status: diffFields(currentStatus, statusAfter),
+				},
+			};
+		}
+		case "run_progress": {
+			// Liveness semantics: only the row's current live run may move forward.
+			// Late/duplicate progress from a finished run is dropped (next run's
+			// progress supersedes it anyway — this kind is transient by design).
+			// A live run with no materialized status cannot legitimately progress
+			// (F2): the first beat always follows run_started's bootstrap write, so
+			// a missing status here means the beat is stale or out of order — and
+			// projecting onto `null` would materialize undefined processState.
+			if (!currentStatus) return reject("stale_run");
+			if (currentState.currentRunId !== command.runId || currentState.processState !== "alive") return reject("stale_run");
+			return applyStatusProjection(command, currentState, currentStatus, now);
+		}
+		case "followup_started": {
+			// No liveness guard and no command.runId: the follow-up starts from a
+			// just-finalized parent run, so the generic stale-run guard must not fire
+			// against it. The NEW run's identity (payload.newRunId) governs the
+			// state-side currentRunId regardless of what the status patch carries,
+			// and a follow-up starting is definitionally the row running again —
+			// pin processState so a sparse bootstrap patch can never materialize
+			// an undefined (key-dropping) processState on a re-pointed row.
+			const result = applyStatusProjection(command, currentState, currentStatus, now);
+			return {
+				...result,
+				mutate: { ...result.mutate, state: { ...result.mutate.state, currentRunId: command.payload.newRunId, processState: "alive" } },
+			};
+		}
+		case "reconcile_finalize": {
+			if (currentState.processState !== "alive") return reject("no_change");
+			const at = now ?? 0;
+			if (command.payload.project === true) {
+				// Project mode: faithfully re-materialize the row from the run's
+				// terminal status (projectViewState delegation — never copied rules).
+				// A missing status means there is nothing to project — stale.
+				if (!currentStatus) return reject("stale_run");
+				const projected = projectViewState(cloneJson(currentStatus), at, currentState);
+				return { action: "apply", reason: command.kind, mutate: { state: diffFields(currentState, projected) } };
+			}
+			const failed = command.payload.semanticState === "failed";
+			const stateClone = cloneJson(currentState);
+			stateClone.semanticState = command.payload.semanticState;
+			stateClone.processState = "exited";
+			// Derived-field clearing at legacy parity (service.mjs reconcile sites,
+			// ruling R4): both legacy branches always stamp these fields.
+			stateClone.needsInput = false;
+			stateClone.hasError = failed;
+			stateClone.question = null;
+			stateClone.pendingQuestions = [];
+			stateClone.error = command.payload.reason ?? null;
+			stateClone.summary = command.payload.summary;
+			const mutate = { state: diffFields(currentState, stateClone) };
+			if (currentStatus) {
+				const statusClone = cloneJson(currentStatus);
+				// Same field names finalizeRun stamps, minus the semantic recomputation:
+				// the reconciler observed the outcome explicitly and its verdict governs.
+				statusClone.endedAt = at;
+				statusClone.exitCode = command.payload.exitCode ?? null;
+				statusClone.processState = "exited";
+				statusClone.pid = null;
+				statusClone.semanticState = command.payload.semanticState;
+				mutate.status = diffFields(currentStatus, statusClone);
+			}
+			return { action: "apply", reason: command.kind, mutate };
+		}
+		case "host_run_failed": {
+			// No kind-specific guard: the generic manual_fence above is exactly the
+			// PR #1 residual-risk closure — a late host crash must not flip a row
+			// the user already completed by hand.
+			const message = command.payload?.error ?? "PTY host failed";
+			const mutate = {
+				state: {
+					semanticState: "failed",
+					processState: "exited",
+					// Legacy parity with markRowFailedDirect (runner/pty-runner-legacy.mjs):
+					// both summary and error carry the message, hasError/needsInput are
+					// stamped so row rendering and warm-host eviction match the direct era.
+					summary: message,
+					hasError: true,
+					needsInput: false,
+					error: command.payload?.error ?? null,
+				},
+			};
+			if (currentStatus) {
+				mutate.status = {
+					semanticState: "failed",
+					processState: "exited",
+					error: command.payload?.error ?? null,
+				};
+			}
+			return { action: "apply", reason: command.kind, mutate };
+		}
+		case "archive_view": {
+			// Busy rows are allowed: archiving a working row stops it (matches the
+			// legacy archiveView behavior this kind replaces).
+			return {
+				action: "apply",
+				reason: command.kind,
+				mutate: {
+					state: {
+						semanticState: "stopped",
+						processState: "exited",
+						needsInput: false,
+						hasError: false,
+						question: null,
+						pendingQuestions: [],
+						error: null,
+						autoState: null,
+						summary: "Stopped",
+					},
+				},
+			};
+		}
+		case "adopt_session": {
+			if (currentState.processState === "alive") return reject("busy");
+			// Derived-field clearing at legacy parity (service.mjs adoptSession reuse
+			// path, ruling R4). autoState is intentionally untouched: the legacy
+			// adopt path leaves it alone.
+			return {
+				action: "apply",
+				reason: command.kind,
+				mutate: {
+					state: {
+						semanticState: "idle",
+						processState: "exited",
+						needsInput: false,
+						hasError: false,
+						question: null,
+						pendingQuestions: [],
+						error: null,
+						summary: "Backgrounded session",
+					},
+				},
+			};
+		}
+		case "sync_foreground": {
+			// Foreground mirrors never own a background run: the projection is the
+			// caller's, but currentRunId stays null regardless of what it carries.
+			const stateClone = cloneJson(currentState);
+			Object.assign(stateClone, command.payload.projection);
+			stateClone.currentRunId = null;
+			return { action: "apply", reason: command.kind, mutate: { state: diffFields(currentState, stateClone) } };
+		}
+		case "plan_ready": {
+			// The producer (job-runner's plan-ready pass) fires POST-finalization:
+			// the run has exited by the time a plan is ready for approval, so a live
+			// row means out-of-order delivery — drop it (ruling R3 inverts the guard).
+			if (currentState.processState === "alive") return reject("no_change");
+			// Exact legacy parity with runner/job-runner.mjs's plan-ready write.
+			return {
+				action: "apply",
+				reason: command.kind,
+				mutate: {
+					state: {
+						semanticState: "needs_input",
+						processState: "exited",
+						needsInput: true,
+						question: command.payload?.question ?? "Approve this plan?",
+						summary: "Plan ready for approval",
+						currentRunId: command.payload.runId,
+					},
+				},
+			};
+		}
+		case "patch_fields": {
+			const allowed = PATCHABLE_FIELDS[command.source];
+			if (!allowed) return reject("field_not_allowed");
+			const requestedState = command.payload.state ?? {};
+			const requestedStatus = command.payload.status ?? {};
+			for (const key of Object.keys(requestedState)) {
+				if (!allowed.state.includes(key)) return reject("field_not_allowed");
+			}
+			for (const key of Object.keys(requestedStatus)) {
+				if (!allowed.status.includes(key)) return reject("field_not_allowed");
+			}
+			const stateClone = cloneJson(currentState);
+			Object.assign(stateClone, requestedState);
+			const statePatch = diffFields(currentState, stateClone);
+			let statusPatch;
+			if (currentStatus && Object.keys(requestedStatus).length > 0) {
+				const statusClone = cloneJson(currentStatus);
+				Object.assign(statusClone, requestedStatus);
+				statusPatch = diffFields(currentStatus, statusClone);
+			}
+			if (Object.keys(statePatch).length === 0 && (!statusPatch || Object.keys(statusPatch).length === 0)) {
+				return reject("no_change");
+			}
+			return { action: "apply", reason: command.kind, mutate: statusPatch ? { state: statePatch, status: statusPatch } : { state: statePatch } };
+		}
 		default:
 			// validateCommand already rejects unknown kinds; defensive only.
 			return reject("unknown_kind");
@@ -215,4 +578,40 @@ function buildPatches(currentState, stateClone, stateChanged, currentStatus, sta
 	if (stateChanged) mutate.state = diffFields(currentState, stateClone);
 	if (statusChanged) mutate.status = diffFields(currentStatus, statusClone);
 	return mutate;
+}
+
+/**
+ * Shared body for the status-patch kinds (`run_progress`, `followup_started`):
+ * merge payload.statusPatch onto the materialized status, then let
+ * projectViewState recompute the state side — the projection rules live in
+ * events.mjs and are never copied here (same delegation contract as
+ * run_finalized).
+ *
+ * A missing status file is tolerated: the patch merges onto an empty object so
+ * the coordinator materializes a fresh status from the patch fields (this is
+ * the followup_started bootstrap path — a new run's status file does not exist
+ * yet). The caller should send enough fields to make that object meaningful.
+ *
+ * Pure; timestamp comes from `now`, falling back to the patch's
+ * lastActivityAt (payload-carried determinism, same rule as run_finalized).
+ *
+ * @param {object} command
+ * @param {object} currentState
+ * @param {object|null} currentStatus
+ * @param {number|undefined} now
+ */
+function applyStatusProjection(command, currentState, currentStatus, now) {
+	const patch = command.payload.statusPatch;
+	const at = now ?? patch.lastActivityAt ?? 0;
+	const statusClone = cloneJson(currentStatus) ?? {};
+	Object.assign(statusClone, patch);
+	const projectedState = projectViewState(statusClone, at, currentState);
+	return {
+		action: "apply",
+		reason: command.kind,
+		mutate: {
+			state: diffFields(currentState, projectedState),
+			status: diffFields(currentStatus ?? {}, statusClone),
+		},
+	};
 }

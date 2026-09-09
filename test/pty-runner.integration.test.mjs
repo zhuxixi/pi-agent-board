@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, readFileSync, statSync, mkdirSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, readFileSync, statSync, mkdirSync, symlinkSync, copyFileSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -9,7 +9,9 @@ import { test } from "node:test";
 import { atomicWriteJson } from "../src/core/atomic.mjs";
 import { readDiagnostics } from "../src/core/diagnostics.mjs";
 import * as P from "../src/core/paths.mjs";
-import { claimHost, createView, readHost, updateOwnedHost, writeHost } from "../src/core/store.mjs";
+import { claimHost, createView, readHost, readMeta, readState, updateOwnedHost, writeHost, writeState } from "../src/core/store.mjs";
+import { readJournal } from "../src/core/coordinator-journal.mjs";
+import { startCoordinator } from "../test-support/ensure-coordinator-helper.mjs";
 import { tryAcquireOwnedViewLock } from "../src/core/locks.mjs";
 
 function freshRoot() {
@@ -1240,6 +1242,144 @@ test("owned runner leaves error untouched on a clean child exit", async () => {
 	} finally {
 		try { runner?.kill("SIGKILL"); } catch {}
 		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+// ---- host spawn failure → fenced host_run_failed (issue #91, Phase-2b Task 5) ----
+
+/** Spawn a copy of the runner from a package-less shadow dir so its top-level
+ *  `import("node-pty")` fails deterministically (no node_modules ancestor),
+ *  making spawnInteractive throw "node-pty is unavailable" before any child
+ *  starts — the markRowFailed trigger — when pipe fallback is disabled. */
+function launchShadowRunner(root, viewId, instanceId) {
+	const shadowRunnerDir = join(root, "shadow", "runner");
+	mkdirSync(shadowRunnerDir, { recursive: true });
+	symlinkSync(resolve("src"), join(root, "shadow", "src"), "dir");
+	copyFileSync(resolve("runner/pty-runner.mjs"), join(shadowRunnerDir, "pty-runner.mjs"));
+	copyFileSync(resolve("runner/pty-runner-legacy.mjs"), join(shadowRunnerDir, "pty-runner-legacy.mjs"));
+	// The view must already exist (caller creates + seeds it). createView here
+	// would bootstrap a fresh state.json and clobber the seeded row.
+	const meta = readMeta(root, viewId);
+	if (!meta) throw new Error(`view ${viewId} must exist before launchShadowRunner`);
+	const configPath = P.hostConfigPathFor(root, viewId, instanceId);
+	const socketPath = P.hostEndpointPathFor(process.platform, root, viewId, instanceId);
+	atomicWriteJson(configPath, {
+		root,
+		viewId,
+		instanceId,
+		configPath,
+		socketPath,
+		sessionFile: meta.sessionFile,
+		cwd: process.cwd(),
+		initialPrompt: null,
+		piCommand: process.execPath,
+		piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+		model: null,
+		tools: null,
+		env: {},
+		cols: 80,
+		rows: 24,
+	});
+	const claim = claimHost(root, {
+		viewId,
+		instanceId,
+		configPath,
+		socketPath,
+		claimAt: Date.now(),
+		claimPid: process.pid,
+		claimIdentity: { pid: process.pid, startToken: null },
+	});
+	if (!claim.claimed) throw new Error(`claimHost refused: ${JSON.stringify(claim)}`);
+	const runner = spawn(process.execPath, [join(shadowRunnerDir, "pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+	return { runner };
+}
+
+/** Idle, run-tracked row that is NOT a manual completion (autoState present). */
+function idleRowState(viewId) {
+	return {
+		version: 1,
+		viewId,
+		currentRunId: "r1",
+		semanticState: "idle",
+		processState: "exited",
+		summary: "Idle",
+		lastActivityAt: 1000,
+		updatedAt: 1000,
+		needsInput: false,
+		hasError: false,
+		latestAssistantPreview: "",
+		latestTool: null,
+		question: null,
+		pendingQuestions: [],
+		error: null,
+		autoState: { source: "heuristic" },
+		materializedRevision: 1,
+	};
+}
+
+test("host spawn failure keeps a manually completed row (fenced host_run_failed, PR #1 residual #2)", async () => {
+	const root = freshRoot();
+	// Seed BEFORE the coordinator boots so its revision counter scan and the
+	// manual_fence decision see the seeded row (createView-then-seed order).
+	createView(root, { id: "v1", name: "fence", cwd: process.cwd() });
+	const manualAt = Date.now();
+	writeState(root, {
+		version: 1, viewId: "v1", currentRunId: "r1", semanticState: "completed", processState: "exited",
+		summary: "Done by hand", lastActivityAt: manualAt, updatedAt: manualAt, needsInput: false, hasError: false,
+		latestAssistantPreview: "", latestTool: null, question: null, pendingQuestions: [], error: null,
+		autoState: null, materializedRevision: 2,
+	});
+	const coord = await startCoordinator(root);
+	try {
+		const { runner } = launchShadowRunner(root, "v1", "ifence");
+		assert.equal(await waitForExit(runner, 10000), true, "runner exits after spawn failure");
+		try {
+			await waitFor(() => readDiagnostics(root, "v1").some((d) => d.code === "host_run_failed_skipped"));
+		} catch (err) {
+			throw new Error(`skipped-diagnostic wait failed; diagnostics=${JSON.stringify(readDiagnostics(root, "v1"))} state=${JSON.stringify(readState(root, "v1"))} journal=${JSON.stringify(readJournal(root))}`, { cause: err });
+		}
+		const skipped = readDiagnostics(root, "v1").find((d) => d.code === "host_run_failed_skipped");
+		assert.equal(skipped.details?.reason, "manual_fence", "the coordinator must fence the late host failure");
+		const state = readState(root, "v1");
+		assert.equal(state.semanticState, "completed", "manual completion must survive a late host crash");
+		assert.equal(state.autoState ?? null, null, "the manual fence signal must stay intact");
+		const rejectedRecord = readJournal(root).find((e) => e?.command?.kind === "host_run_failed");
+		assert.ok(rejectedRecord, "the rejected command must be journaled (durable rejection)");
+		assert.equal(rejectedRecord.result?.status, "rejected", "the journal record must carry the rejection");
+		assert.equal(rejectedRecord.result?.reason, "manual_fence", "the journal record must carry the manual_fence reason");
+	} finally {
+		await coord.kill();
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("host spawn failure marks a non-fenced row failed through host_run_failed", async () => {
+	const root = freshRoot();
+	createView(root, { id: "v1", name: "fail", cwd: process.cwd() });
+	writeState(root, idleRowState("v1"));
+	const coord = await startCoordinator(root);
+	try {
+		const { runner } = launchShadowRunner(root, "v1", "ifail");
+		assert.equal(await waitForExit(runner, 10000), true, "runner exits after spawn failure");
+		const state = await waitFor(() => {
+			const s = readState(root, "v1");
+			return s.semanticState === "failed" ? s : false;
+		});
+		assert.equal(state.processState, "exited");
+		assert.match(state.error ?? "", /PTY host failed/);
+		assert.equal(state.hasError, true, "host_run_failed stamps hasError (F4 legacy parity)");
+		assert.equal(state.needsInput, false, "host_run_failed stamps needsInput (F4 legacy parity)");
+		assert.match(state.summary ?? "", /PTY host failed/, "summary carries the message like legacy markRowFailedDirect (F4)");
+		assert.ok(state.lastActivityAt > 1000, "host_run_failed stamps lastActivityAt (F5b legacy parity)");
+		assert.equal(state.materializedRevision, 2, "applied command bumps the materialized revision");
+		const record = readJournal(root).find((e) => e?.command?.kind === "host_run_failed");
+		assert.ok(record, "applied command must be journaled");
+		assert.equal(record.command.runId, "r1", "the runner sources the runId from the row so stale_run stays effective");
+		assert.equal(record.command.source, "pty-runner");
+		assert.ok(!readDiagnostics(root, "v1").some((d) => d.code === "host_run_failed_ambiguous"), "applied commands are not ambiguous");
+	} finally {
+		await coord.kill();
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
 });

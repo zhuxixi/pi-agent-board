@@ -5,13 +5,18 @@
  * Usage: node job-runner.mjs <configPath>
  *
  * Owns one run: spawns a headless Pi worker (`pi --mode json -p --session <file> <prompt>`),
- * streams its JSON events into events.jsonl, reduces them into status.json + the row's
- * state.json, and finalizes on exit. Survives the parent Pi process exiting/reloading.
+ * streams its JSON events into events.jsonl, and routes every semantic-state
+ * mutation through the View State Coordinator as commands (issue #91): boot
+ * run_started, transient run_progress beats on the throttled hot path,
+ * auto-state classifications, run_finalized on exit, and the post-exit
+ * patch_fields (evidence mirrors / model summary). Evidence artifacts
+ * (events/stdout/stderr logs, evidence files, code-refs) stay runner-owned and
+ * are written directly. Survives the parent Pi process exiting/reloading.
  */
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { appendLine, readJson } from "../src/core/atomic.mjs";
-import { createRunStatus, finalizeRun, projectViewState, reduceEvent } from "../src/core/events.mjs";
+import { createRunStatus, finalizeRun, reduceEvent } from "../src/core/events.mjs";
 import { encodePromptForCliArg } from "../src/core/prompt-transport.mjs";
 import { applyAutoStateToStatus, autoStateEnabled, autoStateFromModelOrHeuristic, autoStateModel, buildAutoStatePrompt, heuristicAutoState, isManualCompletion } from "../src/core/auto-state.mjs";
 import { appendDiagnostic } from "../src/core/diagnostics.mjs";
@@ -21,9 +26,10 @@ import { claimNextFollowUp, completeFollowUp, releaseFollowUp } from "../src/cor
 import { newRunId } from "../src/core/ids.mjs";
 import { launchRun } from "../src/core/launch.mjs";
 import * as P from "../src/core/paths.mjs";
-import { readState, readStatus, readMeta, writeState, writeStatus } from "../src/core/store.mjs";
+import { readState, readStatus, readMeta } from "../src/core/store.mjs";
 import { readSteering, recordPlanReady } from "../src/core/steering.mjs";
 import { sendStateCommand, coordinatorDisabled } from "../src/core/coordinator-client.mjs";
+import { legacyFollowupBootstrap, legacyPersistState, legacyPlanReadyStateWrite, legacyWriteState, legacyWriteStatus } from "./job-runner-legacy.mjs";
 import { buildApprovePlanPrompt, buildPlanChangesPrompt, buildPlanRequestPrompt } from "../src/core/steering-prompts.mjs";
 
 const WRITE_THROTTLE_MS = 250;
@@ -60,13 +66,70 @@ function main() {
 	const meta = readMeta(root, viewId);
 
 	let status = createRunStatus(config, null, Date.now());
+	// The run starts working the moment the runner is up; seeding the boot status
+	// with "working" (instead of createRunStatus's "queued") avoids the stale
+	// queued frame flickering through run_started's first materialization.
+	status.semanticState = "working";
 	let evidence = emptyEvidenceSnapshot({ viewId, runId, source: "json-runner" });
 	appendDiagnostic(root, viewId, { source: "runner", runId, code: "runner_start", message: "Runner started", details: { kind: config.kind, cwd: config.cwd, model: config.model } });
-	writeStatus(root, status);
 	writeRunEvidence(root, evidence);
 	writeEvidence(root, evidence);
 	updateCodeRefsFromEvidence(root, viewId, evidence, meta);
-	writeState(root, projectViewState(status, Date.now(), readState(root, viewId)));
+	if (coordinatorDisabled()) {
+		legacyPersistState({ root, viewId, runId, status });
+	}
+	return bootstrapRun({ root, viewId, runId, config, status, meta, evidence, stdoutLog, stderrLog, eventsLog });
+}
+
+/**
+ * Async continuation of main: route the run_started bootstrap through the
+ * coordinator (the status file it creates is what every later run_progress
+ * beat patches onto), then spawn the worker and wire the event handlers.
+ * @param {{ root: string, viewId: string, runId: string, config: object, status: object, meta: object, evidence: object, stdoutLog: string, stderrLog: string, eventsLog: string }} ctx
+ */
+async function bootstrapRun({ root, viewId, runId, config, status, meta, evidence, stdoutLog, stderrLog, eventsLog }) {
+	if (!coordinatorDisabled()) {
+		// Journaled bootstrap: creates the run's status.json (STATUS_BOOTSTRAP_KINDS)
+		// and pins the row to working/alive/currentRunId. Ambiguous outcomes never
+																				  // block the run: if the command was journaled, coordinator replay recovers
+		// it; otherwise dashboard reconcile converges the row.
+		const started = await sendStateCommand(root, {
+			type: "state_command",
+			viewId,
+			runId,
+			source: "job-runner",
+			kind: "run_started",
+			expectedRevision: null,
+			payload: { status: { ...status } },
+		});
+		if (started.status !== "applied" && started.reason !== "coordinator_disabled") {
+			appendDiagnostic(root, viewId, { source: "runner", runId, level: "warn", code: "run_started_command_ambiguous", message: `Run bootstrap outcome unknown (${started.reason}); if the command was journaled, coordinator replay will recover it; otherwise dashboard reconcile will converge the row`, details: { reason: started.reason } });
+		}
+	}
+
+	/**
+	 * One transient progress beat: ship the full in-memory status as a sparse
+	 * patch — the coordinator merges it onto the materialized status and lets
+	 * projectViewState recompute the row state (delegation, not copied rules).
+	 *
+	 * Fire-and-forget by design (the ONLY such command in the runner): the hot
+	 * path is a periodic self-healing snapshot (~4/sec), a lost beat is
+	 * superseded by the next one, and failures are silently ignored — logging
+	 * them would spam diagnostics at beat frequency. Transient commands are
+	 * never journaled, so an ambiguous outcome has no replay to await.
+	 */
+	const sendProgressBeat = () => {
+		const { materializedRevision: _fileStamp, ...patch } = status;
+		void sendStateCommand(root, {
+			type: "state_command",
+			viewId,
+			runId,
+			source: "job-runner",
+			kind: "run_progress",
+			expectedRevision: null,
+			payload: { statusPatch: patch },
+		}).catch(() => {});
+	};
 
 	// Build worker args: pi --mode json -p --session <file> [--model m] [--thinking l] [--tools t] <prompt>
 	const args = [
@@ -92,7 +155,9 @@ function main() {
 
 	status.pid = worker.pid ?? null;
 	appendDiagnostic(root, viewId, { source: "runner", runId, code: "worker_pid", message: "Worker pid recorded", details: { pid: status.pid } });
-	writeStatus(root, status);
+	// The pid lands on disk via a transient progress beat (the worker's first
+	// events would carry it too, but a silent worker must still be observable).
+	sendProgressBeat();
 
 	let stoppedByUser = false;
 	let dirty = false;
@@ -100,15 +165,12 @@ function main() {
 
 	const persist = (force = false) => {
 		void force;
-		const now = Date.now();
 		status.evidenceSummary = summarizeEvidence(evidence);
-		writeStatus(root, status);
-		writeRunEvidence(root, evidence);
-		writeEvidence(root, evidence);
-		writeState(root, projectViewState(status, now, readState(root, viewId)));
+		persistEvidenceArtifacts();
+		if (coordinatorDisabled()) legacyPersistState({ root, viewId, runId, status });
+		else sendProgressBeat();
 		// Best-effort code-refs extraction shells out to git and can take hundreds of
-		// ms; run it after the state write so endedAt-visible state converges first.
-		// The extraction only depends on evidence + git, never on state.json.
+		// ms; it only depends on evidence + git, never on state.json.
 		updateCodeRefsFromEvidence(root, viewId, evidence, meta);
 		dirty = false;
 	};
@@ -138,24 +200,50 @@ function main() {
 	};
 
 	/**
-	 * Refresh the evidence mirrors (status.evidenceSummary / state.review) from
-	 * FRESH post-decision reads, fenced on manual completions — the semantic
-	 * fields come from disk, so this can never overwrite a coordinator-materialized
-	 * patch or the user's verdict. Same deferral pattern as
-	 * runner/state-runner.mjs; PR #2 moves the mirrors behind the coordinator too.
+	 * Refresh the evidence mirrors (status.evidenceSummary / state.review)
+	 * through the coordinator: `patch_fields` carries only whitelisted mirror
+	 * fields, and the coordinator's generic manual fence (source != user on a
+	 * manually-completed row) is the authoritative guard — the old fresh-read
+	 * + isManualCompletion pre-checks are no longer needed. Designed fences
+	 * (manual_fence / no_change) are informational; ambiguous outcomes never
+	 * fall back to a direct write.
 	 */
-	const refreshEvidenceMirrors = () => {
+	const refreshEvidenceMirrors = async () => {
 		status.evidenceSummary = summarizeEvidence(evidence);
-		const freshStatus = readStatus(root, viewId, runId);
-		if (freshStatus && !isManualCompletion(freshStatus)) {
-			freshStatus.evidenceSummary = status.evidenceSummary;
-			writeStatus(root, freshStatus);
+		const result = await sendStateCommand(root, {
+			type: "state_command",
+			viewId,
+			runId: null,
+			source: "job-runner",
+			kind: "patch_fields",
+			expectedRevision: null,
+			payload: {
+				state: { review: status.evidenceSummary },
+				status: { evidenceSummary: status.evidenceSummary },
+			},
+		});
+		if (result.status === "applied") {
+			const fresh = readStatus(root, viewId, runId);
+			if (fresh) Object.assign(status, fresh);
+			return true;
 		}
-		const freshState = readState(root, viewId);
-		if (freshState && !isManualCompletion(freshState)) {
-			freshState.review = status.evidenceSummary;
-			writeState(root, freshState);
+		if (result.reason === "manual_fence" || result.reason === "no_change") return false;
+		if (result.reason === "coordinator_disabled") {
+			// Legacy escape hatch: fresh-read + fence, pre-coordinator semantics.
+			const freshStatus = readStatus(root, viewId, runId);
+			if (freshStatus && !isManualCompletion(freshStatus)) {
+				freshStatus.evidenceSummary = status.evidenceSummary;
+				legacyWriteStatus(root, viewId, runId, freshStatus);
+			}
+			const freshState = readState(root, viewId);
+			if (freshState && !isManualCompletion(freshState)) {
+				freshState.review = status.evidenceSummary;
+				legacyWriteState(root, viewId, freshState);
+			}
+			return true;
 		}
+		appendDiagnostic(root, viewId, { source: "runner", runId, level: "warn", code: "evidence_mirror_command_ambiguous", message: `Evidence mirror outcome unknown (${result.reason}); if the command was journaled, coordinator replay will recover it; otherwise the next mirror refresh will converge`, details: { reason: result.reason } });
+		return false;
 	};
 
 	/**
@@ -194,11 +282,12 @@ function main() {
 		if (result.status === "applied") {
 			const fresh = readStatus(root, viewId, runId);
 			if (fresh) Object.assign(status, fresh);
-			refreshEvidenceMirrors();
+			await refreshEvidenceMirrors();
 			return true;
 		}
 		if (result.reason === "coordinator_disabled") {
-			persist(true);
+			persistEvidenceArtifacts();
+			legacyPersistState({ root, viewId, runId, status });
 			return true;
 		}
 		if (result.reason === "stale_run") {
@@ -336,30 +425,43 @@ function main() {
 				}
 				return maybeModelSummary(config, status);
 			})
-			.then((changed) => {
-				if (changed) persistUnlessManual(true);
+			.then(async (changed) => {
+				if (!changed) return;
+				if (coordinatorDisabled()) persistUnlessManual(true);
+				else await patchSummaryThroughCoordinator(config, status);
 			})
 			.catch(() => {})
-			.finally(() => {
+			.then(async () => {
 				// The finalize chain must never prevent process.exit: a lock/fs failure
-				// here used to pin the runner as a 100% CPU zombie (issue #33).
+				// here used to pin the runner as a 100% CPU zombie (issue #33). Both
+				// steps now await coordinator commands, so they run before the exit.
 				try {
-					finalizeSteeringIfNeeded(config, status, evidence);
+					await finalizeSteeringIfNeeded(config, status, evidence);
 				} catch (err) {
 					tryAppendDiagnostic(config, "finalize_steering_failed", err);
 				}
 				try {
-					drainQueuedFollowUp(config, status);
+					await drainQueuedFollowUp(config, status);
 				} catch (err) {
 					tryAppendDiagnostic(config, "follow_up_drain_failed", err);
 				}
+			})
+			.finally(() => {
 				process.exit(stoppedByUser ? 0 : (code ?? 0));
 			});
 	});
 }
 
-/** @param {import("../src/core/types.mjs").RunConfig} config @param {import("../src/core/types.mjs").RunStatus} status @param {import("../src/core/types.mjs").EvidenceSnapshot} evidence */
-function finalizeSteeringIfNeeded(config, status, evidence) {
+/**
+ * Route the plan-ready row flip through the coordinator (`plan_ready`): the
+ * decision layer carries the exact legacy patch (needs_input/exited/"Approve
+ * this plan?") and its manual fence replaces the old file re-read guard.
+ * recordPlanReady's steering.json write STAYS direct — steering is not a
+ * coordinator artifact. The cheap pre-check remains as an optimization; the
+ * coordinator's manual_fence is authoritative. Async because the command must
+ * land before the exit-chain process.exit.
+ * @param {import("../src/core/types.mjs").RunConfig} config @param {import("../src/core/types.mjs").RunStatus} status @param {import("../src/core/types.mjs").EvidenceSnapshot} evidence */
+async function finalizeSteeringIfNeeded(config, status, evidence) {
 	if (config.kind !== "plan" && config.kind !== "plan_change") return;
 	if (status.semanticState === "failed" || status.semanticState === "stopped") return;
 	// A manual completion racing the exit chain must not be resurrected for
@@ -370,21 +472,26 @@ function finalizeSteeringIfNeeded(config, status, evidence) {
 		runId: config.runId,
 		planText: latestEvidenceText(evidence) || status.latestAssistantPreview || status.summary || "Plan ready",
 	});
-	const prev = readState(config.root, config.viewId);
-	if (prev) {
-		prev.semanticState = "needs_input";
-		prev.processState = "exited";
-		prev.needsInput = true;
-		prev.question = "Approve this plan?";
-		prev.summary = "Plan ready for approval";
-		prev.currentRunId = config.runId;
-		prev.updatedAt = Date.now();
-		writeState(config.root, prev);
+	if (coordinatorDisabled()) {
+		legacyPlanReadyStateWrite(config.root, config.viewId, config.runId);
+		return;
 	}
+	const result = await sendStateCommand(config.root, {
+		type: "state_command",
+		viewId: config.viewId,
+		runId: config.runId,
+		source: "job-runner",
+		kind: "plan_ready",
+		expectedRevision: null,
+		payload: { runId: config.runId },
+	});
+	if (result.status === "applied") return;
+	if (result.reason === "manual_fence" || result.reason === "no_change") return;
+	appendDiagnostic(config.root, config.viewId, { source: "runner", runId: config.runId, level: "warn", code: "plan_ready_command_ambiguous", message: `Plan-ready outcome unknown (${result.reason}); if the command was journaled, coordinator replay will recover it; otherwise dashboard reconcile will converge the row`, details: { reason: result.reason } });
 }
 
 /** @param {import("../src/core/types.mjs").RunConfig} config @param {import("../src/core/types.mjs").RunStatus} status */
-function drainQueuedFollowUp(config, status) {
+async function drainQueuedFollowUp(config, status) {
 	if (status.semanticState !== "idle" && status.semanticState !== "completed") return;
 	// A manual completion racing the exit chain must never be followed up: the
 	// user just finished this row, so don't launch a new run over it. The
@@ -405,8 +512,35 @@ function drainQueuedFollowUp(config, status) {
 	try {
 		const { pid } = launchRun(config.root, nextConfig, { runnerScript: fileURLToPath(import.meta.url) });
 		const nextStatus = createRunStatus(nextConfig, pid ?? null, Date.now());
-		writeStatus(config.root, nextStatus);
-		writeState(config.root, projectViewState(nextStatus, Date.now(), readState(config.root, config.viewId)));
+		// Bootstrap the follow-up run through the coordinator: command.runId is
+		// deliberately omitted (a parent-run runId would trip the generic stale-run
+		// guard against the just-finalized parent); payload.newRunId governs the
+		// state-side currentRunId. The new runner's own run_started then lands on
+		// top of this bootstrap with the real pid.
+		if (coordinatorDisabled()) {
+			legacyFollowupBootstrap(config.root, config.viewId, nextStatus);
+		} else {
+			const result = await sendStateCommand(config.root, {
+				type: "state_command",
+				viewId: config.viewId,
+				source: "job-runner",
+				kind: "followup_started",
+				expectedRevision: null,
+				payload: { newRunId: nextRunId, statusPatch: { ...nextStatus } },
+			});
+			if (result.reason === "manual_fence") {
+				// The user completed the row between the pre-check and this command.
+				// The fence preserved their verdict (legacy clobbered it); the child
+				// is already launched, so complete the item to avoid a double fire
+				// and surface the lost follow-up.
+				appendDiagnostic(config.root, config.viewId, { source: "queue", runId: nextRunId, level: "warn", code: "follow_up_fenced", message: "Manual completion fenced the follow-up bootstrap; the launched run continues but the row keeps its manual verdict", details: { kind: item.kind } });
+				completeFollowUp(config.root, config.viewId, item.id, { runId: nextRunId });
+				return;
+			}
+			if (result.status !== "applied" && result.reason !== "no_change" && result.reason !== "stale_run") {
+				appendDiagnostic(config.root, config.viewId, { source: "queue", runId: nextRunId, level: "warn", code: "follow_up_bootstrap_ambiguous", message: `Follow-up bootstrap outcome unknown (${result.reason}); if the command was journaled, coordinator replay will recover it; otherwise the launched runner's own run_started converges the row`, details: { reason: result.reason } });
+			}
+		}
 		completeFollowUp(config.root, config.viewId, item.id, { runId: nextRunId });
 		appendDiagnostic(config.root, config.viewId, { source: "queue", runId: nextRunId, code: "follow_up_started", message: "Queued follow-up started by JSON runner", details: { kind: item.kind } });
 	} catch (err) {
@@ -582,6 +716,40 @@ async function maybeModelSummary(config, status) {
 		status.summary = text.replace(/^["']|["']$/g, "").slice(0, 80);
 		return true;
 	}
+	return false;
+}
+
+/**
+ * Route the post-exit model-summary upgrade through the coordinator as a
+ * `patch_fields` command (summary + latestAssistantPreview are whitelisted for
+ * the job-runner source). The generic manual fence replaces the old
+ * persistUnlessManual file re-read. runId stays null: the finished run's
+ * currentRunId still points at it, so the coordinator binds the status patch
+ * to the right file without tripping the stale-run guard.
+ * @param {import("../src/core/types.mjs").RunConfig} config
+ * @param {import("../src/core/types.mjs").RunStatus} status mutated in place on apply
+ * @returns {Promise<boolean>} whether the summary patch was applied
+ */
+async function patchSummaryThroughCoordinator(config, status) {
+	const result = await sendStateCommand(config.root, {
+		type: "state_command",
+		viewId: config.viewId,
+		runId: null,
+		source: "job-runner",
+		kind: "patch_fields",
+		expectedRevision: null,
+		payload: {
+			state: { summary: status.summary, latestAssistantPreview: status.latestAssistantPreview },
+			status: { summary: status.summary },
+		},
+	});
+	if (result.status === "applied") {
+		const fresh = readStatus(config.root, config.viewId, config.runId);
+		if (fresh) Object.assign(status, fresh);
+		return true;
+	}
+	if (result.reason === "manual_fence" || result.reason === "no_change") return false;
+	appendDiagnostic(config.root, config.viewId, { source: "runner", runId: config.runId, level: "warn", code: "summary_patch_command_ambiguous", message: `Summary patch outcome unknown (${result.reason}); if the command was journaled, coordinator replay will recover it; otherwise dashboard reconcile will converge the row`, details: { reason: result.reason } });
 	return false;
 }
 

@@ -149,7 +149,7 @@ export function createService(opts) {
 	 * @param {RunKind} kind
 	 * @returns {{ runId: string, pid: number|null }}
 	 */
-	function launchForView(meta, prompt, kind) {
+	async function launchForView(meta, prompt, kind) {
 		const runId = newRunId();
 		/** @type {import("../core/types.mjs").RunConfig} */
 		const config = {
@@ -166,9 +166,17 @@ export function createService(opts) {
 			thinkingLevel: meta.defaultThinking ?? null,
 			tools: null,
 		};
+		// Final-review F2 residual (fix round 2): mark_queued must LAND before the
+		// runner can boot. A detached runner that boots faster than this round-trip
+		// used to send run_started while the row was still manual-completed → the
+		// command hit the manual fence → row stuck queued/alive with no status file
+		// → beats and run_finalized reject stale_run forever → permanent zombie.
+		// Spawn regardless of the result: with the coordinator unreachable the
+		// runner's own commands fail the same way either way — launch availability
+		// beats strict ordering.
+		await markQueued(meta.id, runId);
 		const { pid } = launch(root, config, { runnerScript: opts.runnerScript });
 		appendDiagnostic(root, meta.id, { source: "service", runId, code: "launch_run", message: "Detached runner launched", details: { kind, pid } });
-		markQueued(meta.id, runId);
 		return { runId, pid };
 	}
 
@@ -179,9 +187,9 @@ export function createService(opts) {
 	 * can never stack a second host on top of a live claim.
 	 * @param {import("../core/types.mjs").ViewMeta} meta
 	 * @param {string|null} initialPrompt
-	 * @returns {{ ok: true, status: "started"|"pending"|"reused", pid: number|null, socketPath: string|null, instanceId: string|null } | { ok: false, error: string, fallbackReason?: string }}
+	 * @returns {Promise<{ ok: true, status: "started"|"pending"|"reused", pid: number|null, socketPath: string|null, instanceId: string|null } | { ok: false, error: string, fallbackReason?: string }>}
 	 */
-	function launchHost(meta, initialPrompt, launchOpts = {}) {
+	async function launchHost(meta, initialPrompt, launchOpts = {}) {
 		let lease;
 		try {
 			lease = acquireLockImpl(root, meta.id, "host-start", { waitMs: HOST_START_LOCK_WAIT_MS, identity: serviceIdentity() });
@@ -193,7 +201,12 @@ export function createService(opts) {
 			return pendingLaunchResult(existing);
 		}
 		try {
-			return startHostUnderLease(meta, initialPrompt, launchOpts);
+			// Same ordering contract as launchForView (final-review F2 residual):
+			// the row must leave completed/fenced before the host can start work.
+			// `return await` (not `return`) keeps the host-start lease held until
+			// the two-phase claim transaction settles.
+			if (launchOpts.markQueued !== false) await markQueued(meta.id, null);
+			return await startHostUnderLease(meta, initialPrompt, launchOpts);
 		} finally {
 			try { lease.release(); } catch { /* best effort */ }
 		}
@@ -307,7 +320,6 @@ export function createService(opts) {
 		}
 		updateOwnedHost(root, meta.id, instanceId, (h) => ({ ...h, runnerPid: pid, runnerSpawnedAt: nowImpl() }));
 		appendDiagnostic(root, meta.id, { source: "service", code: "launch_host", message: "PTY host launched", details: { pid, instanceId, hasInitialPrompt: Boolean(initialPrompt) } });
-		if (launchOpts.markQueued !== false) markQueued(meta.id, null);
 		return { ok: true, status: "started", pid, socketPath, instanceId };
 	}
 
@@ -405,8 +417,26 @@ export function createService(opts) {
 		return false;
 	}
 
-	/** @param {string} viewId @param {string|null} runId */
-	function markQueued(viewId, runId) {
+	/**
+	 * Fire a state command for a non-run lifecycle/metadata mutation and surface
+	 * non-applied outcomes. Ambiguity contract (issue #91): timeout /
+	 * connection_reset mean the command MAY already be journaled — never fall
+	 * back to a direct write on those; only the explicit
+	 * AGENT_BOARD_COORDINATOR=off escape hatch takes the legacy branch (the
+	 * caller checks `reason === "coordinator_disabled"`).
+	 * @param {object} command
+	 * @param {string} [viewId] defaults to command.viewId
+	 */
+	async function sendLifecycleCommand(command, viewId = command.viewId) {
+		const result = await sendStateCommandImpl(root, command);
+		if (result.status !== "applied" && result.reason !== "coordinator_disabled") {
+			appendDiagnostic(root, viewId, { source: "service", level: "warn", code: "state_command_not_applied", message: `${command.kind} ${result.status} (${result.reason})`, details: { kind: command.kind, reason: result.reason } });
+		}
+		return result;
+	}
+
+	/** Legacy direct write for mark_queued — coordinator_disabled escape hatch only. */
+	function markQueuedDirect(viewId, runId) {
 		const state = readState(root, viewId) ?? blankState(viewId);
 		state.currentRunId = runId;
 		state.semanticState = "queued";
@@ -423,15 +453,106 @@ export function createService(opts) {
 		writeState(root, state);
 	}
 
-	/** @param {string} viewId @returns {{ ok: boolean, error?: string }} */
-	function markVisited(viewId) {
-		const row = loadRow(root, viewId);
-		if (!row) return { ok: false, error: "Unknown session" };
-		const state = readState(root, viewId) ?? row.state ?? blankState(viewId);
+	/** @param {string} viewId @param {string|null} runId @returns {Promise<{status: string, reason: string|null, materializedRevision?: number}>} */
+	function markQueued(viewId, runId) {
+		if (coordinatorDisabled()) {
+			markQueuedDirect(viewId, runId);
+			return Promise.resolve({ status: "applied", reason: "coordinator_disabled" });
+		}
+		// Fire-and-forget: legacy issued this write right after launch() without
+		// waiting on the runner, and the coordinator serializes arrival order the
+		// same way. N1 (Task 1): command.runId stays null — the new run's id rides
+		// in the payload and the decision branch pins currentRunId, so the generic
+		// stale-run guard cannot fire against the PREVIOUS run.
+		//
+		// source is "dashboard-user" on purpose (final-review F1): launching a run
+		// from these flows is ALWAYS user intent (reply / dispatch / attach), and
+		// the manual fence exists to protect the user's verdict from AUTOMATED late
+		// writes — a user-initiated re-launch IS the user changing the verdict, so
+		// mark_queued must lift the fence for the rest of the new run (otherwise a
+		// reply on a done row would execute invisibly while the row stays
+		// completed). Automated re-launch stays guarded upstream: the job-runner's
+		// post-exit follow-up claim refuses manually-completed rows
+		// (drainQueuedFollowUp: `if (isManualCompletion(readState(...))) return;`),
+		// and the service-side drain path delivers already-queued user follow-ups
+		// with no fence by design (prompt-not-lost, issue #70 — its live-host input
+		// path never fenced either).
+		// Fix round 2 (launch ordering): this promise is now AWAITED by launchForView
+		// / launchHost before they spawn — see the ordering notes there.
+		return sendLifecycleCommand({
+			type: "state_command",
+			viewId,
+			runId: null,
+			source: "dashboard-user",
+			kind: "mark_queued",
+			expectedRevision: null,
+			payload: { runId },
+		}).catch(() => ({ status: "rejected", reason: "connection_reset" }));
+	}
+
+	/** Legacy direct write for markVisited — coordinator_disabled escape hatch only. */
+	function markVisitedDirect(row) {
+		const state = readState(root, row.meta.id) ?? row.state ?? blankState(row.meta.id);
 		state.lastVisitedAt = Date.now();
 		state.updatedAt = Date.now();
 		writeState(root, state);
+	}
+
+	/**
+	 * @param {string} viewId
+	 * @returns {Promise<{ ok: boolean, error?: string }>}
+	 */
+	async function markVisited(viewId) {
+		const row = loadRow(root, viewId);
+		if (!row) return { ok: false, error: "Unknown session" };
+		if (coordinatorDisabled()) {
+			markVisitedDirect(row);
+			return { ok: true };
+		}
+		// dashboard-user (not "service"): visiting is a user action, and the
+		// manual fence must not stop visit-recency tracking on completed rows —
+		// legacy stamped lastVisitedAt unconditionally. Whitelist: lastVisitedAt only.
+		const result = await sendLifecycleCommand({
+			type: "state_command",
+			viewId,
+			source: "dashboard-user",
+			kind: "patch_fields",
+			expectedRevision: null,
+			payload: { state: { lastVisitedAt: Date.now() } },
+		}, viewId);
+		if (result.reason === "coordinator_disabled") markVisitedDirect(row);
+		// Visit tracking is best-effort metadata — never fail the UI action.
 		return { ok: true };
+	}
+
+	/** Legacy direct write for adoptSession — coordinator_disabled escape hatch only. */
+	function adoptStateDirect(viewId, state) {
+		const target = state ?? readState(root, viewId) ?? blankState(viewId);
+		target.semanticState = "idle";
+		target.processState = "exited";
+		target.needsInput = false;
+		target.hasError = false;
+		target.question = null;
+		target.pendingQuestions = [];
+		target.error = null;
+		target.summary = "Backgrounded session";
+		target.updatedAt = Date.now();
+		target.lastActivityAt = Date.now();
+		writeState(root, target);
+	}
+
+	/** Route the adopt-idle transition through the coordinator (fenced, journaled). */
+	async function adoptIdleState(viewId, state) {
+		const result = await sendLifecycleCommand({
+			type: "state_command",
+			viewId,
+			runId: null,
+			source: "dashboard-user",
+			kind: "adopt_session",
+			expectedRevision: null,
+			payload: {},
+		}, viewId);
+		if (result.reason === "coordinator_disabled") adoptStateDirect(viewId, state);
 	}
 
 	/** Legacy direct-write completion — only reachable when the coordinator is
@@ -495,11 +616,28 @@ export function createService(opts) {
 		return { ok: false, error: result.reason ?? "state_command_failed" };
 	}
 
+	/** Legacy direct write for archiveView's busy-row stop — coordinator_disabled escape hatch only. */
+	function archiveStateDirect(row) {
+		const state = readState(root, row.meta.id) ?? row.state ?? blankState(row.meta.id);
+		state.semanticState = "stopped";
+		state.processState = "exited";
+		state.needsInput = false;
+		state.hasError = false;
+		state.question = null;
+		state.pendingQuestions = [];
+		state.error = null;
+		state.autoState = null;
+		state.summary = "Stopped";
+		state.lastActivityAt = Date.now();
+		state.updatedAt = Date.now();
+		writeState(root, state);
+	}
+
 	/**
 	 * @param {string} viewId
-	 * @returns {{ ok: boolean, error?: string }}
+	 * @returns {Promise<{ ok: boolean, error?: string }>}
 	 */
-	function archiveView(viewId) {
+	async function archiveView(viewId) {
 		const row = loadRow(root, viewId);
 		if (!row) return { ok: false, error: "Unknown session" };
 		if (row.host?.instanceId) stopHostRow(row, "archive");
@@ -509,19 +647,17 @@ export function createService(opts) {
 			if (pid) killProcess(pid);
 		}
 		if (isAgentBusy(row)) {
-			const state = readState(root, viewId) ?? row.state ?? blankState(viewId);
-			state.semanticState = "stopped";
-			state.processState = "exited";
-			state.needsInput = false;
-			state.hasError = false;
-			state.question = null;
-			state.pendingQuestions = [];
-			state.error = null;
-			state.autoState = null;
-			state.summary = "Stopped";
-			state.lastActivityAt = Date.now();
-			state.updatedAt = Date.now();
-			writeState(root, state);
+			// dashboard-user: archiving is a user action. Busy rows are allowed by
+			// the decision kind (archiving a working row stops it — legacy parity).
+			const result = await sendLifecycleCommand({
+				type: "state_command",
+				viewId,
+				source: "dashboard-user",
+				kind: "archive_view",
+				expectedRevision: null,
+				payload: {},
+			}, viewId);
+			if (result.reason === "coordinator_disabled") archiveStateDirect(row);
 		}
 		row.meta.archived = true;
 		writeMeta(root, row.meta);
@@ -596,14 +732,30 @@ export function createService(opts) {
 	/**
 	 * @param {import("../core/store.mjs").Row} row
 	 * @param {import("../core/types.mjs").RunStatus} status
+	 * @returns {Promise<void>}
 	 */
-	function writeForegroundState(row, status) {
+	async function writeForegroundState(row, status) {
 		const projected = projectViewState(status, Date.now(), readState(root, row.meta.id) ?? row.state ?? null);
 		// Foreground turns are driven by the interactive Pi process, not a detached
 		// runner, so keep currentRunId null. This prevents reconcile()/stop() from
-		// treating a foreground turn as a managed background runner pid.
+		// treating a foreground turn as a managed background runner pid. (The
+		// decision kind force-nulls it too; the caller-side null keeps the
+		// coordinator_disabled direct write at legacy parity.)
 		projected.currentRunId = null;
-		writeState(root, projected);
+		if (coordinatorDisabled()) {
+			writeState(root, projected);
+			return;
+		}
+		const result = await sendLifecycleCommand({
+			type: "state_command",
+			viewId: row.meta.id,
+			runId: null,
+			source: "service",
+			kind: "sync_foreground",
+			expectedRevision: null,
+			payload: { projection: projected },
+		}, row.meta.id);
+		if (result.reason === "coordinator_disabled") writeState(root, projected);
 	}
 
 	/** @param {string} sessionFile */
@@ -1206,7 +1358,7 @@ export function createService(opts) {
 			let hostMode = "pty";
 			if (!pty.ok) hostMode = "json-runner";
 			if (pty.ok) {
-				const launched = launchHost(row.meta, prompt);
+				const launched = await launchHost(row.meta, prompt);
 				if (launched.ok && launched.status !== "started") {
 					// An existing claim owns the view; the item stays queued and retries
 					// after that host becomes ready (issue #70 prompt-not-lost invariant).
@@ -1223,7 +1375,7 @@ export function createService(opts) {
 				return { ok: false, error: "PTY is required to drain adopted session follow-ups safely" };
 			}
 			if (hostMode === "json-runner") {
-				runId = launchForView(row.meta, prompt, runKindForFollowUp(item)).runId;
+				({ runId } = await launchForView(row.meta, prompt, runKindForFollowUp(item)));
 			}
 			completeFollowUp(root, viewId, item.id, { runId });
 			appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_started", message: "Queued follow-up started", details: { kind: item.kind, hostMode } });
@@ -1265,7 +1417,8 @@ export function createService(opts) {
 			status.error = null;
 			status.summary = "Running…";
 			status.lastActivityAt = now;
-			writeForegroundState(row, status);
+			// Throughput path: periodic self-healing mirror, fire-and-forget.
+			void writeForegroundState(row, status);
 			return true;
 		}
 
@@ -1299,7 +1452,9 @@ export function createService(opts) {
 				// the stale in-memory fields cannot clobber the patch (#46 class).
 				// The legacy coordinator_disabled path applies in-memory instead and
 				// still needs the tail projection write (pre-coordinator behavior).
-				writeForegroundState(row, status);
+				// Awaited: this ordering IS the fence — the classification command
+				// must observe processState "exited" or its delegated rules skip.
+				await writeForegroundState(row, status);
 				classificationQueued = await queueAutoState(row.meta, status, evidence);
 				if (classificationQueued) finalizeEvidence(evidence, status, now);
 			}
@@ -1310,7 +1465,7 @@ export function createService(opts) {
 			// between the baseline write and the coordinator's decision read gets
 			// manual_fence back (classificationQueued=false), and writing the stale
 			// in-memory projection here would clobber it (#46 class).
-			if (!isManualCompletion(readState(root, row.meta.id)) && !(classificationQueued && !coordinatorDisabled())) writeForegroundState(row, status);
+			if (!isManualCompletion(readState(root, row.meta.id)) && !(classificationQueued && !coordinatorDisabled())) await writeForegroundState(row, status);
 			pruneWarmHosts({ keepViewId: row.meta.id });
 			// Async delivery (ack-gated, issue #70 A13): fire-and-forget here — the
 			// queue item's own state records the outcome, ordering is preserved by
@@ -1321,7 +1476,8 @@ export function createService(opts) {
 
 		if (reduceEvent(status, event, now, { interactive: true })) {
 			status.processState = "alive";
-			writeForegroundState(row, status);
+			// Throughput path: periodic self-healing mirror, fire-and-forget.
+			void writeForegroundState(row, status);
 			return true;
 		}
 		return false;
@@ -1341,9 +1497,9 @@ export function createService(opts) {
 		 *   model?: string|null,
 		 *   thinkingLevel?: "off"|"minimal"|"low"|"medium"|"high"|"xhigh"|"max"|null,
 		 * }} [dispatchOpts]
-		 * @returns {{ ok: boolean, viewId?: string, error?: string, hostMode?: "pty"|"json-runner", fallbackReason?: string }}
+		 * @returns {Promise<{ ok: boolean, viewId?: string, error?: string, hostMode?: "pty"|"json-runner", fallbackReason?: string }>}
 		 */
-		dispatch(text, dispatchOpts = {}) {
+		async dispatch(text, dispatchOpts = {}) {
 			const prompt = String(text || "").trim();
 			if (!prompt) return { ok: false, error: "Empty task" };
 
@@ -1375,7 +1531,7 @@ export function createService(opts) {
 			let fallbackReason;
 			let queued;
 			if (pty.ok) {
-				const launched = launchHost(meta, prompt);
+				const launched = await launchHost(meta, prompt);
 				if (launched.ok) {
 					hostMode = "pty";
 					if (launched.status !== "started") {
@@ -1387,11 +1543,11 @@ export function createService(opts) {
 					}
 				} else {
 					fallbackReason = launched.fallbackReason ?? launched.error;
-					launchForView(meta, prompt, "dispatch");
+					await launchForView(meta, prompt, "dispatch");
 				}
 			} else {
 				fallbackReason = nodePtyFallbackMessage(pty);
-				launchForView(meta, prompt, "dispatch");
+				await launchForView(meta, prompt, "dispatch");
 			}
 			queueGeneratedTitle(meta, prompt);
 			return {
@@ -1460,7 +1616,7 @@ export function createService(opts) {
 			let hostMode = null;
 			let fallbackReason;
 			if (pty.ok) {
-				const launched = launchHost(row.meta, prompt);
+				const launched = await launchHost(row.meta, prompt);
 				if (launched.ok) {
 					if (launched.status !== "started") {
 						// The existing claim will consume the prompt later — keep it queued
@@ -1481,7 +1637,7 @@ export function createService(opts) {
 			}
 			if (!hostMode) {
 				if (isExternalSession(row.meta)) return { ok: false, error: "PTY is required to continue an adopted foreground session safely" };
-				launchForView(row.meta, prompt, runKindForKind(kind));
+				await launchForView(row.meta, prompt, runKindForKind(kind));
 				hostMode = "json-runner";
 			}
 			return { ok: true, hostMode, ...(hostMode === "json-runner" ? { fallbackReason } : {}) };
@@ -1579,7 +1735,7 @@ export function createService(opts) {
 			return { kind: "session", sessionFile: row.meta.sessionFile };
 		},
 
-		adoptSession(adoptOpts = {}) {
+		async adoptSession(adoptOpts = {}) {
 			const sessionFile = String(adoptOpts.sessionFile || "").trim();
 			if (!sessionFile) return { ok: false, error: "No session file to adopt" };
 			const existing = rowForSession(sessionFile);
@@ -1588,18 +1744,7 @@ export function createService(opts) {
 				if (adoptOpts.name) existing.meta.name = String(adoptOpts.name).trim() || existing.meta.name;
 				writeMeta(root, existing.meta);
 				if (!isAgentBusy(existing)) {
-					const state = readState(root, existing.meta.id) ?? existing.state ?? blankState(existing.meta.id);
-					state.semanticState = "idle";
-					state.processState = "exited";
-					state.needsInput = false;
-					state.hasError = false;
-					state.question = null;
-					state.pendingQuestions = [];
-					state.error = null;
-					state.summary = "Backgrounded session";
-					state.updatedAt = Date.now();
-					state.lastActivityAt = Date.now();
-					writeState(root, state);
+					await adoptIdleState(existing.meta.id, readState(root, existing.meta.id) ?? existing.state ?? blankState(existing.meta.id));
 				}
 				appendDiagnostic(root, existing.meta.id, { source: "service", code: "session_adopted", message: "Existing session adopted into Agent Board", details: { reused: true } });
 				return { ok: true, viewId: existing.meta.id, reused: true };
@@ -1621,12 +1766,7 @@ export function createService(opts) {
 				sessionFile,
 			});
 			const state = readState(root, id) ?? blankState(id);
-			state.semanticState = "idle";
-			state.processState = "exited";
-			state.summary = "Backgrounded session";
-			state.updatedAt = Date.now();
-			state.lastActivityAt = Date.now();
-			writeState(root, state);
+			await adoptIdleState(id, state);
 			appendDiagnostic(root, id, { source: "service", code: "session_adopted", message: "Current session adopted into Agent Board", details: { reused: false } });
 			return { ok: true, viewId: meta.id, reused: false };
 		},
@@ -1781,9 +1921,9 @@ export function createService(opts) {
 		/**
 		 * Bulk archive explicit row ids, skipping live/missing rows.
 		 * @param {string[]} viewIds
-		 * @returns {{ ok: boolean, archived: number, skipped: number }}
+		 * @returns {Promise<{ ok: boolean, archived: number, skipped: number }>}
 		 */
-		archiveMany(viewIds) {
+		async archiveMany(viewIds) {
 			const ids = [...new Set((viewIds ?? []).filter(Boolean))];
 			let archived = 0;
 			let skipped = 0;
@@ -1793,7 +1933,7 @@ export function createService(opts) {
 					skipped += 1;
 					continue;
 				}
-				const res = archiveView(viewId);
+				const res = await archiveView(viewId);
 				if (res.ok) archived += 1;
 				else skipped += 1;
 			}
@@ -1828,9 +1968,9 @@ export function createService(opts) {
 		 * Recovery: reconcile rows whose runner died without finalizing (e.g. machine crash
 		 * or the runner was killed). If a terminal status exists, project it; otherwise mark
 		 * the row failed/stale. Safe to call on every dashboard open and on session_start.
-		 * @returns {number} number of rows reconciled.
+		 * @returns {Promise<number>} number of rows reconciled.
 		 */
-		reconcile() {
+		async reconcile() {
 			const now = Date.now();
 			let fixed = 0;
 			for (const row of listRows(root)) {
@@ -1843,16 +1983,36 @@ export function createService(opts) {
 					// its runner pid may legitimately be absent — never finalize it to failed yet.
 					if (row.host.state === "starting" && now - (row.host.claimAt ?? row.host.startedAt ?? 0) < HOST_START_GRACE_MS) continue;
 						const failed = row.host.state === "starting" || row.host.state === "alive" || row.host.state === "failed" || Boolean(row.host.error) || (row.host.exitCode !== null && row.host.exitCode !== 0);
-						s.semanticState = failed ? "failed" : "idle";
-						s.processState = "exited";
-						s.hasError = failed;
-						s.needsInput = false;
-						s.question = null;
-						s.pendingQuestions = [];
-						s.error = failed ? (s.error ?? row.host.error ?? "PTY host exited unexpectedly") : null;
-						s.summary = failed ? "Failed (PTY host exited)" : "Needs instructions";
-						s.updatedAt = now;
-						writeState(root, s);
+						// F6: failed verdicts must carry a reason (legacy guaranteed an
+						// error string). The row has no currentRunId here, so only the
+						// state half participates (no status.json to sync).
+						const result = await sendLifecycleCommand({
+							type: "state_command",
+							viewId: row.meta.id,
+							runId: null,
+							source: "service",
+							kind: "reconcile_finalize",
+							expectedRevision: null,
+							payload: {
+								semanticState: failed ? "failed" : "idle",
+								summary: failed ? "Failed (PTY host exited)" : "Needs instructions",
+								reason: failed ? (s.error ?? row.host.error ?? "PTY host exited unexpectedly") : null,
+							},
+						}, row.meta.id);
+						if (result.status !== "applied") {
+							if (result.reason === "coordinator_disabled") {
+								s.semanticState = failed ? "failed" : "idle";
+								s.processState = "exited";
+								s.hasError = failed;
+								s.needsInput = false;
+								s.question = null;
+								s.pendingQuestions = [];
+								s.error = failed ? (s.error ?? row.host.error ?? "PTY host exited unexpectedly") : null;
+								s.summary = failed ? "Failed (PTY host exited)" : "Needs instructions";
+								s.updatedAt = now;
+								writeState(root, s);
+							} else continue; // rejected/ambiguous: nothing mutated, not fixed
+						}
 						appendDiagnostic(root, row.meta.id, { source: "service", level: failed ? "error" : "info", code: "host_reconciled", message: failed ? "PTY host exited before final event" : "PTY host finalized without final event", details: { hostState: row.host.state, exitCode: row.host.exitCode } });
 						fixed += 1;
 					}
@@ -1861,16 +2021,52 @@ export function createService(opts) {
 				if (row.alive) continue;
 				const status = readStatus(root, row.meta.id, s.currentRunId);
 				if (status?.endedAt) {
-					writeState(root, projectViewState(status, now, readState(root, row.meta.id) ?? row.state ?? null));
+					// The run's terminal status exists but the row was never materialized
+					// from it (crash between the two writes, or a pre-coordinator row).
+					// Project mode lets the status's own verdict govern (completed rows
+					// must not be forced to failed/idle).
+					const result = await sendLifecycleCommand({
+						type: "state_command",
+						viewId: row.meta.id,
+						runId: s.currentRunId,
+						source: "service",
+						kind: "reconcile_finalize",
+						expectedRevision: null,
+						payload: { project: true },
+					}, row.meta.id);
+					if (result.status !== "applied" && result.reason !== "coordinator_disabled") {
+						// Fix round 2 (F5 leftover): a rejected/ambiguous project-mode
+						// row (manual fence, no_change, stale_run, timeout) mutated
+						// nothing — it must not count toward the fixed tally.
+						continue;
+					}
+					if (result.reason === "coordinator_disabled") writeState(root, projectViewState(status, now, readState(root, row.meta.id) ?? row.state ?? null));
 				} else {
-					s.semanticState = "failed";
-					s.processState = "exited";
-					s.hasError = true;
-					s.needsInput = false;
-					s.error = s.error ?? "Runner exited unexpectedly";
-					s.summary = "Failed (runner exited)";
-					s.updatedAt = now;
-					writeState(root, s);
+					const result = await sendLifecycleCommand({
+						type: "state_command",
+						viewId: row.meta.id,
+						runId: s.currentRunId,
+						source: "service",
+						kind: "reconcile_finalize",
+						expectedRevision: null,
+						payload: {
+							semanticState: "failed",
+							summary: "Failed (runner exited)",
+							reason: s.error ?? "Runner exited unexpectedly",
+						},
+					}, row.meta.id);
+					if (result.status !== "applied") {
+						if (result.reason === "coordinator_disabled") {
+							s.semanticState = "failed";
+							s.processState = "exited";
+							s.hasError = true;
+							s.needsInput = false;
+							s.error = s.error ?? "Runner exited unexpectedly";
+							s.summary = "Failed (runner exited)";
+							s.updatedAt = now;
+							writeState(root, s);
+						} else continue;
+					}
 				}
 				fixed += 1;
 			}

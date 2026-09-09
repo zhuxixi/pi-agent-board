@@ -3,10 +3,13 @@
  *
  * Production code may only import `writeState`/`writeStatus` (the state.json /
  * status.json materializers) inside the View State Coordinator. Every other
- * importer must appear in the shrinking allowlist below with a one-line
- * justification grounded in the actual remaining call sites. PR #2 migrates
- * the remaining sites and MUST delete the corresponding entries — the
- * non-rotting test below fails while a stale entry lingers after migration.
+ * importer must appear in the DESIGNED-EXCEPTION registry below with a
+ * permanent justification. Since Phase-2b (PR #2) migrated every remaining
+ * write site, entries are no longer a shrinking migration queue: each one is
+ * an architecture decision that stands until the underlying escape hatch or
+ * bootstrap path is removed. Adding an entry remains an architecture
+ * regression and must be justified in CR; the non-rotting check keeps entries
+ * honest (an entry whose file no longer writes must be deleted).
  *
  * `writeMeta` is intentionally out of scope: meta.json multi-writer behavior
  * is a documented known exception (spec §D3).
@@ -20,40 +23,38 @@ import { fileURLToPath } from "node:url";
 const PACKAGE_ROOT = fileURLToPath(new URL("..", import.meta.url));
 
 /**
- * PR #1 allowlist: pre-coordinator write sites not yet migrated.
- * Each entry needs a justification grounded in real call sites; ADDING an
+ * Designed-exception registry (Phase-2b end state): the only production write
+ * paths outside the coordinator are the documented
+ * AGENT_BOARD_COORDINATOR=off escape hatches and the createView bootstrap.
+ * Each justification is permanent, not a migration placeholder; ADDING an
  * entry is an architecture regression and must be justified in CR.
- * Call-site inventory verified against the worktree at Task 9 time
- * (2026-09-09); PR #2 migrates the remaining sites and deletes entries.
  */
 const WRITE_STATE_ALLOWLIST = new Map([
-	// Remaining non-finalization semantic sites: markQueued / markVisited /
-	// archiveView / adopt / reconcile row mirrors, plus the explicit
-	// coordinator_disabled legacy branches (e.g. completeViewDirect).
-	["src/runtime/service.mjs", "PR #1: 非终态站点（markQueued/markVisited/archive/adopt/reconcile 镜像）+ coordinator_disabled 遗留分支（completeViewDirect），待 PR #2 迁移"],
+	// coordinator_disabled escape hatch (AGENT_BOARD_COORDINATOR=off, designed
+	// exception): the *Direct helpers (markQueuedDirect / markVisitedDirect /
+	// adoptStateDirect / completeViewDirect / archiveStateDirect) plus the
+	// disabled fallbacks inside syncRowEvent and syncForeground. Unreachable on
+	// the default path — the normal routes all submit coordinator commands.
+	["src/runtime/service.mjs", "coordinator_disabled 逃生门，设计内豁免（debug/降级）：*Direct helper、syncRowEvent/syncForeground 的 disabled 回退分支，以及 reconcile() 的三处 coordinator_disabled 直写回退（host 探测终态 / project 模式 / runner-exited）；默认路径不可达，见各 Direct 函数与 reconcile 的 gating 分支"],
 	// Definition module, not an importer: the import scan can never flag it.
-	// Listed to document that its internal createView bootstrap write is also
-	// a PR #2 migration item. The non-rotting test passes trivially here (the
-	// exported definitions always mention the writers) — by design.
-	["src/core/store.mjs", "定义模块（非 importer）：createView bootstrap 初始化写在本模块内部，PR #2 迁移；此条目仅作记录，导入扫描永不命中"],
-	// During-run throttled persist (WRITE_THROTTLE_MS=250), refreshEvidenceMirrors,
-	// plan-ready prompt write ("Approve this plan?") and follow-up next-run
-	// bootstrap. No markCompleted race: the coordinator's busy/manual fences own
-	// that decision (Task 8).
-	["runner/job-runner.mjs", "PR #1: during-run 热路径节流写（250ms）+ refreshEvidenceMirrors + plan-ready/follow-up bootstrap 写；markCompleted 竞争已由 coordinator busy/manual 围栏治理，其余待 PR #2 迁移"],
-	// Two groups, both manually-fenced: (1) the full legacy classify-persist
-	// inside the coordinator_disabled escape hatch; (2) post-decision evidence
-	// mirrors (status.evidenceSummary / state.review) written from FRESH reads
-	// taken after the coordinator's verdict (Task 7 deferral).
-	["runner/state-runner.mjs", "PR #1: coordinator_disabled 遗留分支的完整分类持久化 + 决策后 evidence 镜像（新读取 + isManualCompletion 围栏，Task 7 延期），待 PR #2 迁移"],
-	// markCompleted compatibility fallback: only reachable when the dashboard
-	// process holds a service object created by a pre-Task-6 module instance
-	// (live-reload window). The normal path routes through the coordinator.
-	["src/ui/dashboard.ts", "PR #1: markCompleted 对已打开 dashboard 旧 service 对象的兼容回退（热重载窗口）；正常路径已走 coordinator，待 PR #2 清理"],
-	// markRowFailed: host crash/failure-path view-state finalization inside the
-	// PTY runner. Outside Task 8's finalize scope (job-runner exit chain +
-	// service terminal sites); PR #2 should route it through a failure command.
-	["runner/pty-runner.mjs", "PR #1: markRowFailed 宿主崩溃/失败路径的 view-state 终态写，不在 Task 8 范围内；PR #2 应改走 failure 终态命令"],
+	// Its internal createView bootstrap write is permanent by design: the fresh
+	// random viewId means no other writer can know the row exists yet, so the
+	// write cannot race. The non-rotting check uses mention-level matching only
+	// for this entry (import-level never matches a definition module).
+	["src/core/store.mjs", "createView bootstrap 不可能竞争（新 viewId 随机生成，无其他写者知情），永久豁免；本模块也是 writeState/writeStatus 的定义模块"],
+	// coordinator_disabled escape hatch (designed exception): every legacy
+	// direct write (boot/throttle/plan-ready/follow-up/post-exit summary)
+	// extracted here in Phase-2b Task 3 so job-runner.mjs itself stays
+	// write-free. Unreachable on the default path.
+	["runner/job-runner-legacy.mjs", "coordinator_disabled 逃生门，设计内豁免（debug/降级）：job-runner 的全部 legacy 直写收敛于本模块；默认路径不可达，见 job-runner.mjs 的 gating 分支"],
+	// coordinator_disabled escape hatch (designed exception): the full legacy
+	// classify-persist branch. The normal path submits auto_state_classified
+	// and the evidence mirrors route through patch_fields (Phase-2b Task 4).
+	["runner/state-runner.mjs", "coordinator_disabled 逃生门，设计内豁免（debug/降级）：完整 legacy 分类持久化分支；默认路径不可达，见 sendStateCommand 结果的 gating 分支"],
+	// coordinator_disabled escape hatch (designed exception): markRowFailedDirect
+	// — the host-crash row finalization, deliberately without a manual fence
+	// (the fenced default path is the host_run_failed command, Phase-2b Task 5).
+	["runner/pty-runner-legacy.mjs", "coordinator_disabled 逃生门，设计内豁免（markRowFailedDirect 直写，无 fence——默认配置不可达，默认路径走 fenced host_run_failed 命令）"],
 ]);
 
 /** The only unconditional writer: the View State Coordinator itself. */
@@ -80,7 +81,7 @@ function rel(file) {
 	return relative(PACKAGE_ROOT, file).split(sep).join("/");
 }
 
-test("only the coordinator imports writeState/writeStatus in production code (allowlisted exceptions)", () => {
+test("only the coordinator imports writeState/writeStatus in production code (designed exceptions only)", () => {
 	const offenders = [];
 	for (const file of collectSourceFiles()) {
 		const src = readFileSync(file, "utf8");
@@ -89,14 +90,40 @@ test("only the coordinator imports writeState/writeStatus in production code (al
 		if (ALLOWED_WRITER_MODULES.has(key)) continue;
 		if (!WRITE_STATE_ALLOWLIST.has(key)) offenders.push(key);
 	}
-	assert.deepEqual(offenders, [], `files import writeState/writeStatus without an allowlist justification: ${offenders.join(", ")}`);
+	assert.deepEqual(offenders, [], `files import writeState/writeStatus without a designed-exception justification: ${offenders.join(", ")}`);
 });
 
-test("allowlist does not shrink silently (update the map when migrating)", () => {
+/** Entries checked at import level (real importers — the non-rotting check
+ *  fails if the import disappears, forcing the entry to be deleted). */
+const IMPORT_LEVEL_ENTRIES = new Set([
+	"src/runtime/service.mjs",
+	"runner/job-runner-legacy.mjs",
+	"runner/state-runner.mjs",
+	"runner/pty-runner-legacy.mjs",
+]);
+
+test("registry entries stay honest — a file that no longer writes must lose its entry", () => {
 	for (const [key] of WRITE_STATE_ALLOWLIST) {
 		const src = readFileSync(join(PACKAGE_ROOT, key), "utf8");
-		assert.ok(WRITE_MENTION_RE.test(src), `${key} no longer writes — remove its allowlist entry`);
+		// Import-level for real importers (a stale entry fails the moment the
+		// import is removed); mention-level only for the definition module, whose
+		// exported writer names always mention the functions by design.
+		const re = IMPORT_LEVEL_ENTRIES.has(key) ? WRITE_IMPORT_RE : WRITE_MENTION_RE;
+		assert.ok(re.test(src), `${key} no longer writes — remove its designed-exception entry`);
 	}
+	assert.ok(
+		WRITE_STATE_ALLOWLIST.has("src/core/store.mjs") && !IMPORT_LEVEL_ENTRIES.has("src/core/store.mjs"),
+		"store.mjs is a definition module — it must stay mention-level only",
+	);
+});
+
+test("mention-level pinning is reserved for the definition module alone (pin/complement symmetry)", () => {
+	const mentionLevel = [...WRITE_STATE_ALLOWLIST.keys()].filter((key) => !IMPORT_LEVEL_ENTRIES.has(key));
+	assert.deepEqual(
+		mentionLevel,
+		["src/core/store.mjs"],
+		"every non-import-level registry entry must be a definition module — real importers belong in IMPORT_LEVEL_ENTRIES",
+	);
 });
 
 test("the coordinator itself still imports the state materializers", () => {
