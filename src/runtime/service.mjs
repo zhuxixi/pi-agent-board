@@ -864,8 +864,9 @@ export function createService(opts) {
 			}
 			if (pid == null) {
 				const message = spawnError ?? "PTY host runner failed to spawn (adopted claim)";
-				// Clear the dead claimer's fields so canReplaceHost sees the claim as
-				// ended — a retry (fresh ensure) must not pend on a gone claimer pid.
+				// Clear the dead claimer's fields (failed fenced — keeps the record
+				// replaceable without depending on claimer liveness; canReplaceHost no
+				// longer consults claim fields, see issue #99).
 				updateOwnedHost(root, viewId, instanceId, (h) => ({ ...h, state: "failed", endedAt: nowImpl(), exitCode: 1, error: message, claimPid: null, claimIdentity: null }));
 				removeFile(configPath);
 				return { ok: true, pending: true, socketPath: null, instanceId };
