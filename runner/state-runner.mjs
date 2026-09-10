@@ -14,6 +14,7 @@ import { finalizeEvidence, readEvidence, summarizeEvidence, writeEvidence } from
 import { updateCodeRefsFromEvidence } from "../src/core/code-refs-store.mjs";
 import { readState, readStatus, readMeta, writeState, writeStatus } from "../src/core/store.mjs";
 import { sendStateCommand } from "../src/core/coordinator-client.mjs";
+import { commandRejectDiagnostic } from "../src/core/state-commands.mjs";
 
 async function main() {
 	const configPath = process.argv[2];
@@ -69,12 +70,12 @@ async function main() {
 
 	if (result.status === "applied") {
 		appendDiagnostic(config.root, config.viewId, { source: "service", runId: config.runId, code: "auto_state_classified", message: "Auto-state classifier updated row state", details: { kind: classification.kind, confidence: classification.confidence, source: classification.source, reason: classification.reason } });
-	} else if (result.reason === "manual_fence" || result.reason === "no_change" || result.reason === "stale_run") {
-		// Designed fences — informational, not errors: the coordinator is the
-		// authority and a manual completion wins by design.
-		appendDiagnostic(config.root, config.viewId, { source: "service", runId: config.runId, code: "auto_state_classified_skipped", message: `Auto-state classification not applied (${result.reason})`, details: { reason: result.reason } });
 	} else if (result.reason !== "coordinator_disabled") {
-		appendDiagnostic(config.root, config.viewId, { source: "service", runId: config.runId, level: "warn", code: "auto_state_command_ambiguous", message: `Auto-state classification outcome unknown (${result.reason}); if the command was journaled, coordinator replay will recover it; otherwise the next classification pass will converge the row`, details: { reason: result.reason } });
+		// Unified decided/ambiguous classification (CR r2 issue-3): decided
+		// rejects (manual_fence/stale_run/…) log as info *_skipped — the
+		// coordinator's verdict is authoritative; only genuinely ambiguous
+		// outcomes (timeout/connection_reset) keep the recovery-path warn.
+		appendDiagnostic(config.root, config.viewId, { source: "service", runId: config.runId, ...commandRejectDiagnostic("auto_state", "Auto-state classification", result.reason, "otherwise the next classification pass will converge the row"), details: { reason: result.reason } });
 	}
 
 	if (result.reason === "coordinator_disabled") {

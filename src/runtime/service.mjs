@@ -29,6 +29,7 @@ import { canFinalizeLegacyHost, canReplaceHost } from "../core/host-coordination
 import { modelRefAvailable } from "../core/launch-options.mjs";
 import { ensureCoordinator, sendStateCommand, coordinatorDisabled } from "../core/coordinator-client.mjs";
 import { createDesyncEpisodeThrottle, rereadPair, statusRevisionDesynced } from "../core/status-consistency.mjs";
+import { commandRejectDiagnostic } from "../core/state-commands.mjs";
 import { HOST_PROBE_RETRY_MS, probeHost } from "../core/host-probe.mjs";
 import * as P from "../core/paths.mjs";
 import {
@@ -108,6 +109,7 @@ export function createService(opts) {
 	const acquireLockImpl = opts.acquireLock ?? acquireOwnedViewLock;
 	const tryAcquireLockImpl = opts.tryAcquireLock ?? tryAcquireOwnedViewLock;
 	const sendStateCommandImpl = opts.sendStateCommand ?? sendStateCommand;
+	const ensureCoordinatorImpl = opts.ensureCoordinator ?? ensureCoordinator;
 	// Desync episode throttle: a stuck (stateRev:statusRev) pair logs once per
 	// service, not once per reconcile pass — see createDesyncEpisodeThrottle().
 	const desyncThrottle = createDesyncEpisodeThrottle();
@@ -415,11 +417,11 @@ export function createService(opts) {
 		if (result.reason === "coordinator_disabled") {
 			return applyAutoStateToStatus(status, classification, Date.now());
 		}
-		if (result.reason === "manual_fence" || result.reason === "no_change" || result.reason === "stale_run") {
-			// Designed fences — informational, not errors.
-			return false;
-		}
-		appendDiagnostic(root, meta.id, { source: "service", runId: commandRunId, level: "warn", code: "auto_state_command_ambiguous", message: `Auto-state classification outcome unknown (${result.reason}); if the command was journaled, coordinator replay will recover it; otherwise the next classification pass will converge the row`, details: { reason: result.reason } });
+		// Unified decided/ambiguous classification (CR r2 issue-3): decided
+		// rejects (manual_fence/stale_run/…) log as info *_skipped — the
+		// coordinator's verdict is authoritative; only genuinely ambiguous
+		// outcomes (timeout/connection_reset) keep the recovery-path warn.
+		appendDiagnostic(root, meta.id, { source: "service", runId: commandRunId, ...commandRejectDiagnostic("auto_state", "Auto-state classification", result.reason, "otherwise the next classification pass will converge the row"), details: { reason: result.reason } });
 		return false;
 	}
 
@@ -2043,9 +2045,24 @@ export function createService(opts) {
 						// Episode throttle: a stuck pair logs once, not once per 700ms
 						// reconcile pass — diagnostics must stay bounded for unrepairable
 						// pairs (torn transient beat has no journal record; coordinator off).
-						if (desyncThrottle.shouldLog(row.meta.id, reread.state.materializedRevision, reread.status.materializedRevision)) {
+						// Episode throttle gates the DIAGNOSTIC (a stuck pair logs once —
+						// CR r1); the repair KICK is retried independently while it keeps
+						// failing (CR r2 issue-4): a transient ensureCoordinator failure
+						// (spawn window exhausted) must not consume the recovery path —
+						// an idle dashboard would otherwise never run boot replay. A
+						// successful kick stops the retries: the coordinator is up, boot
+						// replay already repaired a repairable pair, and an
+						// unrepairable-torn pair gains nothing from re-kicking.
+						// (shouldLog records the episode — evaluate it exactly once.)
+						const logEpisode = desyncThrottle.shouldLog(row.meta.id, reread.state.materializedRevision, reread.status.materializedRevision);
+						if (logEpisode) {
 							appendDiagnostic(root, row.meta.id, { source: "service", level: "warn", code: "state_status_revision_desync", message: "state.json and status.json revisions disagree; skipping reconcile projection and requesting coordinator repair", details: { stateRevision: reread.state.materializedRevision, statusRevision: reread.status.materializedRevision, runId: s.currentRunId } });
-							void ensureCoordinator(root).catch(() => {});
+						}
+						if (logEpisode || desyncThrottle.shouldRetryKick(row.meta.id)) {
+							void ensureCoordinatorImpl(root).then((res) => {
+								if (res?.ok) desyncThrottle.clearKickFailed(row.meta.id);
+								else desyncThrottle.markKickFailed(row.meta.id);
+							}).catch(() => desyncThrottle.markKickFailed(row.meta.id));
 						}
 						continue;
 					}

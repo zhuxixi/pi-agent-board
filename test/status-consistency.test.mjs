@@ -77,3 +77,24 @@ test("rereadPair never flags legacy pairs (missing stamps)", () => {
 	};
 	assert.equal(rereadPair("root", "v1", "r1", legacy).desynced, false);
 });
+
+test("kick-retry tracking is independent of the diagnostic episode (CR r2 issue-4)", () => {
+	const throttle = createDesyncEpisodeThrottle();
+	// New episode: log fires, no retry pending.
+	assert.equal(throttle.shouldLog("v1", 2, 1), true);
+	assert.equal(throttle.shouldRetryKick("v1"), false);
+	// Kick failed: retries flag on, diagnostic episode unchanged.
+	throttle.markKickFailed("v1");
+	assert.equal(throttle.shouldRetryKick("v1"), true);
+	assert.equal(throttle.shouldLog("v1", 2, 1), false, "same pair does not re-log");
+	// Another view is unaffected.
+	throttle.markKickFailed("v2");
+	assert.equal(throttle.shouldRetryKick("v1"), true);
+	assert.equal(throttle.shouldRetryKick("v2"), true);
+	// Successful kick clears only that view's retry flag.
+	throttle.clearKickFailed("v1");
+	assert.equal(throttle.shouldRetryKick("v1"), false);
+	assert.equal(throttle.shouldRetryKick("v2"), true);
+	// A changed pair is a new diagnostic episode regardless of kick state.
+	assert.equal(throttle.shouldLog("v1", 3, 1), true);
+});

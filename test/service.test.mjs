@@ -702,6 +702,47 @@ test("reconcile throttles desync diagnostics per episode (persistent pair logs o
 	}
 });
 
+test("reconcile retries a failed repair kick without re-logging the episode (CR r2 issue-4)", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const s = readState(root, "v1");
+		s.semanticState = "working";
+		s.processState = "exited";
+		s.currentRunId = "r1";
+		s.materializedRevision = 2;
+		writeState(root, s);
+		writeStatus(root, { ...terminalStatusFixture("v1", "r1"), materializedRevision: 1 });
+
+		// Failure injection: the injected ensureCoordinator stands in for the
+		// real spawn — first kick fails (spawn window exhausted), second
+		// succeeds (transient condition cleared). Deterministic, no real
+		// coordinator needed.
+		const ensureCalls = [];
+		let kickSucceeds = false;
+		const svc = service(root, {
+			ensureCoordinator: async () => {
+				ensureCalls.push(kickSucceeds ? "ok" : "fail");
+				return kickSucceeds ? { ok: true, instanceId: "inst" } : { ok: false, error: "coordinator_unavailable" };
+			},
+		});
+
+		await svc.reconcile(); // episode 1: diagnostic + kick #1 (fails → re-arm)
+		kickSucceeds = true; // the transient condition clears
+		await svc.reconcile(); // retry pass: kick #2 fires (succeeds), NO re-log
+		assert.deepEqual(ensureCalls, ["fail", "ok"], "a failed kick is retried on the next pass, a successful one stops the retries");
+		let diags = readDiagnostics(root, "v1").filter((d) => d.code === "state_status_revision_desync");
+		assert.equal(diags.length, 1, "kick retries do not re-log the diagnostic episode");
+
+		await svc.reconcile(); // successful kick cleared the retry flag
+		assert.deepEqual(ensureCalls, ["fail", "ok"], "a successful kick is not re-fired on later passes");
+		diags = readDiagnostics(root, "v1").filter((d) => d.code === "state_status_revision_desync");
+		assert.equal(diags.length, 1);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("reconcile re-verifies a suspected desync against fresh reads before acting (TOCTOU)", async () => {
 	const root = freshRoot();
 	try {

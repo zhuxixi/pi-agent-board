@@ -62,17 +62,37 @@ export function rereadPair(root, viewId, runId, readers = {}) {
  * a changed pair (progression, or a fresh crash at new revisions) logs again,
  * and a repaired pair simply stops firing — no reset bookkeeping needed.
  *
- * @returns {{ shouldLog(viewId: string, stateRevision: number|null, statusRevision: number|null): boolean }}
+ * Kick-retry tracking (issue #111 CR r2): a failed repair kick must not
+ * consume the recovery path — an idle dashboard would otherwise never run
+ * boot replay for a repairable pair. `markKickFailed`/`shouldRetryKick`
+ * track that independently of the diagnostic episode, so retries stay
+ * unbounded while the kick keeps failing while diagnostics stay once per
+ * episode. A successful kick clears the flag (the coordinator is up: boot
+ * replay already repaired a repairable pair; an unrepairable-torn pair
+ * gains nothing from re-kicking).
+ *
+ * @returns {{ shouldLog(viewId: string, stateRevision: number|null, statusRevision: number|null): boolean, markKickFailed(viewId: string): void, shouldRetryKick(viewId: string): boolean, clearKickFailed(viewId: string): void }}
  */
 export function createDesyncEpisodeThrottle() {
 	/** @type {Map<string, string>} */
 	const lastLogged = new Map();
+	/** @type {Set<string>} */
+	const kickFailed = new Set();
 	return {
 		shouldLog(viewId, stateRevision, statusRevision) {
 			const pair = `${stateRevision ?? "null"}:${statusRevision ?? "null"}`;
 			if (lastLogged.get(viewId) === pair) return false;
 			lastLogged.set(viewId, pair);
 			return true;
+		},
+		markKickFailed(viewId) {
+			kickFailed.add(viewId);
+		},
+		shouldRetryKick(viewId) {
+			return kickFailed.has(viewId);
+		},
+		clearKickFailed(viewId) {
+			kickFailed.delete(viewId);
 		},
 	};
 }
