@@ -1210,6 +1210,10 @@ test("archiveMany archives explicit completed rows and skips live ones", async (
 });
 
 test("busy replies queue and drain when idle", async () => {
+	// mark_queued now travels through the coordinator (issue #91); this test
+	// asserts queue/drain mechanics against a mocked launch, so pin legacy mode
+	// instead of spawning a real detached coordinator per run.
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");
 	const root = freshRoot();
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
@@ -1240,6 +1244,7 @@ test("busy replies queue and drain when idle", async () => {
 		assert.equal(launched[0].prompt, "next step");
 		assert.equal(svc.followUps("v1").summary.queuedCount, 0);
 	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
 		rmSync(root, { recursive: true, force: true });
 	}
 });
@@ -1310,6 +1315,8 @@ test("busy steering actions queue raw steering payloads", async () => {
 });
 
 test("idle non-PTY plan request launches with plan run kind", async () => {
+	// Coordinator-off pin: launch-config intent, mocked launch (issue #91).
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");
 	const root = freshRoot();
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
@@ -1331,6 +1338,7 @@ test("idle non-PTY plan request launches with plan run kind", async () => {
 		assert.equal(launched[0].kind, "plan");
 		assert.match(launched[0].prompt, /Create an implementation plan only/);
 	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
 		rmSync(root, { recursive: true, force: true });
 	}
 });
