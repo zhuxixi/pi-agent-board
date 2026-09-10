@@ -370,7 +370,15 @@ export function decideStateTransition(command, currentState, currentStatus, now 
 			// re-pointed rows, sparse patches that would materialize an
 			// undefined-shaped status — stays stale_run (F2's original exposure).
 			if (!currentStatus) {
-				const rowMatches = currentState.currentRunId === command.runId && currentState.processState === "alive";
+				// P2 hardening: the bootstrap is keyed on command.runId (it becomes the
+				// status-file identity), so a degenerate null==null row match must never
+				// bootstrap — the shell would silently drop the status half. The check
+				// lives here beside its sibling liveness guards (runId semantics for
+				// run_progress are decision-layer; envelope validation stays minimal,
+				// matching the generic stale-run guard's decision-side read).
+				const rowMatches = typeof command.runId === "string" && command.runId.length > 0
+					&& currentState.currentRunId === command.runId
+					&& currentState.processState === "alive";
 				if (!rowMatches || !beatPatchQualifiesForBootstrap(command)) return reject("stale_run");
 				// The patch itself is the base: it is the runner's authoritative
 				// full in-memory status, so applyStatusProjection's merge-onto-empty

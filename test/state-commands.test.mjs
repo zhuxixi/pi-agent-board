@@ -728,6 +728,16 @@ test("run_progress without a materialized status: qualified live-run beat bootst
 		decideStateTransition({ ...baseCmd, kind: "run_progress", payload: { statusPatch: makeStatus({ runId: "r2" }) } }, liveState, null, 50),
 		{ action: "reject", reason: "stale_run" },
 	);
+
+	// P2 hardening: a degenerate null==null identity can never bootstrap — the
+	// materialized status file is keyed on command.runId, so a runId-less beat
+	// has nothing legitimate to create (pre-hardening it returned "applied"
+	// while the shell silently dropped the status half).
+	const nullRunBeat = { type: "state_command", viewId: "v1", runId: null, source: "job-runner", kind: "run_progress", payload: { statusPatch: makeStatus({ runId: null }) } };
+	assert.deepEqual(
+		decideStateTransition(nullRunBeat, { ...liveState, currentRunId: null }, null, 50),
+		{ action: "reject", reason: "stale_run" },
+	);
 });
 
 test("transient kinds may omit commandId; journaled kinds may not", () => {

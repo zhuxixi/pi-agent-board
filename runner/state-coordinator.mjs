@@ -73,8 +73,16 @@ const LAST_ACTIVITY_STAMP_KINDS = new Set(["mark_queued", "archive_view", "adopt
  *  full status content for a run that has no materialized status yet. Every
  *  other kind keeps PR #1's "patch presence ≠ file requirement" semantics
  *  (e.g. mark_completed's `status: {autoState: null}` on a legacy row without
- *  a status file must not fabricate one). */
-const STATUS_BOOTSTRAP_KINDS = new Set(["run_started", "followup_started"]);
+ *  a status file must not fabricate one).
+ *
+ *  `run_progress` joins them (issue #91 hard-down residual closure): its beat
+ *  patch IS the runner's full in-memory status, and when the coordinator was
+ *  down through the runner's boot window (mark_queued applied, run_started
+ *  lost) the first post-recovery beat is the only surviving source that can
+ *  recreate the file — without it beats and finalize reject stale_run forever
+ *  and the row can never converge. The decision layer gates this on a
+ *  qualified live-run beat (full-shaped patch, matching string runId). */
+const STATUS_BOOTSTRAP_KINDS = new Set(["run_started", "followup_started", "run_progress"]);
 
 const root = process.argv[2];
 if (!root) {

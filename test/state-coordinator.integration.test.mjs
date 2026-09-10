@@ -996,7 +996,7 @@ test("run_progress from two concurrent clients is serialized without torn writes
 	assert.equal(status.turns, Number(state.latestAssistantPreview.split("-")[1]), "status matches the same winning beat");
 });
 
-test("run_progress with no materialized status is rejected stale_run and not journaled (F2)", async (t) => {
+test("run_progress with no materialized status is rejected stale_run and not journaled (F2 split: sparse patches stay stale_run; qualified beats bootstrap — see hard-down test)", async (t) => {
 	const root = freshRoot();
 	let child = null;
 	t.after(async () => {
@@ -1021,6 +1021,62 @@ test("run_progress with no materialized status is rejected stale_run and not jou
 	assert.equal(result.status, "rejected");
 	assert.equal(result.reason, "stale_run");
 	assert.equal(readJournal(root).length, journalLinesBefore, "transient rejections are not journaled either");
+});
+
+test("hard-down window: a qualified beat bootstraps the missed run_started and the run converges (residual closure)", async (t) => {
+	const root = freshRoot();
+	let child = null;
+	t.after(async () => {
+		if (child && isAlive(child.pid)) { child.kill("SIGTERM"); await waitForExit(child); }
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	});
+	createView(root, { id: "v1", name: "x", cwd: root });
+	child = startCoordinator(root);
+	const { client } = await readyClient(root);
+
+	// mark_queued only: the coordinator was down through the runner's boot
+	// window, so run_started was never delivered — the row is alive with the
+	// run pinned but no status file exists.
+	client.send({ type: "state_command", commandId: "hd-mq-1", viewId: "v1", source: "service", kind: "mark_queued", payload: { runId: "r1" } });
+	assert.equal((await client.next()).status, "applied");
+	assert.equal(readStatus(root, "v1", "r1"), null, "precondition: no status file (run_started was lost)");
+	const journalBeforeBeat = readJournal(root).length;
+
+	// The runner is alive and still beats through the coordinator; its first
+	// post-recovery beat carries the FULL in-memory status and bootstraps the
+	// missed status file.
+	const beatPatch = { ...createRunStatus({ runId: "r1", viewId: "v1", kind: "dispatch", prompt: "p" }, null, Date.now()), semanticState: "working" };
+	client.send({
+		type: "state_command", viewId: "v1", runId: "r1", source: "job-runner",
+		kind: "run_progress", payload: { statusPatch: beatPatch },
+	});
+	const beat = await client.next();
+	assert.equal(beat.type, "state_command_result");
+	assert.equal(beat.status, "applied");
+
+	const bootstrapped = readStatus(root, "v1", "r1");
+	assert.ok(bootstrapped, "beat bootstrapped the missed status file");
+	assert.equal(bootstrapped.runId, "r1");
+	assert.equal(bootstrapped.semanticState, "working");
+	assert.equal(bootstrapped.processState, "alive");
+	assert.equal(bootstrapped.materializedRevision, beat.materializedRevision, "bootstrap stamp shares the revision");
+	const state = readState(root, "v1");
+	assert.equal(state.materializedRevision, beat.materializedRevision);
+	assert.equal(state.semanticState, "working");
+	assert.equal(state.processState, "alive");
+
+	// Transient by design: the bootstrap beat never lands in the journal.
+	assert.equal(readJournal(root).length, journalBeforeBeat, "bootstrap beat stays transient");
+
+	// The run can now finalize — before this closure both beats and finalize
+	// rejected stale_run forever and the row could never converge (residual).
+	client.send({ type: "state_command", commandId: "hd-fin-1", viewId: "v1", runId: "r1", source: "job-runner", kind: "run_finalized", payload: { exitCode: 0 } });
+	const fin = await client.next();
+	assert.equal(fin.status, "applied", "finalize converges after the bootstrap (was stale_run forever)");
+
+	// Journal carries only the journaled commands — the beat never landed there.
+	const kinds = readJournal(root).map((r) => r.command?.kind);
+	assert.deepEqual(kinds, ["mark_queued", "run_finalized"]);
 });
 
 test("host_run_failed applies through the coordinator and fences manual completions", async (t) => {
