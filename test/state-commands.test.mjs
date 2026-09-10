@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { validateCommand, decideStateTransition, STATE_COMMAND_KINDS, COMMAND_SOURCES, TRANSIENT_KINDS, PATCHABLE_FIELDS } from "../src/core/state-commands.mjs";
+import { validateCommand, decideStateTransition, commandRejectDiagnostic, DECIDED_REJECT_REASONS, STATE_COMMAND_KINDS, COMMAND_SOURCES, TRANSIENT_KINDS, PATCHABLE_FIELDS } from "../src/core/state-commands.mjs";
 
 const baseCmd = {
 	type: "state_command", commandId: "cmd-1", viewId: "v1", runId: "r1",
@@ -246,9 +246,29 @@ const ptyRunner = { ...baseCmd, source: "pty-runner" };
 test("validateCommand enforces run_started payload status identity", () => {
 	const cmd = { ...baseCmd, kind: "run_started", payload: { status: makeStatus() } };
 	assert.equal(validateCommand({ ...cmd, runId: undefined }).ok, false);
+	// Empty string is the degenerate falsy path (Task 2 review P2-A): the
+	// statusRunId binding would silently drop the status half while acking applied.
+	assert.equal(validateCommand({ ...cmd, runId: "" }).ok, false);
 	assert.equal(validateCommand({ ...cmd, runId: "r1", payload: {} }).ok, false);
 	assert.equal(validateCommand({ ...cmd, runId: "r1", payload: { status: { runId: "r2" } } }).ok, false);
 	assert.equal(validateCommand({ ...cmd, runId: "r1", payload: { status: { runId: "r1" } } }).ok, true);
+});
+
+test("commandRejectDiagnostic: decided rejects are info skips, transport ambiguity keeps the honest warn", () => {
+	const decided = commandRejectDiagnostic("run_started", "Run bootstrap", "manual_fence", "otherwise dashboard reconcile will converge the row");
+	assert.deepEqual(decided, {
+		level: "info",
+		code: "run_started_skipped",
+		message: "Run bootstrap skipped by the coordinator (manual_fence); its decision is authoritative",
+	});
+	const ambiguous = commandRejectDiagnostic("run_finalize", "Run finalization", "timeout", "otherwise dashboard reconcile will converge the row");
+	assert.equal(ambiguous.level, "warn");
+	assert.equal(ambiguous.code, "run_finalize_ambiguous");
+	assert.match(ambiguous.message, /outcome unknown \(timeout\); if the command was journaled, coordinator replay will recover it; otherwise dashboard reconcile will converge the row/);
+	// Every decision-layer reject reason classifies as decided.
+	for (const reason of DECIDED_REJECT_REASONS) {
+		assert.equal(commandRejectDiagnostic("x", "X", reason, "tail").level, "info", reason);
+	}
 });
 
 test("validateCommand enforces payload shapes for lifecycle kinds", () => {

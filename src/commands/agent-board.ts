@@ -106,7 +106,7 @@ export async function openDashboard(
 					currentThinkingLevel: options.currentThinkingLevel ?? "off",
 				});
 				interval = setInterval(() => {
-					service.reconcile();
+					void service.reconcile().catch(() => {});
 					comp.refresh();
 					requestDashboardRender(tui);
 				}, POLL_MS);
@@ -146,8 +146,8 @@ export async function dashboardAttachLoop(
 	let again = true;
 	while (again) {
 		const currentId = currentViewId(ctx, service);
-		if (currentId) service.markVisited?.(currentId);
-		service.reconcile();
+		if (currentId) void service.markVisited?.(currentId)?.catch(() => {});
+		void service.reconcile().catch(() => {});
 		const result = await openDashboard(ctx, service, {
 			initialSelectedId: selectedId,
 			currentThinkingLevel: getThinkingLevel?.(),
@@ -185,9 +185,9 @@ async function attach(
 	// Single async resolver entry: real probe + bounded recovery decide readiness (issue #70).
 	const plan = planAttachResolved(await service.resolveAttachTarget(viewId));
 	if (plan.plan === "open-pty") {
-		service.markVisited?.(viewId);
+		void service.markVisited?.(viewId)?.catch(() => {});
 		const result = await openPtyAttach(ctx, root, row.meta.id, row.meta.name, plan.socketPath);
-		service.markVisited?.(viewId);
+		void service.markVisited?.(viewId)?.catch(() => {});
 		return { action: result.action === "closed" ? "closed" : "detached" };
 	}
 	if (plan.plan === "session-switch") {
@@ -197,7 +197,7 @@ async function attach(
 			return { action: "none" };
 		}
 		const name = latest.meta.name;
-		service.markVisited?.(viewId);
+		void service.markVisited?.(viewId)?.catch(() => {});
 		const switchingOverlay = await showSwitchingOverlay(ctx, name, "PTY unavailable");
 		const result = await ctx.switchSession(latest.meta.sessionFile, {
 			withSession: async (replaced) => {
@@ -296,8 +296,8 @@ function installBackToDashboard(ctx: ExtensionCommandContext, service: ReturnTyp
 			try {
 				let selectedId = currentViewId(ctx, service);
 				while (true) {
-					if (selectedId) service.markVisited?.(selectedId);
-					service.reconcile();
+					if (selectedId) void service.markVisited?.(selectedId)?.catch(() => {});
+					void service.reconcile().catch(() => {});
 					const result = await openDashboard(ctx, service, { initialSelectedId: selectedId });
 					if (result.action !== "attach") return;
 					selectedId = result.viewId;

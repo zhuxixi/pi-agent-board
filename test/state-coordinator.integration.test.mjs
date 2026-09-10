@@ -1020,6 +1020,9 @@ test("run_progress with no materialized status is rejected stale_run and not jou
 	const result = await client.next();
 	assert.equal(result.status, "rejected");
 	assert.equal(result.reason, "stale_run");
+	// No-fabrication pin (Task 2 review P2-B): the rejected sparse beat must not
+	// have created a status file as a side effect.
+	assert.equal(readStatus(root, "v1", "r1"), null);
 	assert.equal(readJournal(root).length, journalLinesBefore, "transient rejections are not journaled either");
 });
 

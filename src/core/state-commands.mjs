@@ -60,6 +60,45 @@ export const STATE_COMMAND_KINDS = Object.freeze([
 export const TRANSIENT_KINDS = Object.freeze(["run_progress"]);
 
 /**
+ * Decision-layer reject reasons: journaled, authoritative coordinator verdicts
+ * with NO recovery semantics (a retry would be decided the same way). The
+ * complement — transport ambiguity ("timeout"/"connection_reset"/
+ * "connection_failed"/"coordinator_unavailable") — is the only class where
+ * "outcome unknown, replay will recover" diagnostics are honest (issue #91
+ * hygiene). validateCommand envelope errors are first-party programmer errors
+ * and are not in this set.
+ */
+export const DECIDED_REJECT_REASONS = Object.freeze(new Set([
+	"manual_fence",
+	"stale_run",
+	"no_change",
+	"busy",
+	"revision_conflict",
+	"unknown_view",
+	"unknown_kind",
+	"field_not_allowed",
+]));
+
+/**
+ * Diagnostic fields for a non-applied command result (issue #91 hygiene):
+ * decided rejects are info-level skips — the coordinator's verdict is
+ * authoritative, so "outcome unknown, replay will recover" would be a lie.
+ * Transport ambiguity keeps the warn with the caller's recovery hint.
+ * Pure: shapes only, no I/O.
+ * @param {string} code diagnostic code stem (e.g. "run_started")
+ * @param {string} label human phrase for the message (e.g. "Run bootstrap")
+ * @param {string|null} reason rejected reason from the command result
+ * @param {string} ambiguousTail recovery hint appended ONLY for ambiguous reasons
+ * @returns {{ level: "info"|"warn", code: string, message: string }}
+ */
+export function commandRejectDiagnostic(code, label, reason, ambiguousTail) {
+	const decided = reason != null && DECIDED_REJECT_REASONS.has(reason);
+	return decided
+		? { level: "info", code: `${code}_skipped`, message: `${label} skipped by the coordinator (${reason}); its decision is authoritative` }
+		: { level: "warn", code: `${code}_ambiguous`, message: `${label} outcome unknown (${reason}); if the command was journaled, coordinator replay will recover it; ${ambiguousTail}` };
+}
+
+/**
  * Per-source whitelist for `patch_fields` (metadata/evidence-mirror merges).
  * Anything not listed here is rejected with "field_not_allowed" — semantic
  * fields must travel through their dedicated kinds so the guard table in the
@@ -141,7 +180,10 @@ export function validateCommand(raw) {
 			if (raw.payload.runId != null && (typeof raw.payload.runId !== "string" || !raw.payload.runId)) return { ok: false, error: "missing_runId" };
 			break;
 		case "run_started": {
-			if (raw.runId == null) return { ok: false, error: "missing_runId" };
+			// Non-empty string (not just != null): a degenerate runId passes the
+			// null guard, then the statusRunId binding silently drops the status
+			// half while the ack still says "applied" (Task 2 review P2-A).
+			if (typeof raw.runId !== "string" || !raw.runId) return { ok: false, error: "missing_runId" };
 			const status = raw.payload?.status;
 			if (!status || typeof status !== "object") return { ok: false, error: "missing_status" };
 			if (typeof status.runId !== "string" || status.runId !== raw.runId) return { ok: false, error: "bad_status" };

@@ -29,6 +29,7 @@ import * as P from "../src/core/paths.mjs";
 import { readState, readStatus, readMeta } from "../src/core/store.mjs";
 import { readSteering, recordPlanReady } from "../src/core/steering.mjs";
 import { sendStateCommand, coordinatorDisabled } from "../src/core/coordinator-client.mjs";
+import { commandRejectDiagnostic } from "../src/core/state-commands.mjs";
 import { legacyFollowupBootstrap, legacyPersistState, legacyPlanReadyStateWrite, legacyWriteState, legacyWriteStatus } from "./job-runner-legacy.mjs";
 import { buildApprovePlanPrompt, buildPlanChangesPrompt, buildPlanRequestPrompt } from "../src/core/steering-prompts.mjs";
 
@@ -103,7 +104,7 @@ async function bootstrapRun({ root, viewId, runId, config, status, meta, evidenc
 			payload: { status: { ...status } },
 		});
 		if (started.status !== "applied" && started.reason !== "coordinator_disabled") {
-			appendDiagnostic(root, viewId, { source: "runner", runId, level: "warn", code: "run_started_command_ambiguous", message: `Run bootstrap outcome unknown (${started.reason}); if the command was journaled, coordinator replay will recover it; otherwise dashboard reconcile will converge the row`, details: { reason: started.reason } });
+			appendDiagnostic(root, viewId, { source: "runner", runId, ...commandRejectDiagnostic("run_started", "Run bootstrap", started.reason, "otherwise dashboard reconcile will converge the row"), details: { reason: started.reason } });
 		}
 	}
 
@@ -242,7 +243,7 @@ async function bootstrapRun({ root, viewId, runId, config, status, meta, evidenc
 			}
 			return true;
 		}
-		appendDiagnostic(root, viewId, { source: "runner", runId, level: "warn", code: "evidence_mirror_command_ambiguous", message: `Evidence mirror outcome unknown (${result.reason}); if the command was journaled, coordinator replay will recover it; otherwise the next mirror refresh will converge`, details: { reason: result.reason } });
+		appendDiagnostic(root, viewId, { source: "runner", runId, ...commandRejectDiagnostic("evidence_mirror", "Evidence mirror", result.reason, "otherwise the next mirror refresh will converge"), details: { reason: result.reason } });
 		return false;
 	};
 
@@ -294,7 +295,7 @@ async function bootstrapRun({ root, viewId, runId, config, status, meta, evidenc
 			// Duplicate finalize or the run was already superseded — nothing to do.
 			return false;
 		}
-		appendDiagnostic(root, viewId, { source: "runner", runId, level: "warn", code: "run_finalize_command_ambiguous", message: `Run finalization outcome unknown (${result.reason}); if the command was journaled, coordinator replay will recover it; otherwise dashboard reconcile will converge the row`, details: { reason: result.reason } });
+		appendDiagnostic(root, viewId, { source: "runner", runId, ...commandRejectDiagnostic("run_finalize", "Run finalization", result.reason, "otherwise dashboard reconcile will converge the row"), details: { reason: result.reason } });
 		return false;
 	};
 
@@ -487,7 +488,7 @@ async function finalizeSteeringIfNeeded(config, status, evidence) {
 	});
 	if (result.status === "applied") return;
 	if (result.reason === "manual_fence" || result.reason === "no_change") return;
-	appendDiagnostic(config.root, config.viewId, { source: "runner", runId: config.runId, level: "warn", code: "plan_ready_command_ambiguous", message: `Plan-ready outcome unknown (${result.reason}); if the command was journaled, coordinator replay will recover it; otherwise dashboard reconcile will converge the row`, details: { reason: result.reason } });
+	appendDiagnostic(config.root, config.viewId, { source: "runner", runId: config.runId, ...commandRejectDiagnostic("plan_ready", "Plan-ready", result.reason, "otherwise dashboard reconcile will converge the row"), details: { reason: result.reason } });
 }
 
 /** @param {import("../src/core/types.mjs").RunConfig} config @param {import("../src/core/types.mjs").RunStatus} status */
@@ -538,7 +539,7 @@ async function drainQueuedFollowUp(config, status) {
 				return;
 			}
 			if (result.status !== "applied" && result.reason !== "no_change" && result.reason !== "stale_run") {
-				appendDiagnostic(config.root, config.viewId, { source: "queue", runId: nextRunId, level: "warn", code: "follow_up_bootstrap_ambiguous", message: `Follow-up bootstrap outcome unknown (${result.reason}); if the command was journaled, coordinator replay will recover it; otherwise the launched runner's own run_started converges the row`, details: { reason: result.reason } });
+				appendDiagnostic(config.root, config.viewId, { source: "queue", runId: nextRunId, ...commandRejectDiagnostic("follow_up_bootstrap", "Follow-up bootstrap", result.reason, "otherwise the launched runner's own run_started converges the row"), details: { reason: result.reason } });
 			}
 		}
 		completeFollowUp(config.root, config.viewId, item.id, { runId: nextRunId });
@@ -645,7 +646,7 @@ async function classifyThroughCoordinator(config, status, classification) {
 		// Designed fences — informational, not errors.
 		return false;
 	}
-	appendDiagnostic(config.root, config.viewId, { source: "runner", runId: config.runId, level: "warn", code: "auto_state_command_ambiguous", message: `Auto-state classification outcome unknown (${result.reason}); if the command was journaled, coordinator replay will recover it; otherwise the next classification pass will converge the row`, details: { reason: result.reason } });
+	appendDiagnostic(config.root, config.viewId, { source: "runner", runId: config.runId, ...commandRejectDiagnostic("auto_state", "Auto-state classification", result.reason, "otherwise the next classification pass will converge the row"), details: { reason: result.reason } });
 	return false;
 }
 
@@ -749,7 +750,7 @@ async function patchSummaryThroughCoordinator(config, status) {
 		return true;
 	}
 	if (result.reason === "manual_fence" || result.reason === "no_change") return false;
-	appendDiagnostic(config.root, config.viewId, { source: "runner", runId: config.runId, level: "warn", code: "summary_patch_command_ambiguous", message: `Summary patch outcome unknown (${result.reason}); if the command was journaled, coordinator replay will recover it; otherwise dashboard reconcile will converge the row`, details: { reason: result.reason } });
+	appendDiagnostic(config.root, config.viewId, { source: "runner", runId: config.runId, ...commandRejectDiagnostic("summary_patch", "Summary patch", result.reason, "otherwise dashboard reconcile will converge the row"), details: { reason: result.reason } });
 	return false;
 }
 

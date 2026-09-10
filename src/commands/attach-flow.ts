@@ -132,9 +132,9 @@ export async function attach(
 
 	const plan = planAttachResolved(await service.resolveAttachTarget(viewId));
 	if (plan.plan === "open-pty") {
-		service.markVisited?.(viewId);
+		void service.markVisited?.(viewId)?.catch(() => {});
 		const result = await openPtyAttach(ctx, root, row.meta.id, row.meta.name, plan.socketPath);
-		service.markVisited?.(viewId);
+		void service.markVisited?.(viewId)?.catch(() => {});
 		return { action: result.action === "closed" ? "closed" : "detached" };
 	}
 	if (plan.plan === "session-switch") {
@@ -144,7 +144,7 @@ export async function attach(
 			return { action: "none" };
 		}
 		const name = latest.meta.name;
-		service.markVisited?.(viewId);
+		void service.markVisited?.(viewId)?.catch(() => {});
 		const switchingOverlay = await showSwitchingOverlay(ctx, name, "PTY unavailable");
 		const result = await ctx.switchSession(latest.meta.sessionFile, {
 			withSession: async (replaced) => {
@@ -212,8 +212,8 @@ export function installBackToDashboard(
 			try {
 				let selectedId = currentViewId(ctx, service);
 				while (true) {
-					if (selectedId) service.markVisited?.(selectedId);
-					service.reconcile();
+					if (selectedId) void service.markVisited?.(selectedId)?.catch(() => {});
+					void service.reconcile().catch(() => {});
 					const result = await openDashboard(ctx, service, { initialSelectedId: selectedId });
 					if (result.action !== "attach") return;
 					selectedId = result.viewId;

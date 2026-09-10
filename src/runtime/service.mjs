@@ -148,7 +148,9 @@ export function createService(opts) {
 	 * @param {import("../core/types.mjs").ViewMeta} meta
 	 * @param {string} prompt
 	 * @param {RunKind} kind
-	 * @returns {{ runId: string, pid: number|null }}
+	 * @returns {Promise<{ runId: string, pid: number|null }>} resolves after
+	 *   mark_queued has landed and the detached runner is spawned (ordering
+	 *   contract: the row must be queued before the runner can boot, final-review F2).
 	 */
 	async function launchForView(meta, prompt, kind) {
 		const runId = newRunId();
@@ -245,7 +247,7 @@ export function createService(opts) {
 	 * lease; this function never acquires or releases it.
 	 * @param {import("../core/types.mjs").ViewMeta} meta
 	 * @param {string|null} initialPrompt
-	 * @returns {ReturnType<typeof launchHost>}
+	 * @returns {{ ok: true, status: "reused"|"pending"|"started", pid: number|null, socketPath: string|null, instanceId: string|null } | { ok: false, error: string, fallbackReason?: string }}
 	 */
 	function startHostUnderLease(meta, initialPrompt, launchOpts = {}) {
 		const existing = readHost(root, meta.id);
@@ -1805,7 +1807,7 @@ export function createService(opts) {
 			return { ok: true };
 		},
 
-		/** @param {string} viewId @returns {{ ok: boolean, error?: string }} */
+		/** @param {string} viewId @returns {Promise<{ ok: boolean, error?: string }>} */
 		markVisited(viewId) {
 			return markVisited(viewId);
 		},
