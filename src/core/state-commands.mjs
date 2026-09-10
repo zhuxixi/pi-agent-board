@@ -359,11 +359,24 @@ export function decideStateTransition(command, currentState, currentStatus, now 
 			// Liveness semantics: only the row's current live run may move forward.
 			// Late/duplicate progress from a finished run is dropped (next run's
 			// progress supersedes it anyway — this kind is transient by design).
-			// A live run with no materialized status cannot legitimately progress
-			// (F2): the first beat always follows run_started's bootstrap write, so
-			// a missing status here means the beat is stale or out of order — and
-			// projecting onto `null` would materialize undefined processState.
-			if (!currentStatus) return reject("stale_run");
+			//
+			// A missing status file splits two ways (F2, split by the hard-down
+			// residual closure): a QUALIFIED beat from the row's current live run —
+			// full-shaped patch carrying processState/semanticState and the same
+			// runId — bootstraps the file, because the coordinator may have been
+			// down through the runner's boot window (mark_queued applied,
+			// run_started lost): without the bootstrap the row can never converge
+			// (beats and finalize both reject forever). Anything else — exited or
+			// re-pointed rows, sparse patches that would materialize an
+			// undefined-shaped status — stays stale_run (F2's original exposure).
+			if (!currentStatus) {
+				const rowMatches = currentState.currentRunId === command.runId && currentState.processState === "alive";
+				if (!rowMatches || !beatPatchQualifiesForBootstrap(command)) return reject("stale_run");
+				// The patch itself is the base: it is the runner's authoritative
+				// full in-memory status, so applyStatusProjection's merge-onto-empty
+				// materializes exactly the patch (validated full-shaped above).
+				return applyStatusProjection(command, currentState, null, now);
+			}
 			if (currentState.currentRunId !== command.runId || currentState.processState !== "alive") return reject("stale_run");
 			return applyStatusProjection(command, currentState, currentStatus, now);
 		}
@@ -578,6 +591,25 @@ function buildPatches(currentState, stateClone, stateChanged, currentStatus, sta
 	if (stateChanged) mutate.state = diffFields(currentState, stateClone);
 	if (statusChanged) mutate.status = diffFields(currentStatus, statusClone);
 	return mutate;
+}
+
+/**
+ * Whether a run_progress beat may bootstrap a missing status file: the patch
+ * must be full-shaped — carrying processState and semanticState (so the
+ * materialized status never has an undefined shape) and pinned to the same
+ * runId as the command (so a foreign run's snapshot can never masquerade as
+ * this run's bootstrap). Sparse or mismatched patches stay stale_run.
+ * @param {object} command
+ */
+function beatPatchQualifiesForBootstrap(command) {
+	const patch = command.payload?.statusPatch;
+	return Boolean(
+		patch &&
+		typeof patch === "object" &&
+		typeof patch.processState === "string" &&
+		typeof patch.semanticState === "string" &&
+		patch.runId === command.runId,
+	);
 }
 
 /**
