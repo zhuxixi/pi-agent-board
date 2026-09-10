@@ -5,6 +5,23 @@ conventional commits by `scripts/release_helper.mjs`. Entries are
 forward-only: they begin with the first release after this file landed —
 for earlier history, see the git log and the pull-request list.
 
+## [0.7.0] - 2026-09-10
+
+### Features
+
+- runtime cursor desync detect + rate-limited heal (issue #11) (#105)
+- detached View State Coordinator as single writer for state/status (issue #91, phase 1+2a) (#104)
+
+### Fixes
+
+- **coordinator**: protocol version gate replaces stale coordinators on extension updates (issue #108) (#109)
+
+### Changes
+
+- route all remaining state writes through the View State Coordinator (issue #91, phase 2b) (#107)
+
+[0.7.0]: https://github.com/zhuxixi/pi-agent-board/compare/v0.6.2...v0.7.0
+
 ## [0.6.2] - 2026-09-09
 
 ### Fixes
