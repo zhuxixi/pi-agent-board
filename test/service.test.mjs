@@ -666,6 +666,88 @@ test("reconcile skips a revision-desynced state/status pair and requests repair 
 	}
 });
 
+test("reconcile throttles desync diagnostics per episode (persistent pair logs once)", async () => {
+	const root = freshRoot();
+	const prevOff = setEnv("AGENT_BOARD_COORDINATOR", "off");
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const s = readState(root, "v1");
+		s.semanticState = "working";
+		s.processState = "exited";
+		s.currentRunId = "r1";
+		s.materializedRevision = 2;
+		writeState(root, s);
+		writeStatus(root, { ...terminalStatusFixture("v1", "r1"), materializedRevision: 1 });
+		const svc = service(root);
+
+		await svc.reconcile();
+		await svc.reconcile();
+		let diags = readDiagnostics(root, "v1").filter((d) => d.code === "state_status_revision_desync");
+		assert.equal(diags.length, 1, "a stuck pair logs once, not once per 700ms pass");
+		assert.equal(diags[0].details.stateRevision, 2);
+		assert.equal(diags[0].details.statusRevision, 1);
+
+		// The pair progresses (a fresh crash at new revisions, or partial repair):
+		// a changed pair is a new episode and logs again, with the FRESH values.
+		const s2 = readState(root, "v1");
+		s2.materializedRevision = 3;
+		writeState(root, s2);
+		await svc.reconcile();
+		diags = readDiagnostics(root, "v1").filter((d) => d.code === "state_status_revision_desync");
+		assert.equal(diags.length, 2, "a changed pair is a new episode");
+		assert.equal(diags[1].details.stateRevision, 3, "logged details carry the fresh re-read values");
+	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevOff);
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("reconcile re-verifies a suspected desync against fresh reads before acting (TOCTOU)", async () => {
+	const root = freshRoot();
+	try {
+		// vA is processed first; its awaited command mutates vB's on-disk pair
+		// (consistently, rev 2→3) while reconcile holds a stale listRows snapshot
+		// for vB. The suspicion raised against the snapshot must be re-verified
+		// against fresh reads — the fresh pair agrees, so vB is projected, not
+		// skipped as desynced.
+		createView(root, { id: "vA", name: "a", cwd: "/r" });
+		createView(root, { id: "vB", name: "b", cwd: "/r" });
+		for (const [viewId, runId] of [["vA", "rA"], ["vB", "rB"]]) {
+			const s = readState(root, viewId);
+			s.semanticState = "working";
+			s.processState = "exited";
+			s.currentRunId = runId;
+			s.materializedRevision = 2;
+			writeState(root, s);
+			writeStatus(root, { ...terminalStatusFixture(viewId, runId), materializedRevision: 2 });
+		}
+		let vACommandSeen = false;
+		const svc = service(root, {
+			sendStateCommand: async (_root, cmd) => {
+				if (cmd.viewId === "vA" && !vACommandSeen) {
+					vACommandSeen = true;
+					// Concurrent paired writer: both halves advance together while
+					// the snapshot is stale (the pairing invariant holds on disk).
+					const sb = readState(root, "vB");
+					sb.materializedRevision = 3;
+					writeState(root, sb);
+					const stb = readStatus(root, "vB", "rB");
+					stb.materializedRevision = 3;
+					writeStatus(root, stb);
+				}
+				return { status: "applied", reason: null };
+			},
+		});
+		const fixed = await svc.reconcile();
+		assert.equal(vACommandSeen, true, "mutation hook fired inside vA's command window");
+		assert.equal(fixed, 2, "both rows projected — vB's stale-snapshot suspicion was re-verified and cleared");
+		const desyncs = readDiagnostics(root, "vB").filter((d) => d.code === "state_status_revision_desync");
+		assert.equal(desyncs.length, 0, "no false-positive desync diagnostic from the stale snapshot");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("reconcile still fixes legacy rows without revisions (desync check never fires)", async () => {
 	const root = freshRoot();
 	const prevOff = setEnv("AGENT_BOARD_COORDINATOR", "off");

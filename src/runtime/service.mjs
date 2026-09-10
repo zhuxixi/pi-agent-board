@@ -28,7 +28,7 @@ import { acquireOwnedViewLock, tryAcquireOwnedViewLock } from "../core/locks.mjs
 import { canFinalizeLegacyHost, canReplaceHost } from "../core/host-coordination.mjs";
 import { modelRefAvailable } from "../core/launch-options.mjs";
 import { ensureCoordinator, sendStateCommand, coordinatorDisabled } from "../core/coordinator-client.mjs";
-import { statusRevisionDesynced } from "../core/status-consistency.mjs";
+import { createDesyncEpisodeThrottle, rereadPair, statusRevisionDesynced } from "../core/status-consistency.mjs";
 import { HOST_PROBE_RETRY_MS, probeHost } from "../core/host-probe.mjs";
 import * as P from "../core/paths.mjs";
 import {
@@ -108,6 +108,9 @@ export function createService(opts) {
 	const acquireLockImpl = opts.acquireLock ?? acquireOwnedViewLock;
 	const tryAcquireLockImpl = opts.tryAcquireLock ?? tryAcquireOwnedViewLock;
 	const sendStateCommandImpl = opts.sendStateCommand ?? sendStateCommand;
+	// Desync episode throttle: a stuck (stateRev:statusRev) pair logs once per
+	// service, not once per reconcile pass — see createDesyncEpisodeThrottle().
+	const desyncThrottle = createDesyncEpisodeThrottle();
 	// Identity-aware observation/signalling for host recovery (issue #70). Callers must
 	// only signal after observeProcess returned "owned" for that exact identity.
 	const observeProcessImpl = opts.observeProcess ?? defaultObserveProcess;
@@ -2022,16 +2025,32 @@ export function createService(opts) {
 					continue;
 				}
 				if (row.alive) continue;
-				const status = readStatus(root, row.meta.id, s.currentRunId);
+				let status = readStatus(root, row.meta.id, s.currentRunId);
 				if (statusRevisionDesynced(s, status)) {
-					// Half-materialized pair (a coordinator crashed between its paired
-					// writes): don't combine the mismatched halves into one decision —
-					// record it and kick a coordinator so boot replay repairs the pair.
-					// The row is skipped this pass (not fixed); the next pass sees the
-					// repaired stamps and proceeds normally.
-					appendDiagnostic(root, row.meta.id, { source: "service", level: "warn", code: "state_status_revision_desync", message: "state.json and status.json revisions disagree; skipping reconcile projection and requesting coordinator repair", details: { stateRevision: s.materializedRevision, statusRevision: status.materializedRevision, runId: s.currentRunId } });
-					void ensureCoordinator(root).catch(() => {});
-					continue;
+					// TOCTOU guard: `s` is a listRows snapshot, and earlier rows'
+					// awaited commands may have let the on-disk pair advance past
+					// it — re-read BOTH files fresh and act only on a pair that
+					// still disagrees. (The residual window between the two fresh
+					// reads is sub-ms under the coordinator's view-lock pairing
+					// invariant.)
+					const reread = rereadPair(root, row.meta.id, s.currentRunId);
+					if (reread.desynced) {
+						// Half-materialized pair (a coordinator crashed between its paired
+						// writes): don't combine the mismatched halves into one decision —
+						// record it and kick a coordinator so boot replay repairs the pair.
+						// The row is skipped this pass (not fixed); the next pass sees the
+						// repaired stamps and proceeds normally.
+						// Episode throttle: a stuck pair logs once, not once per 700ms
+						// reconcile pass — diagnostics must stay bounded for unrepairable
+						// pairs (torn transient beat has no journal record; coordinator off).
+						if (desyncThrottle.shouldLog(row.meta.id, reread.state.materializedRevision, reread.status.materializedRevision)) {
+							appendDiagnostic(root, row.meta.id, { source: "service", level: "warn", code: "state_status_revision_desync", message: "state.json and status.json revisions disagree; skipping reconcile projection and requesting coordinator repair", details: { stateRevision: reread.state.materializedRevision, statusRevision: reread.status.materializedRevision, runId: s.currentRunId } });
+							void ensureCoordinator(root).catch(() => {});
+						}
+						continue;
+					}
+					// Snapshot was stale but the fresh pair agrees — project from it.
+					status = reread.status;
 				}
 				if (status?.endedAt) {
 					// The run's terminal status exists but the row was never materialized
