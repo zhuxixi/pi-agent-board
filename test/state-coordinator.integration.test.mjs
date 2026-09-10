@@ -833,6 +833,59 @@ test("F5b negative: patch_fields does not stamp lastActivityAt", async (t) => {
 	assert.equal(state.lastActivityAt, 1000, "patch_fields must NOT stamp lastActivityAt");
 });
 
+test("final pairing invariant: state-only patches restamp the run's status revision (issue #91 P1)", async (t) => {
+	const root = freshRoot();
+	let child = null;
+	t.after(async () => {
+		if (child && isAlive(child.pid)) { child.kill("SIGTERM"); await waitForExit(child); }
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	});
+	createView(root, { id: "v1", name: "x", cwd: root });
+	child = startCoordinator(root);
+	await waitFor(() => existsSync(P.coordinatorEndpointPathFor(process.platform, root)));
+
+	// Live run: mark_queued + run_started pair both files at the same revision.
+	const mq = await sendStateCommand(root, {
+		type: "state_command", viewId: "v1", runId: "r1", source: "service",
+		kind: "mark_queued", expectedRevision: null, payload: { runId: "r1" },
+	});
+	assert.equal(mq.status, "applied");
+	const seedStatus = { ...createRunStatus({ runId: "r1", viewId: "v1", kind: "dispatch", prompt: "p" }, null, Date.now()), semanticState: "working" };
+	const rs = await sendStateCommand(root, {
+		type: "state_command", viewId: "v1", runId: "r1", source: "job-runner",
+		kind: "run_started", expectedRevision: null, payload: { status: seedStatus },
+	});
+	assert.equal(rs.status, "applied");
+	assert.equal(readStatus(root, "v1", "r1")?.materializedRevision, rs.materializedRevision);
+
+	// A healthy state-only patch (the markVisited shape): this used to leave
+	// status at the older revision — a live-coordinator-produced desync that
+	// permanently shielded the row from reconcile recovery (final review P1).
+	const pv = await sendStateCommand(root, {
+		type: "state_command", viewId: "v1", source: "service",
+		kind: "patch_fields", expectedRevision: null, payload: { state: { lastVisitedAt: 4242 } },
+	});
+	assert.equal(pv.status, "applied");
+	const state = readState(root, "v1");
+	const status = readStatus(root, "v1", "r1");
+	assert.equal(state.materializedRevision, pv.materializedRevision, "state carries the applied revision");
+	assert.equal(status.materializedRevision, pv.materializedRevision, "the status half is restamped to the applied revision (pairing invariant)");
+	assert.equal(state.lastVisitedAt, 4242, "the whitelisted state patch applies");
+	assert.equal(status.lastVisitedAt, undefined, "restamp is metadata-only — no content change");
+
+	// Replay heals a torn state-only pair through the same shared path: tear
+	// the pair on disk (external/crash shape), restart the coordinator, and
+	// the journaled patch_fields record re-materializes both halves.
+	writeStatus(root, { ...status, materializedRevision: rs.materializedRevision });
+	assert.notEqual(readStatus(root, "v1", "r1").materializedRevision, state.materializedRevision, "torn shape staged");
+	if (child && isAlive(child.pid)) { child.kill("SIGTERM"); await waitForExit(child); }
+	child = startCoordinator(root);
+	await waitFor(() => existsSync(P.coordinatorEndpointPathFor(process.platform, root)));
+	await waitFor(() => readStatus(root, "v1", "r1")?.materializedRevision === state.materializedRevision, 5000);
+	assert.equal(readState(root, "v1").materializedRevision, state.materializedRevision, "replay does not regress the state half");
+	assert.equal(readState(root, "v1").lastVisitedAt, 4242, "replay re-applies the journaled state patch");
+});
+
 test("transient run_progress applies, stamps the revision, and never touches the journal", async (t) => {
 	const root = freshRoot();
 	let child = null;

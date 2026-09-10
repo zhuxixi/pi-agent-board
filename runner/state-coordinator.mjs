@@ -319,32 +319,50 @@ async function main() {
 	 * guards stamp only files strictly behind the record revision: the live path
 	 * always qualifies (the global counter is monotonic), while replay repairs
 	 * just the half that missed its write in a crash window and never moves the
-	 * other half backwards. A status patch without a status file is skipped —
-	 * patch presence ≠ file requirement (mark_completed always emits
-	 * `status: {autoState: null}`). The status run binding is the decision-time
-	 * one (`statusRunId`, recorded in the journal) so replay cannot re-bind a
-	 * runId-less patch to whatever run is current on disk at replay time;
-	 * `state.currentRunId` remains only as a legacy fallback for records written
-	 * before statusRunId existed.
+	 * other half backwards.
+	 *
+	 * Pairing invariant (issue #91 final review): EVERY applied revision pairs
+	 * BOTH files. A state-only patch (e.g. patch_fields markVisited) restamps
+	 * the existing status file's revision with no content change, and a
+	 * status-only patch restamps the state file the same way — a healthy
+	 * coordinator can never produce the asymmetric pair the reader-side
+	 * revision check (reconcile) treats as a crash signature. Journaled
+	 * state-only records heal on replay through this shared path. Residual:
+	 * a torn TRANSIENT beat (crash between the two writes, never journaled)
+	 * stays half-paired — ms-window × adjacent-crash, documented in the spec.
+	 *
+	 * A status patch without a status file is skipped — patch presence ≠ file
+	 * requirement (mark_completed always emits `status: {autoState: null}`).
+	 * The status run binding is the decision-time one (`statusRunId`, recorded
+	 * in the journal) so replay cannot re-bind a runId-less patch to whatever
+	 * run is current on disk at replay time; `state.currentRunId` remains only
+	 * as a legacy fallback for records written before statusRunId existed.
 	 */
 	function materialize(viewId, command, mutate, revision, statusRunId) {
 		withViewLockSync(root, viewId, "state-materialize", () => {
 			const state = readState(root, viewId);
-			if (mutate?.state && state && (state.materializedRevision ?? 0) < revision) {
-				writeState(root, { ...state, ...mutate.state, materializedRevision: revision });
+			if (state && (state.materializedRevision ?? 0) < revision) {
+				writeState(root, mutate?.state
+					? { ...state, ...mutate.state, materializedRevision: revision }
+					: { ...state, materializedRevision: revision });
 			}
 			const runId = command?.runId ?? statusRunId ?? state?.currentRunId ?? null;
-			if (mutate?.status && runId) {
-				const status = readStatus(root, viewId, runId);
+			if (!runId) return;
+			const status = readStatus(root, viewId, runId);
+			if (mutate?.status) {
 				if (!status && STATUS_BOOTSTRAP_KINDS.has(command?.kind)) {
-					// run_started / followup_started carry the full status content for a
-					// run that has no status file yet — create it (F1's clean-bootstrap
-					// half). Identity fields come from the command context; the patch
-					// carries everything meaningful.
+					// run_started / followup_started / (bootstrapping) run_progress
+					// carry the full status content for a run that has no status
+					// file yet — create it. Identity fields come from the command
+					// context; the patch carries everything meaningful.
 					writeStatus(root, { version: 1, runId, viewId, ...mutate.status, materializedRevision: revision });
 				} else if (status && (status.materializedRevision ?? 0) < revision) {
 					writeStatus(root, { ...status, ...mutate.status, materializedRevision: revision });
 				}
+			} else if (status && (status.materializedRevision ?? 0) < revision) {
+				// State-only patch: restamp the existing status file's revision with
+				// no content change (pairing invariant above).
+				writeStatus(root, { ...status, materializedRevision: revision });
 			}
 		});
 	}
