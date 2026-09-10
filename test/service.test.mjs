@@ -12,6 +12,7 @@ import { readJournal } from "../src/core/coordinator-journal.mjs";
 import * as P from "../src/core/paths.mjs";
 import { createView, readHost, readState, readStatus, writeHost, writeHostPid, writeLaunchPrefs, writeState, writeStatus } from "../src/core/store.mjs";
 import { readFollowUpQueue } from "../src/core/follow-up-queue.mjs";
+import { readDiagnostics } from "../src/core/diagnostics.mjs";
 import { startCoordinator } from "../test-support/ensure-coordinator-helper.mjs";
 
 function freshRoot() {
@@ -603,6 +604,88 @@ test("dispatch creates per-instance config and endpoint paths", async () => {
 		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
 		if (oldForce === undefined) delete process.env.AGENT_BOARD_FORCE_PTY;
 		else process.env.AGENT_BOARD_FORCE_PTY = oldForce;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+/** Terminal-status fixture shared by the reconcile desync tests. */
+function terminalStatusFixture(viewId, runId) {
+	return {
+		version: 1,
+		runId,
+		viewId,
+		pid: null,
+		startedAt: 1,
+		endedAt: 2,
+		exitCode: 0,
+		kind: "dispatch",
+		prompt: "x",
+		model: null,
+		semanticState: "completed",
+		processState: "exited",
+		summary: "All done.",
+		lastActivityAt: 2,
+		currentTool: null,
+		latestAssistantPreview: "All done.",
+		question: null,
+		pendingQuestions: [],
+		needsInput: false,
+		hasError: false,
+		autoState: null,
+	};
+}
+
+test("reconcile skips a revision-desynced state/status pair and requests repair (issue #91 read side)", async () => {
+	const root = freshRoot();
+	// Off-mode keeps the repair kick inert (no coordinator spawn); the kick's
+	// repair effect (boot replay) is covered by the coordinator restart tests.
+	const prevOff = setEnv("AGENT_BOARD_COORDINATOR", "off");
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		// Half-materialized pair (coordinator crash between its paired writes):
+		// state carries the newer revision, status the older one.
+		const s = readState(root, "v1");
+		s.semanticState = "working";
+		s.processState = "exited";
+		s.currentRunId = "r1";
+		s.materializedRevision = 2;
+		writeState(root, s);
+		writeStatus(root, { ...terminalStatusFixture("v1", "r1"), materializedRevision: 1 });
+		const svc = service(root);
+		const fixed = await svc.reconcile();
+		assert.equal(fixed, 0, "a desynced pair must not be combined or counted as fixed");
+		const next = readState(root, "v1");
+		assert.equal(next.semanticState, "working", "desynced pair must not be projected from the stale status");
+		assert.equal(next.materializedRevision, 2, "state half untouched");
+		const diag = readDiagnostics(root, "v1").find((d) => d.code === "state_status_revision_desync");
+		assert.ok(diag, "desync diagnostic recorded");
+		assert.equal(diag.level, "warn");
+	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevOff);
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("reconcile still fixes legacy rows without revisions (desync check never fires)", async () => {
+	const root = freshRoot();
+	const prevOff = setEnv("AGENT_BOARD_COORDINATOR", "off");
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const s = readState(root, "v1");
+		s.semanticState = "working";
+		s.processState = "exited";
+		s.currentRunId = "r1";
+		writeState(root, s); // no materializedRevision — legacy shape
+		writeStatus(root, terminalStatusFixture("v1", "r1")); // no revision, has endedAt → project mode
+		const svc = service(root, {
+			sendStateCommand: async () => ({ status: "rejected", reason: "coordinator_disabled" }),
+		});
+		const fixed = await svc.reconcile();
+		assert.equal(fixed, 1, "legacy rows are unaffected by the desync check");
+		const next = readState(root, "v1");
+		assert.equal(next.semanticState, "completed", "legacy projection applied from the terminal status");
+	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevOff);
 		rmSync(root, { recursive: true, force: true });
 	}
 });

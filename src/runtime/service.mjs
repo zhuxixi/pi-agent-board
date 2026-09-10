@@ -27,7 +27,8 @@ import { isAlive, killProcess } from "../core/pid.mjs";
 import { acquireOwnedViewLock, tryAcquireOwnedViewLock } from "../core/locks.mjs";
 import { canFinalizeLegacyHost, canReplaceHost } from "../core/host-coordination.mjs";
 import { modelRefAvailable } from "../core/launch-options.mjs";
-import { sendStateCommand, coordinatorDisabled } from "../core/coordinator-client.mjs";
+import { ensureCoordinator, sendStateCommand, coordinatorDisabled } from "../core/coordinator-client.mjs";
+import { statusRevisionDesynced } from "../core/status-consistency.mjs";
 import { HOST_PROBE_RETRY_MS, probeHost } from "../core/host-probe.mjs";
 import * as P from "../core/paths.mjs";
 import {
@@ -2020,6 +2021,16 @@ export function createService(opts) {
 				}
 				if (row.alive) continue;
 				const status = readStatus(root, row.meta.id, s.currentRunId);
+				if (statusRevisionDesynced(s, status)) {
+					// Half-materialized pair (a coordinator crashed between its paired
+					// writes): don't combine the mismatched halves into one decision —
+					// record it and kick a coordinator so boot replay repairs the pair.
+					// The row is skipped this pass (not fixed); the next pass sees the
+					// repaired stamps and proceeds normally.
+					appendDiagnostic(root, row.meta.id, { source: "service", level: "warn", code: "state_status_revision_desync", message: "state.json and status.json revisions disagree; skipping reconcile projection and requesting coordinator repair", details: { stateRevision: s.materializedRevision, statusRevision: status.materializedRevision, runId: s.currentRunId } });
+					void ensureCoordinator(root).catch(() => {});
+					continue;
+				}
 				if (status?.endedAt) {
 					// The run's terminal status exists but the row was never materialized
 					// from it (crash between the two writes, or a pre-coordinator row).
