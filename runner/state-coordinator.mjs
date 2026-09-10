@@ -54,6 +54,7 @@ import { acquireOwnedViewLock, withViewLockSync } from "../src/core/locks.mjs";
 import * as P from "../src/core/paths.mjs";
 import { readState, readStatus, writeState, writeStatus } from "../src/core/store.mjs";
 import { TRANSIENT_KINDS, decideStateTransition, validateCommand } from "../src/core/state-commands.mjs";
+import { COORDINATOR_PROTOCOL_VERSION } from "../src/core/coordinator-protocol.mjs";
 
 /** In-memory processed-command ring size (FIFO). Beyond the journal, this covers
  *  idempotency when the journal prefix has already been GC'd away. */
@@ -217,7 +218,7 @@ async function main() {
 		try { msg = JSON.parse(line); } catch { return send(socket, { type: "error", message: "invalid json" }); }
 		switch (msg?.type) {
 			case "ping":
-				send(socket, { type: "pong", instanceId, startedAt });
+				send(socket, { type: "pong", instanceId, startedAt, protocolVersion: COORDINATOR_PROTOCOL_VERSION });
 				break;
 			case "state_command":
 				send(socket, { type: "state_command_result", ...processStateCommand(msg) });
