@@ -24,10 +24,12 @@
  * rejections carry the current revision).
  */
 import { createConnection } from "node:net";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { newRunId } from "./ids.mjs";
 import { launchCoordinator } from "./launch.mjs";
 import * as P from "./paths.mjs";
+import { COORDINATOR_PROTOCOL_VERSION } from "./coordinator-protocol.mjs";
 
 const COORDINATOR_SCRIPT = fileURLToPath(
 	new URL("../../runner/state-coordinator.mjs", import.meta.url),
@@ -39,7 +41,7 @@ const ENSURE_POLL_MS = 100;
 const COMMAND_TIMEOUT_MS = 5_000;
 
 /** @typedef {{ status: "applied"|"rejected", reason: string|null, materializedRevision: number }} StateCommandResult */
-/** @typedef {{ ok: boolean, instanceId?: string, pid?: number|null, error?: string }} EnsureResult */
+/** @typedef {{ ok: boolean, instanceId?: string, pid?: number|null, error?: "coordinator_disabled"|"coordinator_unavailable"|"coordinator_stale_protocol" }} EnsureResult */
 
 /**
  * Whether the coordinator is switched off for this process (tests/legacy
@@ -57,7 +59,8 @@ export function coordinatorDisabled() {
  * @param {string} socketPath
  * @param {(path: string) => import("node:net").Socket} connect
  * @param {number} timeoutMs
- * @returns {Promise<string|null>} instanceId on success, null otherwise
+ * @returns {Promise<{ instanceId: string, protocolVersion: number }|null>} null on timeout/error;
+ *   a pong without a numeric protocolVersion counts as version 1 (pre-#107 baseline)
  */
 function probeOnce(socketPath, connect, timeoutMs) {
 	return new Promise((resolve) => {
@@ -99,7 +102,10 @@ function probeOnce(socketPath, connect, timeoutMs) {
 				try {
 					const msg = JSON.parse(line);
 					if (msg?.type === "pong" && typeof msg.instanceId === "string") {
-						finish(msg.instanceId);
+						finish({
+							instanceId: msg.instanceId,
+							protocolVersion: typeof msg.protocolVersion === "number" ? msg.protocolVersion : 1,
+						});
 						return;
 					}
 				} catch {
@@ -111,10 +117,63 @@ function probeOnce(socketPath, connect, timeoutMs) {
 }
 
 /**
+ * Read the coordinator lease's owner.json and return the owning pid. The
+ * lease is written by whichever process owns the "_coordinator" lock, so it
+ * identifies the live coordinator even when its pong predates the pid field.
+ * @param {string} root
+ * @returns {number|null}
+ */
+function readCoordinatorLeasePid(root) {
+	try {
+		const lockPath = P.viewLockPath(root, "_coordinator", "state-coordinator");
+		const owner = JSON.parse(readFileSync(`${lockPath}/owner.json`, "utf8"));
+		const pid = Number(owner?.identity?.pid ?? owner?.pid ?? 0);
+		return Number.isFinite(pid) && pid > 0 ? pid : null;
+	} catch {
+		return null;
+	}
+}
+
+/** Grace window for a SIGTERMed stale coordinator to unlink its socket. */
+const REPLACE_TIMEOUT_MS = 3_000;
+const REPLACE_POLL_MS = 50;
+
+/**
+ * Terminate a stale-protocol coordinator (issue #108) and wait for its socket
+ * to disappear so a fresh instance can bind. SIGTERM triggers the
+ * coordinator's graceful shutdown (socket unlink + lease release); its crash
+ * safety (fsync-before-materialize journal + boot replay) makes the kill safe
+ * even mid-command — an in-flight reply is the documented ambiguous outcome.
+ * @param {string} root
+ * @param {string} socketPath
+ * @returns {Promise<boolean>} whether the socket is gone (replacement can proceed)
+ */
+async function replaceStaleCoordinator(root, socketPath) {
+	const pid = readCoordinatorLeasePid(root);
+	if (pid != null) {
+		try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+	}
+	const deadline = Date.now() + REPLACE_TIMEOUT_MS;
+	while (Date.now() < deadline) {
+		if (!existsSync(socketPath)) return true;
+		await new Promise((r) => setTimeout(r, REPLACE_POLL_MS));
+	}
+	return false;
+}
+
+/**
  * Make sure a coordinator is live for this board root: probe the endpoint and,
  * on failure, spawn one and poll until it answers (the lease guarantees a
  * single owner even under concurrent spawns — the loser exits silently).
  * Repeated/concurrent calls are safe and cheap once a coordinator is up.
+ *
+ * Protocol gate (issue #108): a live coordinator reporting a protocol version
+ * older than this client's build is TERMINATED and respawned — otherwise a
+ * detached old-build instance survives every extension update and rejects
+ * every new command kind (`unknown_kind`), silently stranding state writes.
+ * If the stale instance cannot be replaced (unkillable, socket stuck), report
+ * `coordinator_stale_protocol` instead of pretending it is healthy.
+ *
  * @param {string} root
  * @param {{ runnerScript?: string, node?: string, probeTimeoutMs?: number, ensureWindowMs?: number, pollMs?: number, connect?: (path: string) => import("node:net").Socket }} [opts]
  * @returns {Promise<EnsureResult>}
@@ -128,14 +187,21 @@ export async function ensureCoordinator(root, opts = {}) {
 	const socketPath = P.coordinatorEndpointPathFor(process.platform, root);
 
 	const first = await probeOnce(socketPath, connect, probeTimeoutMs);
-	if (first) return { ok: true, instanceId: first };
+	if (first) {
+		if (first.protocolVersion >= COORDINATOR_PROTOCOL_VERSION) return { ok: true, instanceId: first.instanceId };
+		if (!await replaceStaleCoordinator(root, socketPath)) {
+			return { ok: false, error: "coordinator_stale_protocol" };
+		}
+	}
 
 	const launched = launchCoordinator(root, { runnerScript: opts.runnerScript ?? COORDINATOR_SCRIPT, node: opts.node });
 	const deadline = Date.now() + windowMs;
 	while (Date.now() < deadline) {
 		await new Promise((r) => setTimeout(r, pollMs));
-		const instanceId = await probeOnce(socketPath, connect, probeTimeoutMs);
-		if (instanceId) return { ok: true, instanceId, pid: launched.pid };
+		const probe = await probeOnce(socketPath, connect, probeTimeoutMs);
+		if (probe && probe.protocolVersion >= COORDINATOR_PROTOCOL_VERSION) {
+			return { ok: true, instanceId: probe.instanceId, pid: launched.pid };
+		}
 	}
 	return { ok: false, error: "coordinator_unavailable", pid: launched.pid };
 }
