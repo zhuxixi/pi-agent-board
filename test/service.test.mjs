@@ -12,6 +12,7 @@ import { readJournal } from "../src/core/coordinator-journal.mjs";
 import * as P from "../src/core/paths.mjs";
 import { createView, readHost, readState, readStatus, writeHost, writeHostPid, writeLaunchPrefs, writeState, writeStatus } from "../src/core/store.mjs";
 import { readFollowUpQueue } from "../src/core/follow-up-queue.mjs";
+import { readDiagnostics } from "../src/core/diagnostics.mjs";
 import { startCoordinator } from "../test-support/ensure-coordinator-helper.mjs";
 
 function freshRoot() {
@@ -607,6 +608,211 @@ test("dispatch creates per-instance config and endpoint paths", async () => {
 	}
 });
 
+/** Terminal-status fixture shared by the reconcile desync tests. */
+function terminalStatusFixture(viewId, runId) {
+	return {
+		version: 1,
+		runId,
+		viewId,
+		pid: null,
+		startedAt: 1,
+		endedAt: 2,
+		exitCode: 0,
+		kind: "dispatch",
+		prompt: "x",
+		model: null,
+		semanticState: "completed",
+		processState: "exited",
+		summary: "All done.",
+		lastActivityAt: 2,
+		currentTool: null,
+		latestAssistantPreview: "All done.",
+		question: null,
+		pendingQuestions: [],
+		needsInput: false,
+		hasError: false,
+		autoState: null,
+	};
+}
+
+test("reconcile skips a revision-desynced state/status pair and requests repair (issue #91 read side)", async () => {
+	const root = freshRoot();
+	// Off-mode keeps the repair kick inert (no coordinator spawn); the kick's
+	// repair effect (boot replay) is covered by the coordinator restart tests.
+	const prevOff = setEnv("AGENT_BOARD_COORDINATOR", "off");
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		// Half-materialized pair (coordinator crash between its paired writes):
+		// state carries the newer revision, status the older one.
+		const s = readState(root, "v1");
+		s.semanticState = "working";
+		s.processState = "exited";
+		s.currentRunId = "r1";
+		s.materializedRevision = 2;
+		writeState(root, s);
+		writeStatus(root, { ...terminalStatusFixture("v1", "r1"), materializedRevision: 1 });
+		const svc = service(root);
+		const fixed = await svc.reconcile();
+		assert.equal(fixed, 0, "a desynced pair must not be combined or counted as fixed");
+		const next = readState(root, "v1");
+		assert.equal(next.semanticState, "working", "desynced pair must not be projected from the stale status");
+		assert.equal(next.materializedRevision, 2, "state half untouched");
+		const diag = readDiagnostics(root, "v1").find((d) => d.code === "state_status_revision_desync");
+		assert.ok(diag, "desync diagnostic recorded");
+		assert.equal(diag.level, "warn");
+	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevOff);
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("reconcile throttles desync diagnostics per episode (persistent pair logs once)", async () => {
+	const root = freshRoot();
+	const prevOff = setEnv("AGENT_BOARD_COORDINATOR", "off");
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const s = readState(root, "v1");
+		s.semanticState = "working";
+		s.processState = "exited";
+		s.currentRunId = "r1";
+		s.materializedRevision = 2;
+		writeState(root, s);
+		writeStatus(root, { ...terminalStatusFixture("v1", "r1"), materializedRevision: 1 });
+		const svc = service(root);
+
+		await svc.reconcile();
+		await svc.reconcile();
+		let diags = readDiagnostics(root, "v1").filter((d) => d.code === "state_status_revision_desync");
+		assert.equal(diags.length, 1, "a stuck pair logs once, not once per 700ms pass");
+		assert.equal(diags[0].details.stateRevision, 2);
+		assert.equal(diags[0].details.statusRevision, 1);
+
+		// The pair progresses (a fresh crash at new revisions, or partial repair):
+		// a changed pair is a new episode and logs again, with the FRESH values.
+		const s2 = readState(root, "v1");
+		s2.materializedRevision = 3;
+		writeState(root, s2);
+		await svc.reconcile();
+		diags = readDiagnostics(root, "v1").filter((d) => d.code === "state_status_revision_desync");
+		assert.equal(diags.length, 2, "a changed pair is a new episode");
+		assert.equal(diags[1].details.stateRevision, 3, "logged details carry the fresh re-read values");
+	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevOff);
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("reconcile retries a failed repair kick without re-logging the episode (CR r2 issue-4)", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const s = readState(root, "v1");
+		s.semanticState = "working";
+		s.processState = "exited";
+		s.currentRunId = "r1";
+		s.materializedRevision = 2;
+		writeState(root, s);
+		writeStatus(root, { ...terminalStatusFixture("v1", "r1"), materializedRevision: 1 });
+
+		// Failure injection: the injected ensureCoordinator stands in for the
+		// real spawn — first kick fails (spawn window exhausted), second
+		// succeeds (transient condition cleared). Deterministic, no real
+		// coordinator needed.
+		const ensureCalls = [];
+		let kickSucceeds = false;
+		const svc = service(root, {
+			ensureCoordinator: async () => {
+				ensureCalls.push(kickSucceeds ? "ok" : "fail");
+				return kickSucceeds ? { ok: true, instanceId: "inst" } : { ok: false, error: "coordinator_unavailable" };
+			},
+		});
+
+		await svc.reconcile(); // episode 1: diagnostic + kick #1 (fails → re-arm)
+		kickSucceeds = true; // the transient condition clears
+		await svc.reconcile(); // retry pass: kick #2 fires (succeeds), NO re-log
+		assert.deepEqual(ensureCalls, ["fail", "ok"], "a failed kick is retried on the next pass, a successful one stops the retries");
+		let diags = readDiagnostics(root, "v1").filter((d) => d.code === "state_status_revision_desync");
+		assert.equal(diags.length, 1, "kick retries do not re-log the diagnostic episode");
+
+		await svc.reconcile(); // successful kick cleared the retry flag
+		assert.deepEqual(ensureCalls, ["fail", "ok"], "a successful kick is not re-fired on later passes");
+		diags = readDiagnostics(root, "v1").filter((d) => d.code === "state_status_revision_desync");
+		assert.equal(diags.length, 1);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("reconcile re-verifies a suspected desync against fresh reads before acting (TOCTOU)", async () => {
+	const root = freshRoot();
+	try {
+		// vA is processed first; its awaited command mutates vB's on-disk pair
+		// (consistently, rev 2→3) while reconcile holds a stale listRows snapshot
+		// for vB. The suspicion raised against the snapshot must be re-verified
+		// against fresh reads — the fresh pair agrees, so vB is projected, not
+		// skipped as desynced.
+		createView(root, { id: "vA", name: "a", cwd: "/r" });
+		createView(root, { id: "vB", name: "b", cwd: "/r" });
+		for (const [viewId, runId] of [["vA", "rA"], ["vB", "rB"]]) {
+			const s = readState(root, viewId);
+			s.semanticState = "working";
+			s.processState = "exited";
+			s.currentRunId = runId;
+			s.materializedRevision = 2;
+			writeState(root, s);
+			writeStatus(root, { ...terminalStatusFixture(viewId, runId), materializedRevision: 2 });
+		}
+		let vACommandSeen = false;
+		const svc = service(root, {
+			sendStateCommand: async (_root, cmd) => {
+				if (cmd.viewId === "vA" && !vACommandSeen) {
+					vACommandSeen = true;
+					// Concurrent paired writer: both halves advance together while
+					// the snapshot is stale (the pairing invariant holds on disk).
+					const sb = readState(root, "vB");
+					sb.materializedRevision = 3;
+					writeState(root, sb);
+					const stb = readStatus(root, "vB", "rB");
+					stb.materializedRevision = 3;
+					writeStatus(root, stb);
+				}
+				return { status: "applied", reason: null };
+			},
+		});
+		const fixed = await svc.reconcile();
+		assert.equal(vACommandSeen, true, "mutation hook fired inside vA's command window");
+		assert.equal(fixed, 2, "both rows projected — vB's stale-snapshot suspicion was re-verified and cleared");
+		const desyncs = readDiagnostics(root, "vB").filter((d) => d.code === "state_status_revision_desync");
+		assert.equal(desyncs.length, 0, "no false-positive desync diagnostic from the stale snapshot");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("reconcile still fixes legacy rows without revisions (desync check never fires)", async () => {
+	const root = freshRoot();
+	const prevOff = setEnv("AGENT_BOARD_COORDINATOR", "off");
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const s = readState(root, "v1");
+		s.semanticState = "working";
+		s.processState = "exited";
+		s.currentRunId = "r1";
+		writeState(root, s); // no materializedRevision — legacy shape
+		writeStatus(root, terminalStatusFixture("v1", "r1")); // no revision, has endedAt → project mode
+		const svc = service(root, {
+			sendStateCommand: async () => ({ status: "rejected", reason: "coordinator_disabled" }),
+		});
+		const fixed = await svc.reconcile();
+		assert.equal(fixed, 1, "legacy rows are unaffected by the desync check");
+		const next = readState(root, "v1");
+		assert.equal(next.semanticState, "completed", "legacy projection applied from the terminal status");
+	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevOff);
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("reconcile does not count a rejected project-mode row as fixed (fix round 2)", async () => {
 	const root = freshRoot();
 	try {
@@ -1045,6 +1251,10 @@ test("archiveMany archives explicit completed rows and skips live ones", async (
 });
 
 test("busy replies queue and drain when idle", async () => {
+	// mark_queued now travels through the coordinator (issue #91); this test
+	// asserts queue/drain mechanics against a mocked launch, so pin legacy mode
+	// instead of spawning a real detached coordinator per run.
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");
 	const root = freshRoot();
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
@@ -1075,6 +1285,7 @@ test("busy replies queue and drain when idle", async () => {
 		assert.equal(launched[0].prompt, "next step");
 		assert.equal(svc.followUps("v1").summary.queuedCount, 0);
 	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
 		rmSync(root, { recursive: true, force: true });
 	}
 });
@@ -1145,6 +1356,8 @@ test("busy steering actions queue raw steering payloads", async () => {
 });
 
 test("idle non-PTY plan request launches with plan run kind", async () => {
+	// Coordinator-off pin: launch-config intent, mocked launch (issue #91).
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");
 	const root = freshRoot();
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
@@ -1166,6 +1379,7 @@ test("idle non-PTY plan request launches with plan run kind", async () => {
 		assert.equal(launched[0].kind, "plan");
 		assert.match(launched[0].prompt, /Create an implementation plan only/);
 	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
 		rmSync(root, { recursive: true, force: true });
 	}
 });

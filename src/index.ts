@@ -90,7 +90,7 @@ export default function piAgentBoard(pi: ExtensionAPI): void {
 
 	const updateStatus = (ctx: ExtensionContext) => {
 		try {
-			serviceFor(ctx).reconcile();
+			void serviceFor(ctx).reconcile().catch(() => {});
 			const rows = listRows(root);
 			const needs = rows.filter((r) => r.state?.semanticState === "needs_input").length;
 			const working = rows.filter((r) => r.alive).length;
@@ -122,7 +122,7 @@ export default function piAgentBoard(pi: ExtensionAPI): void {
 		updateStatus(ctx);
 		if (event.reason === "startup" && !isHostedChild && pi.getFlag("agent-board") === true && ctx.hasUI) {
 			const service = createService({ root, runnerScript: RUNNER_SCRIPT, ptyRunnerScript: PTY_RUNNER_SCRIPT, titleRunnerScript: TITLE_RUNNER_SCRIPT, autoStateRunnerScript: AUTO_STATE_RUNNER_SCRIPT, piCommand, piArgsPrefix, defaultCwd: ctx.cwd, availableModels: availableModelsFor(ctx) });
-			service.reconcile();
+			void service.reconcile().catch(() => {});
 			ctx.ui.setWorkingVisible(false);
 			ctx.ui.setHeader(() => ({ render: () => [], invalidate() {} }));
 			ctx.ui.setFooter(() => ({ render: () => [], invalidate() {} }));

@@ -27,7 +27,9 @@ import { isAlive, killProcess } from "../core/pid.mjs";
 import { acquireOwnedViewLock, tryAcquireOwnedViewLock } from "../core/locks.mjs";
 import { canFinalizeLegacyHost, canReplaceHost } from "../core/host-coordination.mjs";
 import { modelRefAvailable } from "../core/launch-options.mjs";
-import { sendStateCommand, coordinatorDisabled } from "../core/coordinator-client.mjs";
+import { ensureCoordinator, sendStateCommand, coordinatorDisabled } from "../core/coordinator-client.mjs";
+import { createDesyncEpisodeThrottle, rereadPair, statusRevisionDesynced } from "../core/status-consistency.mjs";
+import { commandRejectDiagnostic } from "../core/state-commands.mjs";
 import { HOST_PROBE_RETRY_MS, probeHost } from "../core/host-probe.mjs";
 import * as P from "../core/paths.mjs";
 import {
@@ -107,6 +109,10 @@ export function createService(opts) {
 	const acquireLockImpl = opts.acquireLock ?? acquireOwnedViewLock;
 	const tryAcquireLockImpl = opts.tryAcquireLock ?? tryAcquireOwnedViewLock;
 	const sendStateCommandImpl = opts.sendStateCommand ?? sendStateCommand;
+	const ensureCoordinatorImpl = opts.ensureCoordinator ?? ensureCoordinator;
+	// Desync episode throttle: a stuck (stateRev:statusRev) pair logs once per
+	// service, not once per reconcile pass — see createDesyncEpisodeThrottle().
+	const desyncThrottle = createDesyncEpisodeThrottle();
 	// Identity-aware observation/signalling for host recovery (issue #70). Callers must
 	// only signal after observeProcess returned "owned" for that exact identity.
 	const observeProcessImpl = opts.observeProcess ?? defaultObserveProcess;
@@ -147,7 +153,9 @@ export function createService(opts) {
 	 * @param {import("../core/types.mjs").ViewMeta} meta
 	 * @param {string} prompt
 	 * @param {RunKind} kind
-	 * @returns {{ runId: string, pid: number|null }}
+	 * @returns {Promise<{ runId: string, pid: number|null }>} resolves after
+	 *   mark_queued has landed and the detached runner is spawned (ordering
+	 *   contract: the row must be queued before the runner can boot, final-review F2).
 	 */
 	async function launchForView(meta, prompt, kind) {
 		const runId = newRunId();
@@ -244,7 +252,7 @@ export function createService(opts) {
 	 * lease; this function never acquires or releases it.
 	 * @param {import("../core/types.mjs").ViewMeta} meta
 	 * @param {string|null} initialPrompt
-	 * @returns {ReturnType<typeof launchHost>}
+	 * @returns {{ ok: true, status: "reused"|"pending"|"started", pid: number|null, socketPath: string|null, instanceId: string|null } | { ok: false, error: string, fallbackReason?: string }}
 	 */
 	function startHostUnderLease(meta, initialPrompt, launchOpts = {}) {
 		const existing = readHost(root, meta.id);
@@ -409,11 +417,11 @@ export function createService(opts) {
 		if (result.reason === "coordinator_disabled") {
 			return applyAutoStateToStatus(status, classification, Date.now());
 		}
-		if (result.reason === "manual_fence" || result.reason === "no_change" || result.reason === "stale_run") {
-			// Designed fences — informational, not errors.
-			return false;
-		}
-		appendDiagnostic(root, meta.id, { source: "service", runId: commandRunId, level: "warn", code: "auto_state_command_ambiguous", message: `Auto-state classification outcome unknown (${result.reason}); if the command was journaled, coordinator replay will recover it; otherwise the next classification pass will converge the row`, details: { reason: result.reason } });
+		// Unified decided/ambiguous classification (CR r2 issue-3): decided
+		// rejects (manual_fence/stale_run/…) log as info *_skipped — the
+		// coordinator's verdict is authoritative; only genuinely ambiguous
+		// outcomes (timeout/connection_reset) keep the recovery-path warn.
+		appendDiagnostic(root, meta.id, { source: "service", runId: commandRunId, ...commandRejectDiagnostic("auto_state", "Auto-state classification", result.reason, "otherwise the next classification pass will converge the row"), details: { reason: result.reason } });
 		return false;
 	}
 
@@ -1804,7 +1812,7 @@ export function createService(opts) {
 			return { ok: true };
 		},
 
-		/** @param {string} viewId @returns {{ ok: boolean, error?: string }} */
+		/** @param {string} viewId @returns {Promise<{ ok: boolean, error?: string }>} */
 		markVisited(viewId) {
 			return markVisited(viewId);
 		},
@@ -2019,7 +2027,48 @@ export function createService(opts) {
 					continue;
 				}
 				if (row.alive) continue;
-				const status = readStatus(root, row.meta.id, s.currentRunId);
+				let status = readStatus(root, row.meta.id, s.currentRunId);
+				if (statusRevisionDesynced(s, status)) {
+					// TOCTOU guard: `s` is a listRows snapshot, and earlier rows'
+					// awaited commands may have let the on-disk pair advance past
+					// it — re-read BOTH files fresh and act only on a pair that
+					// still disagrees. (The residual window between the two fresh
+					// reads is sub-ms under the coordinator's view-lock pairing
+					// invariant.)
+					const reread = rereadPair(root, row.meta.id, s.currentRunId);
+					if (reread.desynced) {
+						// Half-materialized pair (a coordinator crashed between its paired
+						// writes): don't combine the mismatched halves into one decision —
+						// record it and kick a coordinator so boot replay repairs the pair.
+						// The row is skipped this pass (not fixed); the next pass sees the
+						// repaired stamps and proceeds normally.
+						// Episode throttle: a stuck pair logs once, not once per 700ms
+						// reconcile pass — diagnostics must stay bounded for unrepairable
+						// pairs (torn transient beat has no journal record; coordinator off).
+						// Episode throttle gates the DIAGNOSTIC (a stuck pair logs once —
+						// CR r1); the repair KICK is retried independently while it keeps
+						// failing (CR r2 issue-4): a transient ensureCoordinator failure
+						// (spawn window exhausted) must not consume the recovery path —
+						// an idle dashboard would otherwise never run boot replay. A
+						// successful kick stops the retries: the coordinator is up, boot
+						// replay already repaired a repairable pair, and an
+						// unrepairable-torn pair gains nothing from re-kicking.
+						// (shouldLog records the episode — evaluate it exactly once.)
+						const logEpisode = desyncThrottle.shouldLog(row.meta.id, reread.state.materializedRevision, reread.status.materializedRevision);
+						if (logEpisode) {
+							appendDiagnostic(root, row.meta.id, { source: "service", level: "warn", code: "state_status_revision_desync", message: "state.json and status.json revisions disagree; skipping reconcile projection and requesting coordinator repair", details: { stateRevision: reread.state.materializedRevision, statusRevision: reread.status.materializedRevision, runId: s.currentRunId } });
+						}
+						if (logEpisode || desyncThrottle.shouldRetryKick(row.meta.id)) {
+							void ensureCoordinatorImpl(root).then((res) => {
+								if (res?.ok) desyncThrottle.clearKickFailed(row.meta.id);
+								else desyncThrottle.markKickFailed(row.meta.id);
+							}).catch(() => desyncThrottle.markKickFailed(row.meta.id));
+						}
+						continue;
+					}
+					// Snapshot was stale but the fresh pair agrees — project from it.
+					status = reread.status;
+				}
 				if (status?.endedAt) {
 					// The run's terminal status exists but the row was never materialized
 					// from it (crash between the two writes, or a pre-coordinator row).

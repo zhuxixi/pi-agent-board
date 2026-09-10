@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { validateCommand, decideStateTransition, STATE_COMMAND_KINDS, COMMAND_SOURCES, TRANSIENT_KINDS, PATCHABLE_FIELDS } from "../src/core/state-commands.mjs";
+import { validateCommand, decideStateTransition, commandRejectDiagnostic, DECIDED_REJECT_REASONS, STATE_COMMAND_KINDS, COMMAND_SOURCES, TRANSIENT_KINDS, PATCHABLE_FIELDS } from "../src/core/state-commands.mjs";
 
 const baseCmd = {
 	type: "state_command", commandId: "cmd-1", viewId: "v1", runId: "r1",
@@ -246,9 +246,29 @@ const ptyRunner = { ...baseCmd, source: "pty-runner" };
 test("validateCommand enforces run_started payload status identity", () => {
 	const cmd = { ...baseCmd, kind: "run_started", payload: { status: makeStatus() } };
 	assert.equal(validateCommand({ ...cmd, runId: undefined }).ok, false);
+	// Empty string is the degenerate falsy path (Task 2 review P2-A): the
+	// statusRunId binding would silently drop the status half while acking applied.
+	assert.equal(validateCommand({ ...cmd, runId: "" }).ok, false);
 	assert.equal(validateCommand({ ...cmd, runId: "r1", payload: {} }).ok, false);
 	assert.equal(validateCommand({ ...cmd, runId: "r1", payload: { status: { runId: "r2" } } }).ok, false);
 	assert.equal(validateCommand({ ...cmd, runId: "r1", payload: { status: { runId: "r1" } } }).ok, true);
+});
+
+test("commandRejectDiagnostic: decided rejects are info skips, transport ambiguity keeps the honest warn", () => {
+	const decided = commandRejectDiagnostic("run_started", "Run bootstrap", "manual_fence", "otherwise dashboard reconcile will converge the row");
+	assert.deepEqual(decided, {
+		level: "info",
+		code: "run_started_skipped",
+		message: "Run bootstrap skipped by the coordinator (manual_fence); its decision is authoritative",
+	});
+	const ambiguous = commandRejectDiagnostic("run_finalize", "Run finalization", "timeout", "otherwise dashboard reconcile will converge the row");
+	assert.equal(ambiguous.level, "warn");
+	assert.equal(ambiguous.code, "run_finalize_ambiguous");
+	assert.match(ambiguous.message, /outcome unknown \(timeout\); if the command was journaled, coordinator replay will recover it; otherwise dashboard reconcile will converge the row/);
+	// Every decision-layer reject reason classifies as decided.
+	for (const reason of DECIDED_REJECT_REASONS) {
+		assert.equal(commandRejectDiagnostic("x", "X", reason, "tail").level, "info", reason);
+	}
 });
 
 test("validateCommand enforces payload shapes for lifecycle kinds", () => {
@@ -682,11 +702,62 @@ test("new kinds keep decisions pure: inputs are not mutated", () => {
 
 // -- Task 2: transient-command contracts (shell support lives in the coordinator) --
 
-test("run_progress without a materialized status is rejected stale_run (F2)", () => {
-	const cmd = { ...baseCmd, kind: "run_progress", payload: { statusPatch: { turns: 2 } } };
-	// A live run whose status.json was never bootstrapped cannot legitimately
-	// progress — the first beat always follows run_started's bootstrap write.
-	assert.deepEqual(decideStateTransition(cmd, liveState, null, 50), { action: "reject", reason: "stale_run" });
+test("run_progress without a materialized status: qualified live-run beat bootstraps, everything else stays stale_run (F2 split)", () => {
+	// Hard-down residual (issue #91): if the coordinator was down through the
+	// runner's boot window, run_started was lost while mark_queued landed — the
+	// row is alive with the run pinned but no status file exists. The first
+	// beat after recovery carries the runner's FULL in-memory status; a
+	// qualified beat bootstraps the file (otherwise the row can never converge:
+	// beats and finalize both reject forever). Everything else keeps F2's
+	// stale_run: non-matching/exited rows, and sparse patches that would
+	// materialize an undefined-shaped status.
+	const fullPatch = makeStatus({ lastActivityAt: 50, latestAssistantPreview: "advanced" });
+	const bootstrap = decideStateTransition(
+		{ ...baseCmd, kind: "run_progress", payload: { statusPatch: fullPatch } },
+		liveState, null, 50,
+	);
+	assert.equal(bootstrap.action, "apply");
+	assert.equal(bootstrap.reason, "run_progress");
+	// mutate.status carries the full patch (every field that differs from nothing).
+	for (const key of ["runId", "viewId", "pid", "semanticState", "processState", "lastActivityAt"]) {
+		assert.equal(bootstrap.mutate.status[key], fullPatch[key], `status patch carries ${key}`);
+	}
+	assert.ok(!("materializedRevision" in bootstrap.mutate.status), "file stamp never travels in a patch");
+	// State side: projected from the bootstrapped status (delegation, not copied rules).
+	assert.equal(bootstrap.mutate.state.semanticState, undefined); // working → working unchanged
+	assert.equal(bootstrap.mutate.state.latestAssistantPreview, "advanced");
+	assert.equal(bootstrap.mutate.state.lastActivityAt, 50);
+
+	// Sparse patch (no processState/semanticState) on a matching live row: stale_run —
+	// projecting it would materialize an undefined-shaped status (F2's original exposure).
+	const sparse = { ...baseCmd, kind: "run_progress", payload: { statusPatch: { turns: 2 } } };
+	assert.deepEqual(decideStateTransition(sparse, liveState, null, 50), { action: "reject", reason: "stale_run" });
+
+	// Full patch but the row is not on this run (exited / re-pointed): stale_run.
+	assert.deepEqual(
+		decideStateTransition({ ...baseCmd, kind: "run_progress", payload: { statusPatch: fullPatch } }, { ...liveState, processState: "exited" }, null, 50),
+		{ action: "reject", reason: "stale_run" },
+	);
+	assert.deepEqual(
+		decideStateTransition({ ...baseCmd, kind: "run_progress", payload: { statusPatch: fullPatch } }, { ...liveState, currentRunId: "r2" }, null, 50),
+		{ action: "reject", reason: "stale_run" },
+	);
+
+	// Full-shaped but carrying a DIFFERENT run's identity: stale_run (identity guard).
+	assert.deepEqual(
+		decideStateTransition({ ...baseCmd, kind: "run_progress", payload: { statusPatch: makeStatus({ runId: "r2" }) } }, liveState, null, 50),
+		{ action: "reject", reason: "stale_run" },
+	);
+
+	// P2 hardening: a degenerate null==null identity can never bootstrap — the
+	// materialized status file is keyed on command.runId, so a runId-less beat
+	// has nothing legitimate to create (pre-hardening it returned "applied"
+	// while the shell silently dropped the status half).
+	const nullRunBeat = { type: "state_command", viewId: "v1", runId: null, source: "job-runner", kind: "run_progress", payload: { statusPatch: makeStatus({ runId: null }) } };
+	assert.deepEqual(
+		decideStateTransition(nullRunBeat, { ...liveState, currentRunId: null }, null, 50),
+		{ action: "reject", reason: "stale_run" },
+	);
 });
 
 test("transient kinds may omit commandId; journaled kinds may not", () => {

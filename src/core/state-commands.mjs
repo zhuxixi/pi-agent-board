@@ -60,6 +60,45 @@ export const STATE_COMMAND_KINDS = Object.freeze([
 export const TRANSIENT_KINDS = Object.freeze(["run_progress"]);
 
 /**
+ * Decision-layer reject reasons: journaled, authoritative coordinator verdicts
+ * with NO recovery semantics (a retry would be decided the same way). The
+ * complement — transport ambiguity ("timeout"/"connection_reset"/
+ * "connection_failed"/"coordinator_unavailable") — is the only class where
+ * "outcome unknown, replay will recover" diagnostics are honest (issue #91
+ * hygiene). validateCommand envelope errors are first-party programmer errors
+ * and are not in this set.
+ */
+export const DECIDED_REJECT_REASONS = Object.freeze(new Set([
+	"manual_fence",
+	"stale_run",
+	"no_change",
+	"busy",
+	"revision_conflict",
+	"unknown_view",
+	"unknown_kind",
+	"field_not_allowed",
+]));
+
+/**
+ * Diagnostic fields for a non-applied command result (issue #91 hygiene):
+ * decided rejects are info-level skips — the coordinator's verdict is
+ * authoritative, so "outcome unknown, replay will recover" would be a lie.
+ * Transport ambiguity keeps the warn with the caller's recovery hint.
+ * Pure: shapes only, no I/O.
+ * @param {string} code diagnostic code stem (e.g. "run_started")
+ * @param {string} label human phrase for the message (e.g. "Run bootstrap")
+ * @param {string|null} reason rejected reason from the command result
+ * @param {string} ambiguousTail recovery hint appended ONLY for ambiguous reasons
+ * @returns {{ level: "info"|"warn", code: string, message: string }}
+ */
+export function commandRejectDiagnostic(code, label, reason, ambiguousTail) {
+	const decided = reason != null && DECIDED_REJECT_REASONS.has(reason);
+	return decided
+		? { level: "info", code: `${code}_skipped`, message: `${label} skipped by the coordinator (${reason}); its decision is authoritative` }
+		: { level: "warn", code: `${code}_ambiguous`, message: `${label} outcome unknown (${reason}); if the command was journaled, coordinator replay will recover it; ${ambiguousTail}` };
+}
+
+/**
  * Per-source whitelist for `patch_fields` (metadata/evidence-mirror merges).
  * Anything not listed here is rejected with "field_not_allowed" — semantic
  * fields must travel through their dedicated kinds so the guard table in the
@@ -141,7 +180,10 @@ export function validateCommand(raw) {
 			if (raw.payload.runId != null && (typeof raw.payload.runId !== "string" || !raw.payload.runId)) return { ok: false, error: "missing_runId" };
 			break;
 		case "run_started": {
-			if (raw.runId == null) return { ok: false, error: "missing_runId" };
+			// Non-empty string (not just != null): a degenerate runId passes the
+			// null guard, then the statusRunId binding silently drops the status
+			// half while the ack still says "applied" (Task 2 review P2-A).
+			if (typeof raw.runId !== "string" || !raw.runId) return { ok: false, error: "missing_runId" };
 			const status = raw.payload?.status;
 			if (!status || typeof status !== "object") return { ok: false, error: "missing_status" };
 			if (typeof status.runId !== "string" || status.runId !== raw.runId) return { ok: false, error: "bad_status" };
@@ -359,11 +401,32 @@ export function decideStateTransition(command, currentState, currentStatus, now 
 			// Liveness semantics: only the row's current live run may move forward.
 			// Late/duplicate progress from a finished run is dropped (next run's
 			// progress supersedes it anyway — this kind is transient by design).
-			// A live run with no materialized status cannot legitimately progress
-			// (F2): the first beat always follows run_started's bootstrap write, so
-			// a missing status here means the beat is stale or out of order — and
-			// projecting onto `null` would materialize undefined processState.
-			if (!currentStatus) return reject("stale_run");
+			//
+			// A missing status file splits two ways (F2, split by the hard-down
+			// residual closure): a QUALIFIED beat from the row's current live run —
+			// full-shaped patch carrying processState/semanticState and the same
+			// runId — bootstraps the file, because the coordinator may have been
+			// down through the runner's boot window (mark_queued applied,
+			// run_started lost): without the bootstrap the row can never converge
+			// (beats and finalize both reject forever). Anything else — exited or
+			// re-pointed rows, sparse patches that would materialize an
+			// undefined-shaped status — stays stale_run (F2's original exposure).
+			if (!currentStatus) {
+				// P2 hardening: the bootstrap is keyed on command.runId (it becomes the
+				// status-file identity), so a degenerate null==null row match must never
+				// bootstrap — the shell would silently drop the status half. The check
+				// lives here beside its sibling liveness guards (runId semantics for
+				// run_progress are decision-layer; envelope validation stays minimal,
+				// matching the generic stale-run guard's decision-side read).
+				const rowMatches = typeof command.runId === "string" && command.runId.length > 0
+					&& currentState.currentRunId === command.runId
+					&& currentState.processState === "alive";
+				if (!rowMatches || !beatPatchQualifiesForBootstrap(command)) return reject("stale_run");
+				// The patch itself is the base: it is the runner's authoritative
+				// full in-memory status, so applyStatusProjection's merge-onto-empty
+				// materializes exactly the patch (validated full-shaped above).
+				return applyStatusProjection(command, currentState, null, now);
+			}
 			if (currentState.currentRunId !== command.runId || currentState.processState !== "alive") return reject("stale_run");
 			return applyStatusProjection(command, currentState, currentStatus, now);
 		}
@@ -578,6 +641,25 @@ function buildPatches(currentState, stateClone, stateChanged, currentStatus, sta
 	if (stateChanged) mutate.state = diffFields(currentState, stateClone);
 	if (statusChanged) mutate.status = diffFields(currentStatus, statusClone);
 	return mutate;
+}
+
+/**
+ * Whether a run_progress beat may bootstrap a missing status file: the patch
+ * must be full-shaped — carrying processState and semanticState (so the
+ * materialized status never has an undefined shape) and pinned to the same
+ * runId as the command (so a foreign run's snapshot can never masquerade as
+ * this run's bootstrap). Sparse or mismatched patches stay stale_run.
+ * @param {object} command
+ */
+function beatPatchQualifiesForBootstrap(command) {
+	const patch = command.payload?.statusPatch;
+	return Boolean(
+		patch &&
+		typeof patch === "object" &&
+		typeof patch.processState === "string" &&
+		typeof patch.semanticState === "string" &&
+		patch.runId === command.runId,
+	);
 }
 
 /**

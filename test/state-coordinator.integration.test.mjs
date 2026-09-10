@@ -833,6 +833,59 @@ test("F5b negative: patch_fields does not stamp lastActivityAt", async (t) => {
 	assert.equal(state.lastActivityAt, 1000, "patch_fields must NOT stamp lastActivityAt");
 });
 
+test("final pairing invariant: state-only patches restamp the run's status revision (issue #91 P1)", async (t) => {
+	const root = freshRoot();
+	let child = null;
+	t.after(async () => {
+		if (child && isAlive(child.pid)) { child.kill("SIGTERM"); await waitForExit(child); }
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	});
+	createView(root, { id: "v1", name: "x", cwd: root });
+	child = startCoordinator(root);
+	await waitFor(() => existsSync(P.coordinatorEndpointPathFor(process.platform, root)));
+
+	// Live run: mark_queued + run_started pair both files at the same revision.
+	const mq = await sendStateCommand(root, {
+		type: "state_command", viewId: "v1", runId: "r1", source: "service",
+		kind: "mark_queued", expectedRevision: null, payload: { runId: "r1" },
+	});
+	assert.equal(mq.status, "applied");
+	const seedStatus = { ...createRunStatus({ runId: "r1", viewId: "v1", kind: "dispatch", prompt: "p" }, null, Date.now()), semanticState: "working" };
+	const rs = await sendStateCommand(root, {
+		type: "state_command", viewId: "v1", runId: "r1", source: "job-runner",
+		kind: "run_started", expectedRevision: null, payload: { status: seedStatus },
+	});
+	assert.equal(rs.status, "applied");
+	assert.equal(readStatus(root, "v1", "r1")?.materializedRevision, rs.materializedRevision);
+
+	// A healthy state-only patch (the markVisited shape): this used to leave
+	// status at the older revision — a live-coordinator-produced desync that
+	// permanently shielded the row from reconcile recovery (final review P1).
+	const pv = await sendStateCommand(root, {
+		type: "state_command", viewId: "v1", source: "service",
+		kind: "patch_fields", expectedRevision: null, payload: { state: { lastVisitedAt: 4242 } },
+	});
+	assert.equal(pv.status, "applied");
+	const state = readState(root, "v1");
+	const status = readStatus(root, "v1", "r1");
+	assert.equal(state.materializedRevision, pv.materializedRevision, "state carries the applied revision");
+	assert.equal(status.materializedRevision, pv.materializedRevision, "the status half is restamped to the applied revision (pairing invariant)");
+	assert.equal(state.lastVisitedAt, 4242, "the whitelisted state patch applies");
+	assert.equal(status.lastVisitedAt, undefined, "restamp is metadata-only — no content change");
+
+	// Replay heals a torn state-only pair through the same shared path: tear
+	// the pair on disk (external/crash shape), restart the coordinator, and
+	// the journaled patch_fields record re-materializes both halves.
+	writeStatus(root, { ...status, materializedRevision: rs.materializedRevision });
+	assert.notEqual(readStatus(root, "v1", "r1").materializedRevision, state.materializedRevision, "torn shape staged");
+	if (child && isAlive(child.pid)) { child.kill("SIGTERM"); await waitForExit(child); }
+	child = startCoordinator(root);
+	await waitFor(() => existsSync(P.coordinatorEndpointPathFor(process.platform, root)));
+	await waitFor(() => readStatus(root, "v1", "r1")?.materializedRevision === state.materializedRevision, 5000);
+	assert.equal(readState(root, "v1").materializedRevision, state.materializedRevision, "replay does not regress the state half");
+	assert.equal(readState(root, "v1").lastVisitedAt, 4242, "replay re-applies the journaled state patch");
+});
+
 test("transient run_progress applies, stamps the revision, and never touches the journal", async (t) => {
 	const root = freshRoot();
 	let child = null;
@@ -996,7 +1049,7 @@ test("run_progress from two concurrent clients is serialized without torn writes
 	assert.equal(status.turns, Number(state.latestAssistantPreview.split("-")[1]), "status matches the same winning beat");
 });
 
-test("run_progress with no materialized status is rejected stale_run and not journaled (F2)", async (t) => {
+test("run_progress with no materialized status is rejected stale_run and not journaled (F2 split: sparse patches stay stale_run; qualified beats bootstrap — see hard-down test)", async (t) => {
 	const root = freshRoot();
 	let child = null;
 	t.after(async () => {
@@ -1020,7 +1073,66 @@ test("run_progress with no materialized status is rejected stale_run and not jou
 	const result = await client.next();
 	assert.equal(result.status, "rejected");
 	assert.equal(result.reason, "stale_run");
+	// No-fabrication pin (Task 2 review P2-B): the rejected sparse beat must not
+	// have created a status file as a side effect.
+	assert.equal(readStatus(root, "v1", "r1"), null);
 	assert.equal(readJournal(root).length, journalLinesBefore, "transient rejections are not journaled either");
+});
+
+test("hard-down window: a qualified beat bootstraps the missed run_started and the run converges (residual closure)", async (t) => {
+	const root = freshRoot();
+	let child = null;
+	t.after(async () => {
+		if (child && isAlive(child.pid)) { child.kill("SIGTERM"); await waitForExit(child); }
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	});
+	createView(root, { id: "v1", name: "x", cwd: root });
+	child = startCoordinator(root);
+	const { client } = await readyClient(root);
+
+	// mark_queued only: the coordinator was down through the runner's boot
+	// window, so run_started was never delivered — the row is alive with the
+	// run pinned but no status file exists.
+	client.send({ type: "state_command", commandId: "hd-mq-1", viewId: "v1", source: "service", kind: "mark_queued", payload: { runId: "r1" } });
+	assert.equal((await client.next()).status, "applied");
+	assert.equal(readStatus(root, "v1", "r1"), null, "precondition: no status file (run_started was lost)");
+	const journalBeforeBeat = readJournal(root).length;
+
+	// The runner is alive and still beats through the coordinator; its first
+	// post-recovery beat carries the FULL in-memory status and bootstraps the
+	// missed status file.
+	const beatPatch = { ...createRunStatus({ runId: "r1", viewId: "v1", kind: "dispatch", prompt: "p" }, null, Date.now()), semanticState: "working" };
+	client.send({
+		type: "state_command", viewId: "v1", runId: "r1", source: "job-runner",
+		kind: "run_progress", payload: { statusPatch: beatPatch },
+	});
+	const beat = await client.next();
+	assert.equal(beat.type, "state_command_result");
+	assert.equal(beat.status, "applied");
+
+	const bootstrapped = readStatus(root, "v1", "r1");
+	assert.ok(bootstrapped, "beat bootstrapped the missed status file");
+	assert.equal(bootstrapped.runId, "r1");
+	assert.equal(bootstrapped.semanticState, "working");
+	assert.equal(bootstrapped.processState, "alive");
+	assert.equal(bootstrapped.materializedRevision, beat.materializedRevision, "bootstrap stamp shares the revision");
+	const state = readState(root, "v1");
+	assert.equal(state.materializedRevision, beat.materializedRevision);
+	assert.equal(state.semanticState, "working");
+	assert.equal(state.processState, "alive");
+
+	// Transient by design: the bootstrap beat never lands in the journal.
+	assert.equal(readJournal(root).length, journalBeforeBeat, "bootstrap beat stays transient");
+
+	// The run can now finalize — before this closure both beats and finalize
+	// rejected stale_run forever and the row could never converge (residual).
+	client.send({ type: "state_command", commandId: "hd-fin-1", viewId: "v1", runId: "r1", source: "job-runner", kind: "run_finalized", payload: { exitCode: 0 } });
+	const fin = await client.next();
+	assert.equal(fin.status, "applied", "finalize converges after the bootstrap (was stale_run forever)");
+
+	// Journal carries only the journaled commands — the beat never landed there.
+	const kinds = readJournal(root).map((r) => r.command?.kind);
+	assert.deepEqual(kinds, ["mark_queued", "run_finalized"]);
 });
 
 test("host_run_failed applies through the coordinator and fences manual completions", async (t) => {
