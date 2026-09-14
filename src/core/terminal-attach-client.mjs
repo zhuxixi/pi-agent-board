@@ -15,16 +15,18 @@
  *   - probe timeout → `legacy` (old runner silently ignores the probe)
  *   - `error frame_version_mismatch` → `legacy`
  *   - `error snapshot_failed` / `error invalid_since_seq` → resend fresh
- *     subscribe (same probe window); 3 consecutive → `legacy`
+ *     subscribe (same probe window); up to 3 recovery attempts, then
+ *     `legacy` fallback
  * - `collecting` — `snapshot_begin` seen; waiting for `snapshot_end`.
  *   - `snapshot_frame` → frame stashed
  *   - `output` WITH seq between frame and end = runner catch-up flush
  *     (tested runner contract): stashed, applied after the frame, never
  *     counted before `snapshotReady`
  *   - `output` WITH seq before any frame = protocol violation → resync
- *   - `snapshot_end` → verify `nextSeq === stashed tail + 1` (or
- *     `begin.snapshotSeq + 1` with no flush), then emit `snapshotReady`
- *     followed by the stashed flush in order → `live`
+ *   - `snapshot_end` → verify frame present (or empty baseline) and
+ *     `nextSeq === stashed tail + 1` (or `begin.snapshotSeq + 1` with no
+ *     flush), then emit `snapshotReady` followed by the stashed flush in
+ *     order → `live`
  *   - `resnapshot_required` / `snapshot_failed` (interrupted snapshot) →
  *     discard the partial snapshot → resync
  * - `live` — seq-checked consumption against `lastSeq`.
@@ -33,14 +35,14 @@
  *   - `seq > lastSeq + 1` → gap → resync (fresh snapshot, never stitched)
  *   - `resnapshot_required` → resync; unsolicited `snapshot_begin` → resync
  * - `resyncing` — a fresh `subscribe_terminal` (no `sinceSeq`: the runner
- *   answers with a complete replay or a fresh snapshot; a seq-less request
- *   never produces a partial-tail replay) is in flight.
+ *   answers a seq-less request with a fresh snapshot, always; the replay
+ *   continuation below is defensive for cursor reconnects only) is in flight.
  *   - `snapshot_begin` → `collecting`
  *   - `output` with `seq === lastSeq + 1` (complete replay) → `live`,
  *     seamless (no `snapshotReady`, UI keeps its buffer)
  *   - stray outputs / duplicate markers → ignored
- *   - `snapshot_failed` / `resnapshot_required` → resend; 3 consecutive
- *     failures → `legacy`
+ *   - `snapshot_failed` / `resnapshot_required` → resend; up to 3 recovery
+ *     attempts, then `legacy` fallback
  * - `legacy` — mode decided against this runner: inert, every message
  *   returns false so the UI legacy path (screen.log replay + live output +
  *   jiggle) owns everything.
@@ -55,7 +57,8 @@
  * ## Events (emit)
  *
  * - `mode` — `"protocol"` (first `snapshot_begin`) or `"legacy"` (fallback
- *   decided); exactly once per direction, never both.
+ *   decided — including a downgrade after a protocol session, which the UI
+ *   must observe to switch paths); each direction fires exactly once.
  * - `snapshotReady` — `{ frame?, empty?, resnapshot?, nextSeq }` after
  *   continuity is verified at `snapshot_end`. UI: `term.reset()` +
  *   `write(frame)` (the frame is self-contained on dirty terminals), or
@@ -68,14 +71,17 @@
  * - `protocolError` — `{ code, message }` for runner-side protocol failures
  *   (observability/diagnostics; recovery is automatic until the fallback).
  *
- * The frame/DTO version axes live in the runner module; this client sends no
- * `frameVersion` (runner default) and treats `frame_version_mismatch` as
- * legacy fallback.
+ * The frame/DTO version axes live in the runner module. This client advertises
+ * its `frameVersion` on every `subscribe_terminal` (the runner's mismatch gate
+ * is only reachable when the field is present) and treats
+ * `frame_version_mismatch` as legacy fallback.
  *
  * `AGENT_BOARD_TERMINAL_SNAPSHOT=0` (read once at factory time, overridable
  * via the `forceLegacy` option) forces the legacy path without probing —
  * escape hatch and deterministic legacy-test switch.
  */
+
+import { TERMINAL_FRAME_VERSION } from "./terminal-attach-protocol.mjs";
 
 /**
  * @typedef {"probing" | "collecting" | "live" | "resyncing" | "legacy" | "closed"} AttachClientState
@@ -88,9 +94,19 @@
  * ) => void} AttachClientEmit
  */
 
-const MAX_SNAPSHOT_FAILURES = 3;
+const MAX_SNAPSHOT_FAILURES = 3; // up to 3 recovery attempts, then legacy fallback
 
-/** @type {NonNullable<import("./terminal-attach-client.mjs").AttachClientOptions["scheduleTimeout"]>} */
+/**
+ * @typedef {{
+ *   send: (msg: Record<string, unknown>) => void,
+ *   emit: AttachClientEmit,
+ *   probeTimeoutMs?: number,
+ *   scheduleTimeout?: (delayMs: number, fn: () => void) => () => void,
+ *   forceLegacy?: boolean,
+ * }} AttachClientOptions
+ */
+
+/** @type {NonNullable<AttachClientOptions["scheduleTimeout"]>} */
 const defaultScheduleTimeout = (delayMs, fn) => {
 	const t = setTimeout(fn, delayMs);
 	// Never hold the runner/UI process open for a probe deadline.
@@ -164,17 +180,20 @@ export function createTerminalAttachClient({
 	const fallbackToLegacy = (reason) => {
 		cancelProbeTimer();
 		state = "legacy";
-		if (!modeDecided) {
-			modeDecided = true;
-			emit("mode", "legacy");
-		}
+		// The legacy decision is ALWAYS reported, including after a protocol
+		// session: the UI switched to the snapshot path at "protocol" and must
+		// observe the downgrade to switch back (jiggle, raw output). A silent
+		// protocol→legacy transition would leave the UI frozen on a stale frame.
+		modeDecided = true;
+		emit("mode", "legacy");
 		emit("protocolError", { code: "legacy_fallback", message: reason });
 	};
 
 	/**
 	 * Recovery subscribe: a fresh full snapshot. Deliberately WITHOUT
-	 * `sinceSeq` — a seq-less request can only be answered by a complete
-	 * replay or a fresh snapshot, never by a partial tail (spec: never stitch).
+	 * `sinceSeq` — the runner answers a seq-less request with a fresh snapshot,
+	 * always (its replay branch exists only for cursor reconnects), so this can
+	 * never receive a partial tail (spec: never stitch).
 	 */
 	const resync = (reason) => {
 		// Before the mode is decided the probe deadline still governs the legacy
@@ -184,7 +203,7 @@ export function createTerminalAttachClient({
 		if (modeDecided) cancelProbeTimer();
 		partial = { frame: null, empty: false, resnapshot: false, beginSeq: 0, flush: [] };
 		state = "resyncing";
-		send({ type: "subscribe_terminal" });
+		send({ type: "subscribe_terminal", frameVersion: TERMINAL_FRAME_VERSION });
 		emit("resubscribing", { reason });
 	};
 
@@ -197,11 +216,13 @@ export function createTerminalAttachClient({
 		resync(reason);
 	};
 
-	/** Enter collecting from a begin message (both probing and resyncing). */
+	/** Enter collecting from a begin message (both probing and resyncing).
+	 *  Deliberately does NOT reset the failure budget: a runner that keeps
+	 *  sending begins interleaved with garbage must still trip the cap — only
+	 *  a VERIFIED snapshot (or verified replay) pays the budget back. */
 	const beginCollecting = (msg) => {
 		decideProtocol();
 		cancelProbeTimer();
-		snapshotFailures = 0;
 		partial = {
 			frame: null,
 			empty: msg.empty === true,
@@ -219,15 +240,22 @@ export function createTerminalAttachClient({
 
 	const finishCollecting = (msg) => {
 		const nextSeq = msg.nextSeq;
+		if (!partial.frame && !partial.empty) {
+			// begin (non-empty) + end with no frame in between: never paint from
+			// an unverified window. Bounded recovery: fresh snapshot.
+			resyncOrFail("snapshot_frame_missing");
+			return;
+		}
 		const expected = partial.flush.length
 			? partial.flush[partial.flush.length - 1].seq + 1
 			: (partial.empty ? 0 : partial.beginSeq) + 1;
 		if (nextSeq !== expected) {
 			// Continuity broken inside the snapshot window: never paint a
 			// partially-verified frame. Recovery: fresh snapshot.
-			resync("snapshot_end_mismatch");
+			resyncOrFail("snapshot_end_mismatch");
 			return;
 		}
+		snapshotFailures = 0; // a verified snapshot pays back the recovery budget
 		emit("snapshotReady", {
 			frame: partial.frame ?? undefined,
 			empty: partial.empty || undefined,
@@ -258,12 +286,12 @@ export function createTerminalAttachClient({
 				// Unsolicited begin in collecting (duplicate) or live: protocol
 				// violation — strictness surfaces runner bugs; a fresh subscribe
 				// converges either way.
-				resync("unexpected_snapshot_begin");
+				resyncOrFail("unexpected_snapshot_begin");
 				return true;
 			}
 			case "snapshot_frame": {
 				if (state !== "collecting" || partial.empty || typeof msg.data !== "string") {
-					resync("unexpected_snapshot_frame");
+					resyncOrFail("unexpected_snapshot_frame");
 					return true;
 				}
 				partial.frame = msg.data;
@@ -271,7 +299,7 @@ export function createTerminalAttachClient({
 			}
 			case "snapshot_end": {
 				if (state !== "collecting") {
-					resync("unexpected_snapshot_end");
+					resyncOrFail("unexpected_snapshot_end");
 					return true;
 				}
 				finishCollecting(msg);
@@ -298,7 +326,7 @@ export function createTerminalAttachClient({
 						return true;
 					}
 					if (msg.seq <= lastSeq) return true; // duplicate/stale
-					resync("seq_gap");
+					resyncOrFail("seq_gap");
 					return true;
 				}
 				if (state === "collecting") {
@@ -306,14 +334,14 @@ export function createTerminalAttachClient({
 					if (!partial.frame) {
 						// Output before the frame: the runner never emits this
 						// (its catch-up flush is frame → outputs → end). Violation.
-						resync("output_before_snapshot_frame");
+						resyncOrFail("output_before_snapshot_frame");
 						return true;
 					}
 					const expected = partial.flush.length
 						? partial.flush[partial.flush.length - 1].seq + 1
 						: partial.beginSeq + 1;
 					if (msg.seq !== expected) {
-						resync("snapshot_flush_gap");
+						resyncOrFail("snapshot_flush_gap");
 						return true;
 					}
 					partial.flush.push({ seq: msg.seq, data: msg.data });
@@ -327,6 +355,7 @@ export function createTerminalAttachClient({
 						lastSeq = msg.seq;
 						emit("output", msg.data);
 						state = "live";
+						snapshotFailures = 0; // verified complete replay pays the budget back
 						return true;
 					}
 					return true; // strays (pre-resync in-flight chunks): ignored
@@ -366,7 +395,7 @@ export function createTerminalAttachClient({
 			return;
 		}
 		if (state !== "probing") return;
-		send({ type: "subscribe_terminal" });
+		send({ type: "subscribe_terminal", frameVersion: TERMINAL_FRAME_VERSION });
 		fireProbeTimer();
 	}
 
@@ -381,14 +410,15 @@ export function createTerminalAttachClient({
 	function reconnect(cursorSeq) {
 		if (state === "closed" || state === "legacy") return;
 		if (state === "probing") {
-			send({ type: "subscribe_terminal" });
+			send({ type: "subscribe_terminal", frameVersion: TERMINAL_FRAME_VERSION });
 			fireProbeTimer();
 			return;
 		}
 		lastSeq = cursorSeq;
+		snapshotFailures = 0; // fresh connection, fresh recovery budget
 		partial = { frame: null, empty: false, resnapshot: false, beginSeq: 0, flush: [] };
 		state = "resyncing";
-		send({ type: "subscribe_terminal", sinceSeq: cursorSeq });
+		send({ type: "subscribe_terminal", frameVersion: TERMINAL_FRAME_VERSION, sinceSeq: cursorSeq });
 	}
 
 	/** Tear down: cancel timers, go inert. */

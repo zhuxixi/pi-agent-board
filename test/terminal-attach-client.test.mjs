@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createTerminalAttachClient } from "../src/core/terminal-attach-client.mjs";
+import { TERMINAL_FRAME_VERSION } from "../src/core/terminal-attach-protocol.mjs";
 
 /**
  * Unit matrix for the client-side terminal attach protocol state machine.
@@ -63,6 +64,9 @@ const frame = (data = "\x1b[2J\x1b[3JREDRAW") => ({ type: "snapshot_frame", fram
 const end = (nextSeq) => ({ type: "snapshot_end", nextSeq });
 const out = (seq, data = `chunk${seq}`) => ({ type: "output", seq, data });
 const err = (code, extra = {}) => ({ type: "error", code, ...extra });
+/** Exact wire shape the client must advertise on every subscribe (F1). */
+const SUB = { type: "subscribe_terminal", frameVersion: TERMINAL_FRAME_VERSION };
+const SUB_SEQ = (n) => ({ type: "subscribe_terminal", frameVersion: TERMINAL_FRAME_VERSION, sinceSeq: n });
 const eventsOf = (events, name) => events.filter((e) => e.event === name).map((e) => e.payload);
 
 /** Drive one clean snapshot cycle into `client` (assumes collecting entry). */
@@ -75,7 +79,7 @@ function completeSnapshot(client, { snapshotSeq = 5, nextSeq = 6, data } = {}) {
 test("probe → protocol happy path: frame assembly, nextSeq continuity, seq-checked live", () => {
 	const { client, sent, events } = harness();
 	client.start();
-	assert.deepEqual(sent, [{ type: "subscribe_terminal" }]);
+	assert.deepEqual(sent, [SUB]);
 	assert.equal(client.getMode(), "probing");
 
 	assert.equal(client.handleMessage(begin({ snapshotSeq: 5 })), true);
@@ -135,7 +139,7 @@ test("env AGENT_BOARD_TERMINAL_SNAPSHOT=0 forces legacy; explicit forceLegacy:fa
 
 		const b = harness({ forceLegacy: false });
 		b.client.start();
-		assert.deepEqual(b.sent, [{ type: "subscribe_terminal" }]);
+		assert.deepEqual(b.sent, [SUB]);
 		assert.deepEqual(eventsOf(b.events, "mode"), []);
 		assert.equal(b.client.getMode(), "probing");
 	} finally {
@@ -219,7 +223,7 @@ test("reconnect with retained ring → seamless replay (no snapshotReady, no res
 	client.handleMessage(out(7)); // lastSeq 7
 	const sentBefore = sent.length;
 	client.reconnect(7);
-	assert.deepEqual(sent[sentBefore], { type: "subscribe_terminal", sinceSeq: 7 });
+	assert.deepEqual(sent[sentBefore], SUB_SEQ(7));
 	assert.equal(client.handleMessage(out(8)), true);
 	assert.deepEqual(eventsOf(events, "output").slice(-1), ["chunk8"]);
 	assert.equal(eventsOf(events, "snapshotReady").length, 1, "replay only — no re-hydrate");
@@ -261,7 +265,7 @@ test("reconnect while still probing re-issues the probe (not a cursor subscribe)
 	client.start();
 	const sentBefore = sent.length;
 	client.reconnect(0);
-	assert.deepEqual(sent[sentBefore], { type: "subscribe_terminal" });
+	assert.deepEqual(sent[sentBefore], SUB);
 	assert.equal("sinceSeq" in sent[sentBefore], false);
 	assert.equal(client.getMode(), "probing");
 });
@@ -341,6 +345,38 @@ test("unsolicited snapshot_begin in live → resync (pinned)", () => {
 	client.handleMessage(out(6));
 	client.handleMessage(begin({ snapshotSeq: 9 }));
 	assert.deepEqual(eventsOf(events, "resubscribing"), [{ reason: "unexpected_snapshot_begin" }]);
+});
+
+test("persistent structural inconsistency is bounded: 4th failure → legacy, no infinite loop (F2)", () => {
+	const { client, sent, events } = harness();
+	client.start();
+	completeSnapshot(client); // live
+	const sentBefore = sent.length;
+	// Three structural failures still recover (each resyncs)…
+	client.handleMessage(begin({ snapshotSeq: 20 })); // unexpected begin in live
+	client.handleMessage(frame("F")); // frame while resyncing
+	client.handleMessage(end(99)); // end while resyncing
+	assert.equal(client.getMode(), "protocol", "3 failures still recovering");
+	assert.equal(sent.length - sentBefore, 3, "one recovery subscribe per failure");
+	// …the 4th crosses the cap instead of looping forever. A begin alone is
+	// NOT a reset point (the counter persists across begins — F2); the next
+	// unverified end trips it.
+	client.handleMessage(begin({ snapshotSeq: 30 }));
+	assert.equal(client.getMode(), "protocol");
+	client.handleMessage(end(99)); // snapshot_frame_missing → 4th failure
+	assert.deepEqual(eventsOf(events, "mode"), ["protocol", "legacy"]);
+	assert.equal(client.getMode(), "legacy");
+});
+
+test("snapshot_end without frame (and not empty) → bounded recovery, nothing painted (F3)", () => {
+	const { client, sent, events } = harness();
+	client.start();
+	client.handleMessage(begin({ snapshotSeq: 5 }));
+	const sentBefore = sent.length;
+	client.handleMessage(end(6)); // no snapshot_frame arrived; nextSeq even matches
+	assert.deepEqual(eventsOf(events, "resubscribing"), [{ reason: "snapshot_frame_missing" }]);
+	assert.equal(eventsOf(events, "snapshotReady").length, 0, "unverified window never painted");
+	assert.deepEqual(sent[sentBefore], SUB);
 });
 
 test("legacy output (no seq field) in protocol mode: consumed, ignored, never counted (pinned)", () => {
