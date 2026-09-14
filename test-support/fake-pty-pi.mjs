@@ -18,7 +18,7 @@ if (process.env.FAKE_PTY_STREAM_MODE === "steady") {
 	timer.unref?.();
 }
 
-// "firehose": ~2KB mixed chunks (printable + SGR runs + escape noise) every 1ms
+// "firehose": ~1.1KB mixed chunks (printable + SGR runs + escape noise) every 1ms
 // for FAKE_PTY_STREAM_MS (default 3000) — sustained multi-MB/s stress, then a
 // done marker so tests know the flood ended.
 if (process.env.FAKE_PTY_STREAM_MODE === "firehose") {

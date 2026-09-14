@@ -70,3 +70,23 @@ Targeted tests green → FULL suite green → typecheck → conventional commit 
 - **Protocol-mode UI e2e fixtures**: existing suites assume jiggle/clear sequences — misclassified pins would either break (visible) or silently weaken (reviewer checks assertion equivalence, not just green).
 - **Probe timeout under parser busy**: heavy stream may delay snapshot_begin; 1500ms + no user-visible failure on fallback keeps it safe.
 - **Two-mode complexity is TEMPORARY**: legacy path gets deleted only after fleet refresh — document as Phase 6+ cleanup, don't gold-plate.
+
+## Residual ledger (Phase 4)
+
+### Acceptance table
+
+| ID | Verdict | Evidence |
+|---|---|---|
+| A5 (snapshot/subscribe 无 gap 无重复) | **CLOSED** (wire-level) | `test/terminal-snapshot.integration.test.mjs` A5 mid-stream (real runner+socket+client module, second subscriber seq-contiguity pin, legacy client coexistence) + A5 burst (frame→flush→end window pin, 400 lines exactly-once across frame∪flush∪live) |
+| A5c (runner 重启新基线) | **CLOSED** (wire + component) | same file A5c (wire: foreign cursor → empty baseline, nextSeq restarts at 1, no old-screen in any post-restart frame/stream) + `pty-attach-restart-scenario.ts` via `pty-attach-protocol-e2e.test.mjs` (component: real PtyAttachComponent, kill mid-stream, hold-mode new child, wipe signal, new-echo convergence, zero resizes) |
+| A6 (UI buffer 可丢弃恢复) | **CLOSED** (component + client) | component restart scenario (poisoned screen.log never renders; old echo absent from the same viewport that holds the new echo — F3 wipe pinned without scroll masking) + wire A6 (kill→reconnect→rebased resnapshot/empty; poisoned screen.log never read; pollution-overwrite proof: dirty vs clean independent headless parsers converge byte-identically on the fresh frame) |
+
+### Accepted residuals / documented deltas
+
+- **Runner stderr parse-error volume**: @xterm/headless contains parser errors internally (runner process survives; verified with ~1.3MB/s malformed flood) but logs them to runner stderr — sustained garbage for minutes produces large logs. Rate-limit as later hygiene (not #91 scope).
+- **Catch-up-flush branch is defensive-only on the real wire**: the capture continuation is microtask-atomic today, so chunks never arrive between frame and end (Task 2 review: the branch is unreachable on the current wire; kept + tested as defense-in-depth against future runner refactors).
+- **Collecting-state has no stall timer**: a snapshot that never completes (runner wedged mid-capture) behaves like the legacy silence path — the socket close/reconnect cycle is the recovery. Inherited-equivalent to legacy; not new risk.
+- **Legacy attach timing deltas**: ≤100ms jiggle arm delay in the undecided window (`LEGACY_JIGGLE_ARM_DELAY_MS`); protocol-mode loading banner may persist up to ~2500ms on the steady-stream fixture before settle. Both invisible by design; documented for future bisects.
+- **A5-burst load flake**: 15s waitFor ceiling can trip under full-suite parallel load (machine with 6+ production board runners); passes isolated and in consecutive full runs. Ceilings are eventually-predicates, not timing bounds.
+- **Wire flush-window evidence line logs counts, not bytes** (`EVIDENCE firehose` payload) — byte-volume claims come from the Task 2 report's measured ~1.1KB/chunk × chunk count.
+- **Foreign-cursor ambiguity after restart**: a restarted runner whose new model already exceeds the client's old cursor serves a RING REPLAY (cursor within its own contiguous range) instead of a fresh snapshot — the protocol has no runner-generation/epoch token. The UI converges anyway (replay is real new-child output; F3 wipe fires on the next empty/resnapshot baseline), but pixel-identical old-screen restoration is NOT what happens — content converges from the new child. Epoch token is a Phase 5 candidate (control-command lifecycle owns reconciliation semantics).

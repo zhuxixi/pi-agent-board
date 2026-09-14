@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { once } from "node:events";
 import { spawn } from "node:child_process";
 import { test } from "node:test";
+import xtermHeadless from "@xterm/headless";
+const { Terminal } = xtermHeadless;
 import { atomicWriteJson } from "../src/core/atomic.mjs";
 import * as P from "../src/core/paths.mjs";
 import { createView, readHost } from "../src/core/store.mjs";
@@ -488,6 +490,133 @@ test("parser containment: malformed byte flood cannot crash the runner or wedge 
 		send(socket, { type: "input", data: "after-garbage\r" });
 		await waitFor(() => events.output.some((d) => String(d).includes("echo:after-garbage")));
 		console.log(`EVIDENCE malformed: stderrBytes=${Buffer.concat(stderrChunks.map((s) => Buffer.from(s))).length} stderrPreview=${JSON.stringify(stderrChunks.join("").slice(0, 300))}`);
+	} finally {
+		await cleanup(root, viewId, sockets, [runner]);
+	}
+});
+
+/** Read the settled viewport of an independent headless parser as text rows. */
+async function viewportRows(term, rows, cols) {
+	// @xterm/headless parses asynchronously; settle before reading.
+	await new Promise((r) => setTimeout(r, 80));
+	const b = term.buffer.active;
+	const out = [];
+	for (let y = b.baseY; y < b.baseY + rows; y++) {
+		const line = b.getLine(y);
+		let s = "";
+		for (let x = 0; x < cols; x++) s += line.getCell(x).getChars() || " ";
+		out.push(s);
+	}
+	return out;
+}
+
+test("A6: mid-stream runner kill → reconnect → fresh baseline hydrate; recovery independent of screen.log; frame overwrites a polluted buffer", async () => {
+	const root = freshRoot();
+	const viewId = "a6";
+	let runner;
+	const sockets = [];
+	const POISON = "SCREENLOG-POISON-MARKER";
+	try {
+		({ runner } = spawnRunner(root, viewId, { env: { FAKE_PTY_STREAM_MODE: "steady" } }));
+		await waitFor(() => hostReady(root, viewId));
+
+		// Establish the protocol session and a pre-kill discriminator on the old child.
+		const socket1 = createConnection(P.controlSocketPath(root, viewId));
+		await once(socket1, "connect");
+		sockets.push(socket1);
+		const { client, events, attach } = wireClient(socket1);
+		client.start();
+		await waitFor(() => events.snapshotReady.length > 0);
+		assert.equal(events.mode[0], "protocol");
+		send(socket1, { type: "input", data: "pre-kill\r" });
+		await waitFor(() => events.output.some((d) => String(d).includes("echo:pre-kill")));
+		const cursorBefore = client.getLastSeq();
+		assert.ok(cursorBefore >= 1);
+
+		// Kill the runner, reap the child, and POISON screen.log: every recovery
+		// from here must come from the canonical snapshot, never the log file.
+		try { runner.kill("SIGKILL"); } catch {}
+		await waitFor(() => !isAlive(runner.pid));
+		try {
+			const pid = readHost(root, viewId)?.childPid;
+			if (pid) process.kill(pid, "SIGKILL");
+		} catch {}
+		writeFileSync(P.screenLogPath(root, viewId), `${POISON}\n`);
+
+		// Replacement runner + new child on the same view/config.
+		({ runner } = spawnRunner(root, viewId, { env: { FAKE_PTY_STREAM_MODE: "steady" } }));
+		await waitFor(() => hostReady(root, viewId));
+
+		// SAME client instance reconnects with its pre-kill cursor (the UI shape):
+		// foreign cursor → fresh baseline, explicitly marked resnapshot.
+		const socket2 = createConnection(P.controlSocketPath(root, viewId));
+		await once(socket2, "connect");
+		sockets.push(socket2);
+		attach(socket2);
+		const readyCountBefore = events.snapshotReady.length;
+		// Mark the live-stream cursor BEFORE reconnecting: pre-kill outputs also
+		// contain steady- content, so post-restart liveness must be asserted on
+		// the slice, never the whole array.
+		const outputMarkBeforeReconnect = events.output.length;
+		client.reconnect(cursorBefore);
+		await waitFor(() => events.snapshotReady.length > readyCountBefore);
+		const rebased = events.snapshotReady[readyCountBefore];
+		assert.equal(
+			rebased.resnapshot === true || rebased.empty === true,
+			true,
+			"foreign cursor earns a discard-your-buffer baseline",
+		);
+		const rebasedFrame = typeof rebased.frame === "string" ? rebased.frame : "";
+		assert.ok(!rebasedFrame.includes("echo:pre-kill"), "fresh baseline never carries the old screen");
+		assert.ok(!rebasedFrame.includes(POISON), "baseline never carries screen.log content");
+
+		// Wait for the new child's live stream, then take a DETERMINISTIC framed
+		// snapshot from a third raw subscriber — the canonical viewport is then
+		// guaranteed non-empty (no capture-timing race on the empty-baseline path).
+		await waitFor(() => events.output.slice(outputMarkBeforeReconnect).some((d) => String(d).includes("steady-")));
+		const socket3 = createConnection(P.controlSocketPath(root, viewId));
+		await once(socket3, "connect");
+		sockets.push(socket3);
+		const messages3 = listen(socket3).messages;
+		send(socket3, { type: "subscribe_terminal" });
+		await waitFor(() => messages3.find((m) => m.type === "snapshot_frame"));
+		const frame = messages3.find((m) => m.type === "snapshot_frame").data;
+		assert.equal(typeof frame, "string");
+
+		// Pollution overwrite proof with INDEPENDENT parsers: a clean terminal and
+		// a terminal pre-polluted with garbage must converge to identical viewports
+		// once the frame lands — the frame is self-contained (no dependence on
+		// prior buffer state, no reliance on screen.log or jiggle clears).
+		const clean = new Terminal({ cols: 80, rows: 24, scrollback: 100, allowProposedApi: true });
+		const dirty = new Terminal({ cols: 80, rows: 24, scrollback: 100, allowProposedApi: true });
+		dirty.write(
+			"\x1b[31mGARBAGE-DIRTY-MARKER\x1b[0m stale recovery junk\r\n\x1b[1;44m more garbage \x1b[0m\nstale row\r\n\x1b[10;10Hstale cursor zone",
+		);
+		clean.write(frame);
+		dirty.write(frame);
+		const cleanRows = await viewportRows(clean, 24, 80);
+		const dirtyRows = await viewportRows(dirty, 24, 80);
+		assert.ok(cleanRows.join("\n").includes("steady-"), "hydrated frame renders canonical content");
+		assert.equal(
+			JSON.stringify(dirtyRows), JSON.stringify(cleanRows),
+			"polluted buffer converges byte-identically to the clean hydrate",
+		);
+		assert.ok(!dirtyRows.join("\n").includes("GARBAGE-DIRTY-MARKER"), "pollution fully overwritten by the frame");
+
+		// Converge to the NEW child: post-restart input echoes through the new model.
+		// Scope stream assertions to outputs AFTER the reconnect: the pre-kill live
+		// stream legitimately contains the old echo.
+		const outputMark = events.output.length;
+		send(socket2, { type: "input", data: "post-restart\r" });
+		await waitFor(() => events.output.slice(outputMark).some((d) => String(d).includes("echo:post-restart")));
+		const postRestartStream = events.output.slice(outputMark).map((d) => String(d));
+		assert.ok(postRestartStream.some((d) => d.includes("echo:post-restart")));
+		assert.ok(
+			!postRestartStream.some((d) => d.includes(POISON) || d.includes("echo:pre-kill")),
+			"new stream carries neither screen.log poison nor the old screen",
+		);
+		// The client never hit a protocol violation on this recovery path.
+		for (const e of events.protocolError) assert.notEqual(e.code, "frame_version_mismatch");
 	} finally {
 		await cleanup(root, viewId, sockets, [runner]);
 	}
