@@ -18,6 +18,7 @@ test("desync heal wiring: 7 gates + heal loop", () => {
 	assert.equal(parsed.desyncHealsOnce, true, "H2 desync must heal exactly once (rate limit + chain gate)");
 	assert.equal(parsed.preSettleNoHeal, true, "H3 pre-settle must not heal");
 	assert.equal(parsed.noFrameNoHeal, true, "H4 no TUI frame must not heal");
+	assert.equal(parsed.lateFrameHeals, true, "H8 late first frame must open gate 2 and heal once (issue #106)");
 	assert.equal(parsed.scrolledOutNoHeal, true, "H5 cursor out of viewport must not heal");
 	assert.equal(parsed.recentOutputNoHeal, true, "H6 recent output must not heal");
 	assert.equal(parsed.healLoopCloses, true, "H7 child clear must close the heal loop without a second heal");
