@@ -269,15 +269,14 @@ function reclaimOrBlock(lockPath, token, fs, isProcessDead, now) {
 	} catch {
 		return "blocked";
 	}
-	if (classifyLeaseOwner(owner, now(), isProcessDead) !== "reclaim") {
-		return classifyLeaseOwner(owner, now(), isProcessDead);
-	}
+	const verdict = classifyLeaseOwner(owner, now(), isProcessDead);
+	if (verdict !== "reclaim") return verdict;
 	const inspectedToken = owner.token;
 	const quarantine = `${lockPath}.reclaim.${token}`;
 	// …以下 quarantine 段（rename → token 核对 → restore/rmSync）保持原样不动…
 }
 ```
-（可读性更优的等价写法：`const verdict = classifyLeaseOwner(...); if (verdict !== "reclaim") return verdict;`）
+注意：`classifyLeaseOwner` 返回 `"reclaim"` 时保证 `owner.token` 是 string（函数契约），因此后续 quarantine 段的 `inspectedToken` 可直接取自 `owner.token`。
 `attemptAcquireLease` 的调用处改为传入 clock：`const verdict = reclaimOrBlock(lockPath, token, fs, isProcessDead, now);`
 
 - [ ] **Step 4: Run tests to verify they pass**
@@ -685,10 +684,10 @@ test("a fresh identity-less lock still defers to its short-hold window (no behav
 });
 ```
 
-- [ ] **Step 2: Run tests to verify they fail (pre-Task-2 baseline sanity)**
+- [ ] **Step 2: Run tests to verify they pass end-to-end**
 
 Run: `node --test test/host-owner-store.test.mjs`
-Expected: 一条用例在 Task 2 已完成后应当 PASS（超龄兜底已落地）；若在干净 main 上跑则前两条 FAIL。**此步在本分支（Task 2 已做）中主要验证前两条从「Task 2 之前的 FAIL」转为 PASS**，必要时用 `git stash` 或 `git show HEAD~N:src/core/locks.mjs` 复核失败态；本 task 不接受「新增测试未经验证就声称通过」。
+Expected: 前两条（超龄 identity-less 孤锁的 updateOwnedHost / claimHost 回收）此时应当 PASS——它们验证的是 Task 2 的超龄兜底在 store 集成层确实生效（Task 2 只做了 locks 层单测）。第三条（identity 完整死锁立即回收）依赖 Task 3 的 identity 传递。第四条（新鲜 identity-less 不回收）依赖既有行为。**若前两条 FAIL**，说明 locks 层修复未贯通到 store 集成路径，需先排查而非继续。
 
 - [ ] **Step 3: Update the stale comments**
 
