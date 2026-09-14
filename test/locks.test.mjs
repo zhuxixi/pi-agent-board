@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { acquireOwnedViewLock, classifyLeaseOwner, defaultLocksFs, releaseWithToken, tryAcquireOwnedViewLock, withFileLockSync, withViewLockSync } from "../src/core/locks.mjs";
+import { acquireOwnedViewLock, classifyLeaseOwner, defaultLocksFs, isPublishConflictCode, releaseWithToken, tryAcquireOwnedViewLock, withFileLockSync, withViewLockSync } from "../src/core/locks.mjs";
 import * as P from "../src/core/paths.mjs";
 
 function freshRoot() {
@@ -342,4 +342,16 @@ test("fresh identity-less lock is still blocked (short-hold contract preserved)"
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
+});
+
+// ---- publish-rename conflict codes (issue #114) -----------------------------
+
+test("isPublishConflictCode: rename conflict codes including Windows EPERM", () => {
+	assert.equal(isPublishConflictCode("EEXIST"), true);
+	assert.equal(isPublishConflictCode("ENOTEMPTY"), true, "POSIX rename onto an existing dir");
+	assert.equal(isPublishConflictCode("EPERM"), true, "Windows rename onto an existing dir (errno -4048)");
+	assert.equal(isPublishConflictCode("ENOENT"), false);
+	assert.equal(isPublishConflictCode("EACCES"), false);
+	assert.equal(isPublishConflictCode(undefined), false);
+	assert.equal(isPublishConflictCode(null), false);
 });
