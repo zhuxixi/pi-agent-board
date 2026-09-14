@@ -74,6 +74,9 @@ const ITERM2_FILE_PREFIX = "\x1b]1337;File=";
 interface XtermLike {
 	write(data: string, cb?: () => void): void;
 	resize(cols: number, rows: number): void;
+	// Full buffer wipe (@xterm/headless Terminal.reset): the attach client's
+	// "empty/resnapshot → UI resets its buffer" contract (phase 4, F3).
+	reset(): void;
 	buffer: {
 		active: {
 			baseY: number;
@@ -642,9 +645,12 @@ export class PtyAttachComponent implements Component {
 
 	/**
 	 * Legacy-path jiggle arming with a protocol-race guard (issue #91 phase 4).
-	 * Legacy decided immediately (env-forced or a downgrade) → start now;
-	 * undecided → start after the guard delay unless the snapshot answer wins
-	 * (protocol) or the probe timeout lands first.
+	 * Legacy decided immediately (env-forced) → start now; undecided → start
+	 * after the guard delay unless the snapshot answer wins (protocol). The
+	 * timer guard accepts ANY non-protocol mode, so a fast in-flight decision
+	 * (e.g. frame_version_mismatch landing ~1ms into the probe window) still
+	 * arms the chain — an early-decided legacy session must not end up
+	 * jiggle-less. start() re-arms idempotently, so a late duplicate is safe.
 	 */
 	private armLegacyJiggle(): void {
 		this.clearJiggleStartTimer();
@@ -655,7 +661,7 @@ export class PtyAttachComponent implements Component {
 		}
 		this.jiggleStartTimer = setTimeout(() => {
 			this.jiggleStartTimer = null;
-			if (!this.closed && this.connected && this.attachMode === "undecided") {
+			if (!this.closed && this.connected && this.attachMode !== "protocol") {
 				this.jiggleRetry.start(this.cols, this.rows);
 			}
 		}, LEGACY_JIGGLE_ARM_DELAY_MS);
@@ -1155,18 +1161,20 @@ export class PtyAttachComponent implements Component {
 				this.jiggleRetry.restoreAndStop();
 			} else if (prev === "protocol") {
 				// Downgrade after a protocol session (recovery budget exhausted):
-				// re-arm the legacy screen-healing machinery while the attach
-				// transition is still active; post-settle downgrades fall back to
-				// the desync probe's heal path (fed by raw output again).
+				// re-arm the legacy screen-healing machinery. This must run whenever
+				// the socket is alive — not only during the attach transition. A
+				// post-settle downgrade that skipped start() left the chain stopped
+				// forever (restoreAndStop on the protocol side), so feed() early-
+				// returned and raw output could never heal a desynced screen.
 				this.clearJiggleStartTimer();
-				if (this.attaching && this.connected) this.jiggleRetry.start(this.cols, this.rows);
+				if (this.connected) this.jiggleRetry.start(this.cols, this.rows);
 			}
 			// Legacy decided during the undecided window: the race-guard timer
 			// already fired at 100ms (≪ the 1500ms probe timeout) — nothing to do.
 			return;
 		}
 		if (event === "snapshotReady") {
-			const snap = (payload ?? {}) as { frame?: string; empty?: boolean };
+			const snap = (payload ?? {}) as { frame?: string; empty?: boolean; resnapshot?: boolean };
 			// The synthesized frame is self-contained on dirty terminals (phase 3
 			// torture-proven: DECSTR + clear preamble wipes the constructor
 			// screen.log replay and any pre-probe broadcast bytes), so hydrating is
@@ -1176,7 +1184,12 @@ export class PtyAttachComponent implements Component {
 			// sequences. Empty baselines (the COMMON initial attach state: the host
 			// publishes alive+childPid before the child's first output) carry no
 			// frame; the loading banner persists until the first live output.
+			// Post-attach empty/resnapshot answers (reconnect to a restarted
+			// runner: no banner to hide behind) must wipe the dead session's frame
+			// from the local buffer — the client contract is "empty/resnapshot →
+			// the UI resets its buffer" (client contract doc, Task 1).
 			if (typeof snap.frame === "string") this.pushOutput(snap.frame);
+			else if ((snap.empty || snap.resnapshot) && !this.attaching) this.term.reset();
 			return;
 		}
 		if (event === "output") {
