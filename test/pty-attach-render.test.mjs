@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import xtermHeadless from "@xterm/headless";
+// @xterm/headless is CommonJS; named import from ESM fails, so destructure.
+const { Terminal } = /** @type {any} */ (xtermHeadless);
 import {
 	createAttachOutputRenderScheduler,
 	detectCursorDesync,
+	isPtyCursorHidden,
 	nextAttachRender,
 	projectPtyCursor,
 	shouldScheduleAttachRenderForMessage,
@@ -128,4 +132,33 @@ test("detectCursorDesync: fully empty line (no cells, no inverse) is misaligned"
 
 test("detectCursorDesync: missing buffer line is unknown", () => {
 	assert.equal(detectCursorDesync(fakeDesyncBuf([{ inverse: true, width: 1 }]), { row: 5, col: 0 }), "unknown");
+});
+
+test("isPtyCursorHidden tracks the child terminal's DECTCEM state", async () => {
+	const term = new Terminal({ cols: 40, rows: 10 });
+	assert.equal(isPtyCursorHidden(term), false, "a fresh terminal reports a visible cursor");
+	await new Promise((resolve) => term.write("\x1b[?25l", resolve));
+	assert.equal(isPtyCursorHidden(term), true, "?25l must read as hidden");
+	await new Promise((resolve) => term.write("\x1b[?25h", resolve));
+	assert.equal(isPtyCursorHidden(term), false, "?25h must read as visible again");
+});
+
+test("isPtyCursorHidden falls back to visible for unknown terminal shapes", () => {
+	assert.equal(isPtyCursorHidden(undefined), false);
+	assert.equal(isPtyCursorHidden(null), false);
+	assert.equal(isPtyCursorHidden({}), false);
+	assert.equal(isPtyCursorHidden({ _core: {} }), false);
+	assert.equal(isPtyCursorHidden({ _core: { coreService: {} } }), false);
+	assert.equal(isPtyCursorHidden({ _core: { coreService: { isCursorHidden: false } } }), false);
+	assert.equal(isPtyCursorHidden({ _core: { coreService: { isCursorHidden: undefined } } }), false);
+	assert.equal(isPtyCursorHidden({ _core: { coreService: { isCursorHidden: "true" } } }), false);
+	assert.equal(
+		isPtyCursorHidden({
+			get _core() {
+				throw new Error("upstream shape change");
+			},
+		}),
+		false,
+		"a throwing accessor must degrade to visible, not break the projection",
+	);
 });
