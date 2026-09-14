@@ -5,7 +5,7 @@
  * ensure/spawn path (mirrors the state-coordinator integration fixture).
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -183,6 +183,29 @@ test("ensureCoordinator spawns the real coordinator; sendStateCommand happy path
 	assert.equal(state.semanticState, "completed");
 	assert.equal(state.autoState, null);
 	assert.ok(state.materializedRevision >= 1);
+});
+
+test("ensureCoordinator reclaims a stale identity-less orphan lease (issue #114)", async (t) => {
+	const root = freshRoot();
+	t.after(async () => {
+		await cleanupRoot(root);
+	});
+
+	// Residue of a killed coordinator on a platform without startToken (Windows):
+	// dead pid, identity-less, past the 5min orphan age.
+	const lockPath = P.viewLockPath(root, "_coordinator", "state-coordinator");
+	mkdirSync(lockPath, { recursive: true });
+	writeFileSync(join(lockPath, "owner.json"), JSON.stringify({
+		token: "orphan-lease",
+		pid: 99999999,
+		identity: { pid: 99999999, startToken: null },
+		startedAt: Date.now() - 10 * 60_000,
+	}), "utf8");
+
+	const ensured = await ensureCoordinator(root, { runnerScript: COORDINATOR_SCRIPT });
+	assert.equal(ensured.ok, true, "the orphan lease must be reclaimed, not block startup");
+	assert.match(ensured.instanceId, /^[0-9a-f]+$/);
+	track(ensured.pid);
 });
 
 test("two parallel ensureCoordinator calls converge on one owner; both clients get pongs", async (t) => {
