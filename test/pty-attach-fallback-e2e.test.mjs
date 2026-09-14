@@ -46,3 +46,13 @@ test("F3: reconnect to a restarted runner (empty baseline) wipes the dead sessio
 	assert.equal(r.wiped, true, "empty baseline after reconnect must wipe the stale frame (term.reset)");
 	assert.equal(r.ok, true);
 });
+
+test("F1 final review: initial attach + empty baseline wipes the screen.log warm-start (no cold-start ghost)", () => {
+	const r = runScenario("cold-empty-ghost");
+	assert.equal(r.error, null, `scenario error: ${r.error}`);
+	assert.equal(r.poisonInBuffer, true, "precondition: constructor warm-start loaded the screen.log poison into the buffer");
+	assert.equal(r.settled, true, "precondition: attach settled (banner lifted) after the first live output");
+	assert.equal(r.resizes, 0, "protocol-mode discriminator: zero resizes");
+	assert.equal(r.ghostRendered, false, "empty baseline during INITIAL attach must wipe the poison — the dead session's tail must never render after settle");
+	assert.equal(r.ok, true);
+});

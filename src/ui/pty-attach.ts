@@ -1184,12 +1184,13 @@ export class PtyAttachComponent implements Component {
 			// sequences. Empty baselines (the COMMON initial attach state: the host
 			// publishes alive+childPid before the child's first output) carry no
 			// frame; the loading banner persists until the first live output.
-			// Post-attach empty/resnapshot answers (reconnect to a restarted
-			// runner: no banner to hide behind) must wipe the dead session's frame
-			// from the local buffer — the client contract is "empty/resnapshot →
-			// the UI resets its buffer" (client contract doc, Task 1).
+			// Empty/resnapshot answers ALWAYS wipe the local buffer, attaching or
+			// not: while attaching the banner hides it (zero visual cost), and the
+			// constructor's screen.log warm-start must not outlive the protocol
+			// answer — a gated reset let the dead session's tail render as a
+			// cold-start ghost once the banner lifted (final-review F1).
 			if (typeof snap.frame === "string") this.pushOutput(snap.frame);
-			else if ((snap.empty || snap.resnapshot) && !this.attaching) this.term.reset();
+			else if (snap.empty || snap.resnapshot) this.term.reset();
 			return;
 		}
 		if (event === "output") {

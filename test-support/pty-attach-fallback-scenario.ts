@@ -10,9 +10,14 @@
 //   restart-empty (F3) reconnect to a restarted runner answering an empty
 //                 baseline → the dead session's frame MUST be wiped from the
 //                 local buffer (term.reset), no banner to hide behind.
+//   cold-empty-ghost (final-review F1) INITIAL attach answering an empty
+//                 baseline → the constructor's screen.log warm-start (a poison
+//                 marker written BEFORE construction) must be wiped too: the
+//                 stale-frame reset cannot be gated on !attaching, or the dead
+//                 session's tail renders in protocol mode once the banner lifts.
 // Run via `node --experimental-transform-types`; SCENARIO_MODE selects the
 // scenario; emits ONE JSON result line on stdout.
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -51,6 +56,12 @@ const openConns: any[] = [];
 // Scenario-scope subscribe counter: reconnects arrive on a NEW connection, so
 // per-connection state would misread the second subscribe as another first.
 let subscribeCount = 0;
+// cold-empty-ghost determinism gate: the fake runner holds the empty-baseline
+// answer until the scenario body has OBSERVED the constructor's screen.log
+// warm-start in the buffer, so both variants (gated reset = bug, unconditional
+// reset = fix) run the identical ordering: poison lands → snapshot answer →
+// settle. No reliance on replay/parse timing.
+let allowGhostAnswer = false;
 const server = createServer((socket) => {
 	openConns.push(socket);
 	let buffer = "";
@@ -100,6 +111,20 @@ const server = createServer((socket) => {
 						send({ type: "snapshot_begin", snapshotSeq: 0, cols: 80, rows: 24, frameVersion: 1, empty: true, resnapshot: true });
 						send({ type: "snapshot_end", nextSeq: 1 });
 					}
+				} else if (mode === "cold-empty-ghost") {
+					if (subscribeCount === 1) {
+						// The common post-crash recovery attach: the runner is up but
+						// the new child has not produced output yet → empty baseline,
+						// no frame. Hold the answer until the warm-start poison has
+						// landed (gate above), then answer; first live output follows
+						// so the attach settle can finish and the banner lifts.
+						void waitFor(() => allowGhostAnswer, 8000).then((armed) => {
+							if (!armed) return;
+							send({ type: "snapshot_begin", snapshotSeq: 0, cols: 80, rows: 24, frameVersion: 1, empty: true });
+							send({ type: "snapshot_end", nextSeq: 1 });
+							setTimeout(() => send({ type: "output", seq: 1, data: "fresh child line\n" }), 150);
+						});
+					}
 				}
 			}
 		}
@@ -119,6 +144,14 @@ try {
 		if (typeof data === "string") sent.push(data);
 		return origWrite.call(this, data, ...rest);
 	};
+
+	// cold-empty-ghost precondition: poison the screen.log BEFORE construction so
+	// the constructor's warm-start replay loads the dead session's tail into the
+	// local buffer — exactly what a real post-crash attach sees.
+	const screenLogPath = join(root, "screen.log");
+	if (mode === "cold-empty-ghost") {
+		writeFileSync(screenLogPath, "POISON-GHOST-XYZ dead session tail\n");
+	}
 
 	const tui = {
 		terminal: { rows: 24, cols: 80, columns: 80, write: () => {} },
@@ -172,6 +205,25 @@ try {
 			const wiped = await waitFor(() => !bufferText((component as any).term).includes("OLD-MARKER-XYZ"), 3000);
 			result.wiped = wiped;
 			result.ok = reconnected && wiped;
+		} else if (mode === "cold-empty-ghost") {
+			// Final-review F1: initial attach + empty baseline must wipe the
+			// screen.log warm-start, not just post-attach reconnects. Precondition
+			// proves the poison actually entered the buffer via the constructor
+			// replay; the assertion runs AFTER settle (banner lifted), where the
+			// gated `&& !this.attaching` variant leaves the ghost rendering.
+			const poisonInBuffer = await waitFor(() => bufferText((component as any).term).includes("POISON-GHOST-XYZ"), 4000);
+			result.poisonInBuffer = poisonInBuffer;
+			if (!poisonInBuffer) throw new Error("precondition failed: warm-start poison never entered the buffer");
+			// Poison confirmed in the buffer → only now may the runner answer the
+			// subscribe with the empty baseline and let the scenario play out.
+			allowGhostAnswer = true;
+			const settled = await waitFor(() => (component as any).attaching === false, 8000);
+			result.settled = settled;
+			// Protocol-mode discriminator: attach must have sent zero resizes.
+			result.resizes = (result.resizes as number) ?? 0;
+			const ghostRendered = bufferText((component as any).term).includes("POISON-GHOST-XYZ");
+			result.ghostRendered = ghostRendered;
+			result.ok = poisonInBuffer && settled && !ghostRendered && result.resizes === 0;
 		}
 	} finally {
 		clearInterval(pump);
