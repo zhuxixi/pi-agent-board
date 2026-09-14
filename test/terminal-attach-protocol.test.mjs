@@ -316,9 +316,10 @@ test("duplicate subscribe while capture is in flight is ignored (no double snaps
 test("frame and DTO versions are independent exported axes", () => {
 	assert.equal(TERMINAL_FRAME_VERSION, 1);
 	assert.equal(TERMINAL_SNAPSHOT_VERSION, 1);
-	// They are separate constants, not aliases of one variable — the wire frame
-	// format and the internal DTO format may evolve independently.
-	assert.notEqual(TERMINAL_FRAME_VERSION, Symbol.for("terminal-snapshot-version"));
+	// They are separate constant bindings, not aliases of one variable — the wire
+	// frame format and the internal DTO format may evolve independently.
+	// (Independence is structural: distinct exported bindings, each asserted === 1
+	// above; there is no value-level property that could pin it.)
 });
 
 test("ring eviction under capture pressure degrades to resnapshot_required", async () => {
