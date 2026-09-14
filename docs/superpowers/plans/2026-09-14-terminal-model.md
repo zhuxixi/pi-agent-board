@@ -128,3 +128,13 @@ Every task: targeted tests green → full suite green → typecheck → conventi
 - 颜色编码：-1=默认，0-255=调色板，`0x1000000|rgb`=直色（marker 位与调色板不相交）。
 - 已知边界：DECSTBM scroll region 状态不在 modes 闭包内（region **内容**等价已测，region 设置本身不往返——与 spec 最小闭包一致，记入残留）；`synchronizedOutputMode` 忠实还原。
 - 帧在**脏终端**上自洽（先 DECSTR + 2J/3J + region 重置再发内容）——wire 复用前提已测。
+
+## Residual ledger (Phase 3)
+
+Review rulings and known edges carried forward (Phase 4 must consult before switching the UI):
+
+- **Modes closure edges** (Task 2/3 review rulings): DECSTBM scroll region, charset designation (SO/SI), tab stops (HTS/TBC), and DECSC saved cursor are **outside** the snapshot modes closure — captured content is content-equivalent, region/tab/saved-cursor state itself does not round-trip. Consistent with the spec's "minimal closure" ruling; revisit only if a Phase 4 attach bug traces here.
+- **Test flake (environment)**: two-file combo (`terminal-model` + `terminal-attach-protocol` run back-to-back) showed one 3s `waitFor` load timeout locally; single-file runs and full-suite runs are clean. Optional timeout bump if it recurs on CI.
+- **Phase 4 client-contract nuances**: (a) the replay path (`subscribe_terminal` with `sinceSeq`) sends raw `output` messages with **no snapshot_begin framing** — a reconnecting client must treat replay output as trusted continuation; (b) an empty model with `sinceSeq: 0` replies zero messages until the first live chunk (client must tolerate an empty replay); (c) `frameVersion` (wire) and `TERMINAL_SNAPSHOT_VERSION` (DTO) are deliberately independent axes.
+- **Cosmetic**: `snapshot_begin` header carries dead stores (fields overwritten before send) in `startSnapshot` — harmless, not user-visible.
+- **A11 perf numbers measured** (dev hardware, node --test, deterministic stream): burst 750 chunks in ~870ms — feed p50=1.13ms / p95=1.26ms / p99=1.66ms (limits 5/8); capture 80×24+256sb = 7.1ms (limit 50); hydrate = 12.7ms (limit 100); paced 60×80ms — p95=1.33 / p99=4.08 (timer-coalescing bump, still <50% of limit). Ring overflow (8-chunk cap, 200 chunks): eviction tracked, evicted cursor → `snapshot_begin.resnapshot:true` begin/end path, hydrate equivalence holds — no silent loss. Route decision unaffected by Task 4 numbers.
