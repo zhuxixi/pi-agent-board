@@ -31,6 +31,7 @@ export const CELL_FLAGS = {
 	INVERSE: 32,
 	INVISIBLE: 64,
 	STRIKETHROUGH: 128,
+	OVERLINE: 256,
 };
 
 /**
@@ -98,6 +99,7 @@ function captureCell(cell) {
 	if (cell.isInverse()) flags |= CELL_FLAGS.INVERSE;
 	if (cell.isInvisible()) flags |= CELL_FLAGS.INVISIBLE;
 	if (cell.isStrikethrough()) flags |= CELL_FLAGS.STRIKETHROUGH;
+	if (cell.isOverline()) flags |= CELL_FLAGS.OVERLINE;
 	return flags === 0 && fg === DEFAULT_COLOR && bg === DEFAULT_COLOR ? ch : [ch, fg, bg, flags];
 }
 
@@ -193,6 +195,7 @@ function sgrSequence(fg, bg, flags) {
 	if (flags & CELL_FLAGS.INVERSE) p.push("7");
 	if (flags & CELL_FLAGS.INVISIBLE) p.push("8");
 	if (flags & CELL_FLAGS.STRIKETHROUGH) p.push("9");
+	if (flags & CELL_FLAGS.OVERLINE) p.push("53");
 	pushColor(p, fg, true);
 	pushColor(p, bg, false);
 	return `\x1b[${p.join(";")}m`;
@@ -276,8 +279,16 @@ function modesSequence(m) {
  * wrap-pending state (Task-1 review ruling: captured faithfully, never
  * clamped) — reproduced by re-emitting the target row: with autowrap on, the
  * char landing in the last column re-arms pending. Insert mode must be off
- * while re-emitting (it would shift instead of overwrite) and origin mode off
- * for absolute addressing; both are restored from the captured modes.
+ * while re-emitting (it would shift instead of overwrite); wraparound and
+ * insert are restored after emission (mode sets never move the cursor).
+ *
+ * Origin mode is NEVER toggled here: headless v6 homes the cursor on DECOM
+ * set AND reset (observed), so a toggle after the park would re-home the
+ * just-parked cursor, and a toggle before it is unnecessary — the frame
+ * preamble guarantees a full scroll region (\x1b[r), under which
+ * origin-relative CUP addresses the same cell as absolute CUP, and origin
+ * mode does not affect character emission. The explicit ?6h re-assert keeps
+ * the park self-contained; it must stay before any CUP.
  *
  * @param {string[]} parts
  * @param {TerminalSnapshotDto} dto
@@ -285,18 +296,15 @@ function modesSequence(m) {
 function parkCursor(parts, dto) {
 	const { x, y } = dto.cursor;
 	const row = dto.viewport[y] ?? [];
+	if (dto.modes.originMode) parts.push("\x1b[?6h");
 	if (x >= dto.cols) {
-		parts.push("\x1b[?7h\x1b[?6l\x1b[4l", `\x1b[${y + 1};1H`);
+		parts.push("\x1b[?7h\x1b[4l", `\x1b[${y + 1};1H`);
 		emitRow(parts, row);
 		if (dto.modes.wraparoundMode === false) parts.push("\x1b[?7l");
-		if (dto.modes.originMode) parts.push("\x1b[?6h");
 		if (dto.modes.insertMode) parts.push("\x1b[4h");
 		return;
 	}
-	// CUP is scroll-region-relative under origin mode: park with origin forced
-	// off, then restore the captured mode.
-	parts.push("\x1b[?6l", `\x1b[${y + 1};${x + 1}H`);
-	if (dto.modes.originMode) parts.push("\x1b[?6h");
+	parts.push(`\x1b[${y + 1};${x + 1}H`);
 }
 
 /**

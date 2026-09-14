@@ -67,6 +67,17 @@ const FIXTURES = [
 		chunks: ["hello\r\nworld\r\n\x1b[2;4H"],
 	},
 	{
+		// F1 fix fixture (task-2 review): modes exercised in their ON forms —
+		// origin (?6h), bracketed paste (?2004h), any-event mouse (?1003h),
+		// synchronized output (?2026h) — plus overline (SGR 53) content and a
+		// cursor parked mid-row under origin mode. headless v6 homes the cursor
+		// on DECOM set AND reset, so this fixture pins the park ordering.
+		name: "modes-on-origin-bracketed-mouse-sync-overline",
+		cols: 20,
+		rows: 6,
+		chunks: ["\x1b[?6h\x1b[?2004h\x1b[?1003h\x1b[?2026h", "\x1b[53movline\x1b[0m plain\r\n\x1b[4;2Hmarked"],
+	},
+	{
 		name: "resize-after-content",
 		cols: 40,
 		rows: 4,
@@ -132,6 +143,24 @@ for (const fixture of FIXTURES) {
 		});
 	});
 }
+
+test("modes-on fixture: DECOM homing + overline round-trip (task-2 review F1/F2)", async () => {
+	const fixture = FIXTURES.find((f) => f.name === "modes-on-origin-bracketed-mouse-sync-overline");
+	const source = await buildSourceModel(fixture);
+	assert.equal(source.parser.modes.originMode, true, "precondition: origin on");
+	assert.equal(source.parser.modes.bracketedPasteMode, true, "precondition: bracketed paste on");
+	assert.equal(source.parser.modes.mouseTrackingMode, "any", "precondition: any-event mouse tracking");
+	assert.equal(source.parser.modes.synchronizedOutputMode, true, "precondition: synchronized output on");
+	const dto = await captureTerminalSnapshot(source);
+	const hydrated = await hydrateTerminalSnapshot(dto);
+	assertSnapshotEquivalence(source, hydrated);
+	// Named regression pin: the parked cursor must survive the origin-mode
+	// restore (DECOM homing would otherwise leave the hydrated cursor home).
+	const bufS = source.parser.buffer.active;
+	const bufH = hydrated.parser.buffer.active;
+	assert.equal(bufH.cursorX, bufS.cursorX, "cursor.x lost to DECOM homing");
+	assert.equal(bufH.cursorY, bufS.cursorY, "cursor.y lost to DECOM homing");
+});
 
 test("wrap-pending cursor is captured faithfully, never clamped", async () => {
 	const model = createTerminalModel({ cols: 10, rows: 3, scrollback: 50, parserFactory: defaultParserFactory });
