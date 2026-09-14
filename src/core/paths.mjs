@@ -107,7 +107,11 @@ export function coordinatorEndpointPathFor(platform, root) {
 		// replacements that cannot take the held lease, and locks itself out
 		// (issue #124). resolve() is idempotent on canonical roots, so coordinators
 		// already deployed keep their pipe name and need no restart.
-		const normalized = path.resolve(root);
+		// win32 semantics are named explicitly rather than using the ambient
+		// path.resolve: this branch must emit the same pipe name on every host OS
+		// (ambient resolve has no drive-letter/dot-segment/drive-case handling on
+		// POSIX), so platform-injected tests and CI behave identically everywhere.
+		const normalized = path.win32.resolve(root);
 		const hash = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
 		return `\\\\.\\pipe\\agent-board-coordinator-${hash}`;
 	}

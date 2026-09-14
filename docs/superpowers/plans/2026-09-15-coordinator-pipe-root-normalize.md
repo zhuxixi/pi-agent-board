@@ -214,3 +214,11 @@ gh issue comment 124 --repo zhuxixi/pi-agent-board --body "## 实现完成：验
 - **Placeholder scan**：无 TBD/TODO；测试与实现均为完整代码。
 - **Type consistency**：`coordinatorEndpointPathFor(platform, root)` 签名不变（仅内部归一化）；测试 helper 名称（`freshRoot`/`track`/`cleanupRoot`/`COORDINATOR_SCRIPT`）与既有定义一致。
 - **向后兼容护栏**：Task 1 第 2 用例（隔离保留）与 Task 2 的 revert-check 共同保证"修复真的修好了"且没有把不同 root 折叠成一个。
+
+---
+
+## Execution notes
+
+- Commit `06a416a` originally implemented Task 1 Step 3 verbatim with `path.resolve(root)`.
+- **Review round 1 (Critical, plan-mandated)** flagged that as host-dependent: ambient `path.resolve` has no Windows drive-letter/dot-segment semantics on POSIX hosts, so the four spellings produce four different hashes on ubuntu CI and the Task 1 invariance assertion fails on the merge gate. Controller ruling: amend to `path.win32.resolve(root)`.
+- `path.win32.resolve(root)` is host-independent and on Windows hosts `path === path.win32`, so the emitted pipe name is byte-identical (canonical root still `0af89859a5276f1c` — no coordinator restart needed). Applied in `fix(paths): use win32 resolve semantics for the coordinator pipe hash (issue #124)`.
