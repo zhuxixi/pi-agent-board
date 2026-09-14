@@ -32,7 +32,7 @@ export function coordinatorEndpointPathFor(platform, root) {
 		// "same lock, two pipes" — panel permanently locked out (issue #124).
 		// resolve() is idempotent on canonical roots, so already-deployed
 		// coordinators keep their pipe name and need no restart.
-		const normalized = path.resolve(root);
+		const normalized = path.win32.resolve(root);
 		const hash = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
 		return `\\\\.\\pipe\\agent-board-coordinator-${hash}`;
 	}
@@ -40,6 +40,7 @@ export function coordinatorEndpointPathFor(platform, root) {
 }
 ```
 
+- **win32 语义显式指定**：hash 前用 `path.win32.resolve` 而非宿主 `path.resolve` —— 该分支必须在任何宿主 OS 上产出同一管道名（Linux/macOS 宿主的 `path.resolve` 是 POSIX 语义，会把 `C:\x` 当作相对路径：没有盘符与反斜杠分隔符语义），使 platform 注入式单测与 CI 在任何 OS 上行为一致；Windows 宿主上 `path === path.win32`，输出逐字节不变。
 - **可测性拆分**：该函数已是纯函数（platform + root → string，零副作用、无 I/O）→ 直接单测，无需新增抽象；副作用（bind/connect）留在 client/runner。
 - **向后兼容（实测）**：`path.resolve(canonical) === canonical` 成立 → 规范形式（生产 `defaultRoot()` 的产物）hash **不变** → 已部署 coordinator 管道名不变、零中断（实测数据见 issue R1 评论）。
 - **POSIX 分支不改**：其 endpoint 是文件系统路径，`path.join` 已归一化；改为 `path.resolve` 会让相对 root 语义变化（行为改变而非修复）。

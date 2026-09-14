@@ -109,8 +109,9 @@ export function coordinatorEndpointPathFor(platform, root) {
 		// already deployed keep their pipe name and need no restart.
 		// win32 semantics are named explicitly rather than using the ambient
 		// path.resolve: this branch must emit the same pipe name on every host OS
-		// (ambient resolve has no drive-letter/dot-segment/drive-case handling on
-		// POSIX), so platform-injected tests and CI behave identically everywhere.
+		// (on POSIX, ambient resolve treats `C:\x` as a relative path: no
+		// drive-letter or backslash-separator semantics), so platform-injected
+		// tests and CI behave identically everywhere.
 		const normalized = path.win32.resolve(root);
 		const hash = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
 		return `\\\\.\\pipe\\agent-board-coordinator-${hash}`;
