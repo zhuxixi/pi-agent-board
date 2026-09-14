@@ -359,10 +359,10 @@ test("isPublishConflictCode: rename conflict codes including Windows EPERM", () 
 /** Windows-style publish fs: renaming onto an existing lock path throws EPERM
  *  (errno -4048) instead of POSIX's ENOTEMPTY; all other ops are real. */
 function windowsPublishFs(lockPath) {
-	return {
+	const fs = {
 		...LOCK_FS,
 		renameSync: (from, to, ...rest) => {
-			if (String(to) === lockPath && existsSync(to)) {
+			if (String(to) === lockPath && fs.existsSync(to)) {
 				const e = new Error("EPERM: operation not permitted, rename");
 				e.code = "EPERM";
 				throw e;
@@ -370,6 +370,7 @@ function windowsPublishFs(lockPath) {
 			return realRenameSync(from, to, ...rest);
 		},
 	};
+	return fs;
 }
 
 const ME = { pid: process.pid, startToken: "me" };
@@ -384,7 +385,7 @@ test("EPERM publish contention: dead owner with full identity is reclaimed", () 
 		const got = tryAcquireOwnedViewLock(root, "v1", "coordinator", { identity: ME, fs: windowsPublishFs(lockPath) });
 		assert.equal(got.acquired, true, "EPERM contention must reach reclaimOrBlock");
 		assert.equal(got.lease.isOwner(), true);
-		got.lease.release();
+		assert.equal(got.lease.release(), true, "the reclaimed lease must be the holder's to release");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -402,7 +403,7 @@ test("EPERM publish contention: stale identity-less owner (Windows startToken:nu
 		}));
 		const got = tryAcquireOwnedViewLock(root, "v1", "coordinator", { identity: ME, fs: windowsPublishFs(lockPath) });
 		assert.equal(got.acquired, true, "issue #112 orphan reclaim must be reachable through EPERM contention");
-		got.lease.release();
+		assert.equal(got.lease.release(), true, "the reclaimed lease must be the holder's to release");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

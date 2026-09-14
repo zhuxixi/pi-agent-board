@@ -5,7 +5,7 @@
  * ensure/spawn path (mirrors the state-coordinator integration fixture).
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -206,6 +206,12 @@ test("ensureCoordinator reclaims a stale identity-less orphan lease (issue #114)
 	assert.equal(ensured.ok, true, "the orphan lease must be reclaimed, not block startup");
 	assert.match(ensured.instanceId, /^[0-9a-f]+$/);
 	track(ensured.pid);
+
+	// On-disk proof of takeover: the planted orphan record is gone, replaced by
+	// the live coordinator's own token and pid.
+	const owner = JSON.parse(readFileSync(join(lockPath, "owner.json"), "utf8"));
+	assert.notEqual(owner.token, "orphan-lease", "the orphan token must no longer own the lock");
+	assert.equal(owner.pid, ensured.pid, "the lock must now be owned by the spawned coordinator pid");
 });
 
 test("two parallel ensureCoordinator calls converge on one owner; both clients get pongs", async (t) => {
