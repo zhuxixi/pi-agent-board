@@ -4,8 +4,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, w
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
-import { test } from "node:test";
+import { test, beforeEach } from "node:test";
 import { createService, shouldProbePtySupport } from "../src/runtime/service.mjs";
+import { foregroundPreviewCache } from "../src/core/foreground-preview-cache.mjs";
 import { readCodeRefs } from "../src/core/code-refs-store.mjs";
 import { diagnoseNodePtyFailure } from "../src/core/pty-support.mjs";
 import { readJournal } from "../src/core/coordinator-journal.mjs";
@@ -81,6 +82,38 @@ async function startTrackedCoordinator(root) {
 			setEnv("AGENT_BOARD_ROOT", prev.boardRoot);
 			setEnv("PI_CODING_AGENT_DIR", prev.piDir);
 		},
+	};
+}
+
+/** Reset the module-level preview cache between tests (issue #113). */
+beforeEach(() => {
+	foregroundPreviewCache.clear();
+});
+
+/**
+ * Issue 113 fixture: a sendStateCommand stand-in that materializes
+ * sync_foreground projections after a delay — the coordinator's fsync +
+ * socket latency in miniature. Commands land in arrival order, exactly like
+ * the real single writer. Non-sync kinds resolve a decided rejection.
+ */
+function delayedMaterializingSendStateCommand(root, { delayMs = 20 } = {}) {
+	const applied = [];
+	return {
+		applied,
+		send: (targetRoot, command) =>
+			new Promise((resolve) => {
+				if (command.kind !== "sync_foreground") {
+					resolve({ status: "rejected", reason: "no_change", materializedRevision: 0 });
+					return;
+				}
+				setTimeout(() => {
+					const projection = command.payload?.projection ?? {};
+					const current = readState(root, command.viewId) ?? {};
+					writeState(root, { ...current, ...projection });
+					applied.push(command);
+					resolve({ status: "applied", reason: command.kind, materializedRevision: applied.length });
+				}, delayMs);
+			}),
 	};
 }
 
@@ -1001,6 +1034,149 @@ test("syncForegroundEvent auto-completes foreground turn when auto-done flag is 
 	} finally {
 		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
 		delete process.env.AGENT_BOARD_AUTO_STATE_NO_DONE;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("issue 113: agent_end rebuild cannot clobber the in-flight message_end preview", async () => {
+	const root = freshRoot();
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", undefined);
+	try {
+		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const fake = delayedMaterializingSendStateCommand(root, { delayMs: 20 });
+		const text = "All done with the long task.";
+		// Mirror production: serviceFor() builds a fresh service per event, so the
+		// cache must survive across instances.
+		await service(root, { sendStateCommand: fake.send }).syncForegroundEvent(meta.sessionFile, { type: "agent_start" });
+		await service(root, { sendStateCommand: fake.send }).syncForegroundEvent(meta.sessionFile, {
+			type: "message_end",
+			message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text }] },
+		});
+		// agent_end reads state.json synchronously while the message_end write is
+		// still delayed — the exact 0.7.0 race window.
+		await service(root, { sendStateCommand: fake.send }).syncForegroundEvent(meta.sessionFile, { type: "agent_end" });
+
+		const final = await waitFor(() => {
+			if (fake.applied.length < 4) return null;
+			const s = readState(root, "v1");
+			return s?.semanticState === "idle" && s?.latestAssistantPreview === text ? s : null;
+		}, 3000);
+		assert.ok(final, "the last materialized projection keeps the assistant preview");
+		// Pin FIFO materialization order: agent_start, message_end, agent_end
+		// baseline, agent_end tail (the fake rejects auto_state_classified, so the
+		// classification-queued tail-write skip does not fire).
+		assert.equal(fake.applied.length, 4);
+		assert.equal(final.summary, text);
+		assert.equal(final.lastAgentActivityAt != null, true);
+	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("issue 113: multi-turn race cannot freeze the row on the previous turn's reply", async () => {
+	const root = freshRoot();
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", undefined);
+	try {
+		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
+		// Seed the previous turn's materialized state: a NON-EMPTY preview and
+		// timestamp already on disk, as every turn N>=2 of a real session has.
+		const seeded = readState(root, "v1") ?? {};
+		seeded.latestAssistantPreview = "Previous turn reply.";
+		seeded.lastAgentActivityAt = 111;
+		seeded.semanticState = "idle";
+		seeded.processState = "exited";
+		writeState(root, seeded);
+
+		const fake = delayedMaterializingSendStateCommand(root, { delayMs: 20 });
+		const text = "Second turn reply with new information.";
+		await service(root, { sendStateCommand: fake.send }).syncForegroundEvent(meta.sessionFile, { type: "agent_start" });
+		await service(root, { sendStateCommand: fake.send }).syncForegroundEvent(meta.sessionFile, {
+			type: "message_end",
+			message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text }] },
+		});
+		// agent_end rebuilds from the still-stale disk (previous turn's values);
+		// its awaited baseline write lands after the in-flight message_end write.
+		await service(root, { sendStateCommand: fake.send }).syncForegroundEvent(meta.sessionFile, { type: "agent_end" });
+
+		const final = await waitFor(() => {
+			if (fake.applied.length < 4) return null;
+			const s = readState(root, "v1");
+			return s?.semanticState === "idle" && s?.latestAssistantPreview === text ? s : null;
+		}, 3000);
+		assert.ok(final, "the row must show the CURRENT turn's reply, not the previous one");
+		assert.equal(final.summary, text);
+		assert.ok(final.lastAgentActivityAt != null && final.lastAgentActivityAt > 111, "the activity timestamp advances to the new turn");
+	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("issue 113: archiving a row evicts its preview cache entry", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		createView(root, { id: "v2", name: "b", cwd: "/r" });
+		foregroundPreviewCache.remember("v1", { latestAssistantPreview: "one", lastAgentActivityAt: 1 });
+		foregroundPreviewCache.remember("v2", { latestAssistantPreview: "two", lastAgentActivityAt: 2 });
+
+		const res = await service(root).archive("v1");
+		assert.equal(res.ok, true);
+		assert.equal(foregroundPreviewCache.size(), 1, "only the archived view's entry is evicted");
+		assert.equal(foregroundPreviewCache.backfill("v1", { latestAssistantPreview: "", lastAgentActivityAt: null }), false);
+		assert.equal(foregroundPreviewCache.backfill("v2", { latestAssistantPreview: "", lastAgentActivityAt: null }), true);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("issue 113: archiveByState evicts preview cache entries for archived rows", () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		createView(root, { id: "v2", name: "b", cwd: "/r" });
+		foregroundPreviewCache.remember("v1", { latestAssistantPreview: "one", lastAgentActivityAt: 1 });
+		foregroundPreviewCache.remember("v2", { latestAssistantPreview: "two", lastAgentActivityAt: 2 });
+		const s = readState(root, "v1");
+		s.semanticState = "completed";
+		s.processState = "exited";
+		writeState(root, s);
+
+		const res = service(root).archiveByState("completed");
+		assert.equal(res.archived, 1);
+		assert.equal(foregroundPreviewCache.size(), 1);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("issue 113: real coordinator keeps the assistant preview through a foreground turn", async () => {
+	const root = freshRoot();
+	const { coord, restore } = await startTrackedCoordinator(root);
+	try {
+		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const text = "Coordinator round trip keeps this preview.";
+		await service(root).syncForegroundEvent(meta.sessionFile, { type: "agent_start" });
+		await service(root).syncForegroundEvent(meta.sessionFile, {
+			type: "message_end",
+			message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text }] },
+		});
+		await service(root).syncForegroundEvent(meta.sessionFile, { type: "agent_end" });
+
+		const final = await waitFor(() => {
+			const s = readState(root, "v1");
+			return s?.latestAssistantPreview === text ? s : null;
+		});
+		assert.ok(final, "preview survives the real coordinator round trip");
+		assert.notEqual(final.summary, "Needs instructions");
+		assert.equal(final.lastAgentActivityAt != null, true);
+		// Let in-flight fire-and-forget beats settle against the tracked
+		// coordinator before kill (see the input-mirror test above).
+		await new Promise((resolve) => setTimeout(resolve, 150));
+	} finally {
+		await coord.kill();
+		restore();
 		rmSync(root, { recursive: true, force: true });
 	}
 });
