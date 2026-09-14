@@ -44,6 +44,26 @@ export function projectPtyCursor(buf, start, height) {
 }
 
 /**
+ * Duck-typed read of the child terminal's DECTCEM visibility state.
+ *
+ * pi-tui hides the hardware cursor (ESC[?25l) on essentially every frame and
+ * still parks it for IME positioning, so the xterm cursor position outlives its
+ * visibility: it is a rendering byproduct, not a request to show a cursor. The
+ * attach projection must not resurrect that parked cell as a visible block, and
+ * must equally not hide a cursor the child wants shown (shells, vim,
+ * PI_HARDWARE_CURSOR=1). Only an explicit `true` from xterm's cursor service
+ * counts as hidden; anything unknown (renamed internals, another @xterm build)
+ * falls back to visible, which is the pre-#102 behavior.
+ */
+export function isPtyCursorHidden(term) {
+	try {
+		return term?._core?.coreService?.isCursorHidden === true;
+	} catch {
+		return false;
+	}
+}
+
+/**
  * Coalesce PTY parser callbacks into a bounded stream of repaint requests.
  *
  * node-pty commonly splits one child-TUI update across many small chunks. Rendering
