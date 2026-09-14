@@ -4,6 +4,7 @@ import {
 	createTerminalModel,
 	defaultParserFactory,
 	feedOutput,
+	resizeChildAndModel,
 	resizeTerminalModel,
 	ringChunksAfter,
 	whenIdle,
@@ -208,4 +209,18 @@ test("resizeTerminalModel updates dimensions and parser", async () => {
 	const cell = buffer.getLine(buffer.baseY + 5).getCell(29);
 	assert.equal(cell.getChars(), "X");
 	assert.equal(buffer.cursorY, 5);
+});
+
+test("resizeChildAndModel pairs PTY and model: model reflows only on success (CR R1 advisory)", () => {
+	const model = createTerminalModel({ cols: 20, rows: 4 });
+	resizeChildAndModel({ resize() {} }, model, 30, 6);
+	assert.equal(model.cols, 30);
+	assert.equal(model.rows, 6);
+
+	// child.resize throwing (racing exit) must leave the model matching the
+	// real PTY geometry — not reflowed ahead of it.
+	const stuck = createTerminalModel({ cols: 20, rows: 4 });
+	assert.doesNotThrow(() => resizeChildAndModel({ resize() { throw new Error("EIO: child exiting"); } }, stuck, 30, 6));
+	assert.equal(stuck.cols, 20);
+	assert.equal(stuck.rows, 4);
 });

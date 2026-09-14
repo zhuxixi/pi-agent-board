@@ -199,3 +199,24 @@ export function resizeTerminalModel(model, cols, rows) {
 	const parser = /** @type {{ resize: (c: number, r: number) => void }} */ (model.parser);
 	parser.resize(cols, rows);
 }
+
+/**
+ * Resize the real PTY and the canonical terminal model as ONE paired step
+ * (CR R1 advisory): the model reflows only when `child.resize` succeeded, so
+ * snapshot geometry always mirrors the actual child grid. A throw (child
+ * racing exit) leaves the PTY at its old geometry and the model matching it,
+ * instead of a canonical model that misrepresents the real child output.
+ *
+ * @param {{ resize: (cols: number, rows: number) => void }} child duck-typed PTY handle
+ * @param {TerminalModel} model
+ * @param {number} cols
+ * @param {number} rows
+ */
+export function resizeChildAndModel(child, model, cols, rows) {
+	try {
+		child.resize(cols, rows);
+		resizeTerminalModel(model, cols, rows);
+	} catch {
+		/* child racing exit; PTY kept its old geometry — model stays consistent */
+	}
+}

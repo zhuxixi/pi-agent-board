@@ -21,7 +21,7 @@ import { lastVisibleLogLine } from "../src/core/heuristics.mjs";
 import { acquireOwnedViewLock } from "../src/core/locks.mjs";
 import * as P from "../src/core/paths.mjs";
 import { appendBoundedScreenLog, reconcileScreenLog } from "../src/core/screen-log.mjs";
-import { createTerminalModel, feedOutput, resizeTerminalModel } from "../src/core/terminal-model.mjs";
+import { createTerminalModel, feedOutput, resizeChildAndModel } from "../src/core/terminal-model.mjs";
 import { createTerminalSubscription } from "../src/core/terminal-attach-protocol.mjs";
 import { encodePromptForCliArg } from "../src/core/prompt-transport.mjs";
 import { readHost, readState, updateOwnedHost, writeHost } from "../src/core/store.mjs";
@@ -345,8 +345,10 @@ function legacyMain(config) {
 			case "resize": {
 				const cols = clampInt(msg.cols, 20, 300, host.cols);
 				const rows = clampInt(msg.rows, 5, 120, host.rows);
-				child.resize(cols, rows);
-				resizeTerminalModel(terminalModel, cols, rows);
+				// Paired step (CR R1 advisory): model reflows only when the real PTY
+				// resize succeeded. host.cols/rows keep recording the intended size
+				// (new-client clamp baseline), deliberately outside the guard.
+				resizeChildAndModel(child, terminalModel, cols, rows);
 				update({ cols, rows });
 				break;
 			}
@@ -862,8 +864,8 @@ async function ownedMain(config) {
 	if (cachedResize) {
 		const applyHeld = setTimeout(() => {
 			if (!cachedResize || !child || shutdownStarted) return;
-			try { child.resize(cachedResize.cols, cachedResize.rows); } catch { /* best effort */ }
-			resizeTerminalModel(terminalModel, cachedResize.cols, cachedResize.rows);
+			// Paired step (CR R1 advisory): model follows the real PTY, never leads.
+			resizeChildAndModel(child, terminalModel, cachedResize.cols, cachedResize.rows);
 			notifyChildResize(childPid);
 			cachedResize = null;
 		}, 500);
@@ -940,8 +942,10 @@ async function ownedMain(config) {
 				const cols = clampInt(msg.cols, 20, 300, host.cols);
 				const rows = clampInt(msg.rows, 5, 120, host.rows);
 				if (child) {
-					child.resize(cols, rows);
-					resizeTerminalModel(terminalModel, cols, rows);
+					// Paired step (CR R1 advisory): model reflows only when the real
+					// PTY resize succeeded; cachedResize cleared either way — a failed
+					// resize is not retried against a exiting child.
+					resizeChildAndModel(child, terminalModel, cols, rows);
 					notifyChildResize(childPid);
 					cachedResize = null;
 				} else {

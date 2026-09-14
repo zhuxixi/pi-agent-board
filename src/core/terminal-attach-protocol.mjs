@@ -53,7 +53,7 @@ export { TERMINAL_SNAPSHOT_VERSION };
  *   send: (msg: Record<string, unknown>) => void,
  * }} opts
  */
-export function createTerminalSubscription({ model, send }) {
+export function createTerminalSubscription({ model, send: rawSend }) {
 	/** @type {"idle" | "capturing" | "live"} */
 	let state = "idle";
 	let lastSeq = 0;
@@ -62,6 +62,26 @@ export function createTerminalSubscription({ model, send }) {
 	// failure). The runner excludes subscribed sockets from the legacy output
 	// broadcast; delivery then belongs to this state machine alone.
 	let subscribed = false;
+
+	// Choke-point guard (CR R1 blocking): every protocol write funnels through
+	// this wrapper, so a synchronous socket.write throw can never escape into
+	// the runner's uncaughtException crash path (a runner crash kills the
+	// hosted child). Pinned semantics (tested): a send-throw is treated like
+	// socket death — the subscription downgrades to "idle" silently, further
+	// sends are swallowed no-ops, live fan-out stops, and the runner's socket
+	// error/close handler owns the actual cleanup. "live" transitions are
+	// gated on sendBroken so a throw mid-replay or mid-snapshot cannot
+	// resurrect a dead socket into live state.
+	let sendBroken = false;
+	const send = (msg) => {
+		if (sendBroken) return;
+		try {
+			rawSend(msg);
+		} catch {
+			sendBroken = true;
+			state = "idle";
+		}
+	};
 
 	const fail = (code, extra = {}) => {
 		send({ type: "error", code, ...extra });
@@ -95,7 +115,7 @@ export function createTerminalSubscription({ model, send }) {
 				send(begin);
 				lastSeq = 0;
 				send({ type: "snapshot_end", nextSeq: lastSeq + 1 });
-				state = "live";
+				if (!sendBroken) state = "live";
 				return;
 			}
 			const dto = await captureTerminalSnapshot(model);
@@ -125,7 +145,7 @@ export function createTerminalSubscription({ model, send }) {
 			}
 			if (after.chunks.length === 0) lastSeq = dto.snapshotSeq;
 			send({ type: "snapshot_end", nextSeq: lastSeq + 1 });
-			state = "live";
+			if (!sendBroken) state = "live";
 		} catch (err) {
 			state = "idle";
 			fail("snapshot_failed", { message: err instanceof Error ? err.message : String(err) });
@@ -144,7 +164,7 @@ export function createTerminalSubscription({ model, send }) {
 			send({ type: "output", seq: chunk.seq, data: chunk.data });
 		}
 		lastSeq = model.lastSeq;
-		state = "live";
+		if (!sendBroken) state = "live";
 	}
 
 	/**
@@ -176,12 +196,16 @@ export function createTerminalSubscription({ model, send }) {
 		}
 		if (state === "capturing") return true; // snapshot already in flight; ignore duplicates
 		if (msg.sinceSeq === undefined) {
-			void startSnapshot();
+			// .catch belt-and-braces (CR R1): the snapshot flow already funnels
+			// failures into fail() — which is now throw-safe via the choke point —
+			// but a stray rejection must never surface as an unhandledRejection
+			// crash (the runner treats that as fatal).
+			void startSnapshot().catch(() => {});
 		} else if (msg.sinceSeq > model.lastSeq || msg.sinceSeq < model.evictedThrough) {
 			// Client ahead of the runner (foreign cursor) or needs an evicted
 			// range: both mean "no shared baseline" — fresh snapshot, marked so
 			// the client discards its local buffer first.
-			void startSnapshot({ resnapshot: true });
+			void startSnapshot({ resnapshot: true }).catch(() => {});
 		} else {
 			// Ring invariant: (evictedThrough, lastSeq] is always contiguous, so
 			// sinceSeq === evictedThrough is a COMPLETE replay, not a partial tail.

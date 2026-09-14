@@ -348,3 +348,69 @@ test("ring eviction under capture pressure degrades to resnapshot_required", asy
 	await waitUntil2(() => messages2.some((m) => m.type === "snapshot_end"), "fresh snapshot_end");
 	assert.equal(messages2.find((m) => m.type === "snapshot_begin").snapshotSeq, 2);
 });
+
+test("send-throw degrades to idle silently (choke-point semantics, CR R1)", () => {
+	const model = realModel();
+	feedOutput(model, "one"); // seq 1
+	feedOutput(model, "two"); // seq 2
+	let calls = 0;
+	const sub = createTerminalSubscription({
+		model,
+		send() {
+			calls++;
+			throw new Error("EPIPE: socket dead");
+		},
+	});
+
+	// Replay path is fully synchronous: the first send throws inside the
+	// state machine, the choke point downgrades to idle, and the remaining
+	// replay sends are swallowed — the throw must not propagate into the
+	// runner's client-data handler (which feeds the crash path).
+	assert.equal(sub.handleMessage({ type: "subscribe_terminal", sinceSeq: 0 }), true);
+	assert.equal(calls, 1, "only the first send reached the (dead) socket");
+
+	// Live fan-out on a send-dead subscription is a silent no-op — and the
+	// raw send is never attempted again (short-circuit before rawSend).
+	const seq = feedOutput(model, "three");
+	assert.doesNotThrow(() => sub.onOutput(seq, "three"));
+	assert.equal(calls, 1);
+});
+
+test("send-throw mid-snapshot: failure stays silent, socket never resurrects to live (CR R1)", async () => {
+	const model = createTerminalModel({ cols: 20, rows: 4, scrollback: 50, parserFactory: manualParserFactory() });
+	feedOutput(model, "hello"); // seq 1 — write callback held
+	const messages = [];
+	let notified;
+	const notify = () => notified?.();
+	const sub = createTerminalSubscription({
+		model,
+		send(msg) {
+			if (msg.type === "snapshot_frame") throw new Error("EPIPE: socket died mid-frame");
+			messages.push(msg);
+			notify();
+		},
+	});
+
+	sub.handleMessage({ type: "subscribe_terminal" }); // async capture starts (held)
+	model.parser.release(); // capture completes; frame send will throw
+	await new Promise((r) => {
+		notified = r;
+		setTimeout(r, 25).unref?.();
+	});
+	// Let the rest of the snapshot flow (post-throw swallowed sends, gated
+	// live transition) drain.
+	await new Promise((r) => setImmediate(r));
+	await new Promise((r) => setImmediate(r));
+
+	assert.deepEqual(
+		messages.map((m) => m.type),
+		["snapshot_begin"],
+		"begin delivered; frame throw is swallowed by the choke point; fail()/end never reach the dead socket",
+	);
+
+	// The subscription must NOT be resurrected to live: fan-out stays a no-op.
+	const seq = feedOutput(model, "post-mortem");
+	const before = messages.length;
+	assert.doesNotThrow(() => sub.onOutput(seq, "post-mortem"));
+	assert.equal(messages.length, before, "no output attempted on a send-dead subscription");
+});
