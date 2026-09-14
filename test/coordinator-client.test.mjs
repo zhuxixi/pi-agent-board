@@ -389,6 +389,47 @@ function track(pid) {
 	if (pid) spawnedPids.add(pid);
 }
 
+/**
+ * Poll (bounded) until every pid is really gone. `process.kill(pid, 0)` throws
+ * ESRCH once the process exited, so a throw means "gone".
+ * @param {number[]} pids @param {number} timeoutMs
+ */
+async function waitForPidsGone(pids, timeoutMs = 3000) {
+	const deadline = Date.now() + timeoutMs;
+	let alive = [...pids];
+	while (alive.length > 0 && Date.now() < deadline) {
+		alive = alive.filter((pid) => {
+			try {
+				process.kill(pid, 0);
+				return true;
+			} catch {
+				return false;
+			}
+		});
+		if (alive.length > 0) await new Promise((r) => setTimeout(r, 50));
+	}
+}
+
+/**
+ * Remove a temp tree, retrying the Windows handle-release races: a coordinator
+ * spawned with cwd = the temp root keeps that directory handle for a moment
+ * after it dies, so an immediate rmSync fails with EPERM/EBUSY. Anything else
+ * (and the last attempt) throws.
+ * @param {string} target @param {number} attempts
+ */
+async function rmTreeWithRetry(target, attempts = 20) {
+	for (let attempt = 0; ; attempt++) {
+		try {
+			rmSync(target, { recursive: true, force: true });
+			return;
+		} catch (err) {
+			const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+			if ((code !== "EPERM" && code !== "EBUSY") || attempt >= attempts - 1) throw err;
+			await new Promise((r) => setTimeout(r, 100));
+		}
+	}
+}
+
 async function cleanupRoot(root) {
 	for (const pid of spawnedPids) {
 		try {
@@ -408,13 +449,15 @@ async function cleanupRoot(root) {
 		}
 		if (spawnedPids.size > 0) await new Promise((r) => setTimeout(r, 50));
 	}
-	for (const pid of spawnedPids) {
+	const stubborn = [...spawnedPids];
+	for (const pid of stubborn) {
 		try {
 			process.kill(pid, "SIGKILL");
 		} catch {
 			// gone already — fine
 		}
 	}
+	await waitForPidsGone(stubborn);
 	spawnedPids.clear();
-	rmSync(root, { recursive: true, force: true });
+	await rmTreeWithRetry(root);
 }
