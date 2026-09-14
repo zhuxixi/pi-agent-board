@@ -87,7 +87,11 @@ export function createTerminalSubscription({ model, send }) {
 			if (empty) {
 				// Runner (re)started and the new child has produced no output yet:
 				// the "host starting" baseline. No frame; live output starts at seq 1.
+				// The resnapshot marker applies here too: a client presenting a stale
+				// cursor must discard its local buffer either way (whole-branch review:
+				// marker contract must be consistent across resnapshot paths).
 				begin.empty = true;
+				if (resnapshot) begin.resnapshot = true;
 				send(begin);
 				lastSeq = 0;
 				send({ type: "snapshot_end", nextSeq: lastSeq + 1 });

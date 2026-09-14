@@ -271,7 +271,9 @@ function legacyMain(config) {
 		const outputLine = JSON.stringify({ type: "output", seq: outputSeq, data }) + "\n";
 		for (const [socket, sub] of terminalSubscriptions) {
 			if (sub.subscribed()) sub.onOutput(outputSeq, data);
-			else socket.write(outputLine);
+			// Per-socket guard: a synchronous throw from a dead socket must never
+			// escape into the uncaughtException crash path (whole-branch review).
+			else { try { socket.write(outputLine); } catch { /* 'error' handler cleans up */ } }
 		}
 	});
 	child.onExit((code) => {
@@ -814,7 +816,10 @@ async function ownedMain(config) {
 		const outputLine = JSON.stringify({ type: "output", seq: outputSeq, data }) + "\n";
 		for (const [socket, sub] of terminalSubscriptions) {
 			if (sub.subscribed()) sub.onOutput(outputSeq, data);
-			else socket.write(outputLine);
+			// Same per-socket guard the legacy broadcast had: a synchronous throw
+			// from a dead socket must never escape into the uncaughtException
+			// crash path (whole-branch review finding).
+			else { try { socket.write(outputLine); } catch { /* socket 'error' handler cleans up */ } }
 		}
 	});
 	child.onExit((code) => {

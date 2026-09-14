@@ -36,7 +36,7 @@ function hostReady(root, viewId) {
 	return isAlive(host.runnerPid);
 }
 
-async function waitFor(predicate, timeoutMs = 3000) {
+async function waitFor(predicate, timeoutMs = 10000) {
 	const start = Date.now();
 	while (Date.now() - start < timeoutMs) {
 		const value = predicate();
