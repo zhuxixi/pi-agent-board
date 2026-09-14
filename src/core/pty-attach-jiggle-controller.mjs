@@ -214,11 +214,26 @@ export function createJiggleRetryController(deps) {
 	 * does NOT reschedule the chain; if G1 already released the hold before
 	 * the TUI booted, the frame instead re-arms a fresh hold so the running
 	 * child still sees a width delta (F1 slow-boot probe).
+	 * Terminal chain states still learn frame cognition from later output
+	 * (issue #106) — cognition only; re-opening the protocol stays heal()'s job.
 	 * @param {string} data
 	 */
 	function feed(data) {
-		if (state.clearDetected) return; // chain done; nothing left to detect
-		if (state.stopped) return; // chain ended (G2/G3/G4); output is inert
+		// Terminal chain states: a clear was seen (chain done) or the chain ended
+		// (G2/G3/G4). Output no longer drives the retry protocol — but frame
+		// cognition must still be learned from it (issue #106): a TUI whose first
+		// frame lands after the chain settled must still open the runtime desync
+		// backstop's gate 2 (issue #11), otherwise heal() stays unreachable for the
+		// rest of this connection. Cognition only — no timers, no resizes, and no
+		// retry-state change: re-opening the protocol is heal()'s job (rate-limited
+		// and lifetime-capped), not an output chunk's.
+		if (state.clearDetected || state.stopped) {
+			if (tuiFrameSeen) return; // latched already — nothing left to learn
+			const terminal = feedOutput(state, data, carry);
+			carry = terminal.carry; // keep cross-chunk marker detection intact
+			if (terminal.frameStartFound) tuiFrameSeen = true;
+			return;
+		}
 		const result = feedOutput(state, data, carry);
 		state = result.state;
 		carry = result.carry;

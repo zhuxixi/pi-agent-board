@@ -395,3 +395,45 @@ test("feed() with 2026h and 2J in ONE chunk: clear wins the re-arm, but tuiFrame
 	assert.equal(controller.getState().tuiFrameSeen, true);
 	assert.equal(controller.getState().held, true);
 });
+
+// --- issue #106: terminal chain states must still learn frame cognition ---
+
+test("issue #106: G2-exhausted chain still learns a late first frame (cognition only, zero side effects)", () => {
+	const { controller, scheduler, resizes } = makeController();
+	controller.start(170, 36);
+	scheduler.fireNext(); // G1 fires first in Map order (6000): restore, no frame seen
+	for (let i = 0; i < 8; i++) scheduler.fireNext(); // exhaust the 8-entry chain (G2)
+	assert.equal(controller.getState().stopped, true);
+	assert.equal(controller.getState().tuiFrameSeen, false);
+	const resizesBefore = resizes.length;
+	const timersBefore = scheduler.timers.size;
+	controller.feed("\x1b[?2026h late frame");
+	assert.equal(controller.getState().tuiFrameSeen, true, "cognition must be learned after the chain settled");
+	assert.equal(resizes.length, resizesBefore, "terminal feed must not probe");
+	assert.equal(scheduler.timers.size, timersBefore, "terminal feed must not arm timers");
+	assert.equal(controller.getState().stopped, true, "terminal state must not be rewritten");
+	assert.equal(controller.heal(170, 36), true, "gate 2 open: heal() must be reachable again");
+});
+
+test("issue #106: clearDetected without any frame still learns a late first frame", () => {
+	const { controller, resizes } = makeController();
+	controller.start(170, 36);
+	controller.feed("\x1b[2J\x1b[Hplain shell output"); // clear wins → terminal, still no frame
+	assert.equal(controller.getState().clearDetected, true);
+	assert.equal(controller.getState().tuiFrameSeen, false);
+	const resizesBefore = resizes.length;
+	controller.feed("\x1b[?2026h the TUI boots later");
+	assert.equal(controller.getState().tuiFrameSeen, true, "cognition must be learned after clearDetected");
+	assert.equal(resizes.length, resizesBefore, "terminal feed must not probe");
+	assert.equal(controller.getState().held, false, "terminal feed must not re-arm a hold");
+});
+
+test("issue #106: a frame marker split across chunks is still caught in a terminal state", () => {
+	const { controller } = makeController();
+	controller.start(170, 36);
+	controller.feed("\x1b[2J"); // terminal via clear, still no frame
+	controller.feed("\x1b[?202"); // first half of the 2026h marker
+	assert.equal(controller.getState().tuiFrameSeen, false, "a partial marker alone must not latch");
+	controller.feed("6h TUI frame");
+	assert.equal(controller.getState().tuiFrameSeen, true, "carry must bridge the chunk boundary");
+});
