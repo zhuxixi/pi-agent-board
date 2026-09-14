@@ -28,6 +28,9 @@ test("attach detach gate: ctrl+] passes through, ← keeps its gate", () => {
 	assert.equal(parsed.leftHelloNullResetsStaleEditorState, true, "← must fall back to the heuristic when a hello resets a stale editor_state cache to null");
 	assert.equal(parsed.leftDetachesOnTableRowsWithoutFakeCursor, true, "← must detach when a zero-inverse buffer holds only table/quote glyph lines and editor_state is unknown (issue #69)");
 	assert.equal(parsed.leftDetachesOnContentGlyphFallback, true, "← must detach on a content glyph line in the no-fake-cursor fallback — spurious detach beats trapping (issue #69)");
+	assert.equal(parsed.leftDetachesWhenChatDiffInverseHijacksAnchor, true, "a chat diff row's inverse cells must not veto ← (issue #103)");
+	assert.equal(parsed.leftDetachesWhenNotifyBarInverseHijacksAnchor, true, "an inverse notification bar must not veto ← (issue #103)");
+	assert.equal(parsed.leftDetachesOnUnglyphedDraftAfterAnchorGuard, true, "the un-glyphed draft line intentionally loses fallback protection; editor_state owns it now (issue #103)");
 	assert.equal(parsed.leftDetachRestoresBeforeGracefulEnd, true, "← must restore before graceful socket end");
 	assert.equal(parsed.ctrlLeftDetachesOnDraft, true, "Ctrl+← must detach even when editor_state reports a draft (issue #89)");
 	assert.equal(parsed.ctrlLeftDetachesOnEmptyInput, true, "Ctrl+← must detach from an empty editor too (issue #89)");
