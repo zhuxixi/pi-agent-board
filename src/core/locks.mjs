@@ -143,6 +143,12 @@ function releaseLock(lockPath, fs) {
 const defaultLeaseFs = Object.freeze({ ...defaultLocksFs, renameSync });
 /** Max stale-reclaim → republish rounds inside a single acquire attempt. */
 const MAX_LEASE_RECLAIM_ATTEMPTS = 3;
+/**
+ * Age past which an identity-less lock is treated as an orphan candidate.
+ * Host-meta holds are millisecond-scale critical sections, so no legitimate
+ * holder reaches this (issue #112).
+ */
+const ORPHAN_LEASE_AGE_MS = 5 * 60_000;
 
 /**
  * A token-fenced lease over the view-lock directory. Every operation re-reads
@@ -221,7 +227,7 @@ function attemptAcquireLease(lockPath, opts) {
 			try { fs.rmSync(candidate, { recursive: true, force: true }); } catch { /* best effort */ }
 			const code = err && err.code;
 			if (code !== "EEXIST" && code !== "ENOTEMPTY") throw err;
-			const verdict = reclaimOrBlock(lockPath, token, fs, isProcessDead);
+			const verdict = reclaimOrBlock(lockPath, token, fs, isProcessDead, now);
 			if (verdict !== true) return verdict;
 			// Reclaimed a dead owner's lock — retry the publish on the next round.
 		}
@@ -230,29 +236,60 @@ function attemptAcquireLease(lockPath, opts) {
 }
 
 /**
- * Decide whether an existing lock may be reclaimed. Only a lock whose
- * owner.json carries a usable identity (pid + startToken) AND whose pid is
- * provably dead is reclaimable; anything corrupt, unreadable, or live is
- * never deleted. Reclaim quarantines via rename first so a concurrent winner
- * can only ever delete the directory it itself renamed.
+ * Decide what to do with an inspected lease owner. Pure: the caller supplies
+ * `now` and a pid-liveness probe.
+ *
+ * A full identity (pid + startToken) reclaims exactly when its pid is dead.
+ * An identity-less owner — legacy short-hold locks, or platforms where
+ * startToken cannot be captured — is only reclaimable past `orphanAgeMs`
+ * with a provably dead top-level pid: fresh identity-less locks stay blocked,
+ * preserving the short-critical-section contract (issue #112).
+ * @param {any} owner parsed owner.json
+ * @param {number} now
+ * @param {(pid: number) => boolean} isProcessDead
+ * @param {{ orphanAgeMs?: number }} [opts]
+ * @returns {"reclaim" | "busy" | "blocked"}
+ */
+export function classifyLeaseOwner(owner, now, isProcessDead, opts = {}) {
+	if (!owner || typeof owner !== "object") return "blocked";
+	const ownPid = Number(owner?.identity?.pid ?? 0);
+	const hasIdentity = Number.isFinite(ownPid) && ownPid > 0 && typeof owner?.identity?.startToken === "string";
+	if (hasIdentity) {
+		if (!isProcessDead(ownPid)) return "busy";
+		// Quarantine-mode reclaim verifies by token that it renamed the lock it
+		// inspected — without one nothing may be deleted.
+		return typeof owner.token === "string" ? "reclaim" : "blocked";
+	}
+	const pid = Number(owner?.pid ?? 0);
+	if (!Number.isFinite(pid) || pid <= 0) return "blocked";
+	const orphanAgeMs = Number(opts.orphanAgeMs ?? ORPHAN_LEASE_AGE_MS);
+	if (!(Number(now) - Number(owner?.startedAt ?? 0) >= orphanAgeMs)) return "blocked";
+	if (!isProcessDead(pid)) return "busy";
+	return typeof owner.token === "string" ? "reclaim" : "blocked";
+}
+
+/**
+ * Decide whether an existing lock may be reclaimed. Verdicts come from the
+ * pure `classifyLeaseOwner`; reclaim itself quarantines via rename first so a
+ * concurrent winner can only ever delete the directory it itself renamed.
  * @param {string} lockPath
  * @param {string} token the caller's own token (names the quarantine dir)
  * @param {typeof defaultLeaseFs} fs
  * @param {(pid: number) => boolean} isProcessDead
+ * @param {() => number} now clock (matching the caller's candidate timestamps)
  * @returns {true | "busy" | "blocked"}
  */
-function reclaimOrBlock(lockPath, token, fs, isProcessDead) {
+function reclaimOrBlock(lockPath, token, fs, isProcessDead, now) {
 	let owner;
 	try {
 		owner = JSON.parse(fs.readFileSync(path.join(lockPath, "owner.json"), "utf8"));
 	} catch {
 		return "blocked";
 	}
-	const pid = Number(owner?.identity?.pid ?? 0);
-	if (!Number.isFinite(pid) || pid <= 0 || typeof owner?.identity?.startToken !== "string") return "blocked";
-	if (!isProcessDead(pid)) return "busy";
-	const inspectedToken = typeof owner?.token === "string" ? owner.token : null;
-	if (inspectedToken === null) return "blocked";
+	const verdict = classifyLeaseOwner(owner, now(), isProcessDead);
+	if (verdict !== "reclaim") return verdict;
+	// classifyLeaseOwner only returns "reclaim" when owner.token is a string.
+	const inspectedToken = owner.token;
 	const quarantine = `${lockPath}.reclaim.${token}`;
 	try {
 		fs.renameSync(lockPath, quarantine);

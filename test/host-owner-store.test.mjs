@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import * as P from "../src/core/paths.mjs";
+import { readDiagnostics } from "../src/core/diagnostics.mjs";
 import { acquireOwnedViewLock, tryAcquireOwnedViewLock } from "../src/core/locks.mjs";
+import { captureStartToken } from "../src/core/pid.mjs";
 import {
 	claimHost,
+	clearHostMetaThrottleForTests,
 	createView,
 	loadRow,
 	readHost,
@@ -256,10 +259,10 @@ test("updateOwnedHost rejects a mutate that swaps the instanceId under it", () =
 /** Scripted host-meta acquisition: pops scripted results, then delegates. */
 function scriptLock(scripted) {
 	const calls = [];
-	const impl = (root, viewId, name) => {
-		calls.push({ root, viewId, name });
+	const impl = (root, viewId, name, opts) => {
+		calls.push({ root, viewId, name, opts });
 		const next = scripted.shift();
-		return next ? next(root, viewId, name) : tryAcquireOwnedViewLock(root, viewId, name);
+		return next ? next(root, viewId, name) : tryAcquireOwnedViewLock(root, viewId, name, opts);
 	};
 	return { impl, calls };
 }
@@ -316,10 +319,11 @@ test("updateOwnedHost retries blocked contention the same bounded amount (identi
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
 		writeHost(root, hostFixture(root, "v1"));
 
-		// A concurrent updateOwnedHost holder acquires host-meta WITHOUT a
-		// reclaimable identity, so contenders see `blocked`, not `busy` — the
-		// exact signature of the Node 22 CI revoke collision. It is still a
-		// millisecond-scale hold: retry it, bounded, like busy.
+		// A concurrent holder without a reclaimable identity (legacy residue or
+		// a non-Linux startToken) makes contenders see `blocked`, not `busy`.
+		// Acquisitions stamp a full identity as of issue #112; this path remains
+		// for legacy holders and is still a millisecond-scale hold: retry it,
+		// bounded, like busy.
 		const lock = scriptLock([
 			() => ({ acquired: false, reason: "blocked" }),
 			() => ({ acquired: false, reason: "blocked" }),
@@ -333,6 +337,183 @@ test("updateOwnedHost retries blocked contention the same bounded amount (identi
 		);
 		assert.equal(res.updated, true, "write lands after identity-less contention clears");
 		assert.equal(lock.calls.length, 3, "two blocked attempts then a real acquire");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+// ---- host-meta lease identity (issue #112) ---------------------------------
+
+test("updateOwnedHost stamps a full identity on the held host-meta lease", () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeHost(root, hostFixture(root, "v1"));
+		let held = null;
+		const res = updateOwnedHost(root, "v1", "inst-b", (host) => {
+			// mutate runs inside the host-meta critical section: the lock file on
+			// disk is the very lease this call holds.
+			held = JSON.parse(readFileSync(join(P.viewLockPath(root, "v1", "host-meta"), "owner.json"), "utf8"));
+			return { ...host, state: "stopping", stopRequestedAt: Date.now() };
+		});
+		assert.equal(res.updated, true);
+		assert.equal(held?.identity?.pid, process.pid);
+		assert.equal(held?.identity?.startToken, captureStartToken(process.pid));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("claimHost acquires host-meta through the injected impl with a full identity", () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const seen = [];
+		const lockImpl = (r, viewId, name, opts) => {
+			seen.push({ name, opts });
+			return tryAcquireOwnedViewLock(r, viewId, name, opts);
+		};
+		const claimed = claimHost(root, provisionalFixture(root, "v1"), { lockImpl });
+		assert.equal(claimed.claimed, true);
+		assert.equal(seen.length, 1);
+		assert.equal(seen[0].name, "host-meta");
+		assert.equal(seen[0].opts?.identity?.pid, process.pid);
+		assert.equal(seen[0].opts?.identity?.startToken, captureStartToken(process.pid));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+// ---- sustained contention diagnostics (issue #112) -------------------------
+
+test("updateOwnedHost reports sustained host-meta contention once per view", () => {
+	clearHostMetaThrottleForTests();
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeHost(root, hostFixture(root, "v1"));
+		const busy = () => ({ acquired: false, reason: "busy" });
+
+		const first = scriptLock([busy, busy, busy, busy]);
+		const res = updateOwnedHost(root, "v1", "inst-b", (h) => h, { lockImpl: first.impl });
+		assert.equal(res.updated, false);
+		let reports = readDiagnostics(root, "v1").filter((d) => d.code === "host_meta_lease_contended");
+		assert.equal(reports.length, 1);
+		assert.equal(reports[0].level, "warn");
+		assert.equal(reports[0].details?.lastReason, "busy");
+
+		// A second episode without an intervening success stays throttled.
+		const second = scriptLock([busy, busy, busy]);
+		updateOwnedHost(root, "v1", "inst-b", (h) => h, { lockImpl: second.impl });
+		reports = readDiagnostics(root, "v1").filter((d) => d.code === "host_meta_lease_contended");
+		assert.equal(reports.length, 1, "one report per contention episode");
+
+		// A successful write clears the throttle: the next episode reports again.
+		const third = scriptLock([]);
+		const ok = updateOwnedHost(root, "v1", "inst-b", (h) => ({ ...h, state: "stopping" }), { lockImpl: third.impl });
+		assert.equal(ok.updated, true);
+		const fourth = scriptLock([busy, busy, busy]);
+		updateOwnedHost(root, "v1", "inst-b", (h) => h, { lockImpl: fourth.impl });
+		reports = readDiagnostics(root, "v1").filter((d) => d.code === "host_meta_lease_contended");
+		assert.equal(reports.length, 2, "reports again after recovery");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("claimHost reports blocked host-meta contention but not busy", () => {
+	clearHostMetaThrottleForTests();
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const blockedImpl = () => ({ acquired: false, reason: "blocked" });
+		const res = claimHost(root, provisionalFixture(root, "v1"), { lockImpl: blockedImpl });
+		assert.equal(res.claimed, false);
+		let reports = readDiagnostics(root, "v1").filter((d) => d.code === "host_meta_claim_contended");
+		assert.equal(reports.length, 1);
+		assert.equal(reports[0].details?.reason, "blocked");
+
+		// Fresh view: the earlier blocked warn on v1 must not bleed into this
+		// count — clearHostMetaThrottleForTests only resets the in-process
+		// throttle, not diagnostics.jsonl itself.
+		createView(root, { id: "v2", name: "b", cwd: "/r" });
+		clearHostMetaThrottleForTests();
+		const busyImpl = () => ({ acquired: false, reason: "busy" });
+		claimHost(root, provisionalFixture(root, "v2"), { lockImpl: busyImpl });
+		reports = readDiagnostics(root, "v2").filter((d) => d.code === "host_meta_claim_contended");
+		assert.equal(reports.length, 0, "busy is ordinary contention: no warning");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+// ---- orphan lock self-heal (issue #112 end-to-end) -------------------------
+
+/** Write the exact residue from issue #112 into the view's host-meta lock. */
+function writeOrphanLock(root, viewId, owner) {
+	const lockPath = P.viewLockPath(root, viewId, "host-meta");
+	mkdirSync(lockPath, { recursive: true });
+	writeFileSync(join(lockPath, "owner.json"), JSON.stringify(owner));
+	return lockPath;
+}
+
+test("a stale identity-less orphan lock is reclaimed by a real updateOwnedHost (issue #112 repro)", () => {
+	clearHostMetaThrottleForTests();
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeHost(root, hostFixture(root, "v1"));
+		const lockPath = writeOrphanLock(root, "v1", { token: "orphan", pid: 99999999, identity: null, startedAt: Date.now() - 10 * 60_000 });
+		const res = updateOwnedHost(root, "v1", "inst-b", (h) => ({ ...h, state: "stopping", stopRequestedAt: Date.now() }));
+		assert.equal(res.updated, true, "orphan lock is reclaimed and the fenced write lands");
+		assert.equal(res.ownerChanged, false);
+		assert.equal(readHost(root, "v1").state, "stopping");
+		let leftover = null;
+		try { leftover = JSON.parse(readFileSync(join(lockPath, "owner.json"), "utf8")); } catch { leftover = null; }
+		assert.notEqual(leftover?.token, "orphan", "the orphan lease is no longer observable");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a stale orphan lock also no longer blocks claimHost (issue #112 repro)", () => {
+	clearHostMetaThrottleForTests();
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeOrphanLock(root, "v1", { token: "orphan", pid: 99999999, identity: null, startedAt: Date.now() - 10 * 60_000 });
+		const claimed = claimHost(root, provisionalFixture(root, "v1"));
+		assert.equal(claimed.claimed, true, "a fresh host can be claimed over the orphan residue");
+		assert.equal(claimed.host?.state, "starting");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a dead holder's identity-stamped lock reclaims immediately (new-protocol crash)", () => {
+	clearHostMetaThrottleForTests();
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeHost(root, hostFixture(root, "v1"));
+		writeOrphanLock(root, "v1", { token: "dead-inst", pid: 99999999, identity: { pid: 99999999, startToken: "tok" }, startedAt: Date.now() });
+		const res = updateOwnedHost(root, "v1", "inst-b", (h) => ({ ...h, state: "stopping" }));
+		assert.equal(res.updated, true, "identity-stamped dead holders reclaim without an age gate");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a fresh identity-less lock still defers to its short-hold window (no behavior regression)", () => {
+	clearHostMetaThrottleForTests();
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeHost(root, hostFixture(root, "v1"));
+		writeOrphanLock(root, "v1", { token: "live-ish", pid: process.pid, identity: null, startedAt: Date.now() });
+		const res = updateOwnedHost(root, "v1", "inst-b", (h) => ({ ...h, state: "stopping" }));
+		assert.equal(res.updated, false, "fresh identity-less locks must not be force-reclaimed");
+		assert.equal(readHost(root, "v1").state, "alive", "disk record untouched");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

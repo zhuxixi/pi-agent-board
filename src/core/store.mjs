@@ -8,9 +8,9 @@ import { atomicWriteJson, ensureDir, readJson } from "./atomic.mjs";
 import { sameHostOwner } from "./host-coordination.mjs";
 import { tryAcquireOwnedViewLock } from "./locks.mjs";
 import * as P from "./paths.mjs";
-import { isAlive } from "./pid.mjs";
+import { currentProcessIdentity, isAlive } from "./pid.mjs";
 import { readCodeRefs, summarizeCodeRefs } from "./code-refs-store.mjs";
-import { readDiagnosticSummary } from "./diagnostics.mjs";
+import { appendDiagnostic, readDiagnosticSummary } from "./diagnostics.mjs";
 import { readEvidence, summarizeEvidence } from "./evidence.mjs";
 import { readFollowUpQueue, summarizeFollowUpQueue } from "./follow-up-queue.mjs";
 import { readSteering, summarizeSteering } from "./steering.mjs";
@@ -142,6 +142,39 @@ function hostClaimActive(host) {
 }
 
 /**
+ * Views with an unrecovered host-meta contention report on record. The
+ * heartbeat path calls updateOwnedHost once per second, so without this a
+ * sustained contention episode would flood diagnostics.jsonl (issue #112).
+ */
+const hostMetaContentionReported = new Set();
+
+/** Test hook: clear the per-process contention report throttle. */
+export function clearHostMetaThrottleForTests() {
+	hostMetaContentionReported.clear();
+}
+
+/**
+ * Best-effort single warn per view per contention episode; diagnostics must
+ * never break the caller (appendDiagnostic throws on fs failure).
+ */
+function reportHostMetaContention(root, viewId, code, message, details) {
+	if (hostMetaContentionReported.has(viewId)) return;
+	hostMetaContentionReported.add(viewId);
+	try {
+		appendDiagnostic(root, viewId, { source: "store", level: "warn", code, message, details });
+	} catch { /* best effort */ }
+}
+
+/**
+ * Identity stamped on host-meta acquisitions so a holder that dies mid-hold
+ * leaves a reclaimable record (issue #112).
+ * @returns {{pid: number, startToken: string|null}}
+ */
+function hostMetaIdentity() {
+	return currentProcessIdentity();
+}
+
+/**
  * Atomically create the provisional `starting` host record for a new instance.
  * The ONLY entry point allowed to move "no claim / reclaimable terminal state"
  * into `starting` (issue #70). Refuses when an active claim exists or the
@@ -149,13 +182,23 @@ function hostClaimActive(host) {
  * ready/stop fields so no stale owner data survives the handover.
  * @param {string} root
  * @param {Partial<HostStatus> & { viewId: string, instanceId: string }} provisionalHost
- * @param {{ heldStartLease?: unknown }} [opts] reserved for host-start lease nesting;
- *   host-meta is always acquired independently here (short critical section).
+ * @param {{ heldStartLease?: unknown, lockImpl?: typeof tryAcquireOwnedViewLock }} [opts]
+ *   heldStartLease is reserved for host-start lease nesting; lockImpl injects
+ *   the host-meta acquisition for deterministic contention/identity tests.
  * @returns {{ claimed: boolean, host: HostStatus|null }}
  */
 export function claimHost(root, provisionalHost, opts = {}) {
-	const lock = tryAcquireOwnedViewLock(root, provisionalHost.viewId, "host-meta");
-	if (!lock.acquired) return { claimed: false, host: null };
+	const acquireHostMeta = opts.lockImpl ?? tryAcquireOwnedViewLock;
+	const lock = acquireHostMeta(root, provisionalHost.viewId, "host-meta", { identity: hostMetaIdentity() });
+	if (!lock.acquired) {
+		// busy is ordinary millisecond-scale contention; blocked (identity-less
+		// holder) is the orphan-lock signature worth a diagnostic (issue #112).
+		if (lock.reason === "blocked") {
+			reportHostMetaContention(root, provisionalHost.viewId, "host_meta_claim_contended", "host-meta lease blocked; host claim not established", { reason: lock.reason });
+		}
+		return { claimed: false, host: null };
+	}
+	hostMetaContentionReported.delete(provisionalHost.viewId);
 	try {
 		const existing = readHost(root, provisionalHost.viewId);
 		if (hostClaimActive(existing)) return { claimed: false, host: existing };
@@ -213,12 +256,11 @@ export function claimHost(root, provisionalHost, opts = {}) {
  * few milliseconds, but a one-shot acquire can land inside that window and
  * return busy — a revoke or recovery write that silently no-ops is a real
  * reliability bug, not just a test race. Both `busy` (live owner) and
- * `blocked` (identity-less short hold — updateOwnedHost itself acquires
- * host-meta without a reclaimable identity, so concurrent fenced writes look
- * blocked to each other) are transient here: retry a few times with a short
- * synchronous sleep before giving up. A genuinely orphaned host-meta lock
- * (holder SIGKILLed mid-hold) survives the window and surfaces as retryable
- * not-updated — never as ownership loss.
+ * `blocked` (identity-less holder) are transient here: retry a few times with
+ * a short synchronous sleep before giving up, and record a warn diagnostic on
+ * a sustained episode (issue #112). Acquisitions stamp a full process identity
+ * (issue #112), so a holder that dies mid-hold leaves a reclaimable record;
+ * legacy identity-less residue is reclaimed past the orphan age gate.
  */
 const UPDATE_LOCK_BUSY_ATTEMPTS = 3;
 const UPDATE_LOCK_BUSY_SLEEP_MS = 20;
@@ -243,17 +285,21 @@ const UPDATE_LOCK_BUSY_SLEEP_MS = 20;
 export function updateOwnedHost(root, viewId, expectedInstanceId, mutate, opts = {}) {
 	const acquireHostMeta = opts.lockImpl ?? tryAcquireOwnedViewLock;
 	let lock;
+	let lastReason = null;
 	for (let attempt = 0; ; attempt++) {
-		lock = acquireHostMeta(root, viewId, "host-meta");
+		lock = acquireHostMeta(root, viewId, "host-meta", { identity: hostMetaIdentity() });
 		if (lock.acquired) break;
+		lastReason = lock.reason;
 		// busy and blocked are both millisecond-scale holds for host-meta;
 		// neither is ownership information — only the fenced read below is.
 		if (attempt >= UPDATE_LOCK_BUSY_ATTEMPTS - 1) {
+			reportHostMetaContention(root, viewId, "host_meta_lease_contended", "host-meta lease contended; fenced write not applied", { attempts: UPDATE_LOCK_BUSY_ATTEMPTS, lastReason });
 			return { updated: false, ownerChanged: false, host: null };
 		}
 		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, UPDATE_LOCK_BUSY_SLEEP_MS);
 	}
 	try {
+		hostMetaContentionReported.delete(viewId);
 		const host = readHost(root, viewId);
 		if (!host || !sameHostOwner(host, expectedInstanceId)) {
 			return { updated: false, ownerChanged: true, host };

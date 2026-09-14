@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { acquireOwnedViewLock, defaultLocksFs, releaseWithToken, tryAcquireOwnedViewLock, withFileLockSync, withViewLockSync } from "../src/core/locks.mjs";
+import { acquireOwnedViewLock, classifyLeaseOwner, defaultLocksFs, releaseWithToken, tryAcquireOwnedViewLock, withFileLockSync, withViewLockSync } from "../src/core/locks.mjs";
 import * as P from "../src/core/paths.mjs";
 
 function freshRoot() {
@@ -267,6 +267,76 @@ test("dead-owner lock is reclaimed via quarantine, unknown identity is blocked",
 		mkdirSync(lockPath, { recursive: true });
 		writeFileSync(join(lockPath, "owner.json"), JSON.stringify({ token: "unk", pid: process.pid, identity: null, startedAt: Date.now() }));
 		const blocked = tryAcquireOwnedViewLock(root, "v1", "host-start", { identity: { pid: process.pid, startToken: "me" } });
+		assert.equal(blocked.acquired, false);
+		assert.equal(blocked.reason, "blocked");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+// ---- identity-less orphan reclaim (issue #112) ------------------------------
+
+const DEAD_PID = 99999999;
+const FIXED_NOW = 1_800_000_000_000;
+const livePid = () => false;
+const deadPid = () => true;
+
+test("classifyLeaseOwner: a full identity reclaims exactly when its pid is dead", () => {
+	const owner = { token: "t", pid: 1, identity: { pid: 1, startToken: "s" }, startedAt: FIXED_NOW };
+	assert.equal(classifyLeaseOwner(owner, FIXED_NOW, livePid), "busy");
+	assert.equal(classifyLeaseOwner(owner, FIXED_NOW, deadPid), "reclaim");
+});
+
+test("classifyLeaseOwner: identity-less owners need age AND a dead pid", () => {
+	const fresh = { token: "t", pid: DEAD_PID, identity: null, startedAt: FIXED_NOW - 60_000 };
+	assert.equal(classifyLeaseOwner(fresh, FIXED_NOW, deadPid), "blocked", "fresh identity-less lock stays blocked");
+	const stale = { token: "t", pid: DEAD_PID, identity: null, startedAt: FIXED_NOW - 10 * 60_000 };
+	assert.equal(classifyLeaseOwner(stale, FIXED_NOW, deadPid), "reclaim");
+	assert.equal(classifyLeaseOwner(stale, FIXED_NOW, livePid), "busy");
+});
+
+test("classifyLeaseOwner: the age threshold is inclusive and injectable", () => {
+	const atThreshold = { token: "t", pid: DEAD_PID, identity: null, startedAt: FIXED_NOW - 1000 };
+	assert.equal(classifyLeaseOwner(atThreshold, FIXED_NOW, deadPid, { orphanAgeMs: 1000 }), "reclaim");
+	assert.equal(classifyLeaseOwner(atThreshold, FIXED_NOW, deadPid, { orphanAgeMs: 1001 }), "blocked");
+});
+
+test("classifyLeaseOwner: unparseable, token-less, and pid-less owners never reclaim", () => {
+	assert.equal(classifyLeaseOwner(null, FIXED_NOW, deadPid), "blocked");
+	assert.equal(classifyLeaseOwner("nope", FIXED_NOW, deadPid), "blocked");
+	assert.equal(classifyLeaseOwner({ pid: DEAD_PID, identity: null, startedAt: 0 }, FIXED_NOW, deadPid), "blocked", "no token → no reclaim");
+	assert.equal(classifyLeaseOwner({ token: "t", identity: null, startedAt: 0 }, FIXED_NOW, deadPid), "blocked", "no pid → nothing to judge");
+	assert.equal(classifyLeaseOwner({ identity: { pid: 1, startToken: "s" }, startedAt: 0 }, FIXED_NOW, deadPid), "blocked", "dead pid without token must not reclaim");
+	assert.equal(classifyLeaseOwner({ identity: { pid: 1, startToken: "s" }, startedAt: 0 }, FIXED_NOW, livePid), "busy", "live-holder path keeps busy even without a token");
+});
+
+test("classifyLeaseOwner: null startToken (non-Linux) uses the identity-less fallback", () => {
+	const stale = { token: "t", pid: DEAD_PID, identity: { pid: DEAD_PID, startToken: null }, startedAt: FIXED_NOW - 10 * 60_000 };
+	assert.equal(classifyLeaseOwner(stale, FIXED_NOW, deadPid), "reclaim");
+	assert.equal(classifyLeaseOwner({ ...stale, startedAt: FIXED_NOW }, FIXED_NOW, deadPid), "blocked");
+});
+
+test("stale identity-less lock (issue #112 residue) is reclaimed via quarantine", () => {
+	const root = freshRoot();
+	try {
+		const lockPath = P.viewLockPath(root, "v1", "host-meta");
+		mkdirSync(lockPath, { recursive: true });
+		writeFileSync(join(lockPath, "owner.json"), JSON.stringify({ token: "orphan", pid: 99999999, identity: null, startedAt: Date.now() - 10 * 60_000 }));
+		const got = tryAcquireOwnedViewLock(root, "v1", "host-meta", { identity: { pid: process.pid, startToken: "me" } });
+		assert.equal(got.acquired, true, "stale identity-less lock must be recoverable");
+		got.lease.release();
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("fresh identity-less lock is still blocked (short-hold contract preserved)", () => {
+	const root = freshRoot();
+	try {
+		const lockPath = P.viewLockPath(root, "v1", "host-meta");
+		mkdirSync(lockPath, { recursive: true });
+		writeFileSync(join(lockPath, "owner.json"), JSON.stringify({ token: "unk", pid: process.pid, identity: null, startedAt: Date.now() }));
+		const blocked = tryAcquireOwnedViewLock(root, "v1", "host-meta", { identity: { pid: process.pid, startToken: "me" } });
 		assert.equal(blocked.acquired, false);
 		assert.equal(blocked.reason, "blocked");
 	} finally {
