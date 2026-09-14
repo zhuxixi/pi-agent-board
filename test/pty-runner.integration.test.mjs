@@ -1455,3 +1455,82 @@ test("legacy child receives the legacy view socket as its control endpoint (issu
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
 });
+
+test("reporter connections never count as attached clients (issue #103)", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	try {
+		const { runner: r, socketPath } = await launchOwnedRunner(root, "v1", "i103r");
+		runner = r;
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.childPid ? h : false;
+		});
+		childPid = host.childPid;
+
+		// The child's reporter: permanent connection, identification hello first.
+		const reporter = createConnection(socketPath);
+		reporter.on("error", () => {});
+		await once(reporter, "connect");
+		const reporterMessages = [];
+		let reporterBuf = "";
+		reporter.on("data", (chunk) => {
+			reporterBuf += chunk.toString();
+			const lines = reporterBuf.split("\n");
+			reporterBuf = lines.pop() ?? "";
+			for (const line of lines) if (line.trim()) reporterMessages.push(JSON.parse(line));
+		});
+		send(reporter, { type: "hello", clientId: "editor-reporter" });
+		send(reporter, { type: "editor_state", empty: true });
+		// The runner broadcasts editor_state to every client including the
+		// reporter itself, so observing that broadcast proves the runner has
+		// processed the reporter's hello (same-socket FIFO order) AND applied
+		// the state — the assertions below pin behaviour, not flight timing.
+		await waitFor(() => reporterMessages.some((m) => m.type === "editor_state" && m.empty === true));
+
+		// A reporter must never look like an attached client and must not mark
+		// the host attached: its connection is permanent, and attachedClients
+		// gates warm-host reclamation (issue #75) and the revoke guard.
+		const withReporter = readHost(root, "v1");
+		assert.equal(withReporter.attachedClients, 0, "a reporter must never look like an attached client");
+		assert.notEqual(withReporter.attachedEver, true, "a reporter must not mark the host attached");
+
+		// The reporter's state is the authoritative hello seed for real clients.
+		const ui = createConnection(socketPath);
+		ui.on("error", () => {});
+		await once(ui, "connect");
+		const uiMessages = [];
+		let buf = "";
+		ui.on("data", (chunk) => {
+			buf += chunk.toString();
+			const lines = buf.split("\n");
+			buf = lines.pop() ?? "";
+			for (const line of lines) if (line.trim()) uiMessages.push(JSON.parse(line));
+		});
+		send(ui, { type: "hello", clientId: "ui-test" });
+		const seeded = await waitFor(() => uiMessages.find((m) => m.type === "hello" && "editorEmpty" in m), 2000);
+		assert.equal(seeded.editorEmpty, true, "the reporter's state is the authoritative hello seed");
+		await waitFor(() => readHost(root, "v1")?.attachedClients === 1);
+		assert.equal(readHost(root, "v1").attachedEver, true, "a real UI client still records attachedEver");
+
+		// Dropping the UI client and the reporter must both leave the count at 0.
+		ui.destroy();
+		await waitFor(() => readHost(root, "v1")?.attachedClients === 0);
+		reporter.destroy();
+		await waitFor(() => readHost(root, "v1")?.attachedClients === 0);
+		assert.equal(readHost(root, "v1").attachedClients, 0);
+
+		const exitClient = createConnection(socketPath);
+		exitClient.on("error", () => {});
+		await once(exitClient, "connect");
+		send(exitClient, { type: "input", data: "exit\r" });
+		await waitForExit(runner, 5000);
+		exitClient.destroy();
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
