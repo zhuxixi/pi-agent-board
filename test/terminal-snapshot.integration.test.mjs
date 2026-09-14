@@ -543,37 +543,38 @@ test("A6: mid-stream runner kill → reconnect → fresh baseline hydrate; recov
 		} catch {}
 		writeFileSync(P.screenLogPath(root, viewId), `${POISON}\n`);
 
-		// Replacement runner + new child on the same view/config.
-		({ runner } = spawnRunner(root, viewId, { env: { FAKE_PTY_STREAM_MODE: "steady" } }));
+		// Replacement runner + new child on the same view/config. HOLD-mode child:
+		// silent until input, so the restarted model is deterministically EMPTY at
+		// reconnect time — the foreign cursor always earns a fresh baseline (this
+		// kills the ring-replay race where a steady replacement child outruns the
+		// pre-kill cursor before the subscribe lands).
+		({ runner } = spawnRunner(root, viewId, { env: { FAKE_PTY_HOLD: "1" } }));
 		await waitFor(() => hostReady(root, viewId));
 
 		// SAME client instance reconnects with its pre-kill cursor (the UI shape):
-		// foreign cursor → fresh baseline, explicitly marked resnapshot.
+		// foreign cursor on the empty new model → empty host-starting baseline.
 		const socket2 = createConnection(P.controlSocketPath(root, viewId));
 		await once(socket2, "connect");
 		sockets.push(socket2);
 		attach(socket2);
 		const readyCountBefore = events.snapshotReady.length;
-		// Mark the live-stream cursor BEFORE reconnecting: pre-kill outputs also
-		// contain steady- content, so post-restart liveness must be asserted on
-		// the slice, never the whole array.
-		const outputMarkBeforeReconnect = events.output.length;
 		client.reconnect(cursorBefore);
 		await waitFor(() => events.snapshotReady.length > readyCountBefore);
 		const rebased = events.snapshotReady[readyCountBefore];
-		assert.equal(
-			rebased.resnapshot === true || rebased.empty === true,
-			true,
-			"foreign cursor earns a discard-your-buffer baseline",
-		);
-		const rebasedFrame = typeof rebased.frame === "string" ? rebased.frame : "";
-		assert.ok(!rebasedFrame.includes("echo:pre-kill"), "fresh baseline never carries the old screen");
-		assert.ok(!rebasedFrame.includes(POISON), "baseline never carries screen.log content");
+		assert.equal(rebased.empty, true, "foreign cursor on the restarted (empty) model earns the empty host-starting baseline");
+		assert.equal(rebased.frame, undefined, "empty baseline carries no frame");
+		assert.equal(rebased.nextSeq, 1, "sequence restarts at 1 for the new child");
 
-		// Wait for the new child's live stream, then take a DETERMINISTIC framed
-		// snapshot from a third raw subscriber — the canonical viewport is then
-		// guaranteed non-empty (no capture-timing race on the empty-baseline path).
-		await waitFor(() => events.output.slice(outputMarkBeforeReconnect).some((d) => String(d).includes("steady-")));
+		// Drive deterministic content through input echo (hold-mode child is
+		// silent by design): the new model becomes non-empty only when WE write,
+		// so every downstream capture is race-free.
+		const outputMark = events.output.length;
+		send(socket2, { type: "input", data: "post-restart\r" });
+		await waitFor(() => events.output.slice(outputMark).some((d) => String(d).includes("echo:post-restart")));
+
+		// DETERMINISTIC framed snapshot from a third raw subscriber — the model
+		// provably holds the echo already, so the capture is non-empty by
+		// construction (no capture-timing race on the empty-baseline path).
 		const socket3 = createConnection(P.controlSocketPath(root, viewId));
 		await once(socket3, "connect");
 		sockets.push(socket3);
@@ -582,6 +583,9 @@ test("A6: mid-stream runner kill → reconnect → fresh baseline hydrate; recov
 		await waitFor(() => messages3.find((m) => m.type === "snapshot_frame"));
 		const frame = messages3.find((m) => m.type === "snapshot_frame").data;
 		assert.equal(typeof frame, "string");
+		assert.ok(frame.includes("echo:post-restart"), "framed snapshot renders new-child content");
+		assert.ok(!frame.includes("echo:pre-kill"), "fresh frames never carry the old screen");
+		assert.ok(!frame.includes(POISON), "frames never carry screen.log content");
 
 		// Pollution overwrite proof with INDEPENDENT parsers: a clean terminal and
 		// a terminal pre-polluted with garbage must converge to identical viewports
@@ -596,19 +600,15 @@ test("A6: mid-stream runner kill → reconnect → fresh baseline hydrate; recov
 		dirty.write(frame);
 		const cleanRows = await viewportRows(clean, 24, 80);
 		const dirtyRows = await viewportRows(dirty, 24, 80);
-		assert.ok(cleanRows.join("\n").includes("steady-"), "hydrated frame renders canonical content");
+		assert.ok(cleanRows.join("\n").includes("echo:post-restart"), "hydrated frame renders canonical content");
 		assert.equal(
 			JSON.stringify(dirtyRows), JSON.stringify(cleanRows),
 			"polluted buffer converges byte-identically to the clean hydrate",
 		);
 		assert.ok(!dirtyRows.join("\n").includes("GARBAGE-DIRTY-MARKER"), "pollution fully overwritten by the frame");
 
-		// Converge to the NEW child: post-restart input echoes through the new model.
-		// Scope stream assertions to outputs AFTER the reconnect: the pre-kill live
-		// stream legitimately contains the old echo.
-		const outputMark = events.output.length;
-		send(socket2, { type: "input", data: "post-restart\r" });
-		await waitFor(() => events.output.slice(outputMark).some((d) => String(d).includes("echo:post-restart")));
+		// Converge to the NEW child on the live stream (the echo already proven
+		// above); neither the poison nor the old screen may surface post-restart.
 		const postRestartStream = events.output.slice(outputMark).map((d) => String(d));
 		assert.ok(postRestartStream.some((d) => d.includes("echo:post-restart")));
 		assert.ok(

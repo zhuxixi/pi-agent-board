@@ -194,7 +194,6 @@ try {
 		const deadline = Date.now() + 10_000;
 		while (Date.now() < deadline && !(reconnected && wiped)) {
 			const text = renderScan();
-			scans.push(text);
 			if (comp.connected && comp.attachMode === "protocol") reconnected = true;
 			// Hold-mode child is silent, so once the empty baseline hydrates (F3
 			// reset), the pre-restart steady content must be gone from the viewport.
@@ -209,15 +208,13 @@ try {
 		const deadline = Date.now() + 8000;
 		while (Date.now() < deadline && !result.convergedToNewChild) {
 			const text = renderScan();
-			scans.push(text);
 			if (text.includes("echo:after-restart")) result.convergedToNewChild = true;
 			else await sleep(40);
 		}
 	}
 	// Observation window for late jiggle pulses / late stale content.
 	for (let i = 0; i < 20; i++) {
-		const text = renderScan();
-		scans.push(text);
+		renderScan();
 		await sleep(50);
 	}
 
