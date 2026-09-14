@@ -214,6 +214,24 @@ test("ensureCoordinator reclaims a stale identity-less orphan lease (issue #114)
 	assert.equal(owner.pid, ensured.pid, "the lock must now be owned by the spawned coordinator pid");
 });
 
+test("a coordinator started under one root spelling serves clients using another (issue #124)", async (t) => {
+	const root = freshRoot(); // win32: mkdtempSync returns a backslash path
+	t.after(async () => {
+		await cleanupRoot(root);
+	});
+	const altRoot = process.platform === "win32" ? root.replace(/\\/g, "/") : `${root}/`;
+	assert.notEqual(root, altRoot, "the two spellings must actually differ as strings");
+
+	// the coordinator runs under altRoot; the panel client uses root
+	const started = await ensureCoordinator(altRoot, { runnerScript: COORDINATOR_SCRIPT });
+	assert.equal(started.ok, true, "coordinator must start under the alternate spelling");
+	track(started.pid);
+
+	const ensured = await ensureCoordinator(root, { runnerScript: COORDINATOR_SCRIPT });
+	assert.equal(ensured.ok, true, "a client using the other spelling must reach a coordinator");
+	assert.equal(ensured.instanceId, started.instanceId, "both spellings must resolve to ONE endpoint and owner");
+});
+
 test("two parallel ensureCoordinator calls converge on one owner; both clients get pongs", async (t) => {
 	const root = freshRoot();
 	t.after(async () => {

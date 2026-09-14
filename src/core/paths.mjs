@@ -93,14 +93,27 @@ export const screenLogPath = (root, viewId) => path.join(viewDir(root, viewId), 
  * Well-known endpoint for the board-root View State Coordinator (issue #91, spec D3).
  * Exactly one coordinator may own a root (token-fenced lease), so one stable path
  * suffices; a stale POSIX socket left by a crashed coordinator is unlinked by the
- * new lease owner before bind. win32 pipe names embed a 16-hex hash of the root to
- * stay under the 256-char limit and keep per-root isolation.
+ * new lease owner before bind. win32 pipe names embed a 16-hex hash of the
+ * *normalized* root to stay under the 256-char limit and keep per-root isolation.
  * @param {"win32"|"linux"|"darwin"} platform
  * @param {string} root
  */
 export function coordinatorEndpointPathFor(platform, root) {
 	if (platform === "win32") {
-		const hash = createHash("sha256").update(String(root)).digest("hex").slice(0, 16);
+		// Normalize before hashing: the pipe name must be invariant to the root's
+		// spelling (C:/x vs C:\x, trailing separators, dot segments). The lock path
+		// derived from the same root already is (via path.join); a mismatch yields
+		// "same lock, two pipes" — the panel probes a pipe nobody bound, spawns
+		// replacements that cannot take the held lease, and locks itself out
+		// (issue #124). resolve() is idempotent on canonical roots, so coordinators
+		// already deployed keep their pipe name and need no restart.
+		// win32 semantics are named explicitly rather than using the ambient
+		// path.resolve: this branch must emit the same pipe name on every host OS
+		// (on POSIX, ambient resolve treats `C:\x` as a relative path: no
+		// drive-letter or backslash-separator semantics), so platform-injected
+		// tests and CI behave identically everywhere.
+		const normalized = path.win32.resolve(root);
+		const hash = createHash("sha256").update(normalized).digest("hex").slice(0, 16);
 		return `\\\\.\\pipe\\agent-board-coordinator-${hash}`;
 	}
 	return path.join(root, "coordinator.sock");

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { test } from "node:test";
-import { controlPipeName, controlSocketPath, controlSocketPathFor, hostConfigPathFor, hostEndpointPathFor, viewDir } from "../src/core/paths.mjs";
+import { controlPipeName, controlSocketPath, controlSocketPathFor, coordinatorEndpointPathFor, hostConfigPathFor, hostEndpointPathFor, viewDir } from "../src/core/paths.mjs";
 
 test("controlSocketPath uses a named pipe on win32 (no filesystem socket path)", () => {
 	const p = controlSocketPathFor("win32", "C:\\root", "view_abc123");
@@ -38,4 +38,35 @@ test("instance-specific host config and endpoint paths are unique per instance",
 	assert.match(p1, /^\\\\.\\pipe\\pi-agent-board-view_1-[0-9a-f]{8}$/);
 	assert.ok(p1.length <= 256);
 	assert.notEqual(hostEndpointPathFor("win32", "C:\\root", "view_1", "aaa"), hostEndpointPathFor("win32", "C:\\root", "view_1", "bbb"));
+});
+
+// ---- coordinator endpoint root-form invariance (issue #124) -----------------
+
+test("coordinator pipe name is invariant to the root spelling (win32, issue #124)", () => {
+	const forms = [
+		"C:\\root\\board",
+		"C:/root/board",
+		"C:\\root\\board\\",
+		"C:\\root\\.\\board",
+	];
+	const names = forms.map((r) => coordinatorEndpointPathFor("win32", r));
+	for (const n of names) {
+		assert.match(n, /^\\\\.\\pipe\\agent-board-coordinator-[0-9a-f]{16}$/);
+		assert.ok(n.length <= 256, "named pipe name must fit the Windows 256-char limit");
+	}
+	assert.equal(new Set(names).size, 1, "one logical root must map to one pipe name regardless of spelling");
+});
+
+test("coordinator pipe name still isolates distinct roots (win32)", () => {
+	assert.notEqual(
+		coordinatorEndpointPathFor("win32", "C:\\root\\board-a"),
+		coordinatorEndpointPathFor("win32", "C:\\root\\board-b"),
+	);
+});
+
+test("coordinator endpoint keeps POSIX semantics unchanged", () => {
+	const expected = join("/tmp/root", "coordinator.sock");
+	assert.equal(coordinatorEndpointPathFor("linux", "/tmp/root"), expected);
+	assert.equal(coordinatorEndpointPathFor("darwin", "/tmp/root"), expected);
+	assert.equal(coordinatorEndpointPathFor("linux", "/tmp/root/"), expected, "path.join already normalizes on POSIX");
 });
