@@ -10,7 +10,7 @@ import { tryAcquireOwnedViewLock } from "./locks.mjs";
 import * as P from "./paths.mjs";
 import { currentProcessIdentity, isAlive } from "./pid.mjs";
 import { readCodeRefs, summarizeCodeRefs } from "./code-refs-store.mjs";
-import { readDiagnosticSummary } from "./diagnostics.mjs";
+import { appendDiagnostic, readDiagnosticSummary } from "./diagnostics.mjs";
 import { readEvidence, summarizeEvidence } from "./evidence.mjs";
 import { readFollowUpQueue, summarizeFollowUpQueue } from "./follow-up-queue.mjs";
 import { readSteering, summarizeSteering } from "./steering.mjs";
@@ -142,6 +142,30 @@ function hostClaimActive(host) {
 }
 
 /**
+ * Views with an unrecovered host-meta contention report on record. The
+ * heartbeat path calls updateOwnedHost once per second, so without this a
+ * sustained contention episode would flood diagnostics.jsonl (issue #112).
+ */
+const hostMetaContentionReported = new Set();
+
+/** Test hook: clear the per-process contention report throttle. */
+export function clearHostMetaThrottleForTests() {
+	hostMetaContentionReported.clear();
+}
+
+/**
+ * Best-effort single warn per view per contention episode; diagnostics must
+ * never break the caller (appendDiagnostic throws on fs failure).
+ */
+function reportHostMetaContention(root, viewId, code, message, details) {
+	if (hostMetaContentionReported.has(viewId)) return;
+	hostMetaContentionReported.add(viewId);
+	try {
+		appendDiagnostic(root, viewId, { source: "store", level: "warn", code, message, details });
+	} catch { /* best effort */ }
+}
+
+/**
  * Identity stamped on host-meta acquisitions so a holder that dies mid-hold
  * leaves a reclaimable record (issue #112).
  * @returns {{pid: number, startToken: string|null}}
@@ -166,7 +190,15 @@ function hostMetaIdentity() {
 export function claimHost(root, provisionalHost, opts = {}) {
 	const acquireHostMeta = opts.lockImpl ?? tryAcquireOwnedViewLock;
 	const lock = acquireHostMeta(root, provisionalHost.viewId, "host-meta", { identity: hostMetaIdentity() });
-	if (!lock.acquired) return { claimed: false, host: null };
+	if (!lock.acquired) {
+		// busy is ordinary millisecond-scale contention; blocked (identity-less
+		// holder) is the orphan-lock signature worth a diagnostic (issue #112).
+		if (lock.reason === "blocked") {
+			reportHostMetaContention(root, provisionalHost.viewId, "host_meta_claim_contended", "host-meta lease blocked; host claim not established", { reason: lock.reason });
+		}
+		return { claimed: false, host: null };
+	}
+	hostMetaContentionReported.delete(provisionalHost.viewId);
 	try {
 		const existing = readHost(root, provisionalHost.viewId);
 		if (hostClaimActive(existing)) return { claimed: false, host: existing };
@@ -254,17 +286,21 @@ const UPDATE_LOCK_BUSY_SLEEP_MS = 20;
 export function updateOwnedHost(root, viewId, expectedInstanceId, mutate, opts = {}) {
 	const acquireHostMeta = opts.lockImpl ?? tryAcquireOwnedViewLock;
 	let lock;
+	let lastReason = null;
 	for (let attempt = 0; ; attempt++) {
 		lock = acquireHostMeta(root, viewId, "host-meta", { identity: hostMetaIdentity() });
 		if (lock.acquired) break;
+		lastReason = lock.reason;
 		// busy and blocked are both millisecond-scale holds for host-meta;
 		// neither is ownership information — only the fenced read below is.
 		if (attempt >= UPDATE_LOCK_BUSY_ATTEMPTS - 1) {
+			reportHostMetaContention(root, viewId, "host_meta_lease_contended", "host-meta lease contended; fenced write not applied", { attempts: UPDATE_LOCK_BUSY_ATTEMPTS, lastReason });
 			return { updated: false, ownerChanged: false, host: null };
 		}
 		Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, UPDATE_LOCK_BUSY_SLEEP_MS);
 	}
 	try {
+		hostMetaContentionReported.delete(viewId);
 		const host = readHost(root, viewId);
 		if (!host || !sameHostOwner(host, expectedInstanceId)) {
 			return { updated: false, ownerChanged: true, host };

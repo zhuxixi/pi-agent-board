@@ -4,10 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import * as P from "../src/core/paths.mjs";
+import { readDiagnostics } from "../src/core/diagnostics.mjs";
 import { acquireOwnedViewLock, tryAcquireOwnedViewLock } from "../src/core/locks.mjs";
 import { captureStartToken } from "../src/core/pid.mjs";
 import {
 	claimHost,
+	clearHostMetaThrottleForTests,
 	createView,
 	loadRow,
 	readHost,
@@ -257,10 +259,10 @@ test("updateOwnedHost rejects a mutate that swaps the instanceId under it", () =
 /** Scripted host-meta acquisition: pops scripted results, then delegates. */
 function scriptLock(scripted) {
 	const calls = [];
-	const impl = (root, viewId, name) => {
-		calls.push({ root, viewId, name });
+	const impl = (root, viewId, name, opts) => {
+		calls.push({ root, viewId, name, opts });
 		const next = scripted.shift();
-		return next ? next(root, viewId, name) : tryAcquireOwnedViewLock(root, viewId, name);
+		return next ? next(root, viewId, name) : tryAcquireOwnedViewLock(root, viewId, name, opts);
 	};
 	return { impl, calls };
 }
@@ -376,6 +378,69 @@ test("claimHost acquires host-meta through the injected impl with a full identit
 		assert.equal(seen[0].name, "host-meta");
 		assert.equal(seen[0].opts?.identity?.pid, process.pid);
 		assert.equal(seen[0].opts?.identity?.startToken, captureStartToken(process.pid));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+// ---- sustained contention diagnostics (issue #112) -------------------------
+
+test("updateOwnedHost reports sustained host-meta contention once per view", () => {
+	clearHostMetaThrottleForTests();
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeHost(root, hostFixture(root, "v1"));
+		const busy = () => ({ acquired: false, reason: "busy" });
+
+		const first = scriptLock([busy, busy, busy, busy]);
+		const res = updateOwnedHost(root, "v1", "inst-b", (h) => h, { lockImpl: first.impl });
+		assert.equal(res.updated, false);
+		let reports = readDiagnostics(root, "v1").filter((d) => d.code === "host_meta_lease_contended");
+		assert.equal(reports.length, 1);
+		assert.equal(reports[0].level, "warn");
+		assert.equal(reports[0].details?.lastReason, "busy");
+
+		// A second episode without an intervening success stays throttled.
+		const second = scriptLock([busy, busy, busy]);
+		updateOwnedHost(root, "v1", "inst-b", (h) => h, { lockImpl: second.impl });
+		reports = readDiagnostics(root, "v1").filter((d) => d.code === "host_meta_lease_contended");
+		assert.equal(reports.length, 1, "one report per contention episode");
+
+		// A successful write clears the throttle: the next episode reports again.
+		const third = scriptLock([]);
+		const ok = updateOwnedHost(root, "v1", "inst-b", (h) => ({ ...h, state: "stopping" }), { lockImpl: third.impl });
+		assert.equal(ok.updated, true);
+		const fourth = scriptLock([busy, busy, busy]);
+		updateOwnedHost(root, "v1", "inst-b", (h) => h, { lockImpl: fourth.impl });
+		reports = readDiagnostics(root, "v1").filter((d) => d.code === "host_meta_lease_contended");
+		assert.equal(reports.length, 2, "reports again after recovery");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("claimHost reports blocked host-meta contention but not busy", () => {
+	clearHostMetaThrottleForTests();
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const blockedImpl = () => ({ acquired: false, reason: "blocked" });
+		const res = claimHost(root, provisionalFixture(root, "v1"), { lockImpl: blockedImpl });
+		assert.equal(res.claimed, false);
+		let reports = readDiagnostics(root, "v1").filter((d) => d.code === "host_meta_claim_contended");
+		assert.equal(reports.length, 1);
+		assert.equal(reports[0].details?.reason, "blocked");
+
+		// Fresh view: the earlier blocked warn on v1 must not bleed into this
+		// count — clearHostMetaThrottleForTests only resets the in-process
+		// throttle, not diagnostics.jsonl itself.
+		createView(root, { id: "v2", name: "b", cwd: "/r" });
+		clearHostMetaThrottleForTests();
+		const busyImpl = () => ({ acquired: false, reason: "busy" });
+		claimHost(root, provisionalFixture(root, "v2"), { lockImpl: busyImpl });
+		reports = readDiagnostics(root, "v2").filter((d) => d.code === "host_meta_claim_contended");
+		assert.equal(reports.length, 0, "busy is ordinary contention: no warning");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
