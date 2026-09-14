@@ -10,11 +10,21 @@
  * still-stale state.json, derives the "Needs instructions" fallback summary and
  * overwrites the fresher projection that was still in flight.
  *
- * This cache restores read-your-writes for the two fields whose only legitimate
- * transitions are "empty → non-empty" and "old non-empty → new non-empty":
- * a non-empty value is always remembered, an empty value never overwrites a
- * known non-empty one, and a disk rebuild backfills only empty fields (the
- * materialized file stays authoritative whenever it has a value).
+ * This cache restores read-your-writes for the two fields whose legitimate
+ * transitions are "empty → non-empty" and "old non-empty → new non-empty",
+ * keyed on `lastAgentActivityAt` as the freshness signal (message_end stamps
+ * it with `now`):
+ *
+ * - `remember` keeps the strictly-freshest projection: an entry whose
+ *   timestamp is older than the stored one never degrades it (the stale
+ *   agent_end rebuild must not clobber a newer in-flight message_end value);
+ *   an older or timestampless projection only fills gaps.
+ * - `backfill` adopts BOTH cached fields when the cached timestamp is strictly
+ *   newer than the rebuilt status's (including a timestampless/legacy
+ *   rebuild) — the disk snapshot is stale. Otherwise it fills only empty
+ *   fields: the materialized file stays authoritative when it is newer or
+ *   equally aged, so a value another writer persisted is never resurrected
+ *   over by an older cached one.
  *
  * Module-level by necessity: `serviceFor()` creates a new service instance per
  * call (src/index.ts), so a per-instance cache would be discarded between
@@ -44,8 +54,17 @@ export function createForegroundPreviewCache() {
 		const hasActivity = activityAt != null;
 		if (!hasPreview && !hasActivity) return;
 		const entry = known.get(viewId) ?? { latestAssistantPreview: "", lastAgentActivityAt: null };
-		if (hasPreview) entry.latestAssistantPreview = preview;
-		if (hasActivity) entry.lastAgentActivityAt = activityAt;
+		const isNewer = hasActivity && (entry.lastAgentActivityAt == null || activityAt > entry.lastAgentActivityAt);
+		if (isNewer) {
+			// A strictly fresher projection wins wholesale; an empty preview still
+			// never overwrites a known non-empty one.
+			if (hasPreview) entry.latestAssistantPreview = preview;
+			entry.lastAgentActivityAt = activityAt;
+		} else {
+			// Older or timestampless: gap-fill only, never degrade the entry.
+			if (hasPreview && !entry.latestAssistantPreview) entry.latestAssistantPreview = preview;
+			if (hasActivity && entry.lastAgentActivityAt == null) entry.lastAgentActivityAt = activityAt;
+		}
 		known.set(viewId, entry);
 	}
 
@@ -53,12 +72,26 @@ export function createForegroundPreviewCache() {
 		if (!viewId || !status) return false;
 		const entry = known.get(viewId);
 		if (!entry) return false;
+		const statusAt = status.lastAgentActivityAt ?? null;
 		let changed = false;
+		if (entry.lastAgentActivityAt != null && (statusAt == null || entry.lastAgentActivityAt > statusAt)) {
+			// The disk rebuild is a stale snapshot (or a timestampless legacy row):
+			// the freshest value this process projected wins wholesale.
+			if (entry.latestAssistantPreview && status.latestAssistantPreview !== entry.latestAssistantPreview) {
+				status.latestAssistantPreview = entry.latestAssistantPreview;
+				changed = true;
+			}
+			if (statusAt !== entry.lastAgentActivityAt) {
+				status.lastAgentActivityAt = entry.lastAgentActivityAt;
+				changed = true;
+			}
+			return changed;
+		}
 		if (entry.latestAssistantPreview && !status.latestAssistantPreview) {
 			status.latestAssistantPreview = entry.latestAssistantPreview;
 			changed = true;
 		}
-		if (entry.lastAgentActivityAt != null && status.lastAgentActivityAt == null) {
+		if (entry.lastAgentActivityAt != null && statusAt == null) {
 			status.lastAgentActivityAt = entry.lastAgentActivityAt;
 			changed = true;
 		}

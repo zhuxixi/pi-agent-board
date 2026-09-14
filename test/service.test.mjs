@@ -1057,12 +1057,56 @@ test("issue 113: agent_end rebuild cannot clobber the in-flight message_end prev
 		await service(root, { sendStateCommand: fake.send }).syncForegroundEvent(meta.sessionFile, { type: "agent_end" });
 
 		const final = await waitFor(() => {
+			if (fake.applied.length < 4) return null;
 			const s = readState(root, "v1");
 			return s?.semanticState === "idle" && s?.latestAssistantPreview === text ? s : null;
 		}, 3000);
 		assert.ok(final, "the last materialized projection keeps the assistant preview");
+		// Pin FIFO materialization order: agent_start, message_end, agent_end
+		// baseline, agent_end tail (the fake rejects auto_state_classified, so the
+		// classification-queued tail-write skip does not fire).
+		assert.equal(fake.applied.length, 4);
 		assert.equal(final.summary, text);
 		assert.equal(final.lastAgentActivityAt != null, true);
+	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("issue 113: multi-turn race cannot freeze the row on the previous turn's reply", async () => {
+	const root = freshRoot();
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", undefined);
+	try {
+		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
+		// Seed the previous turn's materialized state: a NON-EMPTY preview and
+		// timestamp already on disk, as every turn N>=2 of a real session has.
+		const seeded = readState(root, "v1") ?? {};
+		seeded.latestAssistantPreview = "Previous turn reply.";
+		seeded.lastAgentActivityAt = 111;
+		seeded.semanticState = "idle";
+		seeded.processState = "exited";
+		writeState(root, seeded);
+
+		const fake = delayedMaterializingSendStateCommand(root, { delayMs: 20 });
+		const text = "Second turn reply with new information.";
+		await service(root, { sendStateCommand: fake.send }).syncForegroundEvent(meta.sessionFile, { type: "agent_start" });
+		await service(root, { sendStateCommand: fake.send }).syncForegroundEvent(meta.sessionFile, {
+			type: "message_end",
+			message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text }] },
+		});
+		// agent_end rebuilds from the still-stale disk (previous turn's values);
+		// its awaited baseline write lands after the in-flight message_end write.
+		await service(root, { sendStateCommand: fake.send }).syncForegroundEvent(meta.sessionFile, { type: "agent_end" });
+
+		const final = await waitFor(() => {
+			if (fake.applied.length < 4) return null;
+			const s = readState(root, "v1");
+			return s?.semanticState === "idle" && s?.latestAssistantPreview === text ? s : null;
+		}, 3000);
+		assert.ok(final, "the row must show the CURRENT turn's reply, not the previous one");
+		assert.equal(final.summary, text);
+		assert.ok(final.lastAgentActivityAt != null && final.lastAgentActivityAt > 111, "the activity timestamp advances to the new turn");
 	} finally {
 		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
 		rmSync(root, { recursive: true, force: true });

@@ -21,9 +21,11 @@
 export function createForegroundPreviewCache() {
   const map = new Map(); // viewId -> { latestAssistantPreview, lastAgentActivityAt }
   return {
-    // 记住投影中的已知字段。规则：非空总是覆盖（新回复更新旧预览），空值永不覆盖。
+    // 记住投影中的已知字段。新鲜度规则（以 lastAgentActivityAt 为序）：
+    // 更新时间戳的投影整体获胜；较旧/无时间戳的投影只补空缺，永不降级已有条目。
     remember(viewId, { latestAssistantPreview, lastAgentActivityAt }),
-    // 回填：仅当 status 对应字段为空/缺失时用缓存值（磁盘值优先——磁盘是权威）。
+    // 回填：缓存时间戳严格更新于重建 status（含 status 无时间戳的 legacy 行）时
+    // 整体采纳缓存两字段；否则仅填空字段（磁盘更新或同静时磁盘优先）。
     backfill(viewId, status),
     forget(viewId),   // 归档时清理，防无界增长
     clear(),          // 测试隔离：清空全部条目（模块级状态跨测试存活）
@@ -43,6 +45,8 @@ export const foregroundPreviewCache = createForegroundPreviewCache(); // 模块�
 - `src/core/state-commands.mjs:331`——`finalize_run` overlay，其唯一发送方 `runner/job-runner.mjs:272` 用 `if (status.latestAssistantPreview) payload...` 的 truthiness guard 只带非空值。
 
 即"非空才带"已是本仓库处理该字段同类时序问题的既有约定，本修复把它延伸到前台镜像路径。此外 viewId↔sessionFile 映射不可变（全仓 src/runner/scripts 无 `.sessionFile =` 赋值；adopt 同文件复用同一 view、新文件新建 viewId），故按 viewId 缓存不会跨会话串值。
+
+**证据链 caveat（终审补充）**：`runner/job-runner.mjs:743` 还有一条不经 truthiness guard 的写入路径——`patch_fields` 命令携带 `state: { summary, latestAssistantPreview }`（字段白名单在 `state-commands.mjs:112`）。该写入方（后台 runner）不在前台缓存的覆盖范围内：缓存只在本进程 `writeForegroundState` 时 remember。因此回填必须"仅当缓存严格更新时才整体采纳"——绝不能用较旧的缓存值覆盖磁盘上更新的 runner 写入（实现已按此新鲜度规则落地）。
 
 ### `src/runtime/service.mjs` 改动点
 
@@ -64,7 +68,7 @@ agent_end:   磁盘读(空 preview) → backfill(v, status) 回填 B → finaliz
 ### 边界与降级
 
 - coordinator off（直写）：`writeState` 同步落盘，磁盘读回自己的写 → backfill 不触发，行为与 0.6.x 一致。
-- 多轮会话：新回合 `agent_end` 后磁盘保留上一轮非空 preview，下一轮 `message_end` 覆盖更新；backfill 只在磁盘为空时介入。
+- 多轮会话：同一竞态在第 N≥2 轮下磁盘已有上一轮非空 preview，若只"填空"会把行冻结在上一轮回复（终审发现）。落地规则为新鲜度感知合并：缓存条目时间戳严格更新于磁盘重建值时整体采纳，较旧的重建写（agent_end baseline）也不得降级缓存；磁盘更新或同静时磁盘优先。
 - 多进程：缓存在单进程内；竞态发生在同进程事件流内，足够。
 - 已知边界（非本次修复范围）：coordinator 命令到达乱序（0.7.0 架构既有行为，概率极低，窗口远小于 0.6.x 并发直写）。
 - 内存：viewId→2 字段；两个归档站点 forget；模块导出 `clear()` 供测试复位。上限不做额外 LRU（归档清理已覆盖生命周期）。
@@ -88,8 +92,8 @@ agent_end:   磁盘读(空 preview) → backfill(v, status) 回填 B → finaliz
 
 | 功能点 | 独立单元 | 测试边界 |
 |---|---|---|
-| 缓存写入规则（非空覆盖/空不覆盖） | `remember`（覆盖语义） | 新模块单测：构造实例直接断言规则 |
-| 回填规则（磁盘优先、仅填空字段） | `backfill`（字段级选择） | 同上：空/非空/缺失三种输入 |
+| 缓存写入规则（新鲜度胜出、旧写不降级、空值不覆盖非空） | `remember`（覆盖语义） | 新模块单测：构造实例直接断言规则 |
+| 回填规则（严格更新时整体采纳；否则仅填空字段，磁盘优先） | `backfill`（字段级选择） | 同上：更新/较旧/同静/无时间戳四类输入 |
 | 事件流集成（message_end→agent_end 竞态） | `createService(opts.sendStateCommand)` 注入 fake | service.test.mjs 新用例：fake **延迟 N ms 落盘**（保真真实时序：晚到的 message_end 写不得回退 agent_end 的正确投影），断言最终磁盘状态 |
 | 真实 coordinator 不变式 | 既有 `startTrackedCoordinator` + `waitFor` 基座 | service.test.mjs 新用例（同型先例：:862 真实 coordinator 前台测试）：断言不变式，不依赖竞态是否发生 |
 | 归档清理 | `forget` + 两个归档站点 | 模块单测 + archiveView/archiveByState 路径断言 |
@@ -101,8 +105,8 @@ agent_end:   磁盘读(空 preview) → backfill(v, status) 回填 B → finaliz
 
 | ID | 功能点 | 验收方式 | 具体验证 | 通过标准 |
 |----|--------|----------|----------|----------|
-| A1 | 缓存写入规则（非空覆盖、空不覆盖、空字段不写） | 自动化（unit） | `node --test test/foreground-preview-cache.test.mjs` | 规则表断言全部通过 |
-| A2 | 回填规则（磁盘优先、仅填空字段；preview 用 falsy、时间戳用 `== null`） | 自动化（unit） | 同上 | 三类输入断言通过 |
+| A1 | 缓存写入规则（新鲜度胜出、旧写不降级、空值不覆盖非空） | 自动化（unit） | `node --test test/foreground-preview-cache.test.mjs` | 规则表断言全部通过 |
+| A2 | 回填规则（严格更新时整体采纳；否则仅填空，磁盘优先；preview 用 falsy、时间戳用 `== null`） | 自动化（unit） | 同上 | 四类输入断言通过 |
 | A3 | 竞态事件流：延迟落盘 fake，message_end→agent_end | 自动化（integration） | `node --test test/service.test.mjs`（新增用例） | 最终磁盘 state：preview=回复文本、summary=首句（非 "Needs instructions"）；移除缓存修复时该用例失败（红/绿自证）；调用方式与生产一致（每次 `service(root)` 新建实例，验证缓存确在模块级） |
 | A4 | 真实 coordinator 不变式 | 自动化（integration） | `node --test test/service.test.mjs`（新增用例，复用 startTrackedCoordinator/waitFor） | 最终磁盘 preview/summary 正确（任何时序下成立） |
 | A5 | 直写模式不回归 | 自动化（unit 回归） | `node --test test/service.test.mjs`（既有 syncForegroundEvent 用例） | 全部通过，行为不变 |
