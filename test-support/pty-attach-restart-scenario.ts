@@ -51,7 +51,10 @@ const config = {
 	tools: null,
 	env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1", FAKE_PTY_STREAM_MODE: "steady" },
 	cols: 80,
-	rows: 24,
+	// Matches the component's computed rows (tui 24 - 2 chrome): the size-sync
+	// (CR R1 blocking) then sends nothing and the zero-resize jiggle assertion
+	// below stays a pure protocol-mode discriminator.
+	rows: 22,
 };
 
 const meta = createView(root, { id: viewId, name: "restart e2e", cwd: root });

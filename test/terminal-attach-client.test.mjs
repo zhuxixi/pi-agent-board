@@ -461,3 +461,49 @@ test("invalid_since_seq and resnapshot_required in probing keep the recovery bou
 	assert.equal(eventsOf(events, "resubscribing").length, 2);
 	assert.deepEqual(eventsOf(events, "mode"), []);
 });
+
+test("snapshotBegin event carries begin geometry (size-sync hook, CR R1 blocking)", () => {
+	const { client, events } = harness();
+	client.start();
+	client.handleMessage(begin({ snapshotSeq: 5 })); // cols 80, rows 24
+	assert.deepEqual(eventsOf(events, "snapshotBegin"), [{ cols: 80, rows: 24 }]);
+	// Empty baselines carry geometry too: a child that has not produced output
+	// yet must be corrected BEFORE its first bytes land.
+	const { client: c2, events: e2 } = harness();
+	c2.start();
+	c2.handleMessage(begin({ snapshotSeq: 0, empty: true }));
+	assert.deepEqual(eventsOf(e2, "snapshotBegin"), [{ cols: 80, rows: 24 }]);
+});
+
+test("onDisconnect cancels the probe deadline — a dead window cannot downgrade (CR R1 advisory)", () => {
+	const { client, sent, events, timers } = harness();
+	client.start();
+	assert.equal(timers.live().length, 1, "probe timer armed");
+	// Socket drops inside the probe window.
+	client.onDisconnect();
+	assert.equal(timers.live().length, 0, "probe timer cancelled on disconnect");
+	timers.fireAll(); // the old deadline would have fired here
+	assert.deepEqual(eventsOf(events, "mode"), [], "no legacy downgrade from the dead window");
+	assert.deepEqual(eventsOf(events, "protocolError"), []);
+	assert.equal(client.getMode(), "probing", "still undecided — the new socket re-probes");
+	// New socket: start() re-arms and a protocol-capable runner answers.
+	client.start();
+	assert.equal(timers.live().length, 1, "probe re-armed on reconnect");
+	assert.equal(sent.filter((m) => m.type === "subscribe_terminal").length, 2, "probe re-sent");
+	client.handleMessage(begin());
+	client.handleMessage(frame());
+	client.handleMessage(end(6));
+	assert.deepEqual(eventsOf(events, "mode"), ["protocol"]);
+	assert.equal(client.getMode(), "protocol");
+});
+
+test("onDisconnect after a decided mode is a no-op (decision stands)", () => {
+	const { client, events, timers } = harness();
+	client.start();
+	client.handleMessage(begin());
+	// Probe timer is already cancelled by the begin; disconnect changes nothing.
+	client.onDisconnect();
+	timers.fireAll();
+	assert.deepEqual(eventsOf(events, "mode"), ["protocol"]);
+	assert.equal(client.getMode(), "protocol");
+});

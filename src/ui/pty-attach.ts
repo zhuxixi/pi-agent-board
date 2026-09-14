@@ -477,6 +477,11 @@ export class PtyAttachComponent implements Component {
 			this.socket = null;
 			this.connected = false;
 			this.disconnectedAt ??= Date.now();
+			// A drop inside the probe window must not leave the absolute 1500ms
+			// deadline armed: firing during the dead window would permanently
+			// downgrade a protocol-capable runner to legacy (CR R1 advisory). The
+			// reconnect's start()/reconnect() re-arms on the new socket.
+			this.attachClient.onDisconnect();
 			if (!this.closed && this.status !== "host exited") {
 				this.status = "disconnected";
 				this.scheduleReconnect();
@@ -492,6 +497,10 @@ export class PtyAttachComponent implements Component {
 			}
 			this.socket = null;
 			this.connected = false;
+			// Notify before nulling: the close event that follows will hit the
+			// stale-socket guard (this.socket no longer matches) and must not be
+			// the only path that cancels the probe deadline (CR R1 advisory).
+			this.attachClient.onDisconnect();
 			try { socket.destroy(); } catch {}
 			this.disconnectedAt ??= Date.now();
 			if (this.closed) return;
@@ -623,6 +632,13 @@ export class PtyAttachComponent implements Component {
 	 */
 	private checkDesync(): void {
 		if (this.closed || this.attaching || !this.connected) return; // gates 1, 7
+		// Protocol mode owns screen correctness via canonical frames (issue #91
+		// phase 4, CR R1 advisory): a "misaligned cursor" there is frame content
+		// or a stale-frame transient that resync heals — a jiggle heal would fire
+		// resize pulses in a mode whose e2e pins zero resizes. The undecided
+		// window keeps legacy semantics on purpose: until the snapshot answer
+		// arrives the jiggle IS armed and the legacy fallthrough owns the screen.
+		if (this.attachMode === "protocol") return;
 		const chain = this.jiggleRetry.getState();
 		if (!chain.tuiFrameSeen) return; // gate 2: shell/vim children never heal
 		if (!chain.stopped || chain.held) return; // gate 5: attach/heal chain active
@@ -1147,7 +1163,7 @@ export class PtyAttachComponent implements Component {
 	 * hydrates frames.
 	 */
 	private handleAttachEvent(
-		event: "mode" | "snapshotReady" | "output" | "resubscribing" | "protocolError",
+		event: "mode" | "snapshotBegin" | "snapshotReady" | "output" | "resubscribing" | "protocolError",
 		payload: any,
 	): void {
 		if (event === "mode") {
@@ -1171,6 +1187,25 @@ export class PtyAttachComponent implements Component {
 			}
 			// Legacy decided during the undecided window: the race-guard timer
 			// already fired at 100ms (≪ the 1500ms probe timeout) — nothing to do.
+			return;
+		}
+		if (event === "snapshotBegin") {
+			// Protocol attach size-sync (CR R1 blocking): the legacy attach resized
+			// the child at every connect (jiggle start); subscribe_terminal carries
+			// no size, so without this the child keeps its host-creation geometry
+			// and full-screen TUI children lay out at a stale size. begin is
+			// authoritative for the runner's CURRENT size; the in-flight frame stays
+			// old-geometry either way, but resizing now starts the child's redraw at
+			// the true size sooner. Matched sizes send nothing (zero-resize
+			// contract for same-size attach stays intact).
+			const beginSize = (payload ?? {}) as { cols?: number; rows?: number };
+			if (
+				typeof beginSize.cols === "number" &&
+				typeof beginSize.rows === "number" &&
+				(beginSize.cols !== this.cols || beginSize.rows !== this.rows)
+			) {
+				this.sendResize();
+			}
 			return;
 		}
 		if (event === "snapshotReady") {

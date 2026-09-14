@@ -2,10 +2,15 @@
 // Constructs the REAL PtyAttachComponent against a REAL runner socket (fake
 // pty child in steady-stream mode) with a fake TUI, and verifies:
 //   1. the session content renders (snapshot hydrate + live output), and
-//   2. the attach sent ZERO resize messages before content appeared —
-//      the legacy shrink-and-hold attach ALWAYS resizes at connect, so a
-//      resize-free content render pins protocol mode.
-// Run via `node --experimental-transform-types` (parameter properties).
+//   2. the size-sync contract (CR R1 blocking): the protocol attach resizes
+//      the child ONLY when snapshot_begin's geometry differs from the
+//      attaching terminal's true size (cols, rows-2 chrome) — never a
+//      jiggle shrink/restore pattern. The legacy shrink-and-hold attach
+//      ALWAYS resizes at connect, so a resize-free same-size render still
+//      pins protocol mode.
+// SCENARIO_HOST_ROWS controls the host config's rows: default 22 MATCHES the
+// component's computed size (tui 24 rows - 2 chrome); set 24 for the
+// differing-size scenario. Run via `node --experimental-transform-types`.
 import { mkdtempSync, rmSync } from "node:fs";
 import { Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -18,6 +23,9 @@ import { PtyAttachComponent } from "../src/ui/pty-attach.ts";
 
 const root = mkdtempSync(join(tmpdir(), "agentview-attach-proto-"));
 const viewId = "proto-e2e";
+// Host geometry (CR R1 blocking size-sync coverage): 22 matches the
+// component's computed rows (tui 24 - 2 chrome); 24 mismatches it.
+const hostRows = Number(process.env.SCENARIO_HOST_ROWS ?? 22);
 
 function isAlive(pid: number): boolean {
 	try {
@@ -53,7 +61,7 @@ atomicWriteJson(configPath, {
 	tools: null,
 	env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1", FAKE_PTY_STREAM_MODE: "steady" },
 	cols: 80,
-	rows: 24,
+	rows: hostRows,
 });
 
 const runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], {
@@ -66,7 +74,9 @@ const result = {
 	sawContent: false,
 	resizesBeforeContent: -1,
 	resizesTotal: -1,
+	resizeSizes: [] as Array<{ cols: number; rows: number }>,
 	subscribeSent: false,
+	hostRows,
 	error: null as string | null,
 };
 
@@ -78,7 +88,8 @@ try {
 	if (!ready) throw new Error("host never became ready");
 
 	// Intercept component→runner messages: the legacy shrink-and-hold attach
-	// resizes at connect, the protocol attach never does (until a user resize).
+	// resizes at connect (jiggle sizes), the protocol attach resizes only on a
+	// snapshot_begin geometry mismatch, to exactly the true terminal size.
 	const sent: string[] = [];
 	const socketProto = Socket.prototype as any;
 	const origWrite = socketProto.write;
@@ -123,7 +134,13 @@ try {
 		component.render(80);
 		await sleep(50);
 	}
-	result.resizesTotal = sent.filter((l) => l.includes('"type":"resize"')).length;
+	const resizeMsgs = sent
+		.map((l) => {
+			try { return JSON.parse(l); } catch { return null; }
+		})
+		.filter((m): m is { type: string; cols: number; rows: number } => !!m && m.type === "resize");
+	result.resizeSizes = resizeMsgs.map((m) => ({ cols: m.cols, rows: m.rows }));
+	result.resizesTotal = resizeMsgs.length;
 	result.ok = result.sawContent && result.resizesBeforeContent === 0 && result.subscribeSent;
 
 	try {

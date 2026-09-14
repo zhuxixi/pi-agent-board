@@ -59,6 +59,12 @@
  * - `mode` — `"protocol"` (first `snapshot_begin`) or `"legacy"` (fallback
  *   decided — including a downgrade after a protocol session, which the UI
  *   must observe to switch paths); each direction fires exactly once.
+ * - `snapshotBegin` — `{ cols, rows }` from every `snapshot_begin` (fresh,
+ *   reconnect, and empty baselines alike). The UI compares against its own
+ *   terminal size and resizes the child when they differ: legacy attach
+ *   resized at every connect (jiggle start), the protocol probe carries no
+ *   size, so without this sync a full-screen TUI child would keep its
+ *   host-creation geometry (CR R1 blocking). Matched sizes send nothing.
  * - `snapshotReady` — `{ frame?, empty?, resnapshot?, nextSeq }` after
  *   continuity is verified at `snapshot_end`. UI: `term.reset()` +
  *   `write(frame)` (the frame is self-contained on dirty terminals), or
@@ -89,7 +95,7 @@ import { TERMINAL_FRAME_VERSION } from "./terminal-attach-protocol.mjs";
 
 /**
  * @typedef {(
- *   event: "mode" | "snapshotReady" | "output" | "resubscribing" | "protocolError",
+ *   event: "mode" | "snapshotBegin" | "snapshotReady" | "output" | "resubscribing" | "protocolError",
  *   payload?: any,
  * ) => void} AttachClientEmit
  */
@@ -223,6 +229,12 @@ export function createTerminalAttachClient({
 	const beginCollecting = (msg) => {
 		decideProtocol();
 		cancelProbeTimer();
+		// Size-sync hook (CR R1 blocking): every begin carries the runner's
+		// captured geometry — empty baselines included, so a child that has not
+		// produced output yet still gets corrected BEFORE its first bytes land.
+		if (typeof msg.cols === "number" && typeof msg.rows === "number") {
+			emit("snapshotBegin", { cols: msg.cols, rows: msg.rows });
+		}
 		partial = {
 			frame: null,
 			empty: msg.empty === true,
@@ -427,9 +439,21 @@ export function createTerminalAttachClient({
 		state = "closed";
 	}
 
+	/** Socket dropped (CR R1 advisory): cancel the probe deadline so a dead
+	 *  window can never downgrade a protocol-capable runner. The timer is
+	 *  absolute — a reconnect landing after the 1500ms deadline would otherwise
+	 *  inherit the stale "no snapshot" verdict for the whole session. The next
+	 *  `start()`/`reconnect()` on the new socket re-arms everything; decided
+	 *  modes (legacy) and closed stay inert. */
+	function onDisconnect() {
+		if (state === "closed" || state === "legacy") return;
+		cancelProbeTimer();
+	}
+
 	return {
 		start,
 		reconnect,
+		onDisconnect,
 		handleMessage,
 		close,
 		/** @returns {"probing" | "protocol" | "legacy" | "closed"} UI-facing mode */

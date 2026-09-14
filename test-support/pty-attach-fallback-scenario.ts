@@ -87,7 +87,7 @@ const server = createServer((socket) => {
 				} else if (mode === "downgrade") {
 					if (subscribeCount === 1) {
 						// Valid empty baseline → live at lastSeq 0.
-						send({ type: "snapshot_begin", snapshotSeq: 0, cols: 80, rows: 24, frameVersion: 1, empty: true });
+						send({ type: "snapshot_begin", snapshotSeq: 0, cols: 80, rows: 22, frameVersion: 1, empty: true });
 						send({ type: "snapshot_end", nextSeq: 1 });
 						send({ type: "output", seq: 1, data: "boot line\n" });
 						send({ type: "output", seq: 2, data: "live line\n" });
@@ -101,14 +101,14 @@ const server = createServer((socket) => {
 					}
 				} else if (mode === "restart-empty") {
 					if (subscribeCount === 1) {
-						send({ type: "snapshot_begin", snapshotSeq: 0, cols: 80, rows: 24, frameVersion: 1 });
+						send({ type: "snapshot_begin", snapshotSeq: 0, cols: 80, rows: 22, frameVersion: 1 });
 						send({ type: "snapshot_frame", frameVersion: 1, data: "OLD-MARKER-XYZ dead frame\n" });
 						send({ type: "snapshot_end", nextSeq: 1 });
 						send({ type: "output", seq: 1, data: "live-one\n" });
 					} else {
 						// Reconnect to the "restarted" runner: fresh empty baseline
 						// (no frame — the old child is gone).
-						send({ type: "snapshot_begin", snapshotSeq: 0, cols: 80, rows: 24, frameVersion: 1, empty: true, resnapshot: true });
+						send({ type: "snapshot_begin", snapshotSeq: 0, cols: 80, rows: 22, frameVersion: 1, empty: true, resnapshot: true });
 						send({ type: "snapshot_end", nextSeq: 1 });
 					}
 				} else if (mode === "cold-empty-ghost") {
@@ -120,7 +120,7 @@ const server = createServer((socket) => {
 						// so the attach settle can finish and the banner lifts.
 						void waitFor(() => allowGhostAnswer, 8000).then((armed) => {
 							if (!armed) return;
-							send({ type: "snapshot_begin", snapshotSeq: 0, cols: 80, rows: 24, frameVersion: 1, empty: true });
+							send({ type: "snapshot_begin", snapshotSeq: 0, cols: 80, rows: 22, frameVersion: 1, empty: true });
 							send({ type: "snapshot_end", nextSeq: 1 });
 							setTimeout(() => send({ type: "output", seq: 1, data: "fresh child line\n" }), 150);
 						});

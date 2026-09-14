@@ -139,7 +139,11 @@ function wireClient(socket) {
 	let current = socket;
 	const client = createTerminalAttachClient({
 		send: (msg) => send(current, msg),
-		emit: (event, payload) => events[event].push(payload ?? null),
+		// Event set is open (the client may add informational events, e.g.
+		// snapshotBegin) — a fixed-shape table must not throw on unknown names:
+		// the throw would be swallowed by the malformed-line tolerance below and
+		// silently kill the snapshot flow (CR R1 fix finding).
+		emit: (event, payload) => (events[event] ??= []).push(payload ?? null),
 	});
 	const attach = (nextSocket) => {
 		current = nextSocket;

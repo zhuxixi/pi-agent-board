@@ -190,6 +190,34 @@ async function main(): Promise<void> {
 		out.healLoopCloses = shrinkSeen && restored && attach.jiggleRetry.getState().healCount === 1 && resizes(sent) === 2; // heal shrink + controller restore
 	}
 
+	// H8 (CR R1 advisory): protocol mode NEVER heals — the undecided window's
+	// legacy fallthrough can set tuiFrameSeen, but once the snapshot answer
+	// decides protocol, screen correctness belongs to canonical frames and a
+	// jiggle heal would violate the zero-resize contract.
+	{
+		const { attach, sent, clock } = makeAttach();
+		await primeRuntime(attach); // tuiFrameSeen=true via the legacy fallthrough feed
+		await write(attach, desyncFrame);
+		attach.finishAttachTransition();
+		(attach as unknown as { attachMode: string }).attachMode = "protocol"; // snapshot answer decided
+		clock.now += 10_000; // every other gate open — only the mode gate can stop it
+		attach.checkDesync();
+		out.protocolModeNoHeal = attach.jiggleRetry.getState().healCount === 0 && resizes(sent) === 0;
+	}
+
+	// H9 (H8's control): the IDENTICAL setup decided legacy heals — proves the
+	// mode gate (not some other gate) is what blocked H8.
+	{
+		const { attach, sent, clock } = makeAttach();
+		await primeRuntime(attach);
+		await write(attach, desyncFrame);
+		attach.finishAttachTransition();
+		(attach as unknown as { attachMode: string }).attachMode = "legacy";
+		clock.now += 10_000;
+		attach.checkDesync();
+		out.legacyDecidedHeals = attach.jiggleRetry.getState().healCount === 1 && resizes(sent) === 1;
+	}
+
 	console.log(JSON.stringify(out));
 	const allOk = Object.values(out).every(Boolean);
 	if (!allOk) process.exitCode = 1;
