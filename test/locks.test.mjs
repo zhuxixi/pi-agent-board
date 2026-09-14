@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, renameSync as realRenameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { acquireOwnedViewLock, classifyLeaseOwner, defaultLocksFs, releaseWithToken, tryAcquireOwnedViewLock, withFileLockSync, withViewLockSync } from "../src/core/locks.mjs";
+import { acquireOwnedViewLock, classifyLeaseOwner, defaultLocksFs, isPublishConflictCode, releaseWithToken, tryAcquireOwnedViewLock, withFileLockSync, withViewLockSync } from "../src/core/locks.mjs";
 import * as P from "../src/core/paths.mjs";
 
 function freshRoot() {
@@ -339,6 +339,99 @@ test("fresh identity-less lock is still blocked (short-hold contract preserved)"
 		const blocked = tryAcquireOwnedViewLock(root, "v1", "host-meta", { identity: { pid: process.pid, startToken: "me" } });
 		assert.equal(blocked.acquired, false);
 		assert.equal(blocked.reason, "blocked");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+// ---- publish-rename conflict codes (issue #114) -----------------------------
+
+test("isPublishConflictCode: rename conflict codes including Windows EPERM", () => {
+	assert.equal(isPublishConflictCode("EEXIST"), true);
+	assert.equal(isPublishConflictCode("ENOTEMPTY"), true, "POSIX rename onto an existing dir");
+	assert.equal(isPublishConflictCode("EPERM"), true, "Windows rename onto an existing dir (errno -4048)");
+	assert.equal(isPublishConflictCode("ENOENT"), false);
+	assert.equal(isPublishConflictCode("EACCES"), false);
+	assert.equal(isPublishConflictCode(undefined), false);
+	assert.equal(isPublishConflictCode(null), false);
+});
+
+/** Windows-style publish fs: renaming onto an existing lock path throws EPERM
+ *  (errno -4048) instead of POSIX's ENOTEMPTY; all other ops are real. */
+function windowsPublishFs(lockPath) {
+	const fs = {
+		...LOCK_FS,
+		renameSync: (from, to, ...rest) => {
+			if (String(to) === lockPath && fs.existsSync(to)) {
+				const e = new Error("EPERM: operation not permitted, rename");
+				e.code = "EPERM";
+				throw e;
+			}
+			return realRenameSync(from, to, ...rest);
+		},
+	};
+	return fs;
+}
+
+const ME = { pid: process.pid, startToken: "me" };
+const DEAD = { pid: 99999999, startToken: "dead" };
+
+test("EPERM publish contention: dead owner with full identity is reclaimed", () => {
+	const root = freshRoot();
+	try {
+		const lockPath = P.viewLockPath(root, "v1", "coordinator");
+		mkdirSync(lockPath, { recursive: true });
+		writeFileSync(join(lockPath, "owner.json"), JSON.stringify({ token: "t", pid: DEAD.pid, identity: DEAD, startedAt: Date.now() }));
+		const got = tryAcquireOwnedViewLock(root, "v1", "coordinator", { identity: ME, fs: windowsPublishFs(lockPath) });
+		assert.equal(got.acquired, true, "EPERM contention must reach reclaimOrBlock");
+		assert.equal(got.lease.isOwner(), true);
+		assert.equal(got.lease.release(), true, "the reclaimed lease must be the holder's to release");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("EPERM publish contention: stale identity-less owner (Windows startToken:null) is reclaimed", () => {
+	const root = freshRoot();
+	try {
+		const lockPath = P.viewLockPath(root, "v1", "coordinator");
+		mkdirSync(lockPath, { recursive: true });
+		writeFileSync(join(lockPath, "owner.json"), JSON.stringify({
+			token: "t", pid: DEAD.pid,
+			identity: { pid: DEAD.pid, startToken: null },
+			startedAt: Date.now() - 10 * 60_000,
+		}));
+		const got = tryAcquireOwnedViewLock(root, "v1", "coordinator", { identity: ME, fs: windowsPublishFs(lockPath) });
+		assert.equal(got.acquired, true, "issue #112 orphan reclaim must be reachable through EPERM contention");
+		assert.equal(got.lease.release(), true, "the reclaimed lease must be the holder's to release");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("EPERM publish contention: live owner stays busy (no steal)", () => {
+	const root = freshRoot();
+	try {
+		const lockPath = P.viewLockPath(root, "v1", "coordinator");
+		mkdirSync(lockPath, { recursive: true });
+		writeFileSync(join(lockPath, "owner.json"), JSON.stringify({ token: "t", pid: process.pid, identity: { pid: process.pid, startToken: "live" }, startedAt: Date.now() }));
+		const got = tryAcquireOwnedViewLock(root, "v1", "coordinator", { identity: ME, fs: windowsPublishFs(lockPath) });
+		assert.equal(got.acquired, false);
+		assert.equal(got.reason, "busy");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("EPERM publish contention: fresh identity-less owner stays blocked", () => {
+	const root = freshRoot();
+	try {
+		const lockPath = P.viewLockPath(root, "v1", "coordinator");
+		mkdirSync(lockPath, { recursive: true });
+		writeFileSync(join(lockPath, "owner.json"), JSON.stringify({ token: "t", pid: DEAD.pid, identity: null, startedAt: Date.now() }));
+		const got = tryAcquireOwnedViewLock(root, "v1", "coordinator", { identity: ME, fs: windowsPublishFs(lockPath) });
+		assert.equal(got.acquired, false);
+		assert.equal(got.reason, "blocked");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

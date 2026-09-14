@@ -5,7 +5,7 @@
  * ensure/spawn path (mirrors the state-coordinator integration fixture).
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -183,6 +183,35 @@ test("ensureCoordinator spawns the real coordinator; sendStateCommand happy path
 	assert.equal(state.semanticState, "completed");
 	assert.equal(state.autoState, null);
 	assert.ok(state.materializedRevision >= 1);
+});
+
+test("ensureCoordinator reclaims a stale identity-less orphan lease (issue #114)", async (t) => {
+	const root = freshRoot();
+	t.after(async () => {
+		await cleanupRoot(root);
+	});
+
+	// Residue of a killed coordinator on a platform without startToken (Windows):
+	// dead pid, identity-less, past the 5min orphan age.
+	const lockPath = P.viewLockPath(root, "_coordinator", "state-coordinator");
+	mkdirSync(lockPath, { recursive: true });
+	writeFileSync(join(lockPath, "owner.json"), JSON.stringify({
+		token: "orphan-lease",
+		pid: 99999999,
+		identity: { pid: 99999999, startToken: null },
+		startedAt: Date.now() - 10 * 60_000,
+	}), "utf8");
+
+	const ensured = await ensureCoordinator(root, { runnerScript: COORDINATOR_SCRIPT });
+	assert.equal(ensured.ok, true, "the orphan lease must be reclaimed, not block startup");
+	assert.match(ensured.instanceId, /^[0-9a-f]+$/);
+	track(ensured.pid);
+
+	// On-disk proof of takeover: the planted orphan record is gone, replaced by
+	// the live coordinator's own token and pid.
+	const owner = JSON.parse(readFileSync(join(lockPath, "owner.json"), "utf8"));
+	assert.notEqual(owner.token, "orphan-lease", "the orphan token must no longer own the lock");
+	assert.equal(owner.pid, ensured.pid, "the lock must now be owned by the spawned coordinator pid");
 });
 
 test("two parallel ensureCoordinator calls converge on one owner; both clients get pongs", async (t) => {
@@ -366,6 +395,47 @@ function track(pid) {
 	if (pid) spawnedPids.add(pid);
 }
 
+/**
+ * Poll (bounded) until every pid is really gone. `process.kill(pid, 0)` throws
+ * ESRCH once the process exited, so a throw means "gone".
+ * @param {number[]} pids @param {number} timeoutMs
+ */
+async function waitForPidsGone(pids, timeoutMs = 3000) {
+	const deadline = Date.now() + timeoutMs;
+	let alive = [...pids];
+	while (alive.length > 0 && Date.now() < deadline) {
+		alive = alive.filter((pid) => {
+			try {
+				process.kill(pid, 0);
+				return true;
+			} catch {
+				return false;
+			}
+		});
+		if (alive.length > 0) await new Promise((r) => setTimeout(r, 50));
+	}
+}
+
+/**
+ * Remove a temp tree, retrying the Windows handle-release races: a coordinator
+ * spawned with cwd = the temp root keeps that directory handle for a moment
+ * after it dies, so an immediate rmSync fails with EPERM/EBUSY. Anything else
+ * (and the last attempt) throws.
+ * @param {string} target @param {number} attempts
+ */
+async function rmTreeWithRetry(target, attempts = 20) {
+	for (let attempt = 0; ; attempt++) {
+		try {
+			rmSync(target, { recursive: true, force: true });
+			return;
+		} catch (err) {
+			const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+			if ((code !== "EPERM" && code !== "EBUSY") || attempt >= attempts - 1) throw err;
+			await new Promise((r) => setTimeout(r, 100));
+		}
+	}
+}
+
 async function cleanupRoot(root) {
 	for (const pid of spawnedPids) {
 		try {
@@ -385,13 +455,15 @@ async function cleanupRoot(root) {
 		}
 		if (spawnedPids.size > 0) await new Promise((r) => setTimeout(r, 50));
 	}
-	for (const pid of spawnedPids) {
+	const stubborn = [...spawnedPids];
+	for (const pid of stubborn) {
 		try {
 			process.kill(pid, "SIGKILL");
 		} catch {
 			// gone already — fine
 		}
 	}
+	await waitForPidsGone(stubborn);
 	spawnedPids.clear();
-	rmSync(root, { recursive: true, force: true });
+	await rmTreeWithRetry(root);
 }

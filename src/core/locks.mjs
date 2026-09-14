@@ -196,6 +196,23 @@ export function tryAcquireOwnedViewLock(root, viewId, name, opts = {}) {
 }
 
 /**
+ * Whether a publish-rename failure means "the lock path already exists"
+ * (contention) rather than a genuine filesystem error.
+ *
+ * POSIX reports EEXIST/ENOTEMPTY when renaming a directory onto an existing
+ * one; Windows reports EPERM (errno -4048) for the same situation — this op's
+ * platform equivalent of EEXIST (issue #114: a crashed owner's lease could
+ * never be reclaimed because EPERM was rethrown before reclaimOrBlock).
+ * Routing a genuine permission error here stays safe: reclaimability is still
+ * decided solely by `classifyLeaseOwner`, so it resolves `blocked`/`busy`.
+ * @param {string|undefined|null} code
+ * @returns {boolean}
+ */
+export function isPublishConflictCode(code) {
+	return code === "EEXIST" || code === "ENOTEMPTY" || code === "EPERM";
+}
+
+/**
  * Single-shot acquire round: publish a complete candidate lock (owner.json
  * written BEFORE the lock path exists) via atomic rename, and on contention
  * either reclaim a provably-dead owner's lock via quarantine or report.
@@ -225,8 +242,8 @@ function attemptAcquireLease(lockPath, opts) {
 			return makeLease(lockPath, token, fs, now);
 		} catch (err) {
 			try { fs.rmSync(candidate, { recursive: true, force: true }); } catch { /* best effort */ }
-			const code = err && err.code;
-			if (code !== "EEXIST" && code !== "ENOTEMPTY") throw err;
+			const code = /** @type {NodeJS.ErrnoException|undefined} */ (err)?.code;
+			if (!isPublishConflictCode(code)) throw err;
 			const verdict = reclaimOrBlock(lockPath, token, fs, isProcessDead, now);
 			if (verdict !== true) return verdict;
 			// Reclaimed a dead owner's lock — retry the publish on the next round.
