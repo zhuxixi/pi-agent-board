@@ -271,6 +271,29 @@ test("live gap downgrades the socket exactly once, further output ignored", () =
 	assert.equal(messages.filter((m) => m.type === "resnapshot_required").length, 1, "exactly one marker");
 });
 
+test("subscribed() is sticky across gap downgrade (runner keeps protocol ownership)", () => {
+	const model = realModel();
+	feedOutput(model, "a"); // seq 1
+	const { sub } = subscriber(model);
+	sub.handleMessage({ type: "subscribe_terminal", sinceSeq: 0 });
+	assert.equal(sub.subscribed(), true, "subscribe_terminal marks the socket protocol-managed");
+	sub.onOutput(2, "b");
+	sub.onOutput(9, "z"); // gap → resnapshot_required, state back to idle
+	assert.equal(sub.subscribed(), true, "gap downgrade must NOT hand the socket back to legacy broadcast");
+	// Post-downgrade chunks stay ignored (re-subscription is the only way back).
+	feedOutput(model, "c");
+	sub.onOutput(10, "junk");
+	assert.equal(sub.subscribed(), true);
+});
+
+test("frameVersion-mismatch rejection still marks the socket protocol-managed", () => {
+	const model = realModel();
+	const { sub, messages } = subscriber(model);
+	sub.handleMessage({ type: "subscribe_terminal", frameVersion: 99 });
+	assert.equal(messages[0]?.code, "frame_version_mismatch");
+	assert.equal(sub.subscribed(), true, "a protocol-speaking client never falls back to the legacy stream");
+});
+
 test("non-subscribe messages are not consumed", () => {
 	const model = realModel();
 	const { sub, messages } = subscriber(model);

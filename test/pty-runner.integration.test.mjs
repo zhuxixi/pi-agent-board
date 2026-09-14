@@ -1383,3 +1383,100 @@ test("host spawn failure marks a non-fenced row failed through host_run_failed",
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
 });
+
+test("subscribe_terminal: snapshot + live continuity alongside legacy clients", async () => {
+	const root = freshRoot();
+	let runner;
+	try {
+		const meta = createView(root, { id: "v1", name: "term", cwd: process.cwd() });
+		const configPath = P.hostConfigPath(root, "v1");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "v1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" },
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		await waitFor(() => hostReady(root, "v1"));
+
+		/** @type {(socket: import("node:net").Socket) => { messages: any[] }} */
+		const listen = (socket) => {
+			let buf = "";
+			const messages = [];
+			socket.on("data", (chunk) => {
+				buf += chunk.toString();
+				const lines = buf.split("\n");
+				buf = lines.pop() ?? "";
+				for (const line of lines) if (line.trim()) messages.push(JSON.parse(line));
+			});
+			return { messages };
+		};
+
+		// Legacy client: plain hello + input, no subscribe (compat pin: its
+		// output messages keep carrying `data` after the seq field landed).
+		const legacy = createConnection(P.controlSocketPath(root, "v1"));
+		await once(legacy, "connect");
+		const legacyMessages = listen(legacy).messages;
+		send(legacy, { type: "hello" });
+		// Wait for the first child output on the legacy socket: it proves the
+		// runner has fed its canonical model, so the subscribe below cannot hit
+		// the "host starting" empty-baseline race.
+		await waitFor(() => legacyMessages.find((m) => m.type === "output" && String(m.data).includes("fake pi ready")));
+
+		// Snapshot subscriber on a second socket.
+		const sub = createConnection(P.controlSocketPath(root, "v1"));
+		await once(sub, "connect");
+		const subMessages = listen(sub).messages;
+		send(sub, { type: "subscribe_terminal" });
+
+		await waitFor(() => subMessages.find((m) => m.type === "snapshot_end"));
+		const begin = subMessages.find((m) => m.type === "snapshot_begin");
+		const frame = subMessages.find((m) => m.type === "snapshot_frame");
+		const end = subMessages.find((m) => m.type === "snapshot_end");
+		assert.equal(begin.frameVersion, 1, "snapshot_begin carries the wire frame version");
+		assert.ok(begin.snapshotSeq >= 1, "baseline output (fake pi ready) is inside the snapshot");
+		assert.ok(typeof frame.data === "string" && frame.data.includes("fake pi ready"), "frame renders the canonical viewport");
+		assert.equal(frame.frameVersion, 1);
+		assert.equal(end.nextSeq, begin.snapshotSeq + 1, "live continues exactly after the snapshot cursor");
+
+		// New output: both clients receive it; the subscriber gets gap-free seq.
+		send(legacy, { type: "input", data: "ping\r" });
+		await waitFor(() => legacyMessages.find((m) => m.type === "output" && String(m.data).includes("echo:ping")));
+		const subOutputs = subMessages.filter((m) => m.type === "output");
+		assert.ok(subOutputs.length >= 1, "subscriber receives the live chunk");
+		const subSeqs = subOutputs.map((m) => m.seq);
+		assert.deepEqual(
+			subSeqs,
+			subSeqs.map((_, i) => begin.snapshotSeq + 1 + i),
+			"subscriber seq is contiguous starting at nextSeq",
+		);
+		for (const m of legacyMessages.filter((m) => m.type === "output")) {
+			assert.equal(typeof m.data, "string", "legacy output keeps the data field (additive seq)");
+			assert.equal(typeof m.seq, "number", "legacy output gains the additive seq");
+		}
+
+		// frameVersion mismatch is rejected at the runner boundary.
+		const sub2 = createConnection(P.controlSocketPath(root, "v1"));
+		await once(sub2, "connect");
+		const sub2Messages = listen(sub2).messages;
+		send(sub2, { type: "subscribe_terminal", frameVersion: 99 });
+		await waitFor(() => sub2Messages.find((m) => m.type === "error"));
+		assert.equal(sub2Messages.find((m) => m.type === "error").code, "frame_version_mismatch");
+
+		legacy.end();
+		sub.end();
+		sub2.end();
+	} finally {
+		try { runner?.kill("SIGTERM"); } catch {}
+		await waitForExit(runner, 5000);
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});

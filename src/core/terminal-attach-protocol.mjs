@@ -20,6 +20,12 @@ import {
  *    only forwarded when `seq === lastSeq + 1`; any discontinuity downgrades
  *    the socket to `resnapshot_required` instead of stitching (spec: never
  *    recover from a partial tail).
+ *
+ * Ownership contract (runner seam): once a socket speaks `subscribe_terminal`,
+ * its output stream is owned by this state machine — the runner must exclude it
+ * from the legacy fire-and-forget output broadcast (`subscribed()` is the
+ * sticky marker for that exclusion). Delivering both streams would duplicate
+ * every chunk.
  */
 
 /**
@@ -51,6 +57,11 @@ export function createTerminalSubscription({ model, send }) {
 	/** @type {"idle" | "capturing" | "live"} */
 	let state = "idle";
 	let lastSeq = 0;
+	// Sticky protocol-ownership marker: set the moment a socket speaks
+	// subscribe_terminal, never reset (not even by gap downgrade or snapshot
+	// failure). The runner excludes subscribed sockets from the legacy output
+	// broadcast; delivery then belongs to this state machine alone.
+	let subscribed = false;
 
 	const fail = (code, extra = {}) => {
 		send({ type: "error", code, ...extra });
@@ -144,6 +155,10 @@ export function createTerminalSubscription({ model, send }) {
 	 */
 	function handleMessage(msg) {
 		if (!msg || msg.type !== "subscribe_terminal") return false;
+		// Every subscribe_terminal speaker is protocol-managed from here on,
+		// including rejected ones (frameVersion mismatch, invalid cursor): the
+		// legacy broadcast stream must never interleave with this protocol.
+		subscribed = true;
 		if (msg.frameVersion !== undefined && msg.frameVersion !== TERMINAL_FRAME_VERSION) {
 			fail("frame_version_mismatch", { supported: TERMINAL_FRAME_VERSION, received: msg.frameVersion });
 			return true;
@@ -195,6 +210,9 @@ export function createTerminalSubscription({ model, send }) {
 	return {
 		handleMessage,
 		onOutput,
+		/** Sticky: true once the socket sent subscribe_terminal. The runner uses
+		 *  this to keep the socket out of the legacy output broadcast. */
+		subscribed: () => subscribed,
 		/** Socket went away; the runner drops its reference. */
 		detach() {
 			state = "idle";
