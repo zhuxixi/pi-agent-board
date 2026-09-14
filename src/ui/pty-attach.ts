@@ -7,7 +7,7 @@ import type { Component, KeybindingsManager, TUI } from "@earendil-works/pi-tui"
 import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { isEditorAnchorLine, isProbablyEmptyPiInputLine, isProbablyPiInputLine, resolveEditorEmpty } from "../core/pty-input.mjs";
 import { findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
-import { createAttachOutputRenderScheduler, detectCursorDesync, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
+import { createAttachOutputRenderScheduler, detectCursorDesync, isPtyCursorHidden, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
 import { evaluateAttachReconnect, shouldEscapeAttach } from "../core/pty-attach-reconnect.mjs";
 import { installImeCursorCoalesce } from "../core/ime-cursor-coalesce.mjs";
 import { createJiggleRetryController } from "../core/pty-attach-jiggle-controller.mjs";
@@ -77,6 +77,7 @@ interface XtermLike {
 		};
 	};
 	_core?: {
+		coreService?: { isCursorHidden?: boolean };
 		_oscLinkService?: {
 			getLinkData?: (id: number) => { uri?: string } | undefined;
 			_dataByLinkId?: Map<number, { data?: { uri?: string } }>;
@@ -1137,8 +1138,9 @@ export class PtyAttachComponent implements Component {
 		// the child terminal); cursorX may equal cols (one past the last cell). Only render
 		// it when it lands inside the projected viewport.
 		const cursor = projectPtyCursor(buf, start, height);
+		const cursorHidden = isPtyCursorHidden(this.term);
 		for (let i = start; i < end; i++) {
-			out.push(lineToAnsi(buf.getLine(i), reusable, this.term, i, selection, cursor));
+			out.push(lineToAnsi(buf.getLine(i), reusable, this.term, i, selection, cursor, cursorHidden));
 		}
 		if (out.length === 0) out.push("Waiting for PTY output…");
 		return { lines: out.slice(-height), cursor };
@@ -1270,12 +1272,14 @@ function lineToAnsi(
 	lineIndex: number,
 	selection: NormalizedSelection | null,
 	cursor: { row: number; col: number } | null,
+	cursorHidden = false,
 ): string {
 	const isCursorRow = cursor !== null && cursor.row === lineIndex;
 	let last = -1;
 	if (!line) {
-		// No buffer line: show the cursor as an inverse block at the start of the line.
-		if (isCursorRow && cursor!.col >= 0) return CURSOR_MARKER + "\x1b[7m \x1b[0m";
+		// No buffer line: keep the marker (IME positioning) and paint the inverse block
+		// only while the child reports a visible cursor.
+		if (isCursorRow && cursor!.col >= 0) return cursorHidden ? CURSOR_MARKER : CURSOR_MARKER + "\x1b[7m \x1b[0m";
 		return "";
 	}
 	for (let x = 0; x < line.length; x++) {
@@ -1284,9 +1288,8 @@ function lineToAnsi(
 		if (cell.getChars()) last = x;
 	}
 	if (last < 0) {
-		// Empty line: show the cursor as a full inverse block at the start of the line
-		// (or as an inverse space when it sits past the end of the content).
-		if (isCursorRow && cursor!.col >= 0) return CURSOR_MARKER + "\x1b[7m \x1b[0m";
+		// Empty line: same split as above.
+		if (isCursorRow && cursor!.col >= 0) return cursorHidden ? CURSOR_MARKER : CURSOR_MARKER + "\x1b[7m \x1b[0m";
 		return "";
 	}
 
@@ -1303,24 +1306,27 @@ function lineToAnsi(
 			prevUri = uri;
 		}
 		const selected = pointWithinSelection(lineIndex, x, selection);
-		// The PTY cursor renders as a solid inverse block so it stays visible even though
-		// the outer TUI hides the hardware cursor by default. The zero-width CURSOR_MARKER
-		// (stripped by the TUI) additionally positions the hardware cursor for IME and
-		// PI_HARDWARE_CURSOR=1 terminals; truncateToWidth keeps or drops it with the cell.
+		// Position and visibility are separate concerns: the zero-width CURSOR_MARKER
+		// (stripped by the TUI) always marks where the hardware cursor belongs for IME
+		// and PI_HARDWARE_CURSOR=1 terminals, while the solid inverse block is only
+		// painted when the child terminal itself reports the cursor as visible. pi-tui
+		// parks a hidden cursor at a diff-write byproduct position, so painting it
+		// unconditionally showed a ghost block (issue #102).
 		const isCursor = isCursorRow && x === cursor!.col;
 		if (isCursor) out += CURSOR_MARKER;
-		const key = attrKey(cell, selected, isCursor);
+		const paintCursor = isCursor && !cursorHidden;
+		const key = attrKey(cell, selected, paintCursor);
 		if (key !== prevAttr) {
-			out += attrsToAnsi(cell, selected, isCursor);
+			out += attrsToAnsi(cell, selected, paintCursor);
 			prevAttr = key;
 		}
 		out += cell.getChars() || " ";
 	}
 	if (prevUri) out += closeOsc8();
 	// Cursor past the end of the line content (cursorX == cols or beyond last cell):
-	// append an inverse space so the position is still visible.
+	// append an inverse space so a VISIBLE position shows, keeping the marker either way.
 	if (isCursorRow && cursor!.col > last) {
-		out += CURSOR_MARKER + "\x1b[7m \x1b[0m";
+		out += CURSOR_MARKER + (cursorHidden ? "" : "\x1b[7m \x1b[0m");
 	}
 	return out + "\x1b[0m";
 }
