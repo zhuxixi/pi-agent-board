@@ -11,6 +11,9 @@
 //   H6. recent output (within DESYNC_QUIET_MS) → no heal.
 //   H7. heal loop: child redraws with clear + cursor back on the fake cursor
 //       → restore + no further heal.
+//   H8 (issue #106): terminal state reached before ANY TUI frame (shell clear,
+//       H4 shape); a first frame arriving later must still open gate 2 →
+//       exactly one heal.
 // Timing/state facts the harness encodes (verified against the component and
 // controller source):
 //   - checkDesync gate 7 needs this.connected — injected true (no real socket).
@@ -96,6 +99,8 @@ function resizes(sent: Array<Record<string, unknown>>): number {
 }
 
 async function main(): Promise<void> {
+	// Keys mirror the H scenarios above; every field is asserted by
+	// test/pty-attach-desync-heal.test.mjs.
 	const out: Record<string, boolean> = {};
 
 	// H1: healthy idle — no heal
@@ -171,6 +176,20 @@ async function main(): Promise<void> {
 		clock.now += 100; // way less than DESYNC_QUIET_MS
 		attach.checkDesync();
 		out.recentOutputNoHeal = attach.jiggleRetry.getState().healCount === 0 && resizes(sent) === 0;
+	}
+
+	// H8 (issue #106): the chain reached a terminal state before ANY TUI frame
+	// (shell clear, H4 shape); a first frame arriving later must still open gate 2
+	// and let checkDesync() heal exactly once.
+	{
+		const { attach, sent, clock } = makeAttach();
+		await write(attach, CLEAR + "plain shell output, no TUI frame"); // terminal, no frame
+		await write(attach, `${ESC}[?2026h`); // the TUI boots later
+		await write(attach, desyncFrame);
+		attach.finishAttachTransition();
+		clock.now += 10_000; // all other gates open — only gate 2 could block the heal
+		attach.checkDesync();
+		out.lateFrameHeals = attach.jiggleRetry.getState().healCount === 1 && resizes(sent) === 1;
 	}
 
 	// H7: heal loop closes — child clears + parks cursor on the fake cursor again
