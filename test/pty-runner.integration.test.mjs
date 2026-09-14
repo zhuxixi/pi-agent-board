@@ -23,7 +23,10 @@ function freshRoot() {
 // Under full-suite parallel load (A11 perf file burns CPU in parallel), real
 // PTY spawn + first output can legitimately exceed 3s; genuine loss still
 // fails, only later.
-async function waitFor(predicate, timeoutMs = 10000) {
+// 15s ceiling: spawn+first-output under parallel suite load measured past 10s
+// on dev hardware (phase 4 added test files; phase 3 residual note anticipated
+// this). Still a hard failure on real breakage — only failure latency grows.
+async function waitFor(predicate, timeoutMs = 15000) {
 	const start = Date.now();
 	while (Date.now() - start < timeoutMs) {
 		const value = predicate();
