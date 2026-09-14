@@ -208,7 +208,7 @@ export function createJiggleRetryController(deps) {
 	 * Feed one socket output chunk. A clear wins over the re-arm when both
 	 * appear in one chunk — but frame cognition is still learned from that
 	 * chunk: a clear only proves the child redraws, not that it isn't a TUI
-	 * (screen-log replay bundles historical frames with clears, issue #11).
+	 * (a live fullRender chunk bundles a frame start with its clear, issue #11).
 	 * The first TUI frame restores the held size (the
 	 * child is now rendering and will fullRender on the width delta) and
 	 * does NOT reschedule the chain; if G1 already released the hold before
