@@ -8,7 +8,7 @@ import { atomicWriteJson, ensureDir, readJson } from "./atomic.mjs";
 import { sameHostOwner } from "./host-coordination.mjs";
 import { tryAcquireOwnedViewLock } from "./locks.mjs";
 import * as P from "./paths.mjs";
-import { isAlive } from "./pid.mjs";
+import { currentProcessIdentity, isAlive } from "./pid.mjs";
 import { readCodeRefs, summarizeCodeRefs } from "./code-refs-store.mjs";
 import { readDiagnosticSummary } from "./diagnostics.mjs";
 import { readEvidence, summarizeEvidence } from "./evidence.mjs";
@@ -142,6 +142,15 @@ function hostClaimActive(host) {
 }
 
 /**
+ * Identity stamped on host-meta acquisitions so a holder that dies mid-hold
+ * leaves a reclaimable record (issue #112).
+ * @returns {{pid: number, startToken: string|null}}
+ */
+function hostMetaIdentity() {
+	return currentProcessIdentity();
+}
+
+/**
  * Atomically create the provisional `starting` host record for a new instance.
  * The ONLY entry point allowed to move "no claim / reclaimable terminal state"
  * into `starting` (issue #70). Refuses when an active claim exists or the
@@ -149,12 +158,14 @@ function hostClaimActive(host) {
  * ready/stop fields so no stale owner data survives the handover.
  * @param {string} root
  * @param {Partial<HostStatus> & { viewId: string, instanceId: string }} provisionalHost
- * @param {{ heldStartLease?: unknown }} [opts] reserved for host-start lease nesting;
- *   host-meta is always acquired independently here (short critical section).
+ * @param {{ heldStartLease?: unknown, lockImpl?: typeof tryAcquireOwnedViewLock }} [opts]
+ *   heldStartLease is reserved for host-start lease nesting; lockImpl injects
+ *   the host-meta acquisition for deterministic contention/identity tests.
  * @returns {{ claimed: boolean, host: HostStatus|null }}
  */
 export function claimHost(root, provisionalHost, opts = {}) {
-	const lock = tryAcquireOwnedViewLock(root, provisionalHost.viewId, "host-meta");
+	const acquireHostMeta = opts.lockImpl ?? tryAcquireOwnedViewLock;
+	const lock = acquireHostMeta(root, provisionalHost.viewId, "host-meta", { identity: hostMetaIdentity() });
 	if (!lock.acquired) return { claimed: false, host: null };
 	try {
 		const existing = readHost(root, provisionalHost.viewId);
@@ -244,7 +255,7 @@ export function updateOwnedHost(root, viewId, expectedInstanceId, mutate, opts =
 	const acquireHostMeta = opts.lockImpl ?? tryAcquireOwnedViewLock;
 	let lock;
 	for (let attempt = 0; ; attempt++) {
-		lock = acquireHostMeta(root, viewId, "host-meta");
+		lock = acquireHostMeta(root, viewId, "host-meta", { identity: hostMetaIdentity() });
 		if (lock.acquired) break;
 		// busy and blocked are both millisecond-scale holds for host-meta;
 		// neither is ownership information — only the fenced read below is.

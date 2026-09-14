@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import * as P from "../src/core/paths.mjs";
 import { acquireOwnedViewLock, tryAcquireOwnedViewLock } from "../src/core/locks.mjs";
+import { captureStartToken } from "../src/core/pid.mjs";
 import {
 	claimHost,
 	createView,
@@ -333,6 +334,48 @@ test("updateOwnedHost retries blocked contention the same bounded amount (identi
 		);
 		assert.equal(res.updated, true, "write lands after identity-less contention clears");
 		assert.equal(lock.calls.length, 3, "two blocked attempts then a real acquire");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+// ---- host-meta lease identity (issue #112) ---------------------------------
+
+test("updateOwnedHost stamps a full identity on the held host-meta lease", () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeHost(root, hostFixture(root, "v1"));
+		let held = null;
+		const res = updateOwnedHost(root, "v1", "inst-b", (host) => {
+			// mutate runs inside the host-meta critical section: the lock file on
+			// disk is the very lease this call holds.
+			held = JSON.parse(readFileSync(join(P.viewLockPath(root, "v1", "host-meta"), "owner.json"), "utf8"));
+			return { ...host, state: "stopping", stopRequestedAt: Date.now() };
+		});
+		assert.equal(res.updated, true);
+		assert.equal(held?.identity?.pid, process.pid);
+		assert.equal(held?.identity?.startToken, captureStartToken(process.pid));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("claimHost acquires host-meta through the injected impl with a full identity", () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const seen = [];
+		const lockImpl = (r, viewId, name, opts) => {
+			seen.push({ name, opts });
+			return tryAcquireOwnedViewLock(r, viewId, name, opts);
+		};
+		const claimed = claimHost(root, provisionalFixture(root, "v1"), { lockImpl });
+		assert.equal(claimed.claimed, true);
+		assert.equal(seen.length, 1);
+		assert.equal(seen[0].name, "host-meta");
+		assert.equal(seen[0].opts?.identity?.pid, process.pid);
+		assert.equal(seen[0].opts?.identity?.startToken, captureStartToken(process.pid));
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
