@@ -256,12 +256,11 @@ export function claimHost(root, provisionalHost, opts = {}) {
  * few milliseconds, but a one-shot acquire can land inside that window and
  * return busy — a revoke or recovery write that silently no-ops is a real
  * reliability bug, not just a test race. Both `busy` (live owner) and
- * `blocked` (identity-less short hold — updateOwnedHost itself acquires
- * host-meta without a reclaimable identity, so concurrent fenced writes look
- * blocked to each other) are transient here: retry a few times with a short
- * synchronous sleep before giving up. A genuinely orphaned host-meta lock
- * (holder SIGKILLed mid-hold) survives the window and surfaces as retryable
- * not-updated — never as ownership loss.
+ * `blocked` (identity-less holder) are transient here: retry a few times with
+ * a short synchronous sleep before giving up, and record a warn diagnostic on
+ * a sustained episode (issue #112). Acquisitions stamp a full process identity
+ * (issue #112), so a holder that dies mid-hold leaves a reclaimable record;
+ * legacy identity-less residue is reclaimed past the orphan age gate.
  */
 const UPDATE_LOCK_BUSY_ATTEMPTS = 3;
 const UPDATE_LOCK_BUSY_SLEEP_MS = 20;
