@@ -4,8 +4,9 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, utimesSync, w
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { once } from "node:events";
-import { test } from "node:test";
+import { test, beforeEach } from "node:test";
 import { createService, shouldProbePtySupport } from "../src/runtime/service.mjs";
+import { foregroundPreviewCache } from "../src/core/foreground-preview-cache.mjs";
 import { readCodeRefs } from "../src/core/code-refs-store.mjs";
 import { diagnoseNodePtyFailure } from "../src/core/pty-support.mjs";
 import { readJournal } from "../src/core/coordinator-journal.mjs";
@@ -81,6 +82,38 @@ async function startTrackedCoordinator(root) {
 			setEnv("AGENT_BOARD_ROOT", prev.boardRoot);
 			setEnv("PI_CODING_AGENT_DIR", prev.piDir);
 		},
+	};
+}
+
+/** Reset the module-level preview cache between tests (issue #113). */
+beforeEach(() => {
+	foregroundPreviewCache.clear();
+});
+
+/**
+ * Issue 113 fixture: a sendStateCommand stand-in that materializes
+ * sync_foreground projections after a delay — the coordinator's fsync +
+ * socket latency in miniature. Commands land in arrival order, exactly like
+ * the real single writer. Non-sync kinds resolve a decided rejection.
+ */
+function delayedMaterializingSendStateCommand(root, { delayMs = 20 } = {}) {
+	const applied = [];
+	return {
+		applied,
+		send: (targetRoot, command) =>
+			new Promise((resolve) => {
+				if (command.kind !== "sync_foreground") {
+					resolve({ status: "rejected", reason: "no_change", materializedRevision: 0 });
+					return;
+				}
+				setTimeout(() => {
+					const projection = command.payload?.projection ?? {};
+					const current = readState(root, command.viewId) ?? {};
+					writeState(root, { ...current, ...projection });
+					applied.push(command);
+					resolve({ status: "applied", reason: command.kind, materializedRevision: applied.length });
+				}, delayMs);
+			}),
 	};
 }
 
@@ -1001,6 +1034,37 @@ test("syncForegroundEvent auto-completes foreground turn when auto-done flag is 
 	} finally {
 		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
 		delete process.env.AGENT_BOARD_AUTO_STATE_NO_DONE;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("issue 113: agent_end rebuild cannot clobber the in-flight message_end preview", async () => {
+	const root = freshRoot();
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", undefined);
+	try {
+		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const fake = delayedMaterializingSendStateCommand(root, { delayMs: 20 });
+		const text = "All done with the long task.";
+		// Mirror production: serviceFor() builds a fresh service per event, so the
+		// cache must survive across instances.
+		await service(root, { sendStateCommand: fake.send }).syncForegroundEvent(meta.sessionFile, { type: "agent_start" });
+		await service(root, { sendStateCommand: fake.send }).syncForegroundEvent(meta.sessionFile, {
+			type: "message_end",
+			message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text }] },
+		});
+		// agent_end reads state.json synchronously while the message_end write is
+		// still delayed — the exact 0.7.0 race window.
+		await service(root, { sendStateCommand: fake.send }).syncForegroundEvent(meta.sessionFile, { type: "agent_end" });
+
+		const final = await waitFor(() => {
+			const s = readState(root, "v1");
+			return s?.semanticState === "idle" && s?.latestAssistantPreview === text ? s : null;
+		}, 3000);
+		assert.ok(final, "the last materialized projection keeps the assistant preview");
+		assert.equal(final.summary, text);
+		assert.equal(final.lastAgentActivityAt != null, true);
+	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
 		rmSync(root, { recursive: true, force: true });
 	}
 });

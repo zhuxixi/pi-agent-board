@@ -16,6 +16,7 @@ import { clearDiagnostics, appendDiagnostic, tailDiagnostics } from "../core/dia
 import { emptyEvidenceSnapshot, finalizeEvidence, readEvidence, reduceEvidence, summarizeEvidence, writeEvidence } from "../core/evidence.mjs";
 import { updateCodeRefsFromEvidence } from "../core/code-refs-store.mjs";
 import { claimNextFollowUp, completeFollowUp, enqueueFollowUp, readFollowUpQueue, releaseFollowUp, summarizeFollowUpQueue, clearQueuedFollowUps, removeLastFollowUp } from "../core/follow-up-queue.mjs";
+import { foregroundPreviewCache } from "../core/foreground-preview-cache.mjs";
 import { approvePlan as approvePlanState, markExecutingApprovedPlan, readSteering, recordPlanReady, requestPlan as requestPlanState, requestPlanChanges as requestPlanChangesState, summarizeSteering } from "../core/steering.mjs";
 import { buildApprovePlanPrompt, buildPlanChangesPrompt, buildPlanRequestPrompt } from "../core/steering-prompts.mjs";
 import { isGenericStatusText } from "../core/derive.mjs";
@@ -750,6 +751,10 @@ export function createService(opts) {
 		// decision kind force-nulls it too; the caller-side null keeps the
 		// coordinator_disabled direct write at legacy parity.)
 		projected.currentRunId = null;
+		// Issue #113: remember the freshest known foreground fields before the
+		// coordinator round trip — syncRowEvent rebuilds from disk on the next
+		// event and must not read an older projection than this one.
+		foregroundPreviewCache.remember(row.meta.id, projected);
 		if (coordinatorDisabled()) {
 			writeState(root, projected);
 			return;
@@ -1406,6 +1411,11 @@ export function createService(opts) {
 	async function syncRowEvent(row, event) {
 		const now = Date.now();
 		const status = statusFromRow(row);
+		// Issue #113: the previous event's projection may still be in flight (the
+		// coordinator journals + fsyncs before materializing), so a disk rebuild
+		// can lag the freshest known preview/activity. Restore read-your-writes
+		// before any event branch touches the status.
+		foregroundPreviewCache.backfill(row.meta.id, status);
 		let evidence = readEvidence(root, row.meta.id);
 		if (!evidence.viewId) evidence = emptyEvidenceSnapshot({ viewId: row.meta.id, source: "hosted" });
 		try {
