@@ -30,6 +30,11 @@ test(
 		const out = execFileSync(process.execPath, ["--experimental-transform-types", E2E_SCRIPT], {
 			encoding: "utf8",
 			timeout: 55_000,
+			// This suite pins the LEGACY screen-healing machinery (shrink-and-hold
+			// + desync probe). The phase-4 snapshot protocol attaches resize-free
+			// and never arms the jiggle, so the component must be forced down the
+			// legacy path for these guarantees to stay exercised (issue #91 ph4).
+			env: { ...process.env, AGENT_BOARD_TERMINAL_SNAPSHOT: "0" },
 		});
 		const parsed = parseResultLine(out);
 		assert.equal(parsed.healedNever, true, "healCount must stay 0 on a healthy idle session");
