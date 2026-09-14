@@ -1107,6 +1107,36 @@ test("issue 113: archiveByState evicts preview cache entries for archived rows",
 	}
 });
 
+test("issue 113: real coordinator keeps the assistant preview through a foreground turn", async () => {
+	const root = freshRoot();
+	const { coord, restore } = await startTrackedCoordinator(root);
+	try {
+		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const text = "Coordinator round trip keeps this preview.";
+		await service(root).syncForegroundEvent(meta.sessionFile, { type: "agent_start" });
+		await service(root).syncForegroundEvent(meta.sessionFile, {
+			type: "message_end",
+			message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text }] },
+		});
+		await service(root).syncForegroundEvent(meta.sessionFile, { type: "agent_end" });
+
+		const final = await waitFor(() => {
+			const s = readState(root, "v1");
+			return s?.latestAssistantPreview === text ? s : null;
+		});
+		assert.ok(final, "preview survives the real coordinator round trip");
+		assert.notEqual(final.summary, "Needs instructions");
+		assert.equal(final.lastAgentActivityAt != null, true);
+		// Let in-flight fire-and-forget beats settle against the tracked
+		// coordinator before kill (see the input-mirror test above).
+		await new Promise((resolve) => setTimeout(resolve, 150));
+	} finally {
+		await coord.kill();
+		restore();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("late foreground agent_end after a manual completion is fenced (#46 class, issue #91)", async () => {
 	const root = freshRoot();
 	// The fence is coordinator-independent (a plain disk read); coordinator off
