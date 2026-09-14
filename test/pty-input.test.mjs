@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isProbablyEmptyPiInputLine, isProbablyPiInputLine, resolveEditorEmpty } from "../src/core/pty-input.mjs";
+import { isEditorAnchorLine, isProbablyEmptyPiInputLine, isProbablyPiInputLine, resolveEditorEmpty } from "../src/core/pty-input.mjs";
 
 test("isProbablyEmptyPiInputLine accepts empty Pi prompt lines", () => {
 	assert.equal(isProbablyEmptyPiInputLine("› "), true);
@@ -34,4 +34,20 @@ test("resolveEditorEmpty prefers the pushed editor state, falls back on null/und
 	assert.equal(resolveEditorEmpty(null, true), true);
 	assert.equal(resolveEditorEmpty(null, false), false);
 	assert.equal(resolveEditorEmpty(undefined, true), true);
+});
+
+test("isEditorAnchorLine accepts only editor-shaped inverse lines (issue #103)", () => {
+	// pi-tui renders an empty editor as one inverse caret cell on an otherwise blank line.
+	assert.equal(isEditorAnchorLine({ text: "", inverseCellCount: 1 }), true);
+	assert.equal(isEditorAnchorLine({ text: "   ", inverseCellCount: 1 }), true);
+	// Older pi variants render a prompt glyph.
+	assert.equal(isEditorAnchorLine({ text: "> draft", inverseCellCount: 1 }), true);
+	assert.equal(isEditorAnchorLine({ text: "  ┃ edit me", inverseCellCount: 2 }), true);
+	// Chat-area diff rows and notification bars carry inverse cells but are not editor lines.
+	assert.equal(isEditorAnchorLine({ text: "+ 65 ## R2 · #822 调研", inverseCellCount: 1 }), false);
+	assert.equal(isEditorAnchorLine({ text: " Session saved ", inverseCellCount: 12 }), false);
+	assert.equal(isEditorAnchorLine({ text: "real draft ", inverseCellCount: 1 }), false);
+	// No inverse cell at all can never anchor the editor line.
+	assert.equal(isEditorAnchorLine({ text: "", inverseCellCount: 0 }), false);
+	assert.equal(isEditorAnchorLine({ text: "> draft", inverseCellCount: 0 }), false);
 });

@@ -34,6 +34,25 @@ export function isProbablyPiInputLine(line) {
 }
 
 /**
+ * Whether a buffer line may be trusted as Pi's editor line (issue #103).
+ *
+ * Pi paints the editor caret as a single inverse cell and, on an empty editor,
+ * nothing else on that line; older variants prefix a prompt glyph. Chat-area
+ * content is NOT distinguishable by attributes alone — diff rows and
+ * notification bars also carry inverse cells — so "the line has an inverse
+ * cell" can never be the anchor criterion by itself. A line that fails this
+ * guard is skipped and the scan continues upward; when nothing qualifies the
+ * caller escapes (detaches) rather than trapping the user (issues #48/#69/#72).
+ * @param {{ text: string, inverseCellCount: number }} line
+ * @returns {boolean}
+ */
+export function isEditorAnchorLine({ text, inverseCellCount }) {
+	if (!(inverseCellCount > 0)) return false;
+	if (inverseCellCount === 1 && isProbablyEmptyPiInputLine(text)) return true;
+	return isProbablyPiInputLine(text);
+}
+
+/**
  * Resolve the ← detach gate's emptiness signal: when the child Pi pushes its
  * authoritative editor state (boolean), it wins; when it is unknown (null/
  * undefined — child extension missing or socket never connected), fall back

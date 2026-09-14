@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { appendLine, readJson } from "../src/core/atomic.mjs";
 import { appendDiagnostic } from "../src/core/diagnostics.mjs";
 import { finalizeHostCrash } from "../src/core/host-crash.mjs";
+import { hostChildEnv } from "../src/core/host-child-env.mjs";
 import { ownsEndpoint, shouldYieldRunner } from "../src/core/host-coordination.mjs";
 import { lastVisibleLogLine } from "../src/core/heuristics.mjs";
 import { acquireOwnedViewLock } from "../src/core/locks.mjs";
@@ -26,6 +27,7 @@ import { createTerminalSubscription } from "../src/core/terminal-attach-protocol
 import { encodePromptForCliArg } from "../src/core/prompt-transport.mjs";
 import { readHost, readState, updateOwnedHost, writeHost } from "../src/core/store.mjs";
 import { sendStateCommand } from "../src/core/coordinator-client.mjs";
+import { classifyClientHello } from "../src/core/control-clients.mjs";
 import { markRowFailedDirect } from "./pty-runner-legacy.mjs";
 import { ensureNodePtySpawnHelperExecutable } from "../src/core/pty-support.mjs";
 
@@ -121,6 +123,9 @@ function legacyMain(config) {
 
 	/** @type {Set<import("node:net").Socket>} */
 	const clients = new Set();
+	/** Reporter sockets are transport, not viewers (issue #103); see ownedMain. */
+	const reporters = new Set();
+	const attachedClientCount = () => Math.max(0, clients.size - reporters.size);
 	let childPid = null;
 	let child = null;
 	let exitCode = null;
@@ -187,7 +192,7 @@ function legacyMain(config) {
 		for (const c of clients) c.write(line);
 	};
 	const update = (patch = {}) => {
-		host = { ...host, ...patch, lastSeenAt: Date.now(), attachedClients: clients.size };
+		host = { ...host, ...patch, lastSeenAt: Date.now(), attachedClients: attachedClientCount() };
 		persist();
 		broadcast({ type: "status", status: host });
 	};
@@ -225,19 +230,13 @@ function legacyMain(config) {
 	if (config.tools) args.push("--tools", config.tools);
 	if (config.initialPrompt) args.push(encodePromptForCliArg(config.initialPrompt));
 
-	const env = {
-		...process.env,
-		...(config.env || {}),
-		AGENT_BOARD_ROOT: config.root,
-		AGENT_BOARD_VIEW_ID: config.viewId,
-		AGENT_BOARD_CHILD: "1",
-		AGENT_BOARD_HOSTED: "pty",
-		// Legacy names are exported too so older child extension builds still behave.
-		AGENT_VIEW_ROOT: config.root,
-		AGENT_VIEW_VIEW_ID: config.viewId,
-		AGENT_VIEW_CHILD: "1",
-		AGENT_VIEW_HOSTED: "pty",
-	};
+	const env = hostChildEnv({
+		root: config.root,
+		viewId: config.viewId,
+		socketPath,
+		baseEnv: process.env,
+		extraEnv: config.env || {},
+	});
 
 	try {
 		child = spawnInteractive(config.piCommand, args, {
@@ -301,7 +300,6 @@ function legacyMain(config) {
 	let server;
 	server = createServer((socket) => {
 		clients.add(socket);
-		update({ attachedEver: true });
 		terminalSubscriptions.set(
 			socket,
 			createTerminalSubscription({ model: terminalModel, send: (msg) => send(socket, msg) }),
@@ -316,11 +314,13 @@ function legacyMain(config) {
 		});
 		socket.on("close", () => {
 			clients.delete(socket);
+			reporters.delete(socket);
 			terminalSubscriptions.delete(socket);
 			update();
 		});
 		socket.on("error", () => {
 			clients.delete(socket);
+			reporters.delete(socket);
 			terminalSubscriptions.delete(socket);
 			update();
 		});
@@ -336,9 +336,15 @@ function legacyMain(config) {
 		let msg;
 		try { msg = JSON.parse(line); } catch { return send(socket, { type: "error", message: "invalid json" }); }
 		switch (msg.type) {
-			case "hello":
+			case "hello": {
+				// Reporter connections are permanent and read-only; probes and reporters
+				// must not flip attachedEver or raise attachedClients (issue #103).
+				const role = classifyClientHello(msg);
+				if (role === "reporter") reporters.add(socket);
+				update(role === "client" ? { attachedEver: true } : {});
 				send(socket, { type: "hello", status: host, editorEmpty });
 				break;
+			}
 			case "input":
 				if (typeof msg.data === "string") child.write(msg.data);
 				break;
@@ -447,6 +453,12 @@ async function ownedMain(config) {
 
 	/** @type {Set<import("node:net").Socket>} */
 	const clients = new Set();
+	/** Reporter sockets hold a permanent connection for the session's lifetime;
+	 *  they are transport, not viewers, so they never count as attached. */
+	const reporters = new Set();
+	/** Viewers only — the reporter must not inflate this (issue #103): the count
+	 *  gates warm-host reclamation (issue #75) and the revoke guard. */
+	const attachedClientCount = () => Math.max(0, clients.size - reporters.size);
 	let childPid = null;
 	let child = null;
 	let exitCode = null;
@@ -499,7 +511,7 @@ async function ownedMain(config) {
 	const ownedUpdate = (mutate) => {
 		const result = updateOwnedHost(config.root, config.viewId, config.instanceId, (cur) => {
 			const next = mutate(cur);
-			return { ...next, lastSeenAt: Date.now(), attachedClients: clients.size };
+			return { ...next, lastSeenAt: Date.now(), attachedClients: attachedClientCount() };
 		});
 		if (result.updated && result.host) host = result.host;
 		return result;
@@ -717,6 +729,7 @@ async function ownedMain(config) {
 			});
 			socket.on("close", () => {
 				clients.delete(socket);
+				reporters.delete(socket);
 				terminalSubscriptions.delete(socket);
 				if (probeSockets.has(socket)) return;
 				// Merge into the live record (a stale closure spread here erases a
@@ -725,6 +738,7 @@ async function ownedMain(config) {
 			});
 			socket.on("error", () => {
 				clients.delete(socket);
+				reporters.delete(socket);
 				terminalSubscriptions.delete(socket);
 				if (probeSockets.has(socket)) return;
 				ownedUpdate((cur) => ({ ...cur }));
@@ -782,19 +796,13 @@ async function ownedMain(config) {
 	if (config.thinkingLevel) args.push("--thinking", config.thinkingLevel);
 	if (config.tools) args.push("--tools", config.tools);
 	if (config.initialPrompt) args.push(encodePromptForCliArg(config.initialPrompt));
-	const env = {
-		...process.env,
-		...(config.env || {}),
-		AGENT_BOARD_ROOT: config.root,
-		AGENT_BOARD_VIEW_ID: config.viewId,
-		AGENT_BOARD_CHILD: "1",
-		AGENT_BOARD_HOSTED: "pty",
-		// Legacy names are exported too so older child extension builds still behave.
-		AGENT_VIEW_ROOT: config.root,
-		AGENT_VIEW_VIEW_ID: config.viewId,
-		AGENT_VIEW_CHILD: "1",
-		AGENT_VIEW_HOSTED: "pty",
-	};
+	const env = hostChildEnv({
+		root: config.root,
+		viewId: config.viewId,
+		socketPath: config.socketPath,
+		baseEnv: process.env,
+		extraEnv: config.env || {},
+	});
 	try {
 		child = spawnInteractive(config.piCommand, args, {
 			cwd: config.cwd,
@@ -903,18 +911,24 @@ async function ownedMain(config) {
 		let msg;
 		try { msg = JSON.parse(line); } catch { return send(socket, { type: "error", message: "invalid json" }); }
 		switch (msg.type) {
-			case "hello":
+			case "hello": {
 				// Probe handshakes (host-probe.mjs) are read-only: mark the socket so
 				// close/error skip the merge write, and never flip attachedEver
-				// (CR round-1 finding 3). Real clients record attachedEver here —
-				// deferred from connect time, which cannot distinguish them yet.
-				if (msg.clientId === "probe") {
+				// (CR round-1 finding 3). The editor reporter is read-only too but
+				// holds a permanent connection (issue #103), so it is also excluded
+				// from attachedClients. Real clients record attachedEver here.
+				const role = classifyClientHello(msg);
+				if (role === "probe") {
 					socket.markProbe?.();
+				} else if (role === "reporter") {
+					reporters.add(socket);
+					ownedUpdate((cur) => ({ ...cur })); // recompute the count without this connection
 				} else {
 					ownedUpdate((cur) => ({ ...cur, attachedEver: true }));
 				}
 				send(socket, { type: "hello", status: host, editorEmpty });
 				break;
+			}
 			case "input": {
 				if (typeof msg.data !== "string") break;
 				if (typeof msg.requestId !== "string" || !msg.requestId) {

@@ -10,6 +10,8 @@
 //   D. ← detach restores the held PTY size before a graceful socket end.
 //   E. ← detaches on an empty editor line that renders no fake cursor.
 //   F. ← detaches via the glyph fallback when a glyph line renders without a fake cursor.
+//   O1/O2/O3. Issue #103: chat-area inverse content must never veto a detach,
+//   and the un-glyphed draft line loses its fallback protection by design.
 // Run via `node --experimental-transform-types` (TS parameter properties).
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
@@ -267,6 +269,44 @@ const out: Record<string, boolean> = {};
 	(attach as unknown as { connected: boolean }).connected = true;
 	attach.handleInput("\x1b[D");
 	out.leftDetachesOnContentGlyphFallback = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	attach.dispose();
+}
+
+// O1. Issue #103: the chat area paints inverse cells too (a diff row highlights
+// its changed fragments). When the editor's fake cursor is missing from the
+// buffer, the bottom-most inverse line is that diff row — it must not be
+// trusted as the editor line, or ← gets swallowed and the user is trapped.
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat\r\n+ 65 ## \x1b[7mR2 · \x1b[27m#\x1b[7m822 调研\x1b[27m\r\n  ");
+	(attach as unknown as { connected: boolean }).connected = true;
+	attach.handleInput("\x1b[D");
+	out.leftDetachesWhenChatDiffInverseHijacksAnchor = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	attach.dispose();
+}
+
+// O2. Same hijack from a notification bar rendered entirely inverse.
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat\r\n\x1b[7m Session saved \x1b[27m\r\n  ");
+	(attach as unknown as { connected: boolean }).connected = true;
+	attach.handleInput("\x1b[D");
+	out.leftDetachesWhenNotifyBarInverseHijacksAnchor = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	attach.dispose();
+}
+
+// O3. The deliberate flip side of O1/O2, paired with scenario B: current Pi
+// renders a draft line as text plus ONE inverse caret cell with no prompt
+// glyph, which is attribute-wise identical to a diff row. The anchor guard
+// therefore refuses it and ← detaches — draft protection now comes from the
+// authoritative editor_state channel (issue #103), not from this heuristic.
+// Do NOT "fix" this by trusting any inverse line again: that re-opens the trap.
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat\r\nreal draft\x1b[7m \x1b[27m");
+	(attach as unknown as { connected: boolean }).connected = true;
+	attach.handleInput("\x1b[D");
+	out.leftDetachesOnUnglyphedDraftAfterAnchorGuard = didDetach() && sent.length === 1 && sent[0].type === "detach";
 	attach.dispose();
 }
 

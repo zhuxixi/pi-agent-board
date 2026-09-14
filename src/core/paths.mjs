@@ -72,6 +72,19 @@ export function controlSocketPathFor(platform, root, viewId) {
 /** @param {string} root @param {string} viewId */
 export const controlSocketPath = (root, viewId) => controlSocketPathFor(process.platform, root, viewId);
 /**
+ * Control endpoint a hosted child's editor-state reporter must connect to
+ * (issue #103). The host runner exports its own bound endpoint through
+ * `AGENT_BOARD_CONTROL_SOCKET`, so the reporter never has to guess the
+ * per-instance name (issue #70 made it `control.<instanceId>.sock`). Without
+ * the variable — a legacy runner, or a child spawned before the export existed
+ * — fall back to the historical per-view socket.
+ * @param {{ envSocketPath?: string|undefined, platform: "win32"|"linux"|"darwin", root: string, viewId: string }} opts
+ */
+export function resolveControlEndpointFor({ envSocketPath, platform, root, viewId }) {
+	if (typeof envSocketPath === "string" && envSocketPath.length > 0) return envSocketPath;
+	return controlSocketPathFor(platform, root, viewId);
+}
+/**
  * Per-instance control endpoint. Each new host instance binds its own socket/pipe,
  * so a superseded runner can never unlink the current owner's endpoint (issue #70).
  * win32 pipe names embed an 8-hex hash of the instanceId to stay under the 256-char limit.

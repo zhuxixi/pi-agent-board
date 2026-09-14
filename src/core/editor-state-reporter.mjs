@@ -1,7 +1,13 @@
 /** Child-Pi editor-state reporter (issue #68): polls the child Pi's editor text
  * and pushes `{type:"editor_state", empty}` over the control socket whenever the
  * text changes, so the attach surface can gate ← on the authoritative state
- * instead of render heuristics. Dependency-injected for unit testing. */
+ * instead of render heuristics. Dependency-injected for unit testing.
+ *
+ * Every (re)connect first sends `{type:"hello", clientId:"editor-reporter"}` so
+ * the runner can tell this permanent connection from an attached viewer and
+ * keep it out of `attachedClients` (issue #103). */
+
+import { EDITOR_REPORTER_CLIENT_ID } from "./control-clients.mjs";
 
 /** @typedef {{ write(jsonLine: string): void; on?(event: "close" | "error", fn: () => void): void }} SocketLike */
 
@@ -80,7 +86,15 @@ export function createEditorStateReporter({ getEditorText, connect, intervalMs =
 		s?.resume?.();
 		s?.unref?.();
 		s?.on?.("data", () => {}); // consume and discard broadcast traffic
-		s?.on?.("connect", () => { if (socket === s) { backoffMs = 1000; startPolling(); } });
+		s?.on?.("connect", () => {
+			if (socket !== s) return;
+			backoffMs = 1000;
+			// Identify before the first editor_state frame: the runner keeps reporter
+			// connections out of its attached-client count, because that count gates
+			// warm-host reclamation (issue #103).
+			send({ type: "hello", clientId: EDITOR_REPORTER_CLIENT_ID });
+			startPolling();
+		});
 		s?.on?.("close", () => { if (socket === s) scheduleReconnect(); });
 		s?.on?.("error", () => { if (socket === s) scheduleReconnect(); });
 	}

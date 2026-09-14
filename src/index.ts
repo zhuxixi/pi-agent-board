@@ -9,7 +9,7 @@ import { fileURLToPath } from "node:url";
 import { createConnection } from "node:net";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resolvePiInvocation } from "./core/invocation.mjs";
-import { controlSocketPathFor, defaultRoot } from "./core/paths.mjs";
+import { defaultRoot, resolveControlEndpointFor } from "./core/paths.mjs";
 import { listRows } from "./core/store.mjs";
 import { createService, envInt } from "./runtime/service.mjs";
 import { attachWarmHostSweeper } from "./core/warm-host-sweeper.mjs";
@@ -115,7 +115,12 @@ export default function piAgentBoard(pi: ExtensionAPI): void {
 			const { createEditorStateReporter } = await import("./core/editor-state-reporter.mjs");
 			hostedEditorReporter = createEditorStateReporter({
 				getEditorText: () => ctx.ui.getEditorText(),
-				connect: () => createConnection(controlSocketPathFor(process.platform as "win32" | "linux" | "darwin", root, hostedViewId)),
+				connect: () => createConnection(resolveControlEndpointFor({
+					envSocketPath: process.env.AGENT_BOARD_CONTROL_SOCKET,
+					platform: process.platform as "win32" | "linux" | "darwin",
+					root,
+					viewId: hostedViewId,
+				})),
 			});
 			hostedEditorReporter.start();
 		}
