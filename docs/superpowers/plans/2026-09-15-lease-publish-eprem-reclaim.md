@@ -333,3 +333,9 @@ gh issue comment 114 --repo zhuxixi/pi-agent-board --body "## 实现完成：验
 - **Spec coverage**：A1 → Task 1 Step 1；A2/A3/A4 → Task 2；A5/A6 → Task 4；A7 → Task 3 + Task 4 Step 2；U1（用户实测）→ 合并部署后由用户执行（spec §3 已标 pending 规则）。
 - **Placeholder scan**：无 TBD/TODO；所有测试与实现代码已给出完整文本。
 - **Type consistency**：`isPublishConflictCode(code)` 签名在 Task 1 定义、Task 2 测试辅助通过行为依赖；`windowsPublishFs` 仅测试内使用；`track` / `cleanupRoot` / `COORDINATOR_SCRIPT` 均为既有名字。
+
+---
+
+## Execution notes
+
+- `b29ca2d` — Task 3 fix round 1 (controller-ruled): test-fixture robustness fix in `test/coordinator-client.test.mjs` — condition-based wait for SIGKILLed pids plus bounded EPERM/EBUSY retry on root removal. It also flipped 4 pre-existing spawn-real test failures green; no plan task was rewritten.
