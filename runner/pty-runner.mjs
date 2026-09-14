@@ -21,6 +21,8 @@ import { lastVisibleLogLine } from "../src/core/heuristics.mjs";
 import { acquireOwnedViewLock } from "../src/core/locks.mjs";
 import * as P from "../src/core/paths.mjs";
 import { appendBoundedScreenLog, reconcileScreenLog } from "../src/core/screen-log.mjs";
+import { createTerminalModel, feedOutput, resizeChildAndModel } from "../src/core/terminal-model.mjs";
+import { createTerminalSubscription } from "../src/core/terminal-attach-protocol.mjs";
 import { encodePromptForCliArg } from "../src/core/prompt-transport.mjs";
 import { readHost, readState, updateOwnedHost, writeHost } from "../src/core/store.mjs";
 import { sendStateCommand } from "../src/core/coordinator-client.mjs";
@@ -156,6 +158,12 @@ function legacyMain(config) {
 		attachedClients: 0,
 		attachedEver: false,
 	};
+	// Canonical terminal model + per-socket snapshot subscriptions (issue #91
+	// phase 3). Fed from child.onData alongside the legacy screen.log/broadcast
+	// path; legacy message semantics unchanged (the `seq` field is additive).
+	const terminalModel = createTerminalModel({ cols: host.cols, rows: host.rows, scrollback: 2000 });
+	/** @type {Map<import("node:net").Socket, ReturnType<typeof createTerminalSubscription>>} */
+	const terminalSubscriptions = new Map();
 	/** Persist host.json. A transient failure (e.g. Windows rename EPERM racing a
 	 *  reader) must degrade, not kill the host: record a diagnostic and let the
 	 *  next heartbeat tick retry. Socket protocol is the attach main channel, so
@@ -254,7 +262,19 @@ function legacyMain(config) {
 
 	child.onData((data) => {
 		screenLogBytes = appendBoundedScreenLog(screenLog, data, screenLogBytes, screenLogLimits);
-		broadcast({ type: "output", data });
+		const outputSeq = feedOutput(terminalModel, data);
+		// Per-socket output delivery (issue #91 phase 3): sockets that speak the
+		// subscribe_terminal protocol get exactly-once, gap-checked chunks from
+		// their subscription state machine; every other client keeps the legacy
+		// fire-and-forget broadcast (additive seq). Both streams to one socket
+		// would duplicate every chunk.
+		const outputLine = JSON.stringify({ type: "output", seq: outputSeq, data }) + "\n";
+		for (const [socket, sub] of terminalSubscriptions) {
+			if (sub.subscribed()) sub.onOutput(outputSeq, data);
+			// Per-socket guard: a synchronous throw from a dead socket must never
+			// escape into the uncaughtException crash path (whole-branch review).
+			else { try { socket.write(outputLine); } catch { /* 'error' handler cleans up */ } }
+		}
 	});
 	child.onExit((code) => {
 		childExited = true;
@@ -282,6 +302,10 @@ function legacyMain(config) {
 	server = createServer((socket) => {
 		clients.add(socket);
 		update({ attachedEver: true });
+		terminalSubscriptions.set(
+			socket,
+			createTerminalSubscription({ model: terminalModel, send: (msg) => send(socket, msg) }),
+		);
 		socket.write(JSON.stringify({ type: "hello", status: host, editorEmpty }) + "\n");
 		let buffer = "";
 		socket.on("data", (chunk) => {
@@ -292,10 +316,12 @@ function legacyMain(config) {
 		});
 		socket.on("close", () => {
 			clients.delete(socket);
+			terminalSubscriptions.delete(socket);
 			update();
 		});
 		socket.on("error", () => {
 			clients.delete(socket);
+			terminalSubscriptions.delete(socket);
 			update();
 		});
 	});
@@ -319,12 +345,18 @@ function legacyMain(config) {
 			case "resize": {
 				const cols = clampInt(msg.cols, 20, 300, host.cols);
 				const rows = clampInt(msg.rows, 5, 120, host.rows);
-				child.resize(cols, rows);
+				// Paired step (CR R1 advisory): model reflows only when the real PTY
+				// resize succeeded. host.cols/rows keep recording the intended size
+				// (new-client clamp baseline), deliberately outside the guard.
+				resizeChildAndModel(child, terminalModel, cols, rows);
 				update({ cols, rows });
 				break;
 			}
 			case "interrupt":
 				child.write("\x1b");
+				break;
+			case "subscribe_terminal":
+				terminalSubscriptions.get(socket)?.handleMessage(msg);
 				break;
 			case "terminate": {
 				killChild(child, childPid, "SIGTERM");
@@ -652,6 +684,14 @@ async function ownedMain(config) {
 	}
 	host = current;
 
+	// Canonical terminal model + per-socket snapshot subscriptions (issue #91
+	// phase 3). Created from the owned host record before the endpoint binds,
+	// so every connect (including probes) can carry a subscription. Legacy
+	// message semantics unchanged (the `seq` field on output is additive).
+	const terminalModel = createTerminalModel({ cols: host.cols, rows: host.rows, scrollback: 2000 });
+	/** @type {Map<import("node:net").Socket, ReturnType<typeof createTerminalSubscription>>} */
+	const terminalSubscriptions = new Map();
+
 	// 3. Bind the per-instance endpoint. NO unlink: the path is unique to this
 	//    instance; an occupied path means someone else owns it.
 	const listenOutcome = await new Promise((resolveListen) => {
@@ -662,6 +702,10 @@ async function ownedMain(config) {
 		const probeSockets = new WeakSet();
 		server = createServer((socket) => {
 			clients.add(socket);
+			terminalSubscriptions.set(
+				socket,
+				createTerminalSubscription({ model: terminalModel, send: (msg) => send(socket, msg) }),
+			);
 			socket.write(JSON.stringify({ type: "hello", status: host, editorEmpty }) + "\n");
 			broadcast({ type: "status", status: host });
 			let buffer = "";
@@ -673,6 +717,7 @@ async function ownedMain(config) {
 			});
 			socket.on("close", () => {
 				clients.delete(socket);
+				terminalSubscriptions.delete(socket);
 				if (probeSockets.has(socket)) return;
 				// Merge into the live record (a stale closure spread here erases a
 				// concurrent revoke — final review finding 2).
@@ -680,6 +725,7 @@ async function ownedMain(config) {
 			});
 			socket.on("error", () => {
 				clients.delete(socket);
+				terminalSubscriptions.delete(socket);
 				if (probeSockets.has(socket)) return;
 				ownedUpdate((cur) => ({ ...cur }));
 			});
@@ -767,7 +813,16 @@ async function ownedMain(config) {
 	childPid = child.pid ?? null;
 	child.onData((data) => {
 		screenLogBytes = appendBoundedScreenLog(screenLog, data, screenLogBytes, screenLogLimits);
-		broadcast({ type: "output", data });
+		const outputSeq = feedOutput(terminalModel, data);
+		// Per-socket output delivery — same contract as legacyMain above.
+		const outputLine = JSON.stringify({ type: "output", seq: outputSeq, data }) + "\n";
+		for (const [socket, sub] of terminalSubscriptions) {
+			if (sub.subscribed()) sub.onOutput(outputSeq, data);
+			// Same per-socket guard the legacy broadcast had: a synchronous throw
+			// from a dead socket must never escape into the uncaughtException
+			// crash path (whole-branch review finding).
+			else { try { socket.write(outputLine); } catch { /* socket 'error' handler cleans up */ } }
+		}
 	});
 	child.onExit((code) => {
 		childExited = true;
@@ -809,7 +864,8 @@ async function ownedMain(config) {
 	if (cachedResize) {
 		const applyHeld = setTimeout(() => {
 			if (!cachedResize || !child || shutdownStarted) return;
-			try { child.resize(cachedResize.cols, cachedResize.rows); } catch { /* best effort */ }
+			// Paired step (CR R1 advisory): model follows the real PTY, never leads.
+			resizeChildAndModel(child, terminalModel, cachedResize.cols, cachedResize.rows);
 			notifyChildResize(childPid);
 			cachedResize = null;
 		}, 500);
@@ -886,7 +942,10 @@ async function ownedMain(config) {
 				const cols = clampInt(msg.cols, 20, 300, host.cols);
 				const rows = clampInt(msg.rows, 5, 120, host.rows);
 				if (child) {
-					child.resize(cols, rows);
+					// Paired step (CR R1 advisory): model reflows only when the real
+					// PTY resize succeeded; cachedResize cleared either way — a failed
+					// resize is not retried against a exiting child.
+					resizeChildAndModel(child, terminalModel, cols, rows);
 					notifyChildResize(childPid);
 					cachedResize = null;
 				} else {
@@ -897,6 +956,9 @@ async function ownedMain(config) {
 			}
 			case "interrupt":
 				if (child) child.write("\x1b");
+				break;
+			case "subscribe_terminal":
+				terminalSubscriptions.get(socket)?.handleMessage(msg);
 				break;
 			case "terminate":
 				// Single exit path: finishHost carries the SIGTERM→4s→SIGKILL ladder,

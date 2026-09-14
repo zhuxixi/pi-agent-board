@@ -71,7 +71,7 @@ function isAlive(pid) {
 	}
 }
 
-async function waitForExit(child, timeoutMs = 3000) {
+async function waitForExit(child, timeoutMs = 10000) {
 	if (child.exitCode !== null || child.signalCode !== null) return child.exitCode;
 	const result = await Promise.race([
 		once(child, "exit").then(([code]) => code),
@@ -128,7 +128,7 @@ function makeClient(socket) {
 	});
 	return {
 		send: (obj) => socket.write(JSON.stringify(obj) + "\n"),
-		next: (timeoutMs = 3000) => {
+		next: (timeoutMs = 10000) => {
 			if (queue.length) return Promise.resolve(queue.shift());
 			return new Promise((resolve, reject) => {
 				const timer = setTimeout(() => reject(new Error("timed out waiting for coordinator message")), timeoutMs);

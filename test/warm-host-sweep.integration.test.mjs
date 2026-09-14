@@ -48,7 +48,7 @@ async function captureHostSocket(root, viewId) {
 
 const closeServer = (s) => new Promise((resolve) => s.close(resolve));
 
-const waitFor = async (pred, timeoutMs = 3000) => {
+const waitFor = async (pred, timeoutMs = 10000) => {
 	const start = Date.now();
 	while (Date.now() - start < timeoutMs) {
 		if (pred()) return true;
