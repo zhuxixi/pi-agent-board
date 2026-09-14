@@ -1383,3 +1383,75 @@ test("host spawn failure marks a non-fenced row failed through host_run_failed",
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
 });
+
+test("hosted child receives this host instance's control endpoint in its environment (issue #103)", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	try {
+		const capturePath = join(root, "child-env.txt");
+		// launchOwnedRunner spreads opts.config last, so the whole env object is replaced here.
+		const { runner: r, socketPath } = await launchOwnedRunner(root, "v1", "i103", {
+			config: { env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1", FAKE_PTY_ENV_CAPTURE_PATH: capturePath } },
+		});
+		runner = r;
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.childPid ? h : false;
+		});
+		childPid = host.childPid;
+		await waitFor(() => (existsSync(capturePath) ? readFileSync(capturePath, "utf8").trim() : false));
+		assert.equal(readFileSync(capturePath, "utf8").trim(), socketPath, "owned child sees the per-instance endpoint");
+		const socket = createConnection(socketPath);
+		socket.on("error", () => {});
+		await once(socket, "connect");
+		send(socket, { type: "input", data: "exit\r" });
+		await waitForExit(runner, 5000);
+		socket.destroy();
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("legacy child receives the legacy view socket as its control endpoint (issue #103)", async () => {
+	const root = freshRoot();
+	let runner;
+	try {
+		const meta = createView(root, { id: "v1", name: "legacy-env", cwd: process.cwd() });
+		const capturePath = join(root, "legacy-child-env.txt");
+		const configPath = P.hostConfigPath(root, "v1");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "v1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1", FAKE_PTY_ENV_CAPTURE_PATH: capturePath },
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		await waitFor(() => hostReady(root, "v1"));
+		const expected = P.controlSocketPath(root, "v1");
+		await waitFor(() => (existsSync(capturePath) ? readFileSync(capturePath, "utf8").trim() : false));
+		assert.equal(readFileSync(capturePath, "utf8").trim(), expected, "legacy child sees the legacy view socket");
+		const socket = createConnection(expected);
+		socket.on("error", () => {});
+		await once(socket, "connect");
+		send(socket, { type: "input", data: "exit\r" });
+		await waitForExit(runner, 5000);
+		socket.destroy();
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		reapChild(root, "v1");
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});

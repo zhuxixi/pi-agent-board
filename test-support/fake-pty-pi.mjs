@@ -7,6 +7,11 @@ if (process.env.FAKE_PTY_ARGV_CAPTURE_PATH) {
 		appendFileSync(process.env.FAKE_PTY_ARGV_CAPTURE_PATH, `${process.argv.at(-1) ?? ""}`);
 	} catch {}
 }
+if (process.env.FAKE_PTY_ENV_CAPTURE_PATH) {
+	try {
+		appendFileSync(process.env.FAKE_PTY_ENV_CAPTURE_PATH, `${process.env.AGENT_BOARD_CONTROL_SOCKET ?? ""}\n`);
+	} catch {}
+}
 process.stdin.setEncoding("utf8");
 process.stdin.setRawMode?.(true);
 process.stdin.on("data", (chunk) => {

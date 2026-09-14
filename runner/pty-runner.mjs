@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { appendLine, readJson } from "../src/core/atomic.mjs";
 import { appendDiagnostic } from "../src/core/diagnostics.mjs";
 import { finalizeHostCrash } from "../src/core/host-crash.mjs";
+import { hostChildEnv } from "../src/core/host-child-env.mjs";
 import { ownsEndpoint, shouldYieldRunner } from "../src/core/host-coordination.mjs";
 import { lastVisibleLogLine } from "../src/core/heuristics.mjs";
 import { acquireOwnedViewLock } from "../src/core/locks.mjs";
@@ -217,19 +218,13 @@ function legacyMain(config) {
 	if (config.tools) args.push("--tools", config.tools);
 	if (config.initialPrompt) args.push(encodePromptForCliArg(config.initialPrompt));
 
-	const env = {
-		...process.env,
-		...(config.env || {}),
-		AGENT_BOARD_ROOT: config.root,
-		AGENT_BOARD_VIEW_ID: config.viewId,
-		AGENT_BOARD_CHILD: "1",
-		AGENT_BOARD_HOSTED: "pty",
-		// Legacy names are exported too so older child extension builds still behave.
-		AGENT_VIEW_ROOT: config.root,
-		AGENT_VIEW_VIEW_ID: config.viewId,
-		AGENT_VIEW_CHILD: "1",
-		AGENT_VIEW_HOSTED: "pty",
-	};
+	const env = hostChildEnv({
+		root: config.root,
+		viewId: config.viewId,
+		socketPath,
+		baseEnv: process.env,
+		extraEnv: config.env || {},
+	});
 
 	try {
 		child = spawnInteractive(config.piCommand, args, {
@@ -736,19 +731,13 @@ async function ownedMain(config) {
 	if (config.thinkingLevel) args.push("--thinking", config.thinkingLevel);
 	if (config.tools) args.push("--tools", config.tools);
 	if (config.initialPrompt) args.push(encodePromptForCliArg(config.initialPrompt));
-	const env = {
-		...process.env,
-		...(config.env || {}),
-		AGENT_BOARD_ROOT: config.root,
-		AGENT_BOARD_VIEW_ID: config.viewId,
-		AGENT_BOARD_CHILD: "1",
-		AGENT_BOARD_HOSTED: "pty",
-		// Legacy names are exported too so older child extension builds still behave.
-		AGENT_VIEW_ROOT: config.root,
-		AGENT_VIEW_VIEW_ID: config.viewId,
-		AGENT_VIEW_CHILD: "1",
-		AGENT_VIEW_HOSTED: "pty",
-	};
+	const env = hostChildEnv({
+		root: config.root,
+		viewId: config.viewId,
+		socketPath: config.socketPath,
+		baseEnv: process.env,
+		extraEnv: config.env || {},
+	});
 	try {
 		child = spawnInteractive(config.piCommand, args, {
 			cwd: config.cwd,
