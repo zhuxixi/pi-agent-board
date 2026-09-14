@@ -18,7 +18,12 @@ function freshRoot() {
 	return mkdtempSync(join(tmpdir(), "agentview-pty-"));
 }
 
-async function waitFor(predicate, timeoutMs = 3000) {
+// Default raised 3000→10000: every call site asserts "eventually happens"
+// (spawn liveness, file appearance, message arrival), never a timing bound.
+// Under full-suite parallel load (A11 perf file burns CPU in parallel), real
+// PTY spawn + first output can legitimately exceed 3s; genuine loss still
+// fails, only later.
+async function waitFor(predicate, timeoutMs = 10000) {
 	const start = Date.now();
 	while (Date.now() - start < timeoutMs) {
 		const value = predicate();
