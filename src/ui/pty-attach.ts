@@ -11,6 +11,7 @@ import { createAttachOutputRenderScheduler, detectCursorDesync, isPtyCursorHidde
 import { evaluateAttachReconnect, shouldEscapeAttach } from "../core/pty-attach-reconnect.mjs";
 import { installImeCursorCoalesce } from "../core/ime-cursor-coalesce.mjs";
 import { createJiggleRetryController } from "../core/pty-attach-jiggle-controller.mjs";
+import { createTerminalAttachClient } from "../core/terminal-attach-client.mjs";
 import { clampInt, parseMouseInputChunk, resolveWheelLines, scrollViewportTop, selectionDragScrollLines } from "../core/pty-scroll.mjs";
 
 export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null };
@@ -40,6 +41,13 @@ const LOADING_TICK_MS = 120;
 const ATTACH_SETTLE_MS = 250;
 /** Hard cap on the attach transition so a silent session can't stall the banner. */
 const ATTACH_HARD_TIMEOUT_MS = 2500;
+/** Protocol-race guard for legacy jiggle arming (issue #91 phase 4): the
+ * undecided window must not pulse the child before the snapshot probe
+ * resolves — a resize-free attach is the protocol-mode contract. Invisible
+ * for legacy (the probe timeout decides at 1500ms ≫ 100ms) and the protocol
+ * answer (~ms) reliably beats it; a pathologically late snapshot merely costs
+ * one harmless shrink pulse that the protocol mode event unwinds. */
+const LEGACY_JIGGLE_ARM_DELAY_MS = 100;
 /** Give ordered detach packets time to flush before using destroy as a fallback. */
 const GRACEFUL_SOCKET_CLOSE_MS = 1000;
 /** Desync detection window: how long output must stay silent before a
@@ -66,6 +74,9 @@ const ITERM2_FILE_PREFIX = "\x1b]1337;File=";
 interface XtermLike {
 	write(data: string, cb?: () => void): void;
 	resize(cols: number, rows: number): void;
+	// Full buffer wipe (@xterm/headless Terminal.reset): the attach client's
+	// "empty/resnapshot → UI resets its buffer" contract (phase 4, F3).
+	reset(): void;
 	buffer: {
 		active: {
 			baseY: number;
@@ -143,6 +154,21 @@ export class PtyAttachComponent implements Component {
 		},
 		clearTimeoutFn: (t) => clearTimeout(t as ReturnType<typeof setTimeout>),
 	});
+	// Snapshot+subscribe attach client (issue #91 phase 4, D2). Created ONCE —
+	// reconnects re-point send at the CURRENT socket (this.send routes through
+	// this.socket) and resume from the applied cursor; wiring shape per the
+	// verified reference in test/terminal-snapshot.integration.test.mjs
+	// (wireClient). AGENT_BOARD_TERMINAL_SNAPSHOT=0 forces the legacy path
+	// (escape hatch + deterministic legacy tests).
+	private readonly attachClient = createTerminalAttachClient({
+		send: (msg) => this.send(msg),
+		emit: (event, payload) => this.handleAttachEvent(event, payload),
+	});
+	/** Decided attach path: "undecided" until the probe resolves (snapshot
+	 * begin → protocol; probe timeout / version mismatch → legacy). Gates
+	 * jiggle arming and probe-vs-cursor reconnects. */
+	private attachMode: "undecided" | "protocol" | "legacy" = "undecided";
+	private jiggleStartTimer: ReturnType<typeof setTimeout> | null = null;
 	private osc52Carry = "";
 	private passthroughCarry = "";
 	private readonly connectStartedAt = Date.now();
@@ -425,7 +451,18 @@ export class PtyAttachComponent implements Component {
 			this.disconnectedAt = null;
 			this.status = "attached";
 			this.send({ type: "hello", clientId: `ui-${Date.now()}`, wantOutput: true });
-			this.jiggleRetry.start(this.cols, this.rows);
+			// Snapshot+subscribe attach (issue #91 phase 4): the first connect
+			// probes with subscribe_terminal (old runners stay silent → probe
+			// timeout → legacy); protocol reconnects resume from the applied
+			// cursor over the SAME client instance (ring replay is seamless;
+			// eviction/restart answers a fresh snapshot). hello stays UI-owned
+			// and precedes the client's subscribe (established ordering).
+			if (this.attachMode === "undecided") this.attachClient.start();
+			else if (this.attachMode === "protocol") this.attachClient.reconnect(this.attachClient.getLastSeq());
+			// The shrink-and-hold redraw protocol is a LEGACY-path correctness
+			// tool: snapshot mode owns screen correctness via canonical frames,
+			// so the jiggle never runs there (armLegacyJiggle guards the race).
+			this.armLegacyJiggle();
 			this.enableMouseScroll();
 			this.scheduleRender();
 			this.startAttachSettle();
@@ -605,6 +642,37 @@ export class PtyAttachComponent implements Component {
 	private clearMouseRefreshTimers(): void {
 		for (const timer of this.mouseRefreshTimers) clearTimeout(timer);
 		this.mouseRefreshTimers = [];
+	}
+
+	/**
+	 * Legacy-path jiggle arming with a protocol-race guard (issue #91 phase 4).
+	 * Legacy decided immediately (env-forced) → start now; undecided → start
+	 * after the guard delay unless the snapshot answer wins (protocol). The
+	 * timer guard accepts ANY non-protocol mode, so a fast in-flight decision
+	 * (e.g. frame_version_mismatch landing ~1ms into the probe window) still
+	 * arms the chain — an early-decided legacy session must not end up
+	 * jiggle-less. start() re-arms idempotently, so a late duplicate is safe.
+	 */
+	private armLegacyJiggle(): void {
+		this.clearJiggleStartTimer();
+		if (this.attachMode === "protocol") return;
+		if (this.attachMode === "legacy") {
+			if (this.connected) this.jiggleRetry.start(this.cols, this.rows);
+			return;
+		}
+		this.jiggleStartTimer = setTimeout(() => {
+			this.jiggleStartTimer = null;
+			if (!this.closed && this.connected && this.attachMode !== "protocol") {
+				this.jiggleRetry.start(this.cols, this.rows);
+			}
+		}, LEGACY_JIGGLE_ARM_DELAY_MS);
+		this.jiggleStartTimer.unref?.();
+	}
+
+	private clearJiggleStartTimer(): void {
+		if (!this.jiggleStartTimer) return;
+		clearTimeout(this.jiggleStartTimer);
+		this.jiggleStartTimer = null;
 	}
 
 	private clearRetry(): void {
@@ -1046,6 +1114,12 @@ export class PtyAttachComponent implements Component {
 			if (!line.trim()) continue;
 			try {
 				const msg = JSON.parse(line);
+				// Protocol-managed messages (snapshot windows, seq-checked live
+				// output, recovery) are consumed by the attach client and re-emitted
+				// through handleAttachEvent. UI-owned messages (hello/status/
+				// editor_state/exit/error) and pre-decision broadcast output return
+				// false and fall through to the legacy path below.
+				if (this.attachClient.handleMessage(msg)) continue;
 				if (msg.type === "output" && typeof msg.data === "string") {
 					this.pushOutput(msg.data, { forwardProtocols: true });
 					this.checkClearSequence(msg.data);
@@ -1066,6 +1140,70 @@ export class PtyAttachComponent implements Component {
 			}
 		}
 		if (needsRender) this.scheduleRender();
+	}
+
+	/**
+	 * Attach-client events (issue #91 phase 4). The client owns protocol
+	 * recovery (it resubscribes internally); the UI only switches paths and
+	 * hydrates frames.
+	 */
+	private handleAttachEvent(
+		event: "mode" | "snapshotReady" | "output" | "resubscribing" | "protocolError",
+		payload: any,
+	): void {
+		if (event === "mode") {
+			const prev = this.attachMode;
+			this.attachMode = payload as "protocol" | "legacy";
+			if (this.attachMode === "protocol") {
+				// Snapshot mode owns screen correctness: cancel any pending legacy
+				// jiggle arming and unwind anything already armed (restores a held
+				// resize; no-ops otherwise).
+				this.clearJiggleStartTimer();
+				this.jiggleRetry.restoreAndStop();
+			} else if (prev === "protocol") {
+				// Downgrade after a protocol session (recovery budget exhausted):
+				// re-arm the legacy screen-healing machinery. This must run whenever
+				// the socket is alive — not only during the attach transition. A
+				// post-settle downgrade that skipped start() left the chain stopped
+				// forever (restoreAndStop on the protocol side), so feed() early-
+				// returned and raw output could never heal a desynced screen.
+				this.clearJiggleStartTimer();
+				if (this.connected) this.jiggleRetry.start(this.cols, this.rows);
+			}
+			// Legacy decided during the undecided window: the race-guard timer
+			// already fired at 100ms (≪ the 1500ms probe timeout) — nothing to do.
+			return;
+		}
+		if (event === "snapshotReady") {
+			const snap = (payload ?? {}) as { frame?: string; empty?: boolean; resnapshot?: boolean };
+			// The synthesized frame is self-contained on dirty terminals (phase 3
+			// torture-proven: DECSTR + clear preamble wipes the constructor
+			// screen.log replay and any pre-probe broadcast bytes), so hydrating is
+			// a plain push: the write callback drives receivedOutput/settle/render
+			// exactly like the legacy replay path. No protocol forwarding — the
+			// frame is runner-synthesized grid content, not child passthrough
+			// sequences. Empty baselines (the COMMON initial attach state: the host
+			// publishes alive+childPid before the child's first output) carry no
+			// frame; the loading banner persists until the first live output.
+			// Empty/resnapshot answers ALWAYS wipe the local buffer, attaching or
+			// not: while attaching the banner hides it (zero visual cost), and the
+			// constructor's screen.log warm-start must not outlive the protocol
+			// answer — a gated reset let the dead session's tail render as a
+			// cold-start ghost once the banner lifted (final-review F1).
+			if (typeof snap.frame === "string") this.pushOutput(snap.frame);
+			else if (snap.empty || snap.resnapshot) this.term.reset();
+			return;
+		}
+		if (event === "output") {
+			// Live/replay protocol output: no jiggle clear-detection — that feed
+			// exists to cancel the shrink-and-hold chain, which never runs in
+			// protocol mode.
+			if (typeof payload === "string") this.pushOutput(payload, { forwardProtocols: true });
+			return;
+		}
+		// "resubscribing": recovery is client-internal (informational only).
+		// "protocolError": observability only — recovery is automatic until the
+		// legacy fallback, whose mode event the UI acts on above.
 	}
 
 	private forwardTerminalProtocols(data: string): void {
@@ -1165,6 +1303,7 @@ export class PtyAttachComponent implements Component {
 		}
 		this.closed = true;
 		this.imeCoalesceUninstall?.();
+		this.attachClient.close();
 		this.jiggleRetry.restoreAndStop();
 		this.disableMouseScroll();
 		this.clearMouseRefreshTimers();

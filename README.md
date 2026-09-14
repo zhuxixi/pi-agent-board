@@ -314,6 +314,7 @@ Set these variables before starting Pi. Model-backed features fall back graceful
 | `AGENT_BOARD_FORWARD_OSC52` | enabled; `0` disables | Disable OSC 52 clipboard sequence forwarding from an attached session. |
 | `AGENT_BOARD_FORWARD_IMAGES` | enabled; `0` disables | Disable terminal image/file passthrough forwarding from an attached session. |
 | `AGENT_BOARD_IME_FIX` | enabled; `0` disables | Disable the attach-view IME cursor coalescer if your terminal has compatibility problems. |
+| `AGENT_BOARD_TERMINAL_SNAPSHOT` | enabled; `0` forces legacy | Force the pre-phase-4 attach path (screen.log replay + jiggle); escape hatch / rollback switch for the snapshot+subscribe attach protocol. |
 
 Older `AGENT_VIEW_*` names are still read in selected compatibility paths. Prefer `AGENT_BOARD_*` for new setups. Internal child markers are managed by Agent Board and are not user settings.
 
