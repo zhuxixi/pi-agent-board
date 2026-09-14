@@ -49,7 +49,7 @@ runner/pty-runner.mjs              # integration: feed model on child.onData, ex
 
 Design decisions (plan-stage rulings):
 - **Scrollback snapshot cap = 256 lines** + viewport, explicit `scrollbackTruncated` flag. Current status quo (screen.log tail hard-cut) recovers far less; unlimited scrollback DTO (2000 lines) would make snapshots heavy. Phase 4 can revisit per attach UX feedback.
-- **Ring caps: 2048 chunks / 4 MiB** (whichever hits first), eviction records `evictedThrough` seq; subscriber needing `sinceSeq <= evictedThrough` → fresh snapshot (spec: never stitch from partial tails).
+- **Ring caps: 2048 chunks / 4 MiB** (whichever hits first), eviction records `evictedThrough` seq; subscriber needing seq beyond eviction → fresh snapshot (spec: never stitch from partial tails). **Boundary ruling (pinned by Task 1 tests)**: the ring always retains the contiguous range `(evictedThrough, lastSeq]`, so `sinceSeq === evictedThrough` means replay IS complete (not a partial tail) → replay; only `sinceSeq < evictedThrough` forces a fresh snapshot.
 - **Perf thresholds (A11)**: feed p95 ≤ 5ms/chunk, p99 ≤ 8ms; snapshot capture ≤ 50ms; hydrate ≤ 100ms (80×24 + 256 scrollback on dev hardware). Ring overflow must produce a resnapshot signal, never silent data loss.
 
 ### Wire route decision (open decision A/B — resolved by Task 2 prototype evidence)
@@ -63,7 +63,7 @@ Design decisions (plan-stage rulings):
 
 - Client → runner: `{type:"subscribe_terminal", sinceSeq?: number}`.
 - First subscribe (no sinceSeq): runner synchronously captures snapshot at current seq S, sends `{type:"snapshot_begin", snapshotSeq:S, cols, rows}` + payload chunk(s) + `{type:"snapshot_end", nextSeq:S+1}`, then live `{type:"output", seq, data}` for seq > S.
-- Reconnect with sinceSeq=X: if `X+1 > evictedThrough` → replay ring X+1..now (bounded write, then live); else send fresh snapshot with `{resnapshot:true}` marker.
+- Reconnect with sinceSeq=X: if `X >= evictedThrough` → replay ring X+1..now (bounded write, then live); else send fresh snapshot with `{resnapshot:true}` marker. (`X > lastSeq` — client ahead of runner — is a protocol-level decision deferred to Task 3, the model primitive deliberately returns empty-not-evicted.)
 - Atomicity: subscription registration + capture happen in the same synchronous tick (single-threaded JS ⇒ no output can interleave); ring retains the gap window by construction.
 - Legacy `output` broadcast gains an additive `seq` field (old clients ignore unknown fields). No legacy message semantics change.
 - Runner restart: model empty ⇒ snapshot payload `{empty:true}` ("host starting" baseline — new child's first output establishes the new baseline; per spec, no old-screen restoration).
@@ -82,7 +82,7 @@ Design decisions (plan-stage rulings):
 - `captureTerminalSnapshot(model, {scrollbackCap=256})` → DTO v1 (grid walk: chars + fg/bg/flags; cursor; modes minimal closure; `await model.whenIdle()` before capture).
 - `synthesizeFullRedrawFrame(model|dto)` → VT bytes: DECSET mode set, scrollback replay via ordered writes + newlines to push into scrollback, then viewport rows with absolute cursor positioning (CUP) + SGR attrs per run, cursor to saved position. One implementation, used by both hydrate and (if chosen) the wire.
 - `hydrateTerminalSnapshot(dto, parserFactory)` → independent model fed by the frame; `assertSnapshotEquivalence(a, b)` grid/cursor/modes walker for tests.
-- Torture fixtures (A4/A5b): split CSI/OSC across chunk boundaries, relative cursor moves (CUB/CUP/CUP-relative), scroll-up + scrollback spillover, SGR attrs (bold/inverse/palette/RGB fg+bg), wide/combining chars smoke, cursor park, resize-after-content.
+- Torture fixtures (A4/A5b): split CSI/OSC across chunk boundaries, relative cursor moves (CUB/CUP/CUP-relative), scroll-up + scrollback spillover, SGR attrs (bold/inverse/palette/RGB fg+bg), wide/combining chars smoke, cursor park, resize-after-content, **and wrap-pending cursor (REQUIRED, Task-1 review ruling): plain write to the last column leaves parser cursorX===cols — capture must encode this state faithfully (no silent clamping) and the chosen encoding must survive `assertSnapshotEquivalence` on that fixture, else Route A falls back per plan**.
 - Perf micro-checks folded into Task 4.
 - **Record route decision** (A vs B) + evidence table appended to this plan → gates Task 3 wire payload shape.
 
