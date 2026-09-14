@@ -46,7 +46,7 @@
   - `foregroundPreviewCache`（模块级共享单例）
   - 规则：`remember` 非空覆盖、空值不覆盖；`backfill` 仅填空字段、磁盘非空优先，返回是否发生回填。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 创建 `$WT/test/foreground-preview-cache.test.mjs`：
 
@@ -135,12 +135,12 @@ test("views are independent; forget and clear remove entries", () => {
 });
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd $WT && node --test test/foreground-preview-cache.test.mjs`
 Expected: FAIL — `Cannot find module '../src/core/foreground-preview-cache.mjs'`
 
-- [ ] **Step 3: 写最小实现**
+- [x] **Step 3: 写最小实现**
 
 创建 `$WT/src/core/foreground-preview-cache.mjs`：
 
@@ -231,17 +231,17 @@ export function createForegroundPreviewCache() {
 export const foregroundPreviewCache = createForegroundPreviewCache();
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cd $WT && node --test test/foreground-preview-cache.test.mjs`
 Expected: PASS（7 tests）
 
-- [ ] **Step 5: typecheck**
+- [x] **Step 5: typecheck**
 
 Run: `cd $WT && npm run typecheck`
 Expected: 无错误（若 JSDoc 报错，修正类型注释而非跳过）
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd $WT
@@ -261,7 +261,7 @@ git -C $WT commit -m "feat(core): add foreground preview read-your-writes cache 
 - Consumes: Task 1 的 `foregroundPreviewCache`（`remember` / `backfill` / `clear`）。
 - Produces: `writeForegroundState` 每次投影后写缓存；`syncRowEvent` 每次磁盘重建后回填。测试 helper `delayedMaterializingSendStateCommand(root, opts)`。
 
-- [ ] **Step 1: 写失败测试（红证）**
+- [x] **Step 1: 写失败测试（红证）**
 
 在 `$WT/test/service.test.mjs` 中：
 
@@ -348,12 +348,12 @@ test("issue 113: agent_end rebuild cannot clobber the in-flight message_end prev
 });
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd $WT && node --test --test-name-pattern "issue 113: agent_end rebuild" test/service.test.mjs`
 Expected: FAIL — `the last materialized projection keeps the assistant preview`（磁盘最终 preview 为空、summary 为 "Needs instructions"）。这就是 bug 的确定性复现。
 
-- [ ] **Step 3: 接线实现**
+- [x] **Step 3: 接线实现**
 
 在 `$WT/src/runtime/service.mjs`：
 
@@ -375,7 +375,7 @@ import { foregroundPreviewCache } from "../core/foreground-preview-cache.mjs";
 		foregroundPreviewCache.backfill(row.meta.id, status);
 ```
 
-- [ ] **Step 4: 运行新测试与既有前台回归**
+- [x] **Step 4: 运行新测试与既有前台回归**
 
 Run: `cd $WT && node --test --test-name-pattern "issue 113: agent_end rebuild" test/service.test.mjs`
 Expected: PASS
@@ -383,7 +383,7 @@ Expected: PASS
 Run: `cd $WT && node --test --test-name-pattern "syncForegroundEvent" test/service.test.mjs`
 Expected: 全部 PASS（A5：直写模式与既有行为不回归）
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd $WT
@@ -403,7 +403,7 @@ git -C $WT commit -m "fix(service): keep foreground preview across coordinator w
 - Consumes: Task 1 的 `foregroundPreviewCache.forget`。
 - Produces: 归档后缓存无该 viewId 条目（`archive` / `archiveMany`→`archiveView`、`archiveByState` 两条路径）。
 
-- [ ] **Step 1: 写失败测试**
+- [x] **Step 1: 写失败测试**
 
 在 `$WT/test/service.test.mjs` 新增（紧邻 Task 2 的用例之后）：
 
@@ -447,12 +447,12 @@ test("issue 113: archiveByState evicts preview cache entries for archived rows",
 });
 ```
 
-- [ ] **Step 2: 运行测试确认失败**
+- [x] **Step 2: 运行测试确认失败**
 
 Run: `cd $WT && node --test --test-name-pattern "evicts" test/service.test.mjs`
 Expected: FAIL — `expected 1 to be 2`（缓存未清理）
 
-- [ ] **Step 3: 实现 forget**
+- [x] **Step 3: 实现 forget**
 
 在 `$WT/src/runtime/service.mjs`：
 
@@ -468,12 +468,12 @@ Expected: FAIL — `expected 1 to be 2`（缓存未清理）
 				foregroundPreviewCache.forget(row.meta.id);
 ```
 
-- [ ] **Step 4: 运行测试确认通过**
+- [x] **Step 4: 运行测试确认通过**
 
 Run: `cd $WT && node --test --test-name-pattern "evicts" test/service.test.mjs`
 Expected: PASS（2 tests）
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd $WT
@@ -493,7 +493,7 @@ git -C $WT commit -m "fix(service): evict preview cache on archive (issue #113)"
 - Consumes: Task 2 的 service 接线。
 - Produces: 真实 coordinator（fsync + socket 往返）下的不变式验证——任何时序下最终状态 preview 必须保留。
 
-- [ ] **Step 1: 写测试**
+- [x] **Step 1: 写测试**
 
 在 `$WT/test/service.test.mjs` 新增（紧邻 Task 3 的用例之后）：
 
@@ -529,16 +529,16 @@ test("issue 113: real coordinator keeps the assistant preview through a foregrou
 });
 ```
 
-- [ ] **Step 2: 运行测试确认通过**
+- [x] **Step 2: 运行测试确认通过**
 
 Run: `cd $WT && node --test --test-name-pattern "real coordinator keeps the assistant preview" test/service.test.mjs`
 Expected: PASS
 
-- [ ] **Step 3: 红/绿自证（可选但推荐）**
+- [x] **Step 3: 红/绿自证（可选但推荐）**
 
 临时注释掉 Task 2 Step 3(c) 的 `backfill` 行 → 运行该用例与 A3 用例，确认二者失败 → 恢复该行 → 再次确认通过。**不要提交注释状态**。
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 cd $WT
@@ -557,12 +557,12 @@ git -C $WT commit -m "test(service): real-coordinator preview invariant (issue #
 - Consumes: Task 1–4 的全部改动。
 - Produces: 全量绿 + 逐项验收证据；U1 用户实测清单。
 
-- [ ] **Step 1: 全量回归**
+- [x] **Step 1: 全量回归**
 
 Run: `cd $WT && npm run typecheck && npm test`
 Expected: 全绿（A8）。若有失败，回到对应 Task 修复后重跑。
 
-- [ ] **Step 2: 逐项验收对账**
+- [x] **Step 2: 逐项验收对账**
 
 按 spec 验收矩阵逐条记录实际执行的命令与结果：
 
@@ -576,7 +576,7 @@ Expected: 全绿（A8）。若有失败，回到对应 Task 修复后重跑。
 | A7 | `beforeEach` 清缓存已落地（service.test.mjs） | 已落地 |
 | A8 | `npm run typecheck && npm test` | PASS |
 
-- [ ] **Step 3: 记录 U1 用户实测清单（交给用户执行）**
+- [x] **Step 3: 记录 U1 用户实测清单（交给用户执行）**
 
 实操步骤与通过标准：
 
@@ -586,11 +586,11 @@ Expected: 全绿（A8）。若有失败，回到对应 Task 修复后重跑。
 4. 可选核对：`~/.pi/.../views/<viewId>/state-journal.jsonl` 中该 run 的 `sync_foreground` 序列里，最终一条的 `projection.latestAssistantPreview` 非空。
 5. **前提**：修复前已被写坏的行（磁盘 preview 为空）不会追溯治愈；需等该会话下一轮 `message_end` 才会恢复正常显示。
 
-- [ ] **Step 4: 交付说明（写入 issue 评论草稿，供 PR 阶段使用）**
+- [x] **Step 4: 交付说明（写入 issue 评论草稿，供 PR 阶段使用）**
 
 内容包含：修复机制一句话、A1–A8 实测证据、U1 前提与清单、遗留边界（见 spec 非目标）。
 
-- [ ] **Step 5: Commit（如有对账文档产物则提交，否则本 task 无 commit）**
+- [x] **Step 5: Commit（如有对账文档产物则提交，否则本 task 无 commit）**
 
 ```bash
 cd $WT
