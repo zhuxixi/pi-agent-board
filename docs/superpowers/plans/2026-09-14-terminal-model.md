@@ -107,3 +107,24 @@ Every task: targeted tests green → full suite green → typecheck → conventi
 - **xterm write-async accounting**: if the write callback is unavailable, poll `setImmediate` until parser idle; model must expose deterministic `whenIdle()` for capture correctness (capture reads buffer post-parse).
 - **Frame synthesis completeness** (route B risk): modes/scrollback edge fidelity — torture fixtures exist precisely to quantify; route A is the fallback if equivalence < 100% on any fixture.
 - **Perf thresholds too tight on CI hardware**: thresholds are p95/p99 with generous headroom; if CI shows systematic misses, re-baseline with evidence (not silently relax).
+
+## Route decision (Task 2 evidence)
+
+**推荐 Route B**（wire 携带 runner 合成的全量重绘帧 + `{frameVersion:1}` 元数据；UI 原样喂现有 xterm）。
+
+| 证据项 | 实测（80×24 + 256sb 真实负载，real parser） |
+|---|---|
+| torture corpus 等价通过率 | **12/12**（A/B 共享同一合成实现；split CSI/OSC、相对光标、滚动溢出、SGR palette+RGB、宽/组合字符、cursor park、resize 后、wrap-pending×2、wraparound off、scroll region、empty） |
+| wire 负载 | DTO JSON **202,187 B** vs 全量重绘帧 **28,850 B**（**7.0×**） |
+| capture 延迟（runner 侧，两路线同） | 2.2–6.8 ms（阈值 50ms） |
+| 帧合成延迟（B: runner 侧 / A: UI 侧） | 3.8–4.8 ms（阈值 50ms） |
+| hydrate 总延迟（A 的 UI 路径 = 合成+解析） | 6.2–10.2 ms（阈值 100ms） |
+| UI 侧改动 | B ≈ 0（喂现有 xterm，正是 Phase 4「本地 buffer 变可丢弃缓存」的形态）；A 需在 UI 侧引入合成适配器（同一模块 import，但 CPU 与失败面移到 UI 进程） |
+
+理由（一句话）：**7 倍 wire 差距发生在每次 attach/gap 恢复的热路径上，而 B 的 UI 侧改动≈0、CPU 差异毫秒级不可感知；DTO 仍是版本化内部契约（D5 达成），wire 版本字段为将来 Route A 协商留了加法空间。**
+
+实现备注：
+- `viewport` 行直接是 cell 数组（plan 草图里的 `text` 字段冗余未采用——cells 已携带字符）；cell 三态编码：默认属性=纯字符串，显式属性=`[ch,fg,bg,flags]`，宽字符续格=`""`（由前导宽字符再生）。
+- 颜色编码：-1=默认，0-255=调色板，`0x1000000|rgb`=直色（marker 位与调色板不相交）。
+- 已知边界：DECSTBM scroll region 状态不在 modes 闭包内（region **内容**等价已测，region 设置本身不往返——与 spec 最小闭包一致，记入残留）；`synchronizedOutputMode` 忠实还原。
+- 帧在**脏终端**上自洽（先 DECSTR + 2J/3J + region 重置再发内容）——wire 复用前提已测。
