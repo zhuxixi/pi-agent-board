@@ -1069,6 +1069,44 @@ test("issue 113: agent_end rebuild cannot clobber the in-flight message_end prev
 	}
 });
 
+test("issue 113: archiving a row evicts its preview cache entry", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		createView(root, { id: "v2", name: "b", cwd: "/r" });
+		foregroundPreviewCache.remember("v1", { latestAssistantPreview: "one", lastAgentActivityAt: 1 });
+		foregroundPreviewCache.remember("v2", { latestAssistantPreview: "two", lastAgentActivityAt: 2 });
+
+		const res = await service(root).archive("v1");
+		assert.equal(res.ok, true);
+		assert.equal(foregroundPreviewCache.size(), 1, "only the archived view's entry is evicted");
+		assert.equal(foregroundPreviewCache.backfill("v1", { latestAssistantPreview: "", lastAgentActivityAt: null }), false);
+		assert.equal(foregroundPreviewCache.backfill("v2", { latestAssistantPreview: "", lastAgentActivityAt: null }), true);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("issue 113: archiveByState evicts preview cache entries for archived rows", () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		createView(root, { id: "v2", name: "b", cwd: "/r" });
+		foregroundPreviewCache.remember("v1", { latestAssistantPreview: "one", lastAgentActivityAt: 1 });
+		foregroundPreviewCache.remember("v2", { latestAssistantPreview: "two", lastAgentActivityAt: 2 });
+		const s = readState(root, "v1");
+		s.semanticState = "completed";
+		s.processState = "exited";
+		writeState(root, s);
+
+		const res = service(root).archiveByState("completed");
+		assert.equal(res.archived, 1);
+		assert.equal(foregroundPreviewCache.size(), 1);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("late foreground agent_end after a manual completion is fenced (#46 class, issue #91)", async () => {
 	const root = freshRoot();
 	// The fence is coordinator-independent (a plain disk read); coordinator off

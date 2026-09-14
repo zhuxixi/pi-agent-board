@@ -668,6 +668,7 @@ export function createService(opts) {
 			}, viewId);
 			if (result.reason === "coordinator_disabled") archiveStateDirect(row);
 		}
+		foregroundPreviewCache.forget(viewId);
 		row.meta.archived = true;
 		writeMeta(root, row.meta);
 		return { ok: true };
@@ -1975,6 +1976,7 @@ export function createService(opts) {
 				}
 				if (row.host?.instanceId) stopHostRow(row, "archive");
 				else if (row.hostAlive) sendHostMessage(row, { type: "terminate" });
+				foregroundPreviewCache.forget(row.meta.id);
 				row.meta.archived = true;
 				writeMeta(root, row.meta);
 				archived += 1;
