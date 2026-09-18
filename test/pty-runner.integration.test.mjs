@@ -1200,6 +1200,92 @@ test("probe connections leave host.json untouched; real clients flip attachedEve
 	}
 });
 
+test("editor reporter connections leave attachedClients/attachedEver untouched (issue #103)", async () => {
+	const root = freshRoot();
+	const envCapture = join(root, "child-env.txt");
+	let runner;
+	let childPid;
+	try {
+		// NOTE: launchOwnedRunner spreads opts.config over its defaults, and the default
+		// env is `{ AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" }` — pass the whole env object,
+		// or the pipe fallback disappears on Windows.
+		const { runner: r, socketPath } = await launchOwnedRunner(root, "v1", "i103", {
+			config: { env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1", FAKE_PTY_ENV_CAPTURE_PATH: envCapture } },
+		});
+		runner = r;
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.readyAt != null && h?.childPid ? h : false;
+		});
+		childPid = host.childPid;
+
+		// The runner must hand the child the endpoint it actually bound (#103 §B).
+		const injected = await waitFor(() => {
+			try {
+				return readFileSync(envCapture, "utf8").trim() || false;
+			} catch {
+				return false;
+			}
+		}, 5000);
+		assert.equal(injected, socketPath, "the child env must carry the per-instance control endpoint");
+
+		// Resident reporter: identity hello, then editor_state keeps flowing.
+		const reporter = createConnection(socketPath);
+		reporter.on("error", () => {});
+		await once(reporter, "connect");
+		const reporterMessages = [];
+		let buf = "";
+		reporter.on("data", (chunk) => {
+			buf += chunk.toString();
+			const lines = buf.split("\n");
+			buf = lines.pop() ?? "";
+			for (const line of lines) if (line.trim()) reporterMessages.push(JSON.parse(line));
+		});
+		reporter.write(JSON.stringify({ type: "hello", clientId: "editor-reporter" }) + "\n");
+		await waitFor(() => reporterMessages.find((m) => m.type === "hello"));
+
+		const afterReporter = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.attachedClients === 0 && h.attachedEver !== true ? h : false;
+		}, 3000);
+		assert.equal(afterReporter.attachedClients, 0, "a resident reporter must not count as an attached client");
+		assert.notEqual(afterReporter.attachedEver, true, "a resident reporter must not mark the host attached");
+		reporter.write(JSON.stringify({ type: "editor_state", empty: true }) + "\n");
+
+		// A real UI client still counts, and detaching it releases the host even
+		// though the reporter stays connected (the warm-host reclaim guard).
+		const client = createConnection(socketPath);
+		client.on("error", () => {});
+		await once(client, "connect");
+		client.write(JSON.stringify({ type: "hello", clientId: "ui-test" }) + "\n");
+		const counted = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.attachedClients === 1 ? h : false;
+		}, 3000);
+		assert.equal(counted.attachedClients, 1, "a real client still counts as attached");
+		client.destroy();
+		const released = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.attachedClients === 0 ? h : false;
+		}, 3000);
+		assert.equal(released.attachedClients, 0, "reporter-only host must read as detached for warm-host reclaim");
+		reporter.destroy();
+
+		// Cleanup stays on the tested path: natural child exit.
+		const exitClient = createConnection(socketPath);
+		exitClient.on("error", () => {});
+		await once(exitClient, "connect");
+		send(exitClient, { type: "input", data: "exit\r" });
+		await waitForExit(runner, 5000);
+		exitClient.destroy();
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
 // ---- child-exit error attribution (issue #90) ----
 
 test("owned runner attributes an abnormal child exit's last visible line into host.json error", async () => {
