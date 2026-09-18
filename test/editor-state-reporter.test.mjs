@@ -72,17 +72,17 @@ test("reporter polls and sends only on text change (A1)", () => {
 	assert.equal(socket.sent.length, 0); // no send before connect + first poll
 	socket.emitConnect(); // connect resets backoff and starts polling
 	sched.fireOne(100); // first poll: "" → lastText was null → change → send empty:true
-	assert.deepEqual(socket.sent.map((l) => JSON.parse(l)), [{ type: "editor_state", empty: true }]);
+	assert.deepEqual(socket.sent.map((l) => JSON.parse(l)), [{ type: "hello", clientId: "editor-reporter" }, { type: "editor_state", empty: true }]);
 	text = "draft";
 	sched.fireOne(200);
-	assert.equal(socket.sent.length, 2);
-	assert.deepEqual(JSON.parse(socket.sent[1]), { type: "editor_state", empty: false });
+	assert.equal(socket.sent.length, 3);
+	assert.deepEqual(JSON.parse(socket.sent[2]), { type: "editor_state", empty: false });
 	sched.fireOne(300); // unchanged text → no send (dedupe)
-	assert.equal(socket.sent.length, 2);
+	assert.equal(socket.sent.length, 3);
 	text = "";
 	sched.fireOne(400);
-	assert.equal(socket.sent.length, 3);
-	assert.deepEqual(JSON.parse(socket.sent[2]), { type: "editor_state", empty: true });
+	assert.equal(socket.sent.length, 4);
+	assert.deepEqual(JSON.parse(socket.sent[3]), { type: "editor_state", empty: true });
 	reporter.stop();
 });
 
@@ -97,7 +97,7 @@ test("reporter stop is idempotent and ends polling (A1)", () => {
 	reporter.stop();
 	assert.equal(socket.destroyed, true); // issue 5: teardown destroys the socket
 	assert.equal(sched.pending.length, 0); // poll + reconnect timers all cleared
-	assert.equal(socket.sent.length, 1);
+	assert.equal(socket.sent.length, 2); // identity hello + the single state frame
 });
 
 test("reporter retries connect with capped backoff then recovers (A2)", () => {
@@ -124,8 +124,8 @@ test("reporter retries connect with capped backoff then recovers (A2)", () => {
 	assert.equal(socket.sent.length, 0); // no poll before connect event
 	socket.emitConnect(); // backoff resets to 1000
 	sched.fireOne(t + 5000 + 100); // first poll after connect
-	assert.equal(socket.sent.length, 1);
-	assert.deepEqual(JSON.parse(socket.sent[0]), { type: "editor_state", empty: true });
+	assert.equal(socket.sent.length, 2); // identity hello + the first state frame
+	assert.deepEqual(JSON.parse(socket.sent[1]), { type: "editor_state", empty: true });
 	// Issue 2: a close after a confirmed connect resets backoff to 1000, not 5000.
 	socket.emit("close");
 	const reconnectFired = sched.fireOne(t + 5000 + 100 + 1000);
@@ -148,14 +148,14 @@ test("reporter reconnects after socket close (A2)", () => {
 	reporter.start();
 	first.emitConnect();
 	sched.fireOne(100); // poll on first socket
-	assert.equal(first.sent.length, 1);
+	assert.equal(first.sent.length, 2); // identity hello + the polled state
 	first.emit("close");
 	assert.equal(first.destroyed, true); // issue 5: closed socket is destroyed
 	assert.equal(sched.pending.length, 1); // reconnect timer scheduled (backoff 1s)
 	sched.fireOne(1100); // reconnect succeeds on second socket
 	second.emitConnect();
 	sched.fireOne(1200); // poll resumes
-	assert.equal(second.sent.length, 1);
+	assert.equal(second.sent.length, 2); // re-announced identity + the polled state
 	reporter.stop();
 });
 
@@ -175,9 +175,34 @@ test("reporter survives a throwing getEditorText (A1 hardening)", () => {
 	reporter.start();
 	socket.emit("connect");
 	sched.fireOne(100); // first poll throws internally, swallowed
-	assert.equal(socket.sent.length, 0);
+	assert.equal(socket.sent.length, 1); // only the identity hello went out
 	sched.fireOne(200); // next poll reports the draft
-	assert.equal(socket.sent.length, 1);
-	assert.deepEqual(JSON.parse(socket.sent[0]), { type: "editor_state", empty: false });
+	assert.equal(socket.sent.length, 2);
+	assert.deepEqual(JSON.parse(socket.sent[1]), { type: "editor_state", empty: false });
+	reporter.stop();
+});
+
+test("reporter identifies itself with a hello on every (re)connect (issue #103)", () => {
+	const sched = fakeScheduler();
+	const first = fakeSocket();
+	const second = fakeSocket();
+	let call = 0;
+	const reporter = createEditorStateReporter({
+		getEditorText: () => "",
+		connect: () => (++call === 1 ? first : second),
+		scheduler: sched,
+		intervalMs: 100,
+	});
+	reporter.start();
+	first.emitConnect();
+	assert.deepEqual(JSON.parse(first.sent[0]), { type: "hello", clientId: "editor-reporter" });
+	sched.fireOne(100);
+	assert.deepEqual(JSON.parse(first.sent[1]), { type: "editor_state", empty: true });
+	// A reconnect must re-announce: the runner needs the id to keep this socket
+	// out of attachedClients (issue #103 §C).
+	first.emit("close");
+	sched.fireOne(1100);
+	second.emitConnect();
+	assert.deepEqual(JSON.parse(second.sent[0]), { type: "hello", clientId: "editor-reporter" });
 	reporter.stop();
 });
