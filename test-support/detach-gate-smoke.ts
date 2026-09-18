@@ -270,6 +270,45 @@ const out: Record<string, boolean> = {};
 	attach.dispose();
 }
 
+// O1. Issue #103: a chat-area diff hunk paints its changed fragments with
+// inverse video (renderDiff) and there is no fake-cursor line in the buffer.
+// The old tier-1 anchor grabbed that hunk and read "draft", so ← was forwarded
+// and the user was trapped. Chat content must never veto detach.
+{
+	const { attach, sent, didDetach } = makeAttach();
+	const DIFF_LINE = "\x1b[48;2;230;233;239m \x1b[38;2;64;160;43m+ 65 ## \x1b[7mR2 · \x1b[27m#\x1b[7m822 新 step 挂链顺序调研\x1b[27m";
+	await writeToTerm(attach, "chat\r\n" + DIFF_LINE + "\r\n  ");
+	(attach as unknown as { connected: boolean }).connected = true;
+	attach.handleInput("\x1b[D");
+	out.leftDetachesWithDiffHighlightInChat = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	attach.dispose();
+}
+
+// O2. Issue #103: the notification banner renders the whole entry inverse
+// (`\x1b[7m … \x1b[27m`) — same hijack, same requirement.
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat\r\n\x1b[7m Session saved \x1b[27m\r\n  ");
+	(attach as unknown as { connected: boolean }).connected = true;
+	attach.handleInput("\x1b[D");
+	out.leftDetachesWithInverseBannerInChat = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	attach.dispose();
+}
+
+// O3. The R1 trade-off, pinned on purpose (spec §2.1; same spirit as K2): a
+// new-style draft line (text + one inverse fake cursor, no prompt glyph) with
+// no pushed editor_state is NOT trusted by the anchor rule, so ← escapes
+// instead of being forwarded. Detach keeps the child session running, so the
+// draft is not lost — a spurious detach beats a trapped user (#42/#48).
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat content\r\n\x1b[7m草\x1b[27m稿");
+	(attach as unknown as { connected: boolean }).connected = true;
+	attach.handleInput("\x1b[D");
+	out.leftDetachesOnNewStyleDraftWithoutReporter = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	attach.dispose();
+}
+
 // L. Issue #89: the Ctrl+← chord detaches unconditionally — even when the
 // editor holds a draft (editor_state empty:false would forward single ←),
 // because the chord is unambiguous exit intent, not a cursor-left.

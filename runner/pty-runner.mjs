@@ -26,6 +26,7 @@ import { createTerminalSubscription } from "../src/core/terminal-attach-protocol
 import { encodePromptForCliArg } from "../src/core/prompt-transport.mjs";
 import { readHost, readState, updateOwnedHost, writeHost } from "../src/core/store.mjs";
 import { sendStateCommand } from "../src/core/coordinator-client.mjs";
+import { classifyClientHello } from "../src/core/host-protocol.mjs";
 import { markRowFailedDirect } from "./pty-runner-legacy.mjs";
 import { ensureNodePtySpawnHelperExecutable } from "../src/core/pty-support.mjs";
 
@@ -121,6 +122,8 @@ function legacyMain(config) {
 
 	/** @type {Set<import("node:net").Socket>} */
 	const clients = new Set();
+	/** Resident editor-state reporters: connected but never "attached" (#103). */
+	const editorReporters = new Set();
 	let childPid = null;
 	let child = null;
 	let exitCode = null;
@@ -232,6 +235,9 @@ function legacyMain(config) {
 		AGENT_BOARD_VIEW_ID: config.viewId,
 		AGENT_BOARD_CHILD: "1",
 		AGENT_BOARD_HOSTED: "pty",
+		// The endpoint this host actually bound: the child's editor-state reporter
+		// dials it instead of guessing the stable per-view address (issue #103).
+		AGENT_BOARD_CONTROL_SOCKET: socketPath,
 		// Legacy names are exported too so older child extension builds still behave.
 		AGENT_VIEW_ROOT: config.root,
 		AGENT_VIEW_VIEW_ID: config.viewId,
@@ -301,7 +307,6 @@ function legacyMain(config) {
 	let server;
 	server = createServer((socket) => {
 		clients.add(socket);
-		update({ attachedEver: true });
 		terminalSubscriptions.set(
 			socket,
 			createTerminalSubscription({ model: terminalModel, send: (msg) => send(socket, msg) }),
@@ -316,11 +321,13 @@ function legacyMain(config) {
 		});
 		socket.on("close", () => {
 			clients.delete(socket);
+			editorReporters.delete(socket);
 			terminalSubscriptions.delete(socket);
 			update();
 		});
 		socket.on("error", () => {
 			clients.delete(socket);
+			editorReporters.delete(socket);
 			terminalSubscriptions.delete(socket);
 			update();
 		});
@@ -336,9 +343,22 @@ function legacyMain(config) {
 		let msg;
 		try { msg = JSON.parse(line); } catch { return send(socket, { type: "error", message: "invalid json" }); }
 		switch (msg.type) {
-			case "hello":
+			case "hello": {
+				// Bookkeeping-only clients must never pin the host against warm-host
+				// reclaim (issue #103 §C): probes are read-only, the editor reporter
+				// is resident. A reporter socket leaves `clients` (the attachedClients
+				// source) but stays writable so editor_state keeps flowing.
+				const kind = classifyClientHello(msg);
+				if (kind === "client") update({ attachedEver: true });
+				if (kind === "editor-reporter") {
+					clients.delete(socket);
+					terminalSubscriptions.delete(socket);
+					editorReporters.add(socket);
+					update();
+				}
 				send(socket, { type: "hello", status: host, editorEmpty });
 				break;
+			}
 			case "input":
 				if (typeof msg.data === "string") child.write(msg.data);
 				break;
@@ -407,6 +427,10 @@ function legacyMain(config) {
 		for (const client of clients) {
 			try { client.end(); } catch {}
 		}
+		for (const reporter of editorReporters) {
+			try { reporter.end(); } catch { /* best effort */ }
+		}
+		editorReporters.clear();
 		killChild(child, childPid, "SIGTERM");
 		if (!(await waitForChildExit(4000)) && !childExited) {
 			killChild(child, childPid, "SIGKILL");
@@ -447,6 +471,8 @@ async function ownedMain(config) {
 
 	/** @type {Set<import("node:net").Socket>} */
 	const clients = new Set();
+	/** Resident editor-state reporters: connected but never "attached" (#103). */
+	const editorReporters = new Set();
 	let childPid = null;
 	let child = null;
 	let exitCode = null;
@@ -561,6 +587,10 @@ async function ownedMain(config) {
 			try { c.destroy(); } catch { /* best effort */ }
 		}
 		clients.clear();
+		for (const reporter of editorReporters) {
+			try { reporter.destroy(); } catch { /* best effort */ }
+		}
+		editorReporters.clear();
 		// Bounded server close (1s): never let a stuck client block cleanup.
 		await new Promise((resolve) => {
 			if (!server) return resolve();
@@ -717,6 +747,7 @@ async function ownedMain(config) {
 			});
 			socket.on("close", () => {
 				clients.delete(socket);
+				editorReporters.delete(socket);
 				terminalSubscriptions.delete(socket);
 				if (probeSockets.has(socket)) return;
 				// Merge into the live record (a stale closure spread here erases a
@@ -725,6 +756,7 @@ async function ownedMain(config) {
 			});
 			socket.on("error", () => {
 				clients.delete(socket);
+				editorReporters.delete(socket);
 				terminalSubscriptions.delete(socket);
 				if (probeSockets.has(socket)) return;
 				ownedUpdate((cur) => ({ ...cur }));
@@ -789,6 +821,9 @@ async function ownedMain(config) {
 		AGENT_BOARD_VIEW_ID: config.viewId,
 		AGENT_BOARD_CHILD: "1",
 		AGENT_BOARD_HOSTED: "pty",
+		// The endpoint this host actually bound: the child's editor-state reporter
+		// dials it instead of guessing the stable per-view address (issue #103).
+		AGENT_BOARD_CONTROL_SOCKET: socketPath,
 		// Legacy names are exported too so older child extension builds still behave.
 		AGENT_VIEW_ROOT: config.root,
 		AGENT_VIEW_VIEW_ID: config.viewId,
@@ -903,18 +938,24 @@ async function ownedMain(config) {
 		let msg;
 		try { msg = JSON.parse(line); } catch { return send(socket, { type: "error", message: "invalid json" }); }
 		switch (msg.type) {
-			case "hello":
-				// Probe handshakes (host-probe.mjs) are read-only: mark the socket so
-				// close/error skip the merge write, and never flip attachedEver
-				// (CR round-1 finding 3). Real clients record attachedEver here —
-				// deferred from connect time, which cannot distinguish them yet.
-				if (msg.clientId === "probe") {
+			case "hello": {
+				// Probe and reporter sockets are bookkeeping-only: neither may flip
+				// attachedEver nor keep attachedClients non-zero, or warm-host reclaim
+				// never fires and hosts leak (issue #103 §C).
+				const kind = classifyClientHello(msg);
+				if (kind === "probe") {
 					socket.markProbe?.();
+				} else if (kind === "editor-reporter") {
+					clients.delete(socket);
+					terminalSubscriptions.delete(socket);
+					editorReporters.add(socket);
+					ownedUpdate((cur) => ({ ...cur }));
 				} else {
 					ownedUpdate((cur) => ({ ...cur, attachedEver: true }));
 				}
 				send(socket, { type: "hello", status: host, editorEmpty });
 				break;
+			}
 			case "input": {
 				if (typeof msg.data !== "string") break;
 				if (typeof msg.requestId !== "string" || !msg.requestId) {

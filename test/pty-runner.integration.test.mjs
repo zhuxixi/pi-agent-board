@@ -1200,6 +1200,191 @@ test("probe connections leave host.json untouched; real clients flip attachedEve
 	}
 });
 
+test("editor reporter connections leave attachedClients/attachedEver untouched (issue #103)", async () => {
+	const root = freshRoot();
+	const envCapture = join(root, "child-env.txt");
+	let runner;
+	let childPid;
+	try {
+		// NOTE: launchOwnedRunner spreads opts.config over its defaults, and the default
+		// env is `{ AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" }` — pass the whole env object,
+		// or the pipe fallback disappears on Windows.
+		const { runner: r, socketPath } = await launchOwnedRunner(root, "v1", "i103", {
+			config: { env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1", FAKE_PTY_ENV_CAPTURE_PATH: envCapture } },
+		});
+		runner = r;
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.readyAt != null && h?.childPid ? h : false;
+		});
+		childPid = host.childPid;
+
+		// The runner must hand the child the endpoint it actually bound (#103 §B).
+		const injected = await waitFor(() => {
+			try {
+				return readFileSync(envCapture, "utf8").trim() || false;
+			} catch {
+				return false;
+			}
+		}, 5000);
+		assert.equal(injected, socketPath, "the child env must carry the per-instance control endpoint");
+
+		// Resident reporter: identity hello, then editor_state keeps flowing.
+		const reporter = createConnection(socketPath);
+		reporter.on("error", () => {});
+		await once(reporter, "connect");
+		const reporterMessages = [];
+		let buf = "";
+		reporter.on("data", (chunk) => {
+			buf += chunk.toString();
+			const lines = buf.split("\n");
+			buf = lines.pop() ?? "";
+			for (const line of lines) if (line.trim()) reporterMessages.push(JSON.parse(line));
+		});
+		reporter.write(JSON.stringify({ type: "hello", clientId: "editor-reporter" }) + "\n");
+		await waitFor(() => reporterMessages.find((m) => m.type === "hello"));
+		reporter.write(JSON.stringify({ type: "editor_state", empty: true }) + "\n");
+
+		// A real UI client still counts, and detaching it releases the host even
+		// though the reporter stays connected (the warm-host reclaim guard). The
+		// `counted === 1` read is the direct proof that the reporter's hello was
+		// classified out of `clients`: had it stayed counted, this would read 2.
+		const client = createConnection(socketPath);
+		client.on("error", () => {});
+		await once(client, "connect");
+		client.write(JSON.stringify({ type: "hello", clientId: "ui-test" }) + "\n");
+		const counted = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.attachedClients === 1 ? h : false;
+		}, 3000);
+		assert.equal(counted.attachedClients, 1, "exactly one attached client — a resident reporter still sitting in `clients` would make this 2");
+		client.destroy();
+		const released = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.attachedClients === 0 ? h : false;
+		}, 3000);
+		assert.equal(released.attachedClients, 0, "reporter-only host must read as detached for warm-host reclaim");
+		reporter.destroy();
+
+		// Cleanup stays on the tested path: natural child exit.
+		const exitClient = createConnection(socketPath);
+		exitClient.on("error", () => {});
+		await once(exitClient, "connect");
+		send(exitClient, { type: "input", data: "exit\r" });
+		await waitForExit(runner, 5000);
+		exitClient.destroy();
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+// ---- child-exit error attribution (issue #90) ----
+
+test("legacy runner keeps the editor reporter and probes out of attachedClients/attachedEver (issue #103)", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	try {
+		// Legacy host: host-config WITHOUT `instanceId` — `main()` dispatches
+		// `legacyMain()`, which binds the stable `control.sock` endpoint and has
+		// its own (older) accounting path. This is the same warm-host-leak fix
+		// as the owned path (spec §C), so the legacy half needs its own proof.
+		const meta = createView(root, { id: "v1", name: "legacy-reporter", cwd: process.cwd() });
+		const configPath = P.hostConfigPath(root, "v1");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "v1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" },
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		await waitFor(() => hostReady(root, "v1"));
+		childPid = readHost(root, "v1")?.childPid ?? null;
+		const socketPath = P.controlSocketPath(root, "v1");
+
+		// (1) A resident editor reporter must not count as attached and must not
+		// flip attachedEver. The runner sends an unsolicited hello on connect;
+		// the SECOND hello is the reply to our explicit reporter hello, which is
+		// sent only after classification + update() ran.
+		const reporter = createConnection(socketPath);
+		reporter.on("error", () => {});
+		await once(reporter, "connect");
+		const reporterMessages = [];
+		let rbuf = "";
+		reporter.on("data", (chunk) => {
+			rbuf += chunk.toString();
+			const lines = rbuf.split("\n");
+			rbuf = lines.pop() ?? "";
+			for (const line of lines) if (line.trim()) reporterMessages.push(JSON.parse(line));
+		});
+		reporter.write(JSON.stringify({ type: "hello", clientId: "editor-reporter" }) + "\n");
+		await waitFor(() => reporterMessages.filter((m) => m.type === "hello").length >= 2);
+		const afterReporter = readHost(root, "v1");
+		assert.equal(afterReporter.attachedClients, 0, "a resident reporter must not count as attached");
+		assert.notEqual(afterReporter.attachedEver, true, "a resident reporter must not flip attachedEver");
+		reporter.write(JSON.stringify({ type: "editor_state", empty: true }) + "\n");
+
+		// (4) A probe hello must never mark the host attached on the legacy path.
+		// Run it before any real client so attachedEver is still false here.
+		const probe = createConnection(socketPath);
+		probe.on("error", () => {});
+		await once(probe, "connect");
+		probe.write(JSON.stringify({ type: "hello", clientId: "probe", wantOutput: false }) + "\n");
+		await new Promise((resolve) => probe.once("data", resolve));
+		probe.destroy();
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		const afterProbe = readHost(root, "v1");
+		assert.notEqual(afterProbe.attachedEver, true, "a probe must never mark the host attached on the legacy path");
+
+		// (2) A real UI client still counts exactly one — if the reporter were
+		// still sitting in `clients`, this would read 2.
+		const client = createConnection(socketPath);
+		client.on("error", () => {});
+		await once(client, "connect");
+		client.write(JSON.stringify({ type: "hello", clientId: "ui-test" }) + "\n");
+		const counted = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.attachedClients === 1 ? h : false;
+		}, 3000);
+		assert.equal(counted.attachedClients, 1, "exactly one attached client — a resident reporter still in `clients` would make this 2");
+		assert.equal(counted.attachedEver, true, "a real client flips attachedEver on the legacy path too");
+
+		// (3) Detaching the real client releases the host even though the
+		// reporter stays connected (the warm-host reclaim guard).
+		client.destroy();
+		const released = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.attachedClients === 0 ? h : false;
+		}, 3000);
+		assert.equal(released.attachedClients, 0, "reporter-only host must read as detached for warm-host reclaim");
+		reporter.destroy();
+
+		// Cleanup stays on the tested path: natural child exit.
+		const exitClient = createConnection(socketPath);
+		exitClient.on("error", () => {});
+		await once(exitClient, "connect");
+		send(exitClient, { type: "input", data: "exit\r" });
+		await waitForExit(runner, 5000);
+		exitClient.destroy();
+	} finally {
+		await stopRunner(runner);
+		reapChild(root, "v1");
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
 // ---- child-exit error attribution (issue #90) ----
 
 test("owned runner attributes an abnormal child exit's last visible line into host.json error", async () => {

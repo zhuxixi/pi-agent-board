@@ -3,6 +3,8 @@
  * text changes, so the attach surface can gate ← on the authoritative state
  * instead of render heuristics. Dependency-injected for unit testing. */
 
+import { CLIENT_ID_EDITOR_REPORTER } from "./host-protocol.mjs";
+
 /** @typedef {{ write(jsonLine: string): void; on?(event: "close" | "error", fn: () => void): void }} SocketLike */
 
 const defaultScheduler = {
@@ -80,7 +82,15 @@ export function createEditorStateReporter({ getEditorText, connect, intervalMs =
 		s?.resume?.();
 		s?.unref?.();
 		s?.on?.("data", () => {}); // consume and discard broadcast traffic
-		s?.on?.("connect", () => { if (socket === s) { backoffMs = 1000; startPolling(); } });
+		s?.on?.("connect", () => {
+			if (socket !== s) return;
+			backoffMs = 1000;
+			// Announce the client id before any state: the runner keeps this
+			// resident socket out of attachedClients/attachedEver so warm-host
+			// reclaim still sees an idle host (issue #103 §C).
+			send({ type: "hello", clientId: CLIENT_ID_EDITOR_REPORTER });
+			startPolling();
+		});
 		s?.on?.("close", () => { if (socket === s) scheduleReconnect(); });
 		s?.on?.("error", () => { if (socket === s) scheduleReconnect(); });
 	}
