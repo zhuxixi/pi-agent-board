@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { test } from "node:test";
-import { controlPipeName, controlSocketPath, controlSocketPathFor, coordinatorEndpointPathFor, hostConfigPathFor, hostEndpointPathFor, viewDir } from "../src/core/paths.mjs";
+import { controlPipeName, controlSocketPath, controlSocketPathFor, coordinatorEndpointPathFor, hostConfigPathFor, hostEndpointPathFor, resolveControlEndpoint, viewDir } from "../src/core/paths.mjs";
 
 test("controlSocketPath uses a named pipe on win32 (no filesystem socket path)", () => {
 	const p = controlSocketPathFor("win32", "C:\\root", "view_abc123");
@@ -69,4 +69,35 @@ test("coordinator endpoint keeps POSIX semantics unchanged", () => {
 	assert.equal(coordinatorEndpointPathFor("linux", "/tmp/root"), expected);
 	assert.equal(coordinatorEndpointPathFor("darwin", "/tmp/root"), expected);
 	assert.equal(coordinatorEndpointPathFor("linux", "/tmp/root/"), expected, "path.join already normalizes on POSIX");
+});
+
+// ---- hosted child control endpoint discovery (issue #103) -------------------
+
+test("resolveControlEndpoint prefers the runner-injected endpoint (issue #103)", () => {
+	const injected = "/tmp/root/views/view_1/control.i1.sock";
+	assert.equal(
+		resolveControlEndpoint({ envSocketPath: injected, platform: "linux", root: "/tmp/root", viewId: "view_1" }),
+		injected,
+	);
+	const pipe = "\\\\.\\pipe\\pi-agent-board-view_1-deadbeef";
+	assert.equal(
+		resolveControlEndpoint({ envSocketPath: pipe, platform: "win32", root: "C:\\root", viewId: "view_1" }),
+		pipe,
+		"a win32 pipe name is passed through verbatim",
+	);
+});
+
+test("resolveControlEndpoint falls back to the stable per-view endpoint (issue #103)", () => {
+	const expected = controlSocketPathFor("linux", "/tmp/root", "view_abc123");
+	for (const envSocketPath of [undefined, null, "", "   "]) {
+		assert.equal(
+			resolveControlEndpoint({ envSocketPath, platform: "linux", root: "/tmp/root", viewId: "view_abc123" }),
+			expected,
+			`env value ${JSON.stringify(envSocketPath)} must fall back to the stable endpoint`,
+		);
+	}
+	assert.equal(
+		resolveControlEndpoint({ platform: "win32", root: "C:\\root", viewId: "view_abc123" }),
+		controlSocketPathFor("win32", "C:\\root", "view_abc123"),
+	);
 });

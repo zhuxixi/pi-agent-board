@@ -72,6 +72,21 @@ export function controlSocketPathFor(platform, root, viewId) {
 /** @param {string} root @param {string} viewId */
 export const controlSocketPath = (root, viewId) => controlSocketPathFor(process.platform, root, viewId);
 /**
+ * Endpoint a hosted child's editor-state reporter should connect to.
+ *
+ * The runner knows which endpoint it actually bound and injects it into the
+ * child env as AGENT_BOARD_CONTROL_SOCKET (issue #103): since #70 the owned
+ * runner binds a per-instance address, while the reporter kept dialing the
+ * stable per-view one, so it never connected and the attach gate lost its
+ * authoritative editor state. The injected value wins; the stable address
+ * remains the fallback for legacy hosts and older runners that predate the key.
+ * @param {{ envSocketPath?: string | null, platform: "win32"|"linux"|"darwin", root: string, viewId: string }} args
+ */
+export function resolveControlEndpoint({ envSocketPath, platform, root, viewId }) {
+	const injected = typeof envSocketPath === "string" ? envSocketPath.trim() : "";
+	return injected.length > 0 ? injected : controlSocketPathFor(platform, root, viewId);
+}
+/**
  * Per-instance control endpoint. Each new host instance binds its own socket/pipe,
  * so a superseded runner can never unlink the current owner's endpoint (issue #70).
  * win32 pipe names embed an 8-hex hash of the instanceId to stay under the 256-char limit.
