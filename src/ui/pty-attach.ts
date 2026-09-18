@@ -5,7 +5,7 @@ import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import type { Component, KeybindingsManager, TUI } from "@earendil-works/pi-tui";
 import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { isProbablyEmptyPiInputLine, isProbablyPiInputLine, resolveEditorEmpty } from "../core/pty-input.mjs";
+import { isProbablyEmptyPiInputLine, isProbablyPiInputLine, pickEditorAnchorLine, resolveEditorEmpty } from "../core/pty-input.mjs";
 import { findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
 import { createAttachOutputRenderScheduler, detectCursorDesync, isPtyCursorHidden, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
 import { evaluateAttachReconnect, shouldEscapeAttach } from "../core/pty-attach-reconnect.mjs";
@@ -350,23 +350,29 @@ export class PtyAttachComponent implements Component {
 		this.done({ action: "detached" });
 	}
 
-	/** Bottom-most line whose cells include an inverse-video cell — Pi renders
-	 * its editor cursor as an inverse "fake cursor" (`ESC[7m`), and the cell
-	 * persists in the buffer even while streaming differential frames skip
-	 * repainting the editor line. */
-	private findLastInverseCellLine(active: {
+	/** Bottom-up projection of every buffer line carrying inverse-video cells,
+	 * with the inverse CHARACTER count. Pi's editor fake cursor is exactly one
+	 * inverse character; chat-area diff hunks (renderDiff) and the inverse
+	 * notification banner are multi-character runs — pickEditorAnchorLine does
+	 * the discrimination. Counting characters rather than cells keeps wide
+	 * glyphs (2 cells, 1 char) counted once (issue #103). */
+	private collectInverseCellLines(active: {
 		baseY: number;
 		length: number;
 		getLine(index: number): BufferLineLike | undefined;
-	}): number | null {
+	}): Array<{ text: string; inverseCharCount: number }> {
+		const lines: Array<{ text: string; inverseCharCount: number }> = [];
 		for (let y = active.baseY + active.length - 1; y >= active.baseY; y--) {
 			const line = active.getLine(y);
 			if (!line) continue;
+			let inverseCharCount = 0;
 			for (let x = 0; x < line.length; x++) {
-				if (line.getCell(x)?.isInverse()) return y;
+				const cell = line.getCell(x);
+				if (cell?.isInverse()) inverseCharCount += cell.getChars().length;
 			}
+			if (inverseCharCount > 0) lines.push({ text: line.translateToString(true) ?? "", inverseCharCount });
 		}
-		return null;
+		return lines;
 	}
 
 	private childInputLooksEmpty(): boolean {
@@ -376,13 +382,13 @@ export class PtyAttachComponent implements Component {
 		// while Pi streams output (or right after attach) the cursor rests on
 		// working/output lines, never the input line, so a genuinely empty
 		// editor was misread as non-empty and ← stopped detaching (issue #66).
-		// Pi's editor line always carries an inverse-video fake-cursor cell,
-		// so anchor on that instead.
-		const fakeCursorLine = this.findLastInverseCellLine(active);
-		if (fakeCursorLine !== null) {
-			const line = active.getLine(fakeCursorLine)?.translateToString(true) ?? "";
-			return isProbablyEmptyPiInputLine(line);
-		}
+		// Pi's editor line carries an inverse fake cursor, but the chat area is
+		// full of inverse content too (diff hunks, the notification banner), and
+		// the editor line is often missing from the buffer entirely — so the
+		// anchor must also look like an editor line, and chat content must be
+		// skipped rather than trusted (issue #103).
+		const anchor = pickEditorAnchorLine(this.collectInverseCellLines(active));
+		if (anchor !== null) return anchor.empty;
 		// Fallback: Pi variants that render no fake cursor — look for an EMPTY
 		// prompt-glyph line. Only an empty glyph line proves an empty editor:
 		// content glyph lines (markdown table rows `│ … │`, quotes `> …`, or a

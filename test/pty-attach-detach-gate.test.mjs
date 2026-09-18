@@ -33,5 +33,8 @@ test("attach detach gate: ctrl+] passes through, ← keeps its gate", () => {
 	assert.equal(parsed.ctrlLeftDetachesOnEmptyInput, true, "Ctrl+← must detach from an empty editor too (issue #89)");
 	assert.equal(parsed.headerMentionsCtrlLeft, true, "the live header must advertise the Ctrl+← chord (issue #89)");
 	assert.equal(parsed.minimumSizeAvoidsInvalidShrink, true, "minimum terminal size must avoid an invalid shrink");
+	assert.equal(parsed.leftDetachesWithDiffHighlightInChat, true, "← must detach when chat-area diff inverse content sits above an empty editor line (issue #103)");
+	assert.equal(parsed.leftDetachesWithInverseBannerInChat, true, "← must detach when an inverse notification banner sits above an empty editor line (issue #103)");
+	assert.equal(parsed.leftDetachesOnNewStyleDraftWithoutReporter, true, "← must escape on an untrusted new-style draft rather than trap the user (issue #103, R1 trade-off)");
 	assert.equal(parsed.staleSocketEventsDoNotClearCurrent, true, "stale socket events must not clear a replacement connection");
 });
