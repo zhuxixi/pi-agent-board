@@ -41,16 +41,28 @@ reporter 是**常驻连接**，而 runner 把连接数直接当 `attachedClients
 
 ### 2.1 A：tier-1 锚点形态校验（D1 = R1，已确认）
 
-新增纯函数 `pickEditorAnchorLine(candidates)`，自底向上遍历**含反色 cell 的行**：
+新增纯函数 `pickEditorAnchorLine(candidates)`，自底向上遍历**含反色字符的行**：只有「**恰好 1 个反色字符**」的候选才被采信。
 
-| 候选行形态 | 判定 | 依据 |
+| 候选行形态（反色字符数 = 1） | 判定 | 依据 |
 |---|---|---|
-| 空白 + **恰好 1 个**反色 cell | 编辑器行，empty → 放行 detach | pi-tui 空编辑器行 = 反色假光标 + 填充 |
-| 字形行（`isProbablyPiInputLine`，旧式 pi） | 编辑器行，empty 由 `isProbablyEmptyPiInputLine` 决定 | 场景 B/B3 的既有语义 |
-| 其余（多 cell 反色片段 / 通知条 / 有文本的非字形行） | **跳过，继续向上扫** | 聊天区内容不得否决 detach |
+| 字形行（`isProbablyPiInputLine`） | 编辑器行，empty 由 `isProbablyEmptyPiInputLine` 决定 | 场景 B/B3 的既有语义（draft 保护保留） |
+| 非字形 + 文本全空白 | 新式 pi 空编辑器行（假光标）→ empty，放行 detach | pi-tui 空编辑器行 = 反色假光标 + 填充 |
+| 非字形 + 有文本 | 新式 pi draft 行 → **跳过**（R1 取舍：兜底不采信） | 见下方「已知代价」 |
+| 反色字符数 ≠ 1（多字符片段 / 通知条） | **跳过，继续向上扫** | 聊天区内容不得否决 detach |
 | 扫完全部候选 | `null` → 交 tier-2 字形扫描 → 仍无 → `return true`（放行） | #48/#69/#72 逃生链不变 |
 
-判定需要「该行反色 cell 计数」，而 `findLastInverseCellLine()` 只有存在性判断 → UI 侧新增计数提取，判定逻辑全部移入纯函数。
+**为什么判据是「反色字符数」而不是「反色 cell 数」**（本机 `@xterm/headless` 6.x 实测）：
+
+| 缓冲行 | 反色 cell 数 | 反色 `getChars().length` 累加 |
+|---|---|---|
+| `\x1b[7m草\x1b[27m稿`（宽字符 draft） | 2 | **1** |
+| `\x1b[7m \x1b[27m`（空编辑器假光标） | 1 | 1 |
+| `\x1b[7m Session saved \x1b[27m`（通知条） | 15 | 15 |
+| `+ 65 ## \x1b[7mR2 · \x1b[27m#\x1b[7m822 新 step\x1b[27m`（diff） | 16 | 15 |
+
+宽字符占 2 个 cell 但只有 1 个字符（续格 `getChars()` 返回空串）。**按 cell 计数会把中文假光标算成 2 → 字形行被误跳过 → 场景 B 的 draft 保护被破坏**，故判据必须是累加 `getChars().length`。
+
+判定所需的「反色字符数」超出 `findLastInverseCellLine()` 的存在性判断 → UI 侧新增提取（副作用隔离），判定逻辑全部移入纯函数。
 
 **已知代价（D1=R1 明确接受）**：新式 pi（编辑器行无 prompt 字形）+ 有 draft + reporter 不在线 → 兜底认不出 draft → 误 detach。可接受：detach 不丢草稿（子 session 继续跑，重新 attach 即回），而困死不可接受；B 修好后权威通道在位，A 只在连接窗口期/扩展缺失时兜底。按 K2 先例用场景 O3 钉住。
 
@@ -69,7 +81,7 @@ reporter 是**常驻连接**，而 runner 把连接数直接当 `attachedClients
 
 | ID | 功能点 | 验收方式 | 具体验证 | 通过标准 |
 |----|--------|----------|----------|----------|
-| A1 | 锚点判定纯函数 | 自动化（unit） | `node --test test/pty-input.test.mjs` | 覆盖：空字形行→empty、字形 draft→non-empty、空白+单反色→empty、多 cell diff 行→跳过、通知条→跳过、无候选→null |
+| A1 | 锚点判定纯函数 | 自动化（unit） | `node --test test/pty-input.test.mjs` | 覆盖：字形空行→empty、字形 draft（含中文宽字符）→non-empty、非字形空白单反色→empty、非字形 draft→跳过、多字符 diff 行→跳过、通知条→跳过、无候选/畸形输入→null |
 | A2 | 聊天区 diff 反色 + 无假光标空编辑器 → detach | 自动化（smoke） | `node --experimental-transform-types test-support/detach-gate-smoke.ts` 场景 **O1** | `detach=true`（当前 false） |
 | A3 | 反色通知条 + 同上 → detach | 自动化（smoke） | 同上，场景 **O2** | `detach=true`（当前 false） |
 | A4 | 钉住 D1/R1 取舍 | 自动化（smoke） | 同上，场景 **O3**：新式 draft（文本 + 单反色，无字形）+ `editorEmpty=null` | `detach=true`（有意放行，照 K2 先例钉住） |
@@ -88,10 +100,10 @@ reporter 是**常驻连接**，而 runner 把连接数直接当 `attachedClients
 
 | 拆分单元 | 位置 | 形态 | 测试边界 |
 |---|---|---|---|
-| `pickEditorAnchorLine(candidates)` | `src/core/pty-input.mjs` | 纯函数：入参 `Array<{text, inverseCellCount}>`（自底向上），出参 `{empty:boolean}\|null` | 零 IO / 零终端依赖 → `test/pty-input.test.mjs` 直接单测 |
+| `pickEditorAnchorLine(candidates)` | `src/core/pty-input.mjs` | 纯函数：入参 `Array<{text, inverseCharCount}>`（自底向上），出参 `{empty:boolean}\|null` | 零 IO / 零终端依赖 → `test/pty-input.test.mjs` 直接单测 |
 | `resolveControlEndpoint({envSocketPath, platform, root, viewId})` | `src/core/paths.mjs` | 纯函数，platform 显式注入 | 零 IO；win32 分支断言 pipe 名原样返回，不真实绑定 |
 | `classifyClientHello(msg)` | `src/core/host-protocol.mjs`（新） | 纯函数 → `"probe"\|"editor-reporter"\|"client"` | 双端共用、零 IO → 单测 |
-| UI 侧提取 | `src/ui/pty-attach.ts` | 只做 `BufferLine → {text, inverseCellCount}`（副作用隔离） | 判定逻辑**不得**回流进 UI |
+| UI 侧提取 | `src/ui/pty-attach.ts` | 只做 `BufferLine → {text, inverseCharCount}`（副作用隔离） | 判定逻辑**不得**回流进 UI |
 | reporter 握手 | `src/core/editor-state-reporter.mjs` | 复用现有 DI（`connect`/`scheduler` 注入） | 用现有 manual-clock fakeScheduler 断言帧序 |
 | runner 反污染 | `runner/pty-runner.mjs` | `clients` / `editorReporters` 分账 | 走既有真实进程 integration 模式 |
 
