@@ -352,6 +352,7 @@ function legacyMain(config) {
 				if (kind === "client") update({ attachedEver: true });
 				if (kind === "editor-reporter") {
 					clients.delete(socket);
+					terminalSubscriptions.delete(socket);
 					editorReporters.add(socket);
 					update();
 				}
