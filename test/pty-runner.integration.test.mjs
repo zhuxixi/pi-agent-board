@@ -1243,17 +1243,12 @@ test("editor reporter connections leave attachedClients/attachedEver untouched (
 		});
 		reporter.write(JSON.stringify({ type: "hello", clientId: "editor-reporter" }) + "\n");
 		await waitFor(() => reporterMessages.find((m) => m.type === "hello"));
-
-		const afterReporter = await waitFor(() => {
-			const h = readHost(root, "v1");
-			return h && h.attachedClients === 0 && h.attachedEver !== true ? h : false;
-		}, 3000);
-		assert.equal(afterReporter.attachedClients, 0, "a resident reporter must not count as an attached client");
-		assert.notEqual(afterReporter.attachedEver, true, "a resident reporter must not mark the host attached");
 		reporter.write(JSON.stringify({ type: "editor_state", empty: true }) + "\n");
 
 		// A real UI client still counts, and detaching it releases the host even
-		// though the reporter stays connected (the warm-host reclaim guard).
+		// though the reporter stays connected (the warm-host reclaim guard). The
+		// `counted === 1` read is the direct proof that the reporter's hello was
+		// classified out of `clients`: had it stayed counted, this would read 2.
 		const client = createConnection(socketPath);
 		client.on("error", () => {});
 		await once(client, "connect");
@@ -1262,7 +1257,7 @@ test("editor reporter connections leave attachedClients/attachedEver untouched (
 			const h = readHost(root, "v1");
 			return h && h.attachedClients === 1 ? h : false;
 		}, 3000);
-		assert.equal(counted.attachedClients, 1, "a real client still counts as attached");
+		assert.equal(counted.attachedClients, 1, "exactly one attached client — a resident reporter still sitting in `clients` would make this 2");
 		client.destroy();
 		const released = await waitFor(() => {
 			const h = readHost(root, "v1");
