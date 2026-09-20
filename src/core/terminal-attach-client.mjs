@@ -211,6 +211,15 @@ export function createTerminalAttachClient({
 	 *  not clobber it before the epoch comparison (that comparison is the whole
 	 *  point of the gate). */
 	let reconnectFromGeneration = null;
+	/** Highest seq seen in legacy-broadcast strays during a reconnect gate. The
+	 * subscribe cursor must start past these or the runner's replay re-sends
+	 * them (wire-level duplicate — see the reconciling output branch). */
+	let strayHighWater = 0;
+	/** Generation observed at disconnect time — the epoch baseline. The live
+	 * `generation` field is refreshed by every hello/status/snapshot_begin,
+	 * INCLUDING the replacement runner's hello that precedes reconnect(), so
+	 * comparing against it can never detect a generation change. */
+	let generationAtDisconnect = null;
 	/** Guards against a double reconcile within one reconnect gate (reconnect()
 	 *  sends with the remembered identity; the fresh hello would otherwise send
 	 *  a second one). */
@@ -323,17 +332,21 @@ export function createTerminalAttachClient({
 	};
 
 	const issueReconnectSubscribe = (sinceSeq) => {
+		// The cursor must clear every stray the legacy broadcast already
+		// delivered to this socket during the gate (wire-level no-dup).
+		const effective = Math.max(sinceSeq, strayHighWater);
+		strayHighWater = 0;
 		const cursor = reconnectCursor;
 		reconnectCursor = null;
 		reconcileInFlight = false;
 		reconnectFromGeneration = null;
 		cancelReconcileTimer();
-		lastSeq = sinceSeq;
+		lastSeq = effective;
 		partial = { frame: null, empty: false, resnapshot: false, beginSeq: 0, flush: [] };
 		state = "resyncing";
 		send(
-			sinceSeq > 0
-				? { type: "subscribe_terminal", frameVersion: TERMINAL_FRAME_VERSION, sinceSeq }
+			effective > 0
+				? { type: "subscribe_terminal", frameVersion: TERMINAL_FRAME_VERSION, sinceSeq: effective }
 				: { type: "subscribe_terminal", frameVersion: TERMINAL_FRAME_VERSION },
 		);
 		return cursor;
@@ -644,7 +657,14 @@ export function createTerminalAttachClient({
 				if (state === "reconciling") {
 					// The fresh socket is not subscribed yet: everything here is
 					// broadcast stray. Consume so the UI legacy path can never
-					// double-feed bytes the coming snapshot/replay will cover.
+					// double-feed bytes the coming snapshot/replay will cover — but
+					// REMEMBER the high-water seq: the runner's legacy broadcast and
+					// the replay stream overlap on the wire, so the subscribe cursor
+					// must start past every stray the broadcast already delivered
+					// (otherwise the replay re-sends them — a wire-level duplicate
+					// that widens from sub-ms to the reconcile RTT under the phase-5
+					// gate).
+					if (typeof msg.seq === "number" && msg.seq > strayHighWater) strayHighWater = msg.seq;
 					return true;
 				}
 				// probing: outputs belong to the legacy broadcast window (old
@@ -701,7 +721,7 @@ export function createTerminalAttachClient({
 			return;
 		}
 		reconnectCursor = cursorSeq;
-		reconnectFromGeneration = generation;
+		reconnectFromGeneration = generationAtDisconnect ?? generation;
 		state = "reconciling";
 		cancelReconcileTimer();
 		reconcileTimer = scheduleTimeout(reconcileTimeoutMs, () => {
@@ -730,6 +750,10 @@ export function createTerminalAttachClient({
 	 *  modes (legacy) and closed stay inert. */
 	function onDisconnect() {
 		if (state === "closed" || state === "legacy") return;
+		// Epoch baseline: snapshot the generation AS OF THE DISCONNECT. The live
+		// `generation` field will be refreshed by the replacement runner's hello
+		// before reconnect() runs, so only this capture can detect a change.
+		if (generation) generationAtDisconnect = generation;
 		cancelProbeTimer();
 		cancelReconcileTimer();
 	}
