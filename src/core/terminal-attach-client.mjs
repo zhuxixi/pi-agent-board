@@ -137,7 +137,7 @@ import { classifyCommandAck, encodeCommand } from "./control-protocol.mjs";
  */
 
 const MAX_SNAPSHOT_FAILURES = 3; // up to 3 recovery attempts, then legacy fallback
-const MAX_RESIZE_START_RETRIES = 5; // bounded host_starting retry chain (starting-window resize parity with the legacy cachedResize)
+const MAX_RESIZE_START_RETRIES = 5; // max TOTAL sends per size change (initial + retries; legacy cachedResize parity is "eventually applied", not infinite)
 const RESIZE_RETRY_DELAY_MS = 300;
 
 /**
@@ -207,6 +207,14 @@ export function createTerminalAttachClient({
 	/** Pending reconnect gate: reconcile must resolve (or time out) before the
 	 *  subscribe decision — spec D4 binds hello → reconcile → snapshot/subscribe. */
 	let reconnectCursor = null;
+	/** Generation baseline AT reconnect time — the fresh socket's hello must
+	 *  not clobber it before the epoch comparison (that comparison is the whole
+	 *  point of the gate). */
+	let reconnectFromGeneration = null;
+	/** Guards against a double reconcile within one reconnect gate (reconnect()
+	 *  sends with the remembered identity; the fresh hello would otherwise send
+	 *  a second one). */
+	let reconcileInFlight = false;
 	/** Active starting-window resize retry chain (latest-wins: a new user
 	 *  resize replaces it). { commandId, cols, rows, attempt } | null */
 	let resizeStartRetry = null;
@@ -304,10 +312,11 @@ export function createTerminalAttachClient({
 		viewId = typeof status.viewId === "string" && status.viewId ? status.viewId : viewId;
 		if (typeof msg.generation === "string" && msg.generation) generation = msg.generation;
 		// A reconnect waiting for identity on the fresh socket can now reconcile.
-		if (state === "reconciling" && instanceId && reconnectCursor !== null) sendReconcile();
+		if (state === "reconciling" && instanceId && reconnectCursor !== null && !reconcileInFlight) sendReconcile();
 	};
 
 	const sendReconcile = () => {
+		reconcileInFlight = true;
 		const commandId = `${clientId}-rec-${++commandCounter}`;
 		seq += 1;
 		send(encodeCommand("reconcile", {}, { commandId, clientId, seq, viewId: viewId ?? "unknown", instanceId }));
@@ -316,6 +325,8 @@ export function createTerminalAttachClient({
 	const issueReconnectSubscribe = (sinceSeq) => {
 		const cursor = reconnectCursor;
 		reconnectCursor = null;
+		reconcileInFlight = false;
+		reconnectFromGeneration = null;
 		cancelReconcileTimer();
 		lastSeq = sinceSeq;
 		partial = { frame: null, empty: false, resnapshot: false, beginSeq: 0, flush: [] };
@@ -328,16 +339,15 @@ export function createTerminalAttachClient({
 		return cursor;
 	};
 
-	/** Epoch rule (spec D4 + phase-4 residual fix): a generation CHANGE means
-	 *  the runner (and its child) was replaced — the remembered cursor describes
-	 *  a dead stream, so ring replay across generations is structurally
-	 *  impossible: discard the cursor and take a fresh snapshot. Same generation
-	 *  → seamless replay from the applied cursor. No generation (legacy-mode
-	 *  host, unreachable here because reconcile needs an instanceId) or an
-	 *  unanswered reconcile (phase-4 runner) → phase-4 semantics: the runner's
-	 *  resnapshot/empty begin flags protect correctness. */
+	/** Epoch rule (spec D4 + phase-4 residual fix): a generation CHANGE versus
+	 *  the baseline captured at reconnect() means the runner (and its child)
+	 *  was replaced — the remembered cursor describes a dead stream, so ring
+	 *  replay across generations is structurally impossible: discard the cursor
+	 *  and take a fresh snapshot. Same generation → seamless replay from the
+	 *  applied cursor. No generation (unreachable: reconcile needs an
+	 *  instanceId) or an unanswered reconcile (phase-4 runner) → phase-4
+	 *  semantics: the runner's resnapshot/empty begin flags protect correctness. */
 	const resolveReconnect = (result) => {
-		const previousGeneration = generation;
 		const nextGeneration = typeof result?.generation === "string" && result.generation ? result.generation : null;
 		generation = nextGeneration ?? generation;
 		emit("reconciled", {
@@ -347,9 +357,9 @@ export function createTerminalAttachClient({
 			stateMaterializedRevision: result?.stateMaterializedRevision,
 			unresolved: result?.unresolved,
 		});
-		if (nextGeneration && previousGeneration && nextGeneration !== previousGeneration) {
+		if (nextGeneration && reconnectFromGeneration && nextGeneration !== reconnectFromGeneration) {
 			lastSeq = 0;
-			emit("epochReset", { previous: previousGeneration, current: nextGeneration });
+			emit("epochReset", { previous: reconnectFromGeneration, current: nextGeneration });
 			issueReconnectSubscribe(0);
 			return;
 		}
@@ -360,13 +370,19 @@ export function createTerminalAttachClient({
 		resizeStartRetry = null;
 	};
 
-	const scheduleResizeStartRetry = (cols, rows, attempt) => {
-		if (attempt >= MAX_RESIZE_START_RETRIES) return;
-		resizeStartRetry = { cols, rows, attempt };
-		scheduleTimeout(RESIZE_RETRY_DELAY_MS, () => {
-			if (resizeStartRetry?.attempt !== attempt) return; // superseded by a newer resize
+	/** Re-arm the starting-window retry chain (bounded, latest-wins). Object
+	 *  identity is the liveness marker: a newer resize replaces the chain, a
+	 *  terminal ack cancels it, and a stale timer is a no-op. */
+	const scheduleResizeStartRetry = (chain) => {
+		if (chain.attempt + 1 >= MAX_RESIZE_START_RETRIES) {
 			resizeStartRetry = null;
-			sendControl("resize", { cols, rows }, attempt + 1);
+			return;
+		}
+		const next = { ...chain, attempt: chain.attempt + 1 };
+		resizeStartRetry = next;
+		scheduleTimeout(RESIZE_RETRY_DELAY_MS, () => {
+			if (resizeStartRetry !== next) return; // superseded or cancelled
+			sendControl("resize", { cols: next.cols, rows: next.rows }, { isRetry: true });
 		});
 	};
 
@@ -379,18 +395,18 @@ export function createTerminalAttachClient({
 	 *
 	 * @param {"resize" | "interrupt" | "terminate" | "detach"} type
 	 * @param {Record<string, unknown>} payload
-	 * @param {number} [startRetryAttempt] internal: host_starting retry chain depth
+	 * @param {{ isRetry?: boolean }} [opts] internal: retry sends keep the chain
 	 */
-	function sendControl(type, payload = {}, startRetryAttempt = 0) {
+	function sendControl(type, payload = {}, opts = {}) {
 		if (type === "input") throw new TypeError("sendControl: keystroke input is never enveloped (fire-and-forget contract)");
 		if (state === "closed" || state === "legacy" || !instanceId || !viewId) return null;
 		const commandId = `${clientId}-${++commandCounter}`;
 		seq += 1;
 		send(encodeCommand(type, payload, { commandId, clientId, seq, viewId, instanceId }));
 		pendingCommands.set(commandId, { type });
-		if (type === "resize" && startRetryAttempt === 0) {
-			cancelResizeStartRetry(); // latest-wins: a new user resize replaces any retry chain
-			resizeStartRetry = { cols: payload.cols, rows: payload.rows, attempt: 0, commandId };
+		if (type === "resize" && !opts.isRetry) {
+			// latest-wins: a new user resize replaces any retry chain
+			resizeStartRetry = { cols: payload.cols, rows: payload.rows, attempt: 0 };
 		}
 		return { commandId };
 	}
@@ -516,10 +532,8 @@ export function createTerminalAttachClient({
 					const pending = pendingCommands.get(msg.commandId);
 					pendingCommands.delete(msg.commandId);
 					emit("cmdAck", { commandId: msg.commandId, type: pending?.type, stage: "error", code: msg.code });
-					if (pending?.type === "resize" && typeof resizeStartRetry?.cols === "number") {
-						const { cols, rows, attempt } = resizeStartRetry;
-						resizeStartRetry = null;
-						scheduleResizeStartRetry(cols, rows, attempt + 1);
+					if (pending?.type === "resize" && resizeStartRetry) {
+						scheduleResizeStartRetry(resizeStartRetry);
 					}
 					return true;
 				}
@@ -684,6 +698,7 @@ export function createTerminalAttachClient({
 			return;
 		}
 		reconnectCursor = cursorSeq;
+		reconnectFromGeneration = generation;
 		state = "reconciling";
 		cancelReconcileTimer();
 		reconcileTimer = scheduleTimeout(reconcileTimeoutMs, () => {

@@ -507,3 +507,189 @@ test("onDisconnect after a decided mode is a no-op (decision stands)", () => {
 	assert.deepEqual(eventsOf(events, "mode"), ["protocol"]);
 	assert.equal(client.getMode(), "protocol");
 });
+
+// ---------------------------------------------------------------------------
+// Phase 5 (D4): control lifecycle — reconnect order, epoch rule, envelopes
+// ---------------------------------------------------------------------------
+
+/** Drive the client to protocol-live WITH observed identity (phase-5 runner). */
+function liveClient(opts = {}) {
+	const h = harness(opts);
+	h.client.start();
+	// The runner sends hello on connect (identity + generation), before the
+	// subscribe's snapshot answer — observeIdentity runs first on the wire.
+	h.client.handleMessage({ type: "hello", status: { instanceId: "inst-1", viewId: "v1" }, generation: "gen-1" });
+	h.client.handleMessage(begin({ snapshotSeq: 5, generation: "gen-1" }));
+	h.client.handleMessage(frame());
+	h.client.handleMessage(end(6));
+	h.sent.length = 0;
+	h.events.length = 0;
+	return h;
+}
+
+test("first connect sends ONLY the probe — reconcile is a reconnect gate, not a first-connect step", () => {
+	const { client, sent } = harness();
+	client.start();
+	assert.deepEqual(sent, [SUB]);
+	// hello answer (with identity) must not add a reconcile on first connect.
+	client.handleMessage({ type: "hello", status: { instanceId: "inst-1", viewId: "v1" }, generation: "gen-1" });
+	assert.equal(sent.length, 1, "no reconcile before the subscribe decision on first connect");
+	assert.equal(client.getMode(), "probing");
+});
+
+test("sendControl envelopes carry commandId/clientId/seq/viewId/instanceId; seq increments; ids unique", () => {
+	const { client, sent } = liveClient();
+	const r1 = client.sendControl("resize", { cols: 100, rows: 30 });
+	const r2 = client.sendControl("detach");
+	assert.ok(r1 && r2 && r1.commandId !== r2.commandId, "unique commandIds");
+	assert.deepEqual(sent, [
+		{
+			type: "resize", commandId: r1.commandId, clientId: sent[0].clientId, seq: 1,
+			viewId: "v1", instanceId: "inst-1", cols: 100, rows: 30,
+		},
+		{ type: "detach", commandId: r2.commandId, clientId: sent[0].clientId, seq: 2, viewId: "v1", instanceId: "inst-1" },
+	]);
+	assert.equal(client.getIdentity().generation, "gen-1");
+});
+
+test("legacy-mode host (instanceId null): sendControl returns null, never envelopes; the attach probe still runs", () => {
+	const { client, sent, timers } = harness();
+	client.start();
+	assert.deepEqual(sent, [SUB], "probe sent before any hello");
+	client.handleMessage({ type: "hello", status: { viewId: "v1" } }); // no instanceId
+	assert.equal(client.sendControl("resize", { cols: 80, rows: 24 }), null, "legacy host: no envelope");
+	assert.equal(client.sendControl("detach"), null);
+	assert.equal(sent.length, 1, "no control messages were sent");
+	assert.equal(timers.live().length, 1, "probe deadline still armed — snapshot attach works on legacy mains");
+});
+
+test("keystroke input is never enveloped (fire-and-forget contract, pinned)", () => {
+	const { client, sent } = liveClient();
+	assert.throws(() => client.sendControl("input", { data: "x" }), /never enveloped/);
+	assert.equal(sent.length, 0);
+});
+
+test("reconnect order hello → reconcile → subscribe; same generation → sinceSeq replay", () => {
+	const { client, sent, events } = liveClient();
+	client.reconnect(9);
+	assert.equal(client.getMode(), "protocol");
+	const rec = sent.find((m) => m.type === "reconcile");
+	assert.ok(rec, "reconcile sent on the new socket");
+	assert.ok(!sent.some((m) => m.type === "subscribe_terminal"), "no subscribe before the reconcile answer");
+	assert.equal(rec.instanceId, "inst-1");
+	client.handleMessage({ type: "hello", status: { instanceId: "inst-1", viewId: "v1" }, generation: "gen-1" });
+	assert.equal(sent.filter((m) => m.type === "reconcile").length, 1, "fresh hello does not double-reconcile");
+	client.handleMessage({ type: "reconcile_result", commandId: rec.commandId, generation: "gen-1", hostRevision: 4, terminalCursor: { lastSeq: 12 }, stateMaterializedRevision: 7, unresolved: [] });
+	assert.deepEqual(sent.at(-1), SUB_SEQ(9), "same generation: seamless replay from the applied cursor");
+	assert.deepEqual(eventsOf(events, "epochReset"), []);
+	assert.ok(eventsOf(events, "reconciled")[0].hostRevision === 4);
+});
+
+test("generation CHANGED across reconnect: cursor discarded, seq-less subscribe (fresh snapshot), epochReset emitted", () => {
+	const { client, sent, events } = liveClient();
+	client.reconnect(9);
+	const rec = sent.find((m) => m.type === "reconcile");
+	client.handleMessage({ type: "hello", status: { instanceId: "inst-2", viewId: "v1" }, generation: "gen-2" });
+	client.handleMessage({ type: "reconcile_result", commandId: rec.commandId, generation: "gen-2", hostRevision: 1, terminalCursor: { lastSeq: 0 }, stateMaterializedRevision: null, unresolved: [] });
+	assert.deepEqual(sent.at(-1), SUB, "runner replaced: seq-less subscribe — fresh snapshot, ring replay across generations impossible");
+	assert.equal(client.getLastSeq(), 0, "stale cursor discarded");
+	const resets = eventsOf(events, "epochReset");
+	assert.deepEqual(resets, [{ previous: "gen-1", current: "gen-2" }]);
+	// The fresh snapshot flow works from zero: begin+frame+end paints and lives at 1.
+	client.handleMessage(begin({ snapshotSeq: 0, resnapshot: true }));
+	client.handleMessage(frame("NEW"));
+	client.handleMessage(end(1));
+	assert.deepEqual(eventsOf(events, "snapshotReady"), [{ frame: "NEW", empty: undefined, resnapshot: true, nextSeq: 1 }]);
+});
+
+test("reconcile deadline without an answer (phase-4 runner): reconnect falls back to sinceSeq subscribe", () => {
+	const { client, sent, timers } = liveClient();
+	client.reconnect(9);
+	timers.fireAll(); // reconcile deadline
+	assert.deepEqual(sent.at(-1), SUB_SEQ(9), "phase-4 semantics: runner begin flags protect correctness");
+	assert.equal(client.getMode(), "protocol");
+});
+
+test("instance_mismatch during reconnect reconcile: adopt currentInstanceId and re-reconcile", () => {
+	const { client, sent } = liveClient();
+	client.reconnect(9);
+	client.handleMessage(err("instance_mismatch", { commandId: sent.find((m) => m.type === "reconcile").commandId, currentInstanceId: "inst-9" }));
+	const reconciles = sent.filter((m) => m.type === "reconcile");
+	assert.equal(reconciles.length, 2);
+	assert.equal(reconciles[1].instanceId, "inst-9", "re-reconcile carries the adopted instance fence");
+});
+
+test("cmdAck correlation: resize applied carries real dims and clears pending; superseded drops the wait", () => {
+	const { client, sent, events } = liveClient();
+	const { commandId } = client.sendControl("resize", { cols: 100, rows: 30 });
+	client.handleMessage({ type: "cmd_ack", commandId, stage: "applied", cols: 100, rows: 30 });
+	assert.deepEqual(eventsOf(events, "cmdAck"), [{ commandId, type: "resize", stage: "applied", cols: 100, rows: 30, byCommandId: undefined, value: undefined, exitConfirmed: undefined, runnerFinalizing: undefined }]);
+	// A late duplicate ack for a cleared command is still consumed, never UI-fed.
+	assert.equal(client.handleMessage({ type: "cmd_ack", commandId, stage: "applied", cols: 100, rows: 30 }), true);
+	assert.equal(eventsOf(events, "cmdAck").length, 2);
+
+	const r2 = client.sendControl("resize", { cols: 120, rows: 40 });
+	const r3 = client.sendControl("resize", { cols: 130, rows: 41 });
+	client.handleMessage({ type: "cmd_ack", commandId: r2.commandId, stage: "superseded", byCommandId: r3.commandId });
+	assert.deepEqual(eventsOf(events, "cmdAck").at(-1).stage, "superseded");
+});
+
+test("terminate observed: runnerFinalizing OR exitConfirmed both classify as terminal evidence (ruling 6)", () => {
+	const { client, events } = liveClient();
+	const a = client.sendControl("terminate");
+	client.handleMessage({ type: "cmd_ack", commandId: a.commandId, stage: "observed", runnerFinalizing: true });
+	assert.equal(eventsOf(events, "cmdAck").at(-1).stage, "observed");
+	const b = client.sendControl("terminate");
+	client.handleMessage({ type: "cmd_ack", commandId: b.commandId, stage: "observed", exitConfirmed: true, exitCode: 0 });
+	assert.equal(eventsOf(events, "cmdAck").at(-1).stage, "observed");
+	// An observed WITHOUT evidence is invalid and never surfaces as terminal.
+	const c = client.sendControl("terminate");
+	client.handleMessage({ type: "cmd_ack", commandId: c.commandId, stage: "observed" });
+	assert.equal(eventsOf(events, "cmdAck").at(-1).stage, "observed", "raw stage surfaces");
+	assert.ok(eventsOf(events, "protocolError").some((p) => p.code === "ack_invalid"), "evidence-less observed is flagged");
+});
+
+test("host_starting on enveloped resize: bounded client-side retry with fresh commandIds (legacy cachedResize parity)", () => {
+	const { client, sent, timers } = liveClient();
+	const first = client.sendControl("resize", { cols: 100, rows: 30 });
+	client.handleMessage(err("host_starting", { commandId: first.commandId }));
+	// attempts 2..5 fire on the fake timer; each host_starting re-arms.
+	for (let i = 0; i < 4; i++) {
+		timers.fireAll();
+		const resend = sent.filter((m) => m.type === "resize").at(-1);
+		client.handleMessage(err("host_starting", { commandId: resend.commandId }));
+	}
+	const resizeCount = sent.filter((m) => m.type === "resize").length;
+	assert.equal(resizeCount, 5, "initial + 4 retries (chain capped at MAX)");
+	// The cap engaged: the 5th host_starting disarmed the chain, so firing the
+	// timers cannot produce a 6th resize.
+	timers.fireAll();
+	assert.equal(sent.filter((m) => m.type === "resize").length, 5, "bounded: no 6th attempt");
+	// An applied resize stops the chain.
+	const last = sent.filter((m) => m.type === "resize").at(-1);
+	client.handleMessage({ type: "cmd_ack", commandId: last.commandId, stage: "applied", cols: 100, rows: 30 });
+	const before = sent.filter((m) => m.type === "resize").length;
+	timers.fireAll();
+	assert.equal(sent.filter((m) => m.type === "resize").length, before, "chain cancelled on applied");
+});
+
+test("snapshot_begin.generation refreshes the identity baseline (ruling 5 pin)", () => {
+	const { client } = harness();
+	client.start();
+	client.handleMessage({ type: "hello", status: { instanceId: "inst-1", viewId: "v1" }, generation: "gen-1" });
+	client.handleMessage(begin({ snapshotSeq: 5, generation: "gen-1b" }));
+	assert.equal(client.getIdentity().generation, "gen-1b", "begin is a generation source too");
+});
+
+test("reconciling consumes stray broadcast output/begin without corrupting the gate", () => {
+	const { client, sent, events } = liveClient();
+	client.reconnect(9);
+	assert.equal(client.handleMessage(out(10, "stray")), true, "broadcast stray consumed");
+	assert.equal(client.handleMessage(begin({ snapshotSeq: 99 })), true, "pre-subscribe begin consumed");
+	assert.equal(eventsOf(events, "output").length, 0, "nothing fed to the UI");
+	assert.equal(client.getLastSeq(), 5, "gate state untouched (applied cursor unchanged while reconciling)");
+	const rec = sent.find((m) => m.type === "reconcile");
+	client.handleMessage({ type: "hello", status: { instanceId: "inst-1", viewId: "v1" }, generation: "gen-1" });
+	client.handleMessage({ type: "reconcile_result", commandId: rec.commandId, generation: "gen-1", hostRevision: 5, terminalCursor: { lastSeq: 12 }, stateMaterializedRevision: null, unresolved: [] });
+	assert.deepEqual(sent.at(-1), SUB_SEQ(9), "gate resolves normally after strays");
+});
