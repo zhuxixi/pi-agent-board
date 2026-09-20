@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createTerminalAttachClient } from "../src/core/terminal-attach-client.mjs";
 import { TERMINAL_FRAME_VERSION } from "../src/core/terminal-attach-protocol.mjs";
+import { CONTROL_ERROR_CODES } from "../src/core/control-protocol.mjs";
 
 /**
  * Unit matrix for the client-side terminal attach protocol state machine.
@@ -692,4 +693,44 @@ test("reconciling consumes stray broadcast output/begin without corrupting the g
 	client.handleMessage({ type: "hello", status: { instanceId: "inst-1", viewId: "v1" }, generation: "gen-1" });
 	client.handleMessage({ type: "reconcile_result", commandId: rec.commandId, generation: "gen-1", hostRevision: 5, terminalCursor: { lastSeq: 12 }, stateMaterializedRevision: null, unresolved: [] });
 	assert.deepEqual(sent.at(-1), SUB_SEQ(9), "gate resolves normally after strays");
+});
+
+test("taxonomy errors correlated by commandId consume the pending entry and surface cmdAck error (task 4, review P2)", () => {
+	for (const code of ["command_failed", "journal_unavailable", "envelope_invalid", "instance_mismatch"]) {
+		const { client, events } = liveClient();
+		const resize = client.sendControl("resize", { cols: 100, rows: 30 });
+		const handled = client.handleMessage(err(code, { commandId: resize.commandId, currentInstanceId: "inst-9" }));
+		assert.equal(handled, true, `${code} is consumed`);
+		const ack = eventsOf(events, "cmdAck").at(-1);
+		assert.equal(ack.stage, "error", `${code} surfaces as cmdAck stage error`);
+		assert.equal(ack.code, code);
+		assert.equal(ack.type, "resize");
+		if (code === "instance_mismatch") assert.equal(ack.currentInstanceId, "inst-9", "recovery signal carried");
+		// Terminal code: the pending entry is gone — a late duplicate error for
+		// the same commandId is consumed as a stale reply without a second ack.
+		assert.equal(client.handleMessage(err(code, { commandId: resize.commandId })), true);
+	}
+});
+
+test("terminal taxonomy codes cancel the resize starting-window retry chain", () => {
+	const { client, sent, timers } = liveClient();
+	const first = client.sendControl("resize", { cols: 100, rows: 30 });
+	client.handleMessage(err("command_failed", { commandId: first.commandId }));
+	timers.fireAll();
+	assert.equal(sent.filter((m) => m.type === "resize").length, 1, "terminal error cancels the retry chain");
+	// Contrast: host_starting keeps the chain armed (covered in detail above).
+});
+
+test("taxonomy error for an unknown commandId is consumed without a fabricated ack type", () => {
+	const { client, events } = liveClient();
+	assert.equal(client.handleMessage(err("command_failed", { commandId: "never-sent" })), true);
+	const ack = eventsOf(events, "cmdAck").at(-1);
+	assert.equal(ack.stage, "error");
+	assert.equal(ack.type, undefined, "no pending correlation — type is honestly undefined");
+});
+
+test("CONTROL_ERROR_CODES enumeration is complete (ruling 2)", () => {
+	for (const code of ["envelope_invalid", "instance_mismatch", "host_starting", "journal_unavailable", "command_failed"]) {
+		assert.ok(CONTROL_ERROR_CODES[code], `${code} documented`);
+	}
 });

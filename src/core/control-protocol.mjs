@@ -56,6 +56,53 @@ export const CONTROL_COMMAND_TYPES = Object.freeze([
 export const ACK_STAGES = Object.freeze(["accepted", "applied", "observed", "superseded"]);
 
 /**
+ * Error taxonomy for `{type:"error", code, commandId?}` replies to enveloped
+ * control commands (spec D4; ruling 2 enumeration). Every code is terminal for
+ * the correlating client EXCEPT `host_starting` (bounded retry with fresh
+ * commandIds is the runner's documented starting-window contract). Clients
+ * must consume a taxonomy error carrying a commandId: clear the pending
+ * correlation and surface `cmdAck {stage:"error", code}` — a swallowed error
+ * leaves the command pending forever.
+ *
+ * - `envelope_invalid` — the envelope failed validation (missing/ill-typed
+ *   fields, listed in `errors`). The command had NO effect. Retrying the same
+ *   bytes is futile; this is a caller bug.
+ * - `instance_mismatch` — the command's instanceId is a foreign fence. The
+ *   command had NO effect on this runner. `currentInstanceId` is the recovery
+ *   signal (re-reconcile against it).
+ * - `host_starting` — the child is not ready (starting window). The command
+ *   had NO effect. Retry with a FRESH commandId is the documented contract
+ *   (the same commandId is not journaled, so reuse would also be safe, but
+ *   fresh ids keep ack correlation unambiguous).
+ * - `journal_unavailable` — a durable accept was REFUSED because the command
+ *   journal could not be written. Nothing was journaled, nothing applied;
+ *   the accepted stage would have been a lie. Retry is safe (fresh accept).
+ * - `command_failed` — the runner-side action failed after (or without) an
+ *   accept. Reconcile by commandId BEFORE retrying: if the command was
+ *   journaled, a blind re-send returns only the cached stage and never
+ *   re-applies — the honest resolution is reconcile-then-decide.
+ *
+ * Not listed here: an out-of-order `seq` is dropped REPLY-LESS (diagnostic
+ * only, `checkSeq` contract) — it is an ordering aid, never a command
+ * rejection, and carries no commandId to correlate.
+ */
+export const CONTROL_ERROR_CODES = Object.freeze({
+	envelope_invalid: "envelope failed validation; command had no effect; caller bug",
+	instance_mismatch: "foreign instance fence; command had no effect; currentInstanceId is the recovery signal",
+	host_starting: "child not ready; command had no effect; bounded retry with fresh commandIds",
+	journal_unavailable: "durable accept refused (journal write failed); nothing journaled or applied; retry safe",
+	command_failed: "runner-side action failed; reconcile by commandId before retry",
+});
+
+/** Error codes after which a client-side retry chain must NOT continue. */
+export const TERMINAL_ERROR_CODES = Object.freeze([
+	"envelope_invalid",
+	"instance_mismatch",
+	"journal_unavailable",
+	"command_failed",
+]);
+
+/**
  * Per-type delivery semantics — BINDING for runner (Task 2), UI client (Task 3)
  * and service follow-up (Task 4). Stage legality is what classifyCommandAck
  * enforces; `retry` names the rule retryPolicy implements.

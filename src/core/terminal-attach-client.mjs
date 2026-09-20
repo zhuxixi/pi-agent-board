@@ -122,7 +122,7 @@
  */
 
 import { TERMINAL_FRAME_VERSION } from "./terminal-attach-protocol.mjs";
-import { classifyCommandAck, encodeCommand } from "./control-protocol.mjs";
+import { classifyCommandAck, encodeCommand, CONTROL_ERROR_CODES, TERMINAL_ERROR_CODES } from "./control-protocol.mjs";
 
 /**
  * @typedef {"probing" | "collecting" | "live" | "resyncing" | "reconciling" | "legacy" | "closed"} AttachClientState
@@ -535,6 +535,21 @@ export function createTerminalAttachClient({
 					if (pending?.type === "resize" && resizeStartRetry) {
 						scheduleResizeStartRetry(resizeStartRetry);
 					}
+					return true;
+				}
+				if (msg.code && CONTROL_ERROR_CODES[msg.code] && msg.commandId) {
+					// Task 4 (review P2): a taxonomy error correlated by commandId must
+					// consume the pending entry and surface as a cmdAck error — a
+					// swallowed error leaves the command pending forever. Terminal codes
+					// also cancel the resize starting-window retry chain (retrying into
+					// a moved fence or a caller-bug rejection is futile; host_starting
+					// above keeps its bounded-retry semantics).
+					const pending = pendingCommands.get(msg.commandId);
+					pendingCommands.delete(msg.commandId);
+					if (pending?.type === "resize" && TERMINAL_ERROR_CODES.includes(msg.code)) {
+						cancelResizeStartRetry();
+					}
+					emit("cmdAck", { commandId: msg.commandId, type: pending?.type, stage: "error", code: msg.code, currentInstanceId: msg.currentInstanceId });
 					return true;
 				}
 				return false; // UI-owned status errors
