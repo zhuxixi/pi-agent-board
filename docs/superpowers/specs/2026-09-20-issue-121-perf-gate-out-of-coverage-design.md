@@ -66,7 +66,7 @@ CI 新增一个 step（**不新增 job**，避免改分支保护配置）：
 ```
 
 - 位置：`Typecheck` 之后、`Unit tests` 之前——此时机器最安静（本 job 尚无可争抢的测试进程），且失败快速暴露。
-- step 内只跑 `test/terminal-model-perf.test.mjs` 一个文件；`--test-concurrency=1` 仅对多文件并行有意义（当前单文件为恒等），保留它是为了将来增加 perf 文件时不引入并发测量。
+- step 内只跑 `test/terminal-model-perf.test.mjs` 一个文件；**首轮不携带 `--test-concurrency=1`**——该 flag 需 Node 21+，而 `package.json` 声明 `engines: node>=20`，且单文件时它是 no-op（2026-09-20 用户裁决：YAGNI，删掉；将来新增第二个 perf 文件时加回，并行测量必须保持不可能）。
 - **升级路径（写进 plan 的残留账）**：若该 step 在连续 5 次运行中仍抖动 → (a) 先按 D4 用证据重设界；(b) 仍不行才升级为独立 job（独立 runner）并把它加入必需检查（需改分支保护，属人工配置步骤）。
 
 ### D4：基线按证据重设，禁止静默放宽

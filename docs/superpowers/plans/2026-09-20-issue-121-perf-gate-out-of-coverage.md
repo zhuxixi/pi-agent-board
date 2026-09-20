@@ -218,9 +218,13 @@ if (process.env.NODE_V8_COVERAGE !== undefined) {
 }
 
 const perfTest = fileURLToPath(new URL("../test/terminal-model-perf.test.mjs", import.meta.url));
+// No --test-concurrency=1: the flag requires Node 21+ but package.json
+// declares engines >=20, and it is a no-op while the gate runs a single
+// file (spec D3, revised 2026-09-20). Re-add it when a second perf file
+// lands — parallel measurement across files must stay impossible.
 const child = spawn(
 	process.execPath,
-	["--test", "--test-concurrency=1", perfTest],
+	["--test", perfTest],
 	{ stdio: "inherit", env: { ...process.env, AGENT_BOARD_PERF_GATE: "1" } },
 );
 child.on("error", (err) => {
