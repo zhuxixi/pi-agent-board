@@ -105,10 +105,12 @@ Targeted tests → FULL suite → typecheck → conventional commit (explicit gi
 Acceptance: A1 CLOSED (test/control-protocol.test.mjs unit matrix — 33 tests); A2 CLOSED (test/control-reconcile.integration.test.mjs — wire-order reconnect, epoch discard, §10 never-rewrite e2e; 3 tests).
 
 - Journal: ≤512 records between rewrites; rare durable commands only; keystrokes never journaled.
+- Keystroke no-ack rationale: the envelope on transient commands is correlation/debugging metadata only — fire-and-forget by contract (no ack, no journal; journal writes must never sit on the keystroke path).
 - Legacy envelope-less coexistence: byte-pinned compat tests; old runners serve legacy paths only (envelopes fenced with instance_mismatch).
 - host_starting retry budget: 5×300ms client-side vs legacy unbounded cachedResize hold (documented parity choice).
 - Failed follow-ups (§10 accepted_unknown) surface via error diagnostic + queue item text; no dedicated dashboard affordance (product note).
 - envelope_invalid (non-retryable) still re-attempts in the queue loop — legacy shape, diagnostic-only signal.
 - TERMINAL_ERROR_CODES includes journal_unavailable for the resize chain — unreachable for resize (never journaled), harmless.
 - Boot-banner accept race (banner broadcast before socket accept, no replay): protocol property documented in 2026-08-27 spec; echo-probe test pattern adopted in terminal-snapshot + pty-runner integration files.
-- Stray high-water subscribe cursor: the reconcile-gate legacy broadcast overlap is closed client-side; a sub-ms residual window (between subscribe write and runner processing) remains, covered by the client's stray-discard semantics.
+- Stray high-water subscribe cursor: the reconcile-gate legacy broadcast overlap is closed client-side (strays are EMITTED — exactly-once UI delivery — and the replay starts past the high-water); a sub-ms residual window (between subscribe write and runner processing) remains, covered by the client's stray-discard semantics. The epoch-reset path zeroes the high-water (fresh snapshot subsumes strays).
+- Reconcile-deadline fallback (phase-4-era runner, lost result): subscribes with the remembered cursor and NO epoch comparison — an undetected generation change within a lost-result gate relies entirely on runner-side invalid_since_seq/begin flags. Pre-diff behavior, noted for the fleet-refresh window.

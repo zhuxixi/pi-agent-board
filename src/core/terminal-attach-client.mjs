@@ -373,6 +373,11 @@ export function createTerminalAttachClient({
 		if (nextGeneration && reconnectFromGeneration && nextGeneration !== reconnectFromGeneration) {
 			lastSeq = 0;
 			emit("epochReset", { previous: reconnectFromGeneration, current: nextGeneration });
+			// Epoch reset demands a seq-less subscribe (fresh snapshot). Gate strays
+			// from the NEW runner must not turn it into a tail replay onto the stale
+			// buffer — the max() in issueReconnectSubscribe is for the SAME-generation
+			// continuity path only. The fresh frame subsumes any emitted strays.
+			strayHighWater = 0;
 			issueReconnectSubscribe(0);
 			return;
 		}
@@ -657,14 +662,15 @@ export function createTerminalAttachClient({
 				if (state === "reconciling") {
 					// The fresh socket is not subscribed yet: everything here is
 					// broadcast stray. Consume so the UI legacy path can never
-					// double-feed bytes the coming snapshot/replay will cover — but
-					// REMEMBER the high-water seq: the runner's legacy broadcast and
-					// the replay stream overlap on the wire, so the subscribe cursor
-					// must start past every stray the broadcast already delivered
-					// (otherwise the replay re-sends them — a wire-level duplicate
-					// that widens from sub-ms to the reconcile RTT under the phase-5
-					// gate).
+					// double-feed — and EMIT it: these bytes must reach the UI exactly
+					// once (strays cover (cursor, strayHighWater]; the replay starts
+					// past strayHighWater). Consuming WITHOUT emitting would silently
+					// drop them from the rendered output — a data-loss regression the
+					// task-5 review caught. lastSeq deliberately does NOT advance here:
+					// the subscribe cursor (max(cursor, strayHighWater)) carries the
+					// applied position once the replay/stream resumes.
 					if (typeof msg.seq === "number" && msg.seq > strayHighWater) strayHighWater = msg.seq;
+					emit("output", msg.data);
 					return true;
 				}
 				// probing: outputs belong to the legacy broadcast window (old

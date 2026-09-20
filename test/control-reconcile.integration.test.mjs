@@ -286,6 +286,26 @@ test("A2: reconnect wires hello → reconcile → subscribe in order; baseline m
 		await waitFor(() => h.outputSeqs().filter((s) => s > disconnectSeq).length >= 3);
 		const resumed = h.outputSeqs().filter((s) => s > disconnectSeq).slice(0, 3);
 		assert.deepEqual(resumed, [disconnectSeq + 1, disconnectSeq + 2, disconnectSeq + 3], "no gap, no duplicate after reconnect");
+		// Task-5 review P0 regression guard: every wire-delivered seq past the
+		// cursor must reach the UI exactly once (gate strays are EMITTED, replay
+		// covers the rest). Compare steady markers: wire vs emitted events.
+		{
+			const wireMarkers = h.messages
+				.filter((m) => m.type === "output" && typeof m.seq === "number" && m.seq > disconnectSeq)
+				.flatMap((m) => String(m.data ?? "").match(/steady-\d+/g) ?? []);
+			const uiMarkers = h.events
+				.filter((e) => e.event === "output")
+				.flatMap((e) => String(e.payload ?? "").match(/steady-\d+/g) ?? [])
+				// Only markers past the pre-disconnect position (earlier ones came
+				// from the pre-drop live stream on socket1).
+				.filter((mk) => Number(mk.slice(7)) > 0);
+			const wireSet = new Set(wireMarkers);
+			const uiCounts = new Map();
+			for (const mk of uiMarkers) uiCounts.set(mk, (uiCounts.get(mk) ?? 0) + 1);
+			for (const mk of wireSet) {
+				assert.equal(uiCounts.get(mk) ?? 0, 1, `steady marker ${mk} delivered to the UI exactly once`);
+			}
+		}
 
 		// The retried durable command dedups to the cached applied stage — the
 		// child sees the prompt exactly once across the reconnect. (seq 2: the

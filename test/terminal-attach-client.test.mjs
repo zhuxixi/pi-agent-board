@@ -687,8 +687,8 @@ test("reconciling consumes stray broadcast output/begin without corrupting the g
 	client.reconnect(9);
 	assert.equal(client.handleMessage(out(10, "stray")), true, "broadcast stray consumed");
 	assert.equal(client.handleMessage(begin({ snapshotSeq: 99 })), true, "pre-subscribe begin consumed");
-	assert.equal(eventsOf(events, "output").length, 0, "nothing fed to the UI");
-	assert.equal(client.getLastSeq(), 5, "gate state untouched (applied cursor unchanged while reconciling)");
+	assert.deepEqual(eventsOf(events, "output"), ["stray"], "strays ARE emitted — exactly-once delivery (task-5 review P0 fix)");
+	assert.equal(client.getLastSeq(), 5, "applied cursor unchanged while reconciling (the subscribe cursor carries the high-water)");
 	const rec = sent.find((m) => m.type === "reconcile");
 	client.handleMessage({ type: "hello", status: { instanceId: "inst-1", viewId: "v1" }, generation: "gen-1" });
 	client.handleMessage({ type: "reconcile_result", commandId: rec.commandId, generation: "gen-1", hostRevision: 5, terminalCursor: { lastSeq: 12 }, stateMaterializedRevision: null, unresolved: [] });
