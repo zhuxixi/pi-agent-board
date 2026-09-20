@@ -99,3 +99,16 @@ Targeted tests → FULL suite → typecheck → conventional commit (explicit gi
 - **Envelope on keystrokes adds per-key bytes**: tiny (commandId+seq ≈ 60B); keystrokes get NO ack (fire-and-forget preserved) — envelope is correlation-only.
 - **Backward compatibility surface**: no-envelope messages must behave byte-identically (old UIs during upgrade window) — pin with compat tests in every task that touches the runner.
 - **`instanceId` fencing interplay**: envelope's instanceId must not fight the existing host-ownership fencing — read the #70 fencing code before wiring (Task 2 first step).
+
+## Residual ledger (Phase 5)
+
+Acceptance: A1 CLOSED (test/control-protocol.test.mjs unit matrix — 33 tests); A2 CLOSED (test/control-reconcile.integration.test.mjs — wire-order reconnect, epoch discard, §10 never-rewrite e2e; 3 tests).
+
+- Journal: ≤512 records between rewrites; rare durable commands only; keystrokes never journaled.
+- Legacy envelope-less coexistence: byte-pinned compat tests; old runners serve legacy paths only (envelopes fenced with instance_mismatch).
+- host_starting retry budget: 5×300ms client-side vs legacy unbounded cachedResize hold (documented parity choice).
+- Failed follow-ups (§10 accepted_unknown) surface via error diagnostic + queue item text; no dedicated dashboard affordance (product note).
+- envelope_invalid (non-retryable) still re-attempts in the queue loop — legacy shape, diagnostic-only signal.
+- TERMINAL_ERROR_CODES includes journal_unavailable for the resize chain — unreachable for resize (never journaled), harmless.
+- Boot-banner accept race (banner broadcast before socket accept, no replay): protocol property documented in 2026-08-27 spec; echo-probe test pattern adopted in terminal-snapshot + pty-runner integration files.
+- Stray high-water subscribe cursor: the reconcile-gate legacy broadcast overlap is closed client-side; a sub-ms residual window (between subscribe write and runner processing) remains, covered by the client's stray-discard semantics.
