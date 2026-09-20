@@ -295,10 +295,7 @@ test("A2: reconnect wires hello → reconcile → subscribe in order; baseline m
 				.flatMap((m) => String(m.data ?? "").match(/steady-\d+/g) ?? []);
 			const uiMarkers = h.events
 				.filter((e) => e.event === "output")
-				.flatMap((e) => String(e.payload ?? "").match(/steady-\d+/g) ?? [])
-				// Only markers past the pre-disconnect position (earlier ones came
-				// from the pre-drop live stream on socket1).
-				.filter((mk) => Number(mk.slice(7)) > 0);
+				.flatMap((e) => String(e.payload ?? "").match(/steady-\d+/g) ?? []);
 			const wireSet = new Set(wireMarkers);
 			const uiCounts = new Map();
 			for (const mk of uiMarkers) uiCounts.set(mk, (uiCounts.get(mk) ?? 0) + 1);

@@ -698,6 +698,19 @@ test("reconciling consumes stray broadcast output/begin without corrupting the g
 	assert.deepEqual(sent.at(-1), SUB_SEQ(10), "subscribe cursor clears the stray high-water (no wire duplicate)");
 });
 
+test("epoch reset zeroes the stray high-water — generation change always takes a seq-less subscribe", () => {
+	const { client, sent, events } = liveClient();
+	client.reconnect(9);
+	assert.equal(client.handleMessage(out(12, "new-gen stray")), true, "gate stray consumed+emitted");
+	const rec = sent.find((m) => m.type === "reconcile");
+	client.handleMessage({ type: "hello", status: { instanceId: "inst-1", viewId: "v1" }, generation: "gen-2" });
+	// generation differs from the at-disconnect baseline (liveClient's gen-1)
+	client.handleMessage({ type: "reconcile_result", commandId: rec.commandId, generation: "gen-2", hostRevision: 5, terminalCursor: { lastSeq: 12 }, stateMaterializedRevision: null, unresolved: [] });
+	assert.ok(eventsOf(events, "epochReset").length === 1, "epoch reset fired");
+	const sub = [...sent].reverse().find((m) => m.type === "subscribe_terminal");
+	assert.equal(sub.sinceSeq, undefined, "fresh snapshot after an epoch change even with gate strays — never a tail replay onto the stale buffer");
+});
+
 test("taxonomy errors correlated by commandId consume the pending entry and surface cmdAck error (task 4, review P2)", () => {
 	for (const code of ["command_failed", "journal_unavailable", "envelope_invalid", "instance_mismatch"]) {
 		const { client, events } = liveClient();

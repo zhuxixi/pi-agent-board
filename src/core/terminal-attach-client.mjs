@@ -46,8 +46,10 @@
  * - `reconciling` — (phase 5, D4) reconnect gate: `reconcile` sent on the new
  *   socket, awaiting `reconcile_result` (or the reconcile deadline). Spec D4
  *   binds the reconnect order hello → reconcile → snapshot/subscribe. All
- *   runner messages in this state are consumed-and-ignored (the socket is not
- *   subscribed yet). Resolution:
+ *   runner messages in this state are consumed; outputs are ALSO EMITTED —
+ *   they are legacy-broadcast strays that must reach the UI exactly once
+ *   (strays cover (cursor, strayHighWater]; the replay starts past the
+ *   high-water; see the reconciling output branch). Resolution:
  *   - `reconcile_result` → epoch rule: generation CHANGED since last seen ⇒
  *     discard the cursor (`lastSeq = 0`, `epochReset` event) ⇒ seq-less
  *     subscribe (fresh snapshot — ring replay across runner generations is
@@ -83,7 +85,8 @@
  *   continuity is verified at `snapshot_end`. UI: `term.reset()` +
  *   `write(frame)` (the frame is self-contained on dirty terminals), or
  *   loading baseline for `empty`. Empty baselines carry no frame.
- * - `output` — live/replay chunk data (protocol-managed only).
+ * - `output` — live/replay chunk data (protocol-managed only), including gate
+ *   strays emitted during `reconciling`.
  * - `resubscribing` — the client sent a recovery subscribe itself. The plan
  *   contract originally made resubscribe UI-actionable; it is internal now
  *   (send is injected and socket-scoped) so the UI wiring stays minimal —
