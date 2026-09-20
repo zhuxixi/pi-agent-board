@@ -26,3 +26,15 @@ test("package.json: default globs unchanged, test:perf wired, verify ordered", (
 	assert.ok(idx("npm run test:perf") < idx("npm test"), "perf runs before the parallel suite");
 	assert.ok(idx("npm run test:perf") < idx("npm run test:coverage"), "perf runs before coverage");
 });
+
+// A8: the docs are part of the contract — if the opt-in gate disappears from
+// README/VERIFY, the next maintainer will re-add perf assertions to the
+// coverage path and reintroduce the flake this issue removes.
+const README = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+const VERIFY_MD = readFileSync(new URL("../VERIFY.md", import.meta.url), "utf8");
+
+test("docs: README and VERIFY document the opt-in perf gate", () => {
+	assert.match(README, /npm run test:perf/, "README mentions the perf gate entry");
+	assert.match(README, /perf assertions.*(opt-in|skip)/i, "README states perf assertions are opt-in / skipped by default");
+	assert.match(VERIFY_MD, /npm run test:perf/, "VERIFY.md §0 mentions the perf gate entry");
+});
