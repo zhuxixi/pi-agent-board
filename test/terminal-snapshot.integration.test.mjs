@@ -250,6 +250,10 @@ test("A5: mid-stream subscribe via the real client module — no gap, no dup, al
 	}
 });
 
+// Wait ceilings here are 30s (vs the 15s file default): the burst scenario is
+// spawn-heavy (runner + 400-line child burst) and is the ledgered load-flake
+// hotspot — it has tripped its ceiling even at moderate parallel load. Loud
+// failure semantics preserved; only failure latency grows.
 test("A5: burst through the snapshot window — frame→flush→end interleaving pinned on the wire, client converges in order", async () => {
 	const root = freshRoot();
 	const viewId = "a5flush";
@@ -257,14 +261,14 @@ test("A5: burst through the snapshot window — frame→flush→end interleaving
 	const sockets = [];
 	try {
 		({ runner } = spawnRunner(root, viewId, { env: { FAKE_PTY_BURST_LINES: "400" } }));
-		await waitFor(() => hostReady(root, viewId));
+		await waitFor(() => hostReady(root, viewId), 30000);
 
 		const driver = createConnection(P.controlSocketPath(root, viewId));
 		await once(driver, "connect");
 		sockets.push(driver);
 		const driverMessages = listen(driver).messages;
 		send(driver, { type: "hello" });
-		await waitFor(() => driverMessages.find((m) => m.type === "output" && m.data.includes("fake pi ready")));
+		await waitFor(() => driverMessages.find((m) => m.type === "output" && m.data.includes("fake pi ready")), 30000);
 
 		// Client B: real client module, subscribed mid-burst.
 		const socketB = createConnection(P.controlSocketPath(root, viewId));
@@ -287,7 +291,7 @@ test("A5: burst through the snapshot window — frame→flush→end interleaving
 		await waitFor(() => {
 			const end = messagesC.find((m) => m.type === "snapshot_end");
 			return end && eventsB.snapshotReady.length > 0;
-		});
+		}, 30000);
 
 		// Wire pin (subscriber C): outputs between snapshot_frame and
 		// snapshot_end ARE the catch-up flush window; they must be contiguous
@@ -320,7 +324,7 @@ test("A5: burst through the snapshot window — frame→flush→end interleaving
 		await waitFor(() => {
 			for (const data of eventsB.output) collect(data);
 			return seen.size >= 400;
-		}, 20000);
+		}, 30000);
 		assert.equal(seen.size, 400, "every burst line delivered exactly once across frame+flush+live");
 	} finally {
 		await cleanup(root, viewId, sockets, [runner]);
