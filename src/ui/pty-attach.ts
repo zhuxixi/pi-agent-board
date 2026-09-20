@@ -371,7 +371,11 @@ export class PtyAttachComponent implements Component {
 		// the socket immediately after receiving detach, so sending detach first
 		// can drop the G3 restore resize (issue #42).
 		this.jiggleRetry.restoreAndStop();
-		this.send({ type: "detach" });
+		// Phase 5 (D4): enveloped detach (correlated applied ack) with legacy
+		// fallback; both reach the same runner detach handler.
+		if (!this.attachClient.sendControl("detach")) {
+			this.send({ type: "detach" });
+		}
 		this.close(true);
 		this.done({ action: "detached" });
 	}
@@ -1064,7 +1068,13 @@ export class PtyAttachComponent implements Component {
 	}
 
 	private sendResize(cols = this.cols, rows = this.rows): void {
-		this.send({ type: "resize", cols, rows });
+		// Phase 5 (D4): enveloped resize when the host has an instance fence
+		// (correlated applied/superseded acks; starting-window host_starting is
+		// retried client-side); legacy plain message otherwise. Both paths reach
+		// the same runner resize handler.
+		if (!this.attachClient.sendControl("resize", { cols, rows })) {
+			this.send({ type: "resize", cols, rows });
+		}
 		this.clampViewportTop(this.bodyHeight());
 	}
 
@@ -1170,7 +1180,7 @@ export class PtyAttachComponent implements Component {
 	 * hydrates frames.
 	 */
 	private handleAttachEvent(
-		event: "mode" | "snapshotBegin" | "snapshotReady" | "output" | "resubscribing" | "protocolError",
+		event: "mode" | "snapshotBegin" | "snapshotReady" | "output" | "resubscribing" | "protocolError" | "cmdAck" | "reconciled" | "epochReset",
 		payload: any,
 	): void {
 		if (event === "mode") {
@@ -1245,6 +1255,12 @@ export class PtyAttachComponent implements Component {
 		// "resubscribing": recovery is client-internal (informational only).
 		// "protocolError": observability only — recovery is automatic until the
 		// legacy fallback, whose mode event the UI acts on above.
+		// "cmdAck"/"reconciled"/"epochReset" (phase 5): correlation/observability
+		// only — applied/superseded bookkeeping, reconcile baselines and the
+		// generation epoch rule live inside the client; the UI's behavioral
+		// surface (hydrate, mode switching, size-sync) is unchanged. host_starting
+		// resize retries are also client-internal (parity with the legacy runner-
+		// side cachedResize).
 	}
 
 	private forwardTerminalProtocols(data: string): void {

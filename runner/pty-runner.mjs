@@ -9,8 +9,9 @@
  */
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
+import { randomUUID } from "node:crypto";
 import { createServer } from "node:net";
-import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, statSync, unlinkSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendLine, readJson } from "../src/core/atomic.mjs";
@@ -24,6 +25,16 @@ import { appendBoundedScreenLog, reconcileScreenLog } from "../src/core/screen-l
 import { createTerminalModel, feedOutput, resizeChildAndModel } from "../src/core/terminal-model.mjs";
 import { createTerminalSubscription } from "../src/core/terminal-attach-protocol.mjs";
 import { encodePromptForCliArg } from "../src/core/prompt-transport.mjs";
+import {
+	checkSeq,
+	CONTROL_COMMAND_TYPES,
+	createResizeTracker,
+	journalAppendRecord,
+	journalGc,
+	journalUnresolved,
+	JOURNAL_KEEP_DEFAULT,
+	validateCommandEnvelope,
+} from "../src/core/control-protocol.mjs";
 import { readHost, readState, updateOwnedHost, writeHost } from "../src/core/store.mjs";
 import { sendStateCommand } from "../src/core/coordinator-client.mjs";
 import { classifyClientHello } from "../src/core/host-protocol.mjs";
@@ -45,6 +56,14 @@ const HEARTBEAT_MS = 1000;
 const HOST_ACK_DEDUP_MAX = 1000;
 /** Max time an owned runner waits to take the per-view host-start lease (issue #70). */
 const HOST_RUNNER_LOCK_WAIT_MS = 5_000;
+/** Boot identity for the control lifecycle (issue #91 phase 5, spec D4 generation
+ *  token): one runner process = one generation. Clients detect a runner
+ *  replacement by the generation changing, which structurally disambiguates a
+ *  reconnect ring-replay from a fresh child (phase 4 epoch ambiguity). */
+const GENERATION = randomUUID();
+/** GC trigger: rewrite the journal when records exceed 2× the keep bound.
+ *  Append-only between rewrites, so the common path stays O(1) per command. */
+const JOURNAL_GC_TRIGGER = JOURNAL_KEEP_DEFAULT * 2;
 /** How much of the screen.log tail to scan when attributing an abnormal child
  *  exit (issue #90). Tail-only: the log can be 100MB+. */
 const EXIT_LOG_TAIL_BYTES = 8_192;
@@ -160,6 +179,7 @@ function legacyMain(config) {
 		rows: config.rows || 36,
 		attachedClients: 0,
 		attachedEver: false,
+		revision: 0,
 	};
 	// Canonical terminal model + per-socket snapshot subscriptions (issue #91
 	// phase 3). Fed from child.onData alongside the legacy screen.log/broadcast
@@ -167,6 +187,49 @@ function legacyMain(config) {
 	const terminalModel = createTerminalModel({ cols: host.cols, rows: host.rows, scrollback: 2000 });
 	/** @type {Map<import("node:net").Socket, ReturnType<typeof createTerminalSubscription>>} */
 	const terminalSubscriptions = new Map();
+	// Control lifecycle runtime (issue #91 phase 5). instanceId is null in this
+	// legacy-mode main: no instance fence exists, so EVERY envelope claims a
+	// foreign instance and is rejected with `instance_mismatch` (documented
+	// contract — legacy-mode hosts serve only envelope-less clients).
+	const control = createControlRuntime({
+		viewId: config.viewId,
+		root: config.root,
+		instanceId: null,
+		send,
+		diag: (code, message, details) => {
+			try {
+				appendDiagnostic(config.root, config.viewId, { source: "runner", code, message, ...(details ? { details } : {}) });
+			} catch {
+				/* diagnostics must never kill the host */
+			}
+		},
+		actions: {
+			childReady: () => Boolean(child),
+			writeInput: (data) => {
+				child.write(data);
+			},
+			hostCols: () => host.cols,
+			hostRows: () => host.rows,
+			applyResize: (cols, rows) => {
+				resizeChildAndModel(child, terminalModel, cols, rows);
+				update({ cols, rows });
+			},
+			currentDims: () => ({ cols: terminalModel.cols, rows: terminalModel.rows }),
+			applyInterrupt: () => {
+				if (child) child.write("\x1b");
+			},
+			applyTerminate: () => {
+				killChild(child, childPid, "SIGTERM");
+				setTimeout(() => killChild(child, childPid, "SIGKILL"), 4000).unref?.();
+			},
+			applyDetach: (s) => {
+				s.end();
+			},
+			hostRevision: () => host.revision ?? 0,
+			cursor: () => ({ lastSeq: terminalModel.lastSeq, cols: terminalModel.cols, rows: terminalModel.rows }),
+			stateStamp: () => readState(config.root, config.viewId)?.materializedRevision ?? null,
+		},
+	});
 	/** Persist host.json. A transient failure (e.g. Windows rename EPERM racing a
 	 *  reader) must degrade, not kill the host: record a diagnostic and let the
 	 *  next heartbeat tick retry. Socket protocol is the attach main channel, so
@@ -190,9 +253,9 @@ function legacyMain(config) {
 		for (const c of clients) c.write(line);
 	};
 	const update = (patch = {}) => {
-		host = { ...host, ...patch, lastSeenAt: Date.now(), attachedClients: clients.size };
+		host = { ...host, ...patch, revision: (host.revision ?? 0) + 1, lastSeenAt: Date.now(), attachedClients: clients.size };
 		persist();
-		broadcast({ type: "status", status: host });
+		broadcast({ type: "status", status: host, generation: GENERATION });
 	};
 	persist();
 
@@ -286,6 +349,9 @@ function legacyMain(config) {
 		childExited = true;
 		resolveChildExit?.();
 		exitCode = code ?? 0;
+		// Terminate lifecycle (spec D4): a confirmed child exit is the observed
+		// evidence for any enveloped terminate still pending on a live socket.
+		control.flushTerminateObservations(exitCode, false);
 		// After a crash the handler already persisted "failed" and broadcast
 		// exit; this callback must not overwrite that state.
 		if (!crashed) {
@@ -309,9 +375,9 @@ function legacyMain(config) {
 		clients.add(socket);
 		terminalSubscriptions.set(
 			socket,
-			createTerminalSubscription({ model: terminalModel, send: (msg) => send(socket, msg) }),
+			createTerminalSubscription({ model: terminalModel, send: (msg) => send(socket, msg), generation: GENERATION }),
 		);
-		socket.write(JSON.stringify({ type: "hello", status: host, editorEmpty }) + "\n");
+		socket.write(JSON.stringify({ type: "hello", status: host, editorEmpty, generation: GENERATION }) + "\n");
 		let buffer = "";
 		socket.on("data", (chunk) => {
 			buffer += chunk.toString("utf8");
@@ -323,12 +389,14 @@ function legacyMain(config) {
 			clients.delete(socket);
 			editorReporters.delete(socket);
 			terminalSubscriptions.delete(socket);
+			control.closeSocket(socket);
 			update();
 		});
 		socket.on("error", () => {
 			clients.delete(socket);
 			editorReporters.delete(socket);
 			terminalSubscriptions.delete(socket);
+			control.closeSocket(socket);
 			update();
 		});
 	});
@@ -342,6 +410,14 @@ function legacyMain(config) {
 		if (!line.trim()) return;
 		let msg;
 		try { msg = JSON.parse(line); } catch { return send(socket, { type: "error", message: "invalid json" }); }
+		// Enveloped control commands take the phase-5 lifecycle path; everything
+		// else (no commandId, or a non-control type carrying one) falls through to
+		// the legacy switch byte-identically.
+		const envelope = validateCommandEnvelope(msg);
+		if (envelope.enveloped && CONTROL_COMMAND_TYPES.includes(msg.type)) {
+			control.handle(msg, socket, envelope);
+			return;
+		}
 		switch (msg.type) {
 			case "hello": {
 				// Bookkeeping-only clients must never pin the host against warm-host
@@ -356,7 +432,7 @@ function legacyMain(config) {
 					editorReporters.add(socket);
 					update();
 				}
-				send(socket, { type: "hello", status: host, editorEmpty });
+				send(socket, { type: "hello", status: host, editorEmpty, generation: GENERATION });
 				break;
 			}
 			case "input":
@@ -387,7 +463,7 @@ function legacyMain(config) {
 				socket.end();
 				break;
 			case "get_status":
-				send(socket, { type: "status", status: host });
+				send(socket, { type: "status", status: host, generation: GENERATION });
 				break;
 			case "editor_state": {
 				editorEmpty = typeof msg.empty === "boolean" ? msg.empty : null;
@@ -422,6 +498,10 @@ function legacyMain(config) {
 		if (requestedExitCode !== null) shutdownExitCode = requestedExitCode;
 		if (shutdownStarted) return;
 		shutdownStarted = true;
+		// Terminate lifecycle (spec D4): pending enveloped terminates get the
+		// runner-finalizing evidence before sockets end (exit-confirm flush in
+		// child.onExit covers the natural path; this covers deliberate shutdown).
+		control.flushTerminateObservations(null, true);
 		try { server?.close(); } catch {}
 		try { if (existsSync(socketPath)) unlinkSync(socketPath); } catch {}
 		for (const client of clients) {
@@ -525,7 +605,10 @@ async function ownedMain(config) {
 	const ownedUpdate = (mutate) => {
 		const result = updateOwnedHost(config.root, config.viewId, config.instanceId, (cur) => {
 			const next = mutate(cur);
-			return { ...next, lastSeenAt: Date.now(), attachedClients: clients.size };
+			// Record revision (phase 5 reconcile baseline): every committed fenced
+			// write bumps it, heartbeats included — a client comparing revisions
+			// sees any host-record movement, which is exactly the contract.
+			return { ...next, revision: (cur.revision ?? 0) + 1, lastSeenAt: Date.now(), attachedClients: clients.size };
 		});
 		if (result.updated && result.host) host = result.host;
 		return result;
@@ -572,6 +655,11 @@ async function ownedMain(config) {
 	async function finishHost(reason, requestedExitCode = null) {
 		if (shutdownStarted) return;
 		shutdownStarted = true;
+		// Terminate lifecycle (spec D4): pending enveloped terminates get the
+		// runner-finalizing evidence before teardown ends sockets. The child-exit
+		// flush (exitConfirmed) normally wins the race; whichever fires first
+		// clears the pending set, so exactly one observed ack goes out.
+		control.flushTerminateObservations(null, true);
 		if (heartbeatTimer) {
 			clearInterval(heartbeatTimer);
 			heartbeatTimer = null;
@@ -580,7 +668,7 @@ async function ownedMain(config) {
 		// superseded owner (or a duplicate that never claimed) never writes.
 		if (claimedRecord && reason !== "owner_lost" && isOwnerNow()) {
 			ownedUpdate((cur) => ({ ...cur, state: "stopping", stopReason: reason }));
-			broadcast({ type: "status", status: host });
+			broadcast({ type: "status", status: host, generation: GENERATION });
 		}
 		try { broadcast({ type: "exit", exitCode: requestedExitCode ?? exitCode ?? 0 }); } catch { /* best effort */ }
 		for (const c of clients) {
@@ -721,6 +809,53 @@ async function ownedMain(config) {
 	const terminalModel = createTerminalModel({ cols: host.cols, rows: host.rows, scrollback: 2000 });
 	/** @type {Map<import("node:net").Socket, ReturnType<typeof createTerminalSubscription>>} */
 	const terminalSubscriptions = new Map();
+	// Control lifecycle runtime (issue #91 phase 5). Created after the terminal
+	// model (actions close over it) and BEFORE the endpoint binds, so the durable
+	// journal is loaded from disk before any client can reconcile. The action
+	// closures read `child`/`host` at call time (both are let-bound above).
+	const control = createControlRuntime({
+		viewId: config.viewId,
+		root: config.root,
+		instanceId: config.instanceId,
+		send,
+		diag,
+		actions: {
+			childReady: () => Boolean(child),
+			writeInput: (data) => {
+				child.write(data);
+			},
+			hostCols: () => host.cols,
+			hostRows: () => host.rows,
+			applyResize: (cols, rows) => {
+				// The runtime pre-checks childReady (host_starting reply otherwise),
+				// so this only runs against a live child — the starting window's
+				// cachedResize path belongs exclusively to the legacy switch below.
+				// Paired step (CR R1 advisory): model reflows only when the real
+				// PTY resize succeeded; cachedResize cleared either way — a failed
+				// resize is not retried against a exiting child.
+				resizeChildAndModel(child, terminalModel, cols, rows);
+				notifyChildResize(childPid);
+				cachedResize = null;
+				ownedUpdate((cur) => ({ ...cur, cols, rows }));
+			},
+			currentDims: () => ({ cols: terminalModel.cols, rows: terminalModel.rows }),
+			applyInterrupt: () => {
+				if (child) child.write("\x1b");
+			},
+			applyTerminate: () => {
+				// Single exit path: finishHost carries the SIGTERM→4s→SIGKILL ladder,
+				// so a SIGTERM-immune child still terminates within a bounded window.
+				// The applied ack was already sent by the runtime BEFORE this hook.
+				finish("terminated", 0);
+			},
+			applyDetach: (s) => {
+				s.end();
+			},
+			hostRevision: () => host.revision ?? 0,
+			cursor: () => ({ lastSeq: terminalModel.lastSeq, cols: terminalModel.cols, rows: terminalModel.rows }),
+			stateStamp: () => readState(config.root, config.viewId)?.materializedRevision ?? null,
+		},
+	});
 
 	// 3. Bind the per-instance endpoint. NO unlink: the path is unique to this
 	//    instance; an occupied path means someone else owns it.
@@ -734,10 +869,10 @@ async function ownedMain(config) {
 			clients.add(socket);
 			terminalSubscriptions.set(
 				socket,
-				createTerminalSubscription({ model: terminalModel, send: (msg) => send(socket, msg) }),
+				createTerminalSubscription({ model: terminalModel, send: (msg) => send(socket, msg), generation: GENERATION }),
 			);
-			socket.write(JSON.stringify({ type: "hello", status: host, editorEmpty }) + "\n");
-			broadcast({ type: "status", status: host });
+			socket.write(JSON.stringify({ type: "hello", status: host, editorEmpty, generation: GENERATION }) + "\n");
+			broadcast({ type: "status", status: host, generation: GENERATION });
 			let buffer = "";
 			socket.on("data", (chunk) => {
 				buffer += chunk.toString("utf8");
@@ -749,6 +884,7 @@ async function ownedMain(config) {
 				clients.delete(socket);
 				editorReporters.delete(socket);
 				terminalSubscriptions.delete(socket);
+				control.closeSocket(socket);
 				if (probeSockets.has(socket)) return;
 				// Merge into the live record (a stale closure spread here erases a
 				// concurrent revoke — final review finding 2).
@@ -758,6 +894,7 @@ async function ownedMain(config) {
 				clients.delete(socket);
 				editorReporters.delete(socket);
 				terminalSubscriptions.delete(socket);
+				control.closeSocket(socket);
 				if (probeSockets.has(socket)) return;
 				ownedUpdate((cur) => ({ ...cur }));
 			});
@@ -799,7 +936,7 @@ async function ownedMain(config) {
 		return;
 	}
 	claimedRecord = true;
-	broadcast({ type: "status", status: host });
+	broadcast({ type: "status", status: host, generation: GENERATION });
 
 	// Test seam (issue #70 Task 8): a config-level delay between publishing the
 	// runner identity and spawning the child creates a REAL starting window
@@ -863,6 +1000,10 @@ async function ownedMain(config) {
 		childExited = true;
 		resolveChildExit?.();
 		exitCode = code ?? 0;
+		// Terminate lifecycle (spec D4): a confirmed child exit is the observed
+		// evidence for any enveloped terminate still pending — flush before the
+		// finish teardown ends the client sockets.
+		control.flushTerminateObservations(exitCode, false);
 		editorEmpty = null;
 		broadcast({ type: "editor_state", empty: null });
 		finish("child_exit", exitCode);
@@ -888,7 +1029,7 @@ async function ownedMain(config) {
 		await finishHost(revoked ? "host_start_revoked" : "owner_lost", 0);
 		return;
 	}
-	broadcast({ type: "status", status: host });
+	broadcast({ type: "status", status: host, generation: GENERATION });
 
 	// A starting-window resize cannot be applied at spawn-return nor at first
 	// output: the child node process is still bootstrapping and a SIGWINCH
@@ -937,6 +1078,15 @@ async function ownedMain(config) {
 		if (!line.trim()) return;
 		let msg;
 		try { msg = JSON.parse(line); } catch { return send(socket, { type: "error", message: "invalid json" }); }
+		// Enveloped control commands take the phase-5 lifecycle path; everything
+		// else (no commandId, or a non-control type carrying one — e.g.
+		// subscribe_terminal with correlation metadata) falls through to the
+		// legacy switch byte-identically.
+		const envelope = validateCommandEnvelope(msg);
+		if (envelope.enveloped && CONTROL_COMMAND_TYPES.includes(msg.type)) {
+			control.handle(msg, socket, envelope);
+			return;
+		}
 		switch (msg.type) {
 			case "hello": {
 				// Probe and reporter sockets are bookkeeping-only: neither may flip
@@ -953,7 +1103,7 @@ async function ownedMain(config) {
 				} else {
 					ownedUpdate((cur) => ({ ...cur, attachedEver: true }));
 				}
-				send(socket, { type: "hello", status: host, editorEmpty });
+				send(socket, { type: "hello", status: host, editorEmpty, generation: GENERATION });
 				break;
 			}
 			case "input": {
@@ -1010,7 +1160,7 @@ async function ownedMain(config) {
 				socket.end();
 				break;
 			case "get_status":
-				send(socket, { type: "status", status: host });
+				send(socket, { type: "status", status: host, generation: GENERATION });
 				break;
 			case "editor_state": {
 				editorEmpty = typeof msg.empty === "boolean" ? msg.empty : null;
@@ -1105,6 +1255,342 @@ function clampInt(value, min, max, fallback) {
 	const n = Number(value);
 	if (!Number.isFinite(n)) return fallback;
 	return Math.max(min, Math.min(max, Math.floor(n)));
+}
+
+// ---------------------------------------------------------------------------
+// Control-command lifecycle runtime (issue #91 phase 5, spec D4). Pure
+// decision logic lives in src/core/control-protocol.mjs; this is the runner's
+// serial side-effect shell: per-socket seq tracking, the durable command
+// journal, resize latest-wins routing, and staged ack emission. Messages
+// WITHOUT an envelope (no commandId) never reach this code — the legacy
+// switch keeps byte-identical behavior.
+// ---------------------------------------------------------------------------
+
+/** Load journal records, dropping torn tail lines from a crash mid-append. */
+function loadJournalRecords(path) {
+	try {
+		const records = [];
+		for (const line of readFileSync(path, "utf8").split("\n")) {
+			if (!line.trim()) continue;
+			try {
+				records.push(JSON.parse(line));
+			} catch {
+				/* torn tail: the accepted/applied truth for that line is unknown —
+				 dropping it can only widen the accepted_unknown set, never hide one */
+			}
+		}
+		return records;
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * One control runtime per main. `actions` bundles the main-specific side
+ * effects (child shape differs between the legacy and owned lifecycles); the
+ * decision order here is shared and binding:
+ *   envelope validity → instance fence → seq monotonicity → per-type dispatch.
+ * @param {{
+ *   viewId: string, root: string, instanceId: string|null,
+ *   send: (socket: import("node:net").Socket, msg: object) => void,
+ *   diag: (code: string, message: string, details?: object) => void,
+ *   actions: {
+ *     childReady(): boolean,
+ *     writeInput(data: string): void,
+ *     hostCols(): number, hostRows(): number,
+ *     applyResize(cols: number, rows: number): void,  // runtime pre-checks childReady — never called without a child
+ *     currentDims(): { cols: number, rows: number },
+ *     applyInterrupt(): void,
+ *     applyTerminate(): void,
+ *     applyDetach(socket: import("node:net").Socket): void,
+ *     hostRevision(): number,
+ *     cursor(): { lastSeq: number, cols: number, rows: number },
+ *     stateStamp(): number | null,
+ *   },
+ * }} opts
+ */
+function createControlRuntime({ viewId, root, instanceId, send, diag, actions }) {
+	/** Per-connection seq watermark (ordering aid only — never dedup). */
+	const connectionSeq = new Map();
+	const journalPath = P.controlJournalPath(root, viewId);
+	const journalRecords = loadJournalRecords(journalPath);
+	/** O(1) journal dedup — rebuilt after GC so it mirrors the retained records. */
+	const journalIds = new Set(journalRecords.map((r) => r.commandId));
+	const resizes = createResizeTracker();
+	/** commandId → socket awaiting the resize ack (superseded/applied routing). */
+	const pendingResizeSockets = new Map();
+	/** commandId → socket that requested terminate (observed routing). */
+	const pendingTerminates = new Map();
+
+	const rawAppend = (record) => {
+		appendFileSync(journalPath, JSON.stringify(record) + "\n");
+	};
+	const maybeGcJournal = () => {
+		if (journalRecords.length <= JOURNAL_GC_TRIGGER) return;
+		const kept = journalGc(journalRecords, JOURNAL_KEEP_DEFAULT);
+		journalRecords.length = 0;
+		journalRecords.push(...kept);
+		journalIds.clear();
+		for (const record of kept) journalIds.add(record.commandId);
+		try {
+			writeFileSync(journalPath, kept.map((r) => JSON.stringify(r)).join("\n") + "\n");
+		} catch (err) {
+			diag("control_journal_rewrite_failed", err instanceof Error ? err.message : String(err));
+		}
+	};
+	/** @returns {boolean} false when the append failed — the command is NOT accepted. */
+	const journalAccept = (commandId, command, now) => {
+		// Ruling (b): a journaled commandId is NEVER re-appended — the dedup
+		// check is the caller's, and this guard is the last line of defense.
+		if (journalIds.has(commandId)) return true;
+		const record = { kind: "accepted", commandId, command, acceptedAt: now };
+		journalAppendRecord(journalRecords, record); // shape validation; throws on a runner bug
+		try {
+			rawAppend(record);
+		} catch (err) {
+			// Nothing was pushed into journalRecords for this record (pure
+			// validate + manual push on success), so there is nothing to unwind —
+			// the command is simply not accepted.
+			diag("control_journal_write_failed", err instanceof Error ? err.message : String(err), { commandId });
+			return false;
+		}
+		journalRecords.push(record);
+		journalIds.add(commandId);
+		maybeGcJournal();
+		return true;
+	};
+	const journalApply = (commandId, now) => {
+		const record = { kind: "applied", commandId, appliedAt: now };
+		try {
+			rawAppend(record);
+		} catch (err) {
+			diag("control_journal_write_failed", err instanceof Error ? err.message : String(err), { commandId });
+			return;
+		}
+		journalRecords.push(record);
+		maybeGcJournal();
+	};
+
+	/** Socket-death semantics for every ack: a dead client must never turn a
+	 *  control reply into a runner crash (same invariant as the broadcast guard). */
+	const reply = (socket, msg) => {
+		try {
+			send(socket, msg);
+		} catch {
+			/* socket 'error'/'close' handler owns cleanup */
+		}
+	};
+
+	const flushTerminateObservations = (exitCode, runnerFinalizing) => {
+		for (const [commandId, termSocket] of pendingTerminates) {
+			reply(termSocket, {
+				type: "cmd_ack",
+				commandId,
+				stage: "observed",
+				...(exitCode != null ? { exitConfirmed: true, exitCode } : {}),
+				...(runnerFinalizing ? { runnerFinalizing: true } : {}),
+			});
+		}
+		pendingTerminates.clear();
+	};
+
+	/**
+	 * Dispatch an enveloped control command. Caller guarantees
+	 * `env.enveloped && CONTROL_COMMAND_TYPES.includes(msg.type)`.
+	 *
+	 * Crash containment: a throwing action (e.g. child.write on a pty that died
+	 * mid-command) must degrade to an error reply + diagnostic, never escape
+	 * into the runner's uncaughtException path — the legacy switch predates this
+	 * invariant, but new protocol code must not inherit that crash class.
+	 */
+	const handle = (msg, socket, env) => {
+		// (d) errors are only meaningful for enveloped messages — this function is
+		// only entered for enveloped control types, so every error below is legal.
+		if (env.errors.length > 0) {
+			reply(socket, { type: "error", code: "envelope_invalid", commandId: msg.commandId, errors: env.errors });
+			return;
+		}
+		try {
+			handleChecked(msg, socket, env);
+		} catch (err) {
+			diag("control_command_failed", err instanceof Error ? err.message : String(err), { commandId: msg.commandId, type: msg.type });
+			reply(socket, { type: "error", code: "command_failed", commandId: msg.commandId });
+		}
+	};
+
+	const handleChecked = (msg, socket, env) => {
+		// (a) instance fencing, reject-with-current: a client naming a DIFFERENT
+		// instance is talking across a runner replacement (stale socket race);
+		// silently applying its commands would resurrect phantom controls — the
+		// exact class #70 fencing exists to prevent. The error carries the current
+		// instanceId so a well-behaved client re-hellos and recovers. Legacy-mode
+		// hosts (instanceId null) fence EVERY envelope: an envelope claims an
+		// instance a legacy-mode runner never had.
+		if (msg.instanceId !== instanceId) {
+			diag("instance_mismatch", "control command carries a foreign instanceId", {
+				commandId: msg.commandId,
+				got: msg.instanceId,
+				current: instanceId,
+			});
+			reply(socket, { type: "error", code: "instance_mismatch", commandId: msg.commandId, currentInstanceId: instanceId });
+			return;
+		}
+		// (c) per-connection monotonic seq: an ordering aid. Repeats/regressions
+		// are dropped with a diagnostic — NOT a dedup signal (dedup keys on
+		// commandId only); a legitimate re-send after reconnect uses a new socket.
+		const lastSeq = connectionSeq.get(socket) ?? 0;
+		const seqVerdict = checkSeq(lastSeq, msg.seq);
+		if (!seqVerdict.ok) {
+			diag("seq_out_of_order", "control command dropped for non-monotonic seq", {
+				commandId: msg.commandId,
+				seq: msg.seq,
+				lastSeq,
+			});
+			return;
+		}
+		connectionSeq.set(socket, msg.seq);
+
+		switch (msg.type) {
+			case "input": {
+				if (typeof msg.data !== "string") {
+					reply(socket, { type: "error", code: "envelope_invalid", commandId: msg.commandId, errors: ["input_data_missing"] });
+					return;
+				}
+				if (msg.durable !== true) {
+					// Keystroke with a correlation id: fire-and-forget preserved — no
+					// ack, no journal (journal writes must never sit on the keystroke
+					// path). The envelope is correlation/debugging metadata only.
+					if (actions.childReady()) actions.writeInput(msg.data);
+					return;
+				}
+				// Durable follow-up: accepted (journaled) → applied (written). A
+				// re-send of a journaled commandId returns the cached final stage —
+				// never re-appended (ruling b), never re-written (commandId dedup).
+				if (journalIds.has(msg.commandId)) {
+					const wasApplied = journalRecords.some((r) => r.kind === "applied" && r.commandId === msg.commandId);
+					reply(socket, { type: "cmd_ack", commandId: msg.commandId, stage: wasApplied ? "applied" : "accepted", durable: true });
+					return;
+				}
+				if (!actions.childReady()) {
+					// Starting window: nothing accepted (matches the requestId path's
+					// host_starting contract; the service retries with its own policy).
+					reply(socket, { type: "error", code: "host_starting", commandId: msg.commandId });
+					return;
+				}
+				if (!journalAccept(msg.commandId, msg.data, Date.now())) {
+					// accepted means JOURNALED — without the journal entry the stage
+					// would be a lie, so the command is refused, not silently applied.
+					reply(socket, { type: "error", code: "journal_unavailable", commandId: msg.commandId });
+					return;
+				}
+				reply(socket, { type: "cmd_ack", commandId: msg.commandId, stage: "accepted", durable: true });
+				try {
+					actions.writeInput(msg.data);
+				} catch (err) {
+					// §10 honesty: accepted but the write failed — the command stays
+					// accepted_unknown; reconcile reports it; never auto-replayed.
+					diag("input_apply_failed", err instanceof Error ? err.message : String(err), { commandId: msg.commandId });
+					return;
+				}
+				journalApply(msg.commandId, Date.now());
+				reply(socket, { type: "cmd_ack", commandId: msg.commandId, stage: "applied" });
+				return;
+			}
+			case "resize": {
+				// Uniform starting-window contract with input: without a child there
+				// is nothing to resize and no honest applied value — the client
+				// retries (new commandId). This also keeps latest-wins tracking off
+				// the books for commands that never applied.
+				if (!actions.childReady()) {
+					reply(socket, { type: "error", code: "host_starting", commandId: msg.commandId });
+					return;
+				}
+				const cols = clampInt(msg.cols, 20, 300, actions.hostCols());
+				const rows = clampInt(msg.rows, 5, 120, actions.hostRows());
+				const tracked = resizes.track({ commandId: msg.commandId, clientId: msg.clientId, cols, rows });
+				for (const sup of tracked.superseded) {
+					const oldSocket = pendingResizeSockets.get(sup.commandId) ?? socket;
+					pendingResizeSockets.delete(sup.commandId);
+					reply(oldSocket, { type: "cmd_ack", commandId: sup.commandId, stage: "superseded", byCommandId: sup.byCommandId });
+				}
+				if (tracked.duplicate) {
+					// Same commandId re-request: applyResize is synchronous, so a
+					// duplicate always finds the command already applied — return the
+					// cached result. (CR R1 advisory: the pendingResizeSockets entry is
+					// deliberately NOT set here — the original resolved synchronously,
+					// so a re-pointed entry would be a stale leak.)
+					const cached = resizes.resultFor(msg.commandId);
+					if (cached) reply(socket, { type: "cmd_ack", commandId: msg.commandId, stage: "applied", cols: cached.cols, rows: cached.rows });
+					return;
+				}
+				pendingResizeSockets.set(msg.commandId, socket);
+				actions.applyResize(cols, rows);
+				// The paired resize step keeps the model mirroring the REAL PTY
+				// (reflow only on successful child.resize), so the model's dims are
+				// the honest applied value — even when the PTY kept its old geometry.
+				const dims = actions.currentDims();
+				resizes.applied(msg.commandId, dims.cols, dims.rows);
+				pendingResizeSockets.delete(msg.commandId);
+				reply(socket, { type: "cmd_ack", commandId: msg.commandId, stage: "applied", cols: dims.cols, rows: dims.rows });
+				return;
+			}
+			case "interrupt": {
+				// Starting-window honesty (CR R1 blocking): applyInterrupt no-ops
+				// without a child, so an unconditional applied ack would be a lie —
+				// same contract as input/resize. The client consumes host_starting
+				// as a cmdAck error (no retry chain: interrupt is transient and
+				// user-timed; a re-send carries a fresh commandId).
+				if (!actions.childReady()) {
+					reply(socket, { type: "error", code: "host_starting", commandId: msg.commandId });
+					return;
+				}
+				actions.applyInterrupt();
+				reply(socket, { type: "cmd_ack", commandId: msg.commandId, stage: "applied" });
+				return;
+			}
+			case "terminate": {
+				// Idempotent: a repeat while the termination is in flight returns the
+				// current stage instead of claiming a fresh start.
+				if (pendingTerminates.has(msg.commandId)) {
+					reply(socket, { type: "cmd_ack", commandId: msg.commandId, stage: "applied", value: "termination_started" });
+					return;
+				}
+				pendingTerminates.set(msg.commandId, socket);
+				reply(socket, { type: "cmd_ack", commandId: msg.commandId, stage: "applied", value: "termination_started" });
+				actions.applyTerminate();
+				return;
+			}
+			case "detach": {
+				reply(socket, { type: "cmd_ack", commandId: msg.commandId, stage: "applied", value: "detach_accepted" });
+				actions.applyDetach(socket);
+				return;
+			}
+			case "reconcile": {
+				reply(socket, {
+					type: "reconcile_result",
+					commandId: msg.commandId,
+					generation: GENERATION,
+					hostRevision: actions.hostRevision(),
+					terminalCursor: actions.cursor(),
+					stateMaterializedRevision: actions.stateStamp(),
+					unresolved: journalUnresolved(journalRecords).map((u) => ({ ...u, status: "accepted_unknown" })),
+				});
+				return;
+			}
+		}
+	};
+
+	/** Socket teardown: drop the seq watermark and any ack-routing entries. */
+	const closeSocket = (socket) => {
+		connectionSeq.delete(socket);
+		for (const [commandId, sock] of pendingResizeSockets) if (sock === socket) pendingResizeSockets.delete(commandId);
+		for (const [commandId, sock] of pendingTerminates) if (sock === socket) pendingTerminates.delete(commandId);
+	};
+
+	// (completeHeldResize was removed as dead code: the starting-window resize
+	// path rejects with host_starting instead of holding, and applyResize is
+	// synchronous — there is no held-resize completion path. Task 2 review P2-C.)
+	return { handle, closeSocket, flushTerminateObservations, journalIds };
 }
 
 /** POSIX process start token — /proc/<pid>/stat field 22 (starttime), stable

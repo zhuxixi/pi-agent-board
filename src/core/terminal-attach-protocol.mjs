@@ -53,7 +53,7 @@ export { TERMINAL_SNAPSHOT_VERSION };
  *   send: (msg: Record<string, unknown>) => void,
  * }} opts
  */
-export function createTerminalSubscription({ model, send: rawSend }) {
+export function createTerminalSubscription({ model, send: rawSend, generation }) {
 	/** @type {"idle" | "capturing" | "live"} */
 	let state = "idle";
 	let lastSeq = 0;
@@ -103,6 +103,9 @@ export function createTerminalSubscription({ model, send: rawSend }) {
 				cols: model.cols,
 				rows: model.rows,
 				frameVersion: TERMINAL_FRAME_VERSION,
+				// Runner boot identity (issue #91 phase 5): lets a reconnecting
+				// client detect a runner replacement from the snapshot answer alone.
+				...(generation ? { generation } : {}),
 			});
 			if (empty) {
 				// Runner (re)started and the new child has produced no output yet:

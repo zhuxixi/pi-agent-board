@@ -15,7 +15,7 @@ import { finalizeRun, projectViewState, reduceEvent } from "../core/events.mjs";
 import { clearDiagnostics, appendDiagnostic, tailDiagnostics } from "../core/diagnostics.mjs";
 import { emptyEvidenceSnapshot, finalizeEvidence, readEvidence, reduceEvidence, summarizeEvidence, writeEvidence } from "../core/evidence.mjs";
 import { updateCodeRefsFromEvidence } from "../core/code-refs-store.mjs";
-import { claimNextFollowUp, completeFollowUp, enqueueFollowUp, readFollowUpQueue, releaseFollowUp, summarizeFollowUpQueue, clearQueuedFollowUps, removeLastFollowUp } from "../core/follow-up-queue.mjs";
+import { claimNextFollowUp, completeFollowUp, enqueueFollowUp, failFollowUp, readFollowUpQueue, releaseFollowUp, summarizeFollowUpQueue, clearQueuedFollowUps, removeLastFollowUp } from "../core/follow-up-queue.mjs";
 import { foregroundPreviewCache } from "../core/foreground-preview-cache.mjs";
 import { approvePlan as approvePlanState, markExecutingApprovedPlan, readSteering, recordPlanReady, requestPlan as requestPlanState, requestPlanChanges as requestPlanChangesState, summarizeSteering } from "../core/steering.mjs";
 import { buildApprovePlanPrompt, buildPlanChangesPrompt, buildPlanRequestPrompt } from "../core/steering-prompts.mjs";
@@ -1323,7 +1323,7 @@ export function createService(opts) {
 	 * async: the item is only completed on input_ack; any failure releases it
 	 * back to queued for a later retry (issue #70 A13).
 	 * @param {string} viewId
-	 * @returns {Promise<{ ok: boolean, error?: string, sent?: boolean, started?: boolean, pending?: boolean, item?: any }>}
+	 * @returns {Promise<{ ok: boolean, error?: string, sent?: boolean, started?: boolean, pending?: boolean, failed?: boolean, item?: any }>} (failed=true: §10 accepted_unknown — marked failed, never re-sent)
 	 */
 	async function drainNextFollowUp(viewId) {
 		const row = loadRow(root, viewId);
@@ -1353,12 +1353,26 @@ export function createService(opts) {
 					return { ok: true, pending: true, item };
 				}
 				const sent = socketPath
-					? await sendHostInput(socketPath, `${prompt}\r`, { requestId: item.id })
+					? await sendHostInput(socketPath, `${prompt}\r`, {
+						requestId: item.id,
+						commandId: item.id,
+						viewId,
+						instanceId: row.host.instanceId,
+					})
 					: { ok: false, error: "No host socket", retryable: true };
 				if (sent.ok) {
 					completeFollowUp(root, viewId, item.id);
 					appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_sent", message: "Queued follow-up sent to live host", details: { kind: item.kind } });
 					return { ok: true, sent: true, item };
+				}
+				if (sent.ambiguous) {
+					// §10: the prompt was accepted by a host that restarted before
+					// delivering it — a re-send can only return cached stages, so the
+					// honest terminal state is failed-with-reason (mirrors the queue's
+					// existing failure marking; the item keeps its text for re-send).
+					failFollowUp(root, viewId, item.id, "accepted_unknown: accepted but never applied; outcome unknowable (§10); not re-sent");
+					appendDiagnostic(root, viewId, { source: "queue", level: "error", code: "follow_up_ambiguous", message: "Queued follow-up accepted_unknown after host restart — marked failed, not re-sent", details: { kind: item.kind, commandId: item.id } });
+					return { ok: true, failed: true, item };
 				}
 				releaseFollowUp(root, viewId, item.id);
 				appendDiagnostic(root, viewId, { source: "queue", level: "warn", code: "follow_up_send_failed", message: "Queued follow-up could not be delivered to the host", details: { kind: item.kind, error: sent.error ?? "unknown", retryable: sent.retryable !== false } });
@@ -1619,12 +1633,23 @@ export function createService(opts) {
 				}
 				const socketPath = row.host?.socketPath;
 				const sent = socketPath
-					? await sendHostInput(socketPath, `${prompt}\r`, { requestId: queued.item.id })
+					? await sendHostInput(socketPath, `${prompt}\r`, {
+						requestId: queued.item.id,
+						commandId: queued.item.id,
+						viewId,
+						instanceId: row.host.instanceId,
+					})
 					: { ok: false, error: "No host socket", retryable: true };
 				if (sent.ok) {
 					completeFollowUp(root, viewId, queued.item.id);
 					appendDiagnostic(root, viewId, { source: "queue", code: "follow_up_sent", message: "Queued follow-up sent to live host", details: { kind } });
 					return { ok: true, sent: true, item: queued.item };
+				}
+				if (sent.ambiguous) {
+					// §10: see drainNextFollowUp — never re-queue, never complete.
+					failFollowUp(root, viewId, queued.item.id, "accepted_unknown: accepted but never applied; outcome unknowable (§10); not re-sent");
+					appendDiagnostic(root, viewId, { source: "queue", level: "error", code: "follow_up_ambiguous", message: "Queued follow-up accepted_unknown after host restart — marked failed, not re-sent", details: { kind, commandId: queued.item.id } });
+					return { ok: true, failed: true, item: queued.item };
 				}
 				// Not an error: starting host, busy socket or lost ack — the drain
 				// loop retries once the host acks (issue #70 prompt-not-lost).
@@ -2406,10 +2431,183 @@ function sendHostMessage(row, message) {
 }
 
 /**
- * Default window service waits for the runner's input_ack before treating a
- * host input as undelivered (issue #70 A13).
+ * Default window service waits for the runner's input_ack (or, on the staged
+ * path, `cmd_ack applied`) before treating a host input as undelivered
+ * (issue #70 A13; phase 5 D4).
  */
 const HOST_INPUT_ACK_TIMEOUT_MS = 2_000;
+
+/**
+ * Reconcile-query one commandId against a host control socket (§10 discipline:
+ * a timeout must be resolved by query, never by a blind retry).
+ * @returns {Promise<"accepted_unknown"|"reconciled_clean"|"unavailable">}
+ */
+function reconcileQueryCommand(socketPath, commandId, opts = {}) {
+	const { viewId, instanceId, clientId = "service", connect = createConnection, timeoutMs = HOST_INPUT_ACK_TIMEOUT_MS } = opts;
+	return new Promise((resolve) => {
+		let settled = false;
+		let buffer = "";
+		/** @type {import("node:net").Socket|null} */
+		let socket = null;
+		const finish = (verdict) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			try { socket?.destroy(); } catch { /* best effort */ }
+			resolve(verdict);
+		};
+		const timer = setTimeout(() => finish("unavailable"), timeoutMs);
+		timer.unref?.();
+		try {
+			socket = connect(socketPath);
+		} catch {
+			finish("unavailable");
+			return;
+		}
+		socket.on("connect", () => {
+			try {
+				socket.write(JSON.stringify({ type: "reconcile", commandId: `reconcile-${commandId}`, clientId, seq: 1, viewId, instanceId }) + "\n");
+			} catch {
+				finish("unavailable");
+			}
+		});
+		socket.on("data", (chunk) => {
+			buffer += chunk.toString("utf8");
+			const lines = buffer.split("\n");
+			buffer = lines.pop() ?? "";
+			for (const line of lines) {
+				if (!line.trim()) continue;
+				let msg;
+				try { msg = JSON.parse(line); } catch { continue; }
+				if (msg?.type !== "reconcile_result") continue;
+				const unresolved = Array.isArray(msg.unresolved) ? msg.unresolved : [];
+				finish(unresolved.some((u) => u?.commandId === commandId) ? "accepted_unknown" : "reconciled_clean");
+				return;
+			}
+		});
+		socket.on("error", () => finish("unavailable"));
+		socket.on("close", () => finish("unavailable"));
+	});
+}
+
+/**
+ * Staged durable-input delivery (phase 5 D4): enveloped `{durable:true}` input
+ * expecting `cmd_ack accepted → applied` against a generation-capable runner,
+ * with the §10 reconcile-query on timeout. Runners whose hello lacks a
+ * `generation` token predate the control lifecycle: the SAME connection falls
+ * back to the legacy requestId/input_ack contract (byte-identical bytes), so
+ * phase-4 owned hosts (instanceId known, envelope-ignorant) keep their dedup
+ * instead of double-writing.
+ *
+ * Result shapes (never rejects):
+ * - `{ok:true, applied:true}` — the runner wrote the child.
+ * - `{ok:false, ambiguous:true, error:"accepted_unknown", retryable:false}` —
+ *   accepted but never applied (restart/write-failure window); the caller must
+ *   NOT re-send (§10) and must NOT treat the prompt as delivered.
+ * - `{ok:false, error, retryable}` — everything else (starting window, dead
+ *   socket, legacy timeout); re-send is safe (journal dedup or requestId dedup).
+ * @param {string} socketPath
+ * @param {string} text
+ * @param {{ requestId?: string|null, commandId?: string|null, viewId?: string, instanceId?: string|null, clientId?: string, timeoutMs?: number, connect?: (path: string) => import("node:net").Socket }} [opts]
+ */
+function sendHostInputStaged(socketPath, text, opts = {}) {
+	const commandId = opts.commandId ?? opts.requestId;
+	const clientId = opts.clientId ?? "service";
+	const timeoutMs = opts.timeoutMs ?? HOST_INPUT_ACK_TIMEOUT_MS;
+	const connect = opts.connect ?? createConnection;
+	const { viewId, instanceId } = opts;
+	return new Promise((resolve) => {
+		let settled = false;
+		let buffer = "";
+		let helloSeen = false;
+		let sawAccepted = false;
+		/** @type {import("node:net").Socket|null} */
+		let socket = null;
+		const finish = (result) => {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			try { socket?.destroy(); } catch { /* best effort */ }
+			resolve(result);
+		};
+		/** §10: resolve the deadline by query, never by a blind retry. */
+		const resolveByReconcile = (fallbackError) => {
+			if (settled) return;
+			reconcileQueryCommand(socketPath, commandId, { viewId, instanceId, clientId, connect, timeoutMs }).then((verdict) => {
+				if (verdict === "accepted_unknown") finish({ ok: false, ambiguous: true, error: "accepted_unknown", retryable: false });
+				else if (verdict === "reconciled_clean") finish({ ok: false, error: fallbackError, retryable: true });
+				else finish({ ok: false, error: fallbackError, retryable: true });
+			});
+		};
+		const timer = setTimeout(() => resolveByReconcile("timeout"), timeoutMs);
+		timer.unref?.();
+		try {
+			socket = connect(socketPath);
+		} catch (err) {
+			finish({ ok: false, error: err instanceof Error ? err.message : String(err), retryable: true });
+			return;
+		}
+		socket.on("data", (chunk) => {
+			buffer += chunk.toString("utf8");
+			const lines = buffer.split("\n");
+			buffer = lines.pop() ?? "";
+			for (const line of lines) {
+				if (!line.trim()) continue;
+				let msg;
+				try { msg = JSON.parse(line); } catch { continue; }
+				if (!helloSeen) {
+					if (msg?.type !== "hello") continue; // wait for the capability answer
+					helloSeen = true;
+					try {
+						if (typeof msg.generation === "string" && msg.generation) {
+							socket.write(JSON.stringify({ type: "input", durable: true, commandId, clientId, seq: 1, viewId, instanceId, data: text }) + "\n");
+						} else {
+							// Pre-lifecycle runner: legacy requestId contract, same bytes.
+							socket.write(JSON.stringify({ type: "input", requestId: commandId, data: text }) + "\n");
+						}
+					} catch (err) {
+						finish({ ok: false, error: err instanceof Error ? err.message : String(err), retryable: true });
+					}
+					continue;
+				}
+				if (msg?.type === "cmd_ack" && msg.commandId === commandId) {
+					if (msg.stage === "applied") finish({ ok: true, applied: true });
+					if (msg.stage === "accepted") {
+						sawAccepted = true;
+						// accepted → applied is synchronous runner-side (Task 2 ruling 4);
+						// a dropped socket between them is resolved by the deadline's query.
+					}
+					continue;
+				}
+				if (msg?.type === "input_ack" && msg.requestId === commandId) {
+					// Legacy fallback answer on this same connection.
+					finish({ ok: true });
+					return;
+				}
+				if (msg?.type === "error") {
+					const code = msg.code ?? msg.message ?? "host_error";
+					if (code === "command_failed") {
+						// Taxonomy: reconcile by commandId before any retry decision.
+						resolveByReconcile(code);
+						return;
+					}
+					finish({ ok: false, error: code, retryable: code !== "envelope_invalid" });
+					return;
+				}
+				// hello/status/output lines are ignored — keep waiting.
+			}
+		});
+		socket.on("error", (err) => {
+			const code = /** @type {NodeJS.ErrnoException} */ (err).code;
+			finish({ ok: false, error: code ?? (err instanceof Error ? err.message : String(err)), retryable: true });
+		});
+		socket.on("close", () => {
+			// A close after an accepted ack is the §10 window — resolve by query.
+			if (sawAccepted) resolveByReconcile("socket_closed");
+			else finish({ ok: false, error: "socket_closed", retryable: true });
+		});
+	});
+}
 
 /**
  * Send one input line to a host control socket and wait for the runner's
@@ -2433,6 +2631,15 @@ const HOST_INPUT_ACK_TIMEOUT_MS = 2_000;
  * @returns {Promise<{ ok: boolean, error?: string, retryable?: boolean }>}
  */
 export function sendHostInput(socketPath, text, opts = {}) {
+	// Staged durable path (phase 5 D4): the caller knows the host fence
+	// (viewId + instanceId) and a stable commandId — envelope it and expect
+	// accepted → applied with the §10 reconcile-query on timeout. Runners whose
+	// hello lacks a generation fall back to the legacy requestId contract on
+	// the same connection, so the legacy branch below stays for callers that
+	// have no fence (pre-instanceId hosts).
+	if (opts.viewId && opts.instanceId != null && (opts.commandId || opts.requestId)) {
+		return sendHostInputStaged(socketPath, text, opts);
+	}
 	const requestId = opts.requestId ?? null;
 	const timeoutMs = opts.timeoutMs ?? HOST_INPUT_ACK_TIMEOUT_MS;
 	const connect = opts.connect ?? createConnection;

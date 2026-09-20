@@ -268,7 +268,20 @@ test("A5: burst through the snapshot window — frame→flush→end interleaving
 		sockets.push(driver);
 		const driverMessages = listen(driver).messages;
 		send(driver, { type: "hello" });
-		await waitFor(() => driverMessages.find((m) => m.type === "output" && m.data.includes("fake pi ready")), 30000);
+		// One-shot boot banner is racy against socket accept (banner can be
+		// broadcast before this connection is accepted, and legacy output has no
+		// replay): probe with an echo instead — the fake-pty echoes every input,
+		// so a probe line ALWAYS produces output on a live host.
+		let probeN = 0;
+		const probeTimer = setInterval(() => {
+			probeN += 1;
+			send(driver, { type: "input", data: `boot-probe-${probeN}\r` });
+		}, 300);
+		try {
+			await waitFor(() => driverMessages.find((m) => m.type === "output" && /boot-probe-\d/.test(String(m.data))), 30000);
+		} finally {
+			clearInterval(probeTimer);
+		}
 
 		// Client B: real client module, subscribed mid-burst.
 		const socketB = createConnection(P.controlSocketPath(root, viewId));
