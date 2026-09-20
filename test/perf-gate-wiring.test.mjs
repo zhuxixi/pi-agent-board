@@ -38,3 +38,15 @@ test("docs: README and VERIFY document the opt-in perf gate", () => {
 	assert.match(README, /perf assertions.*(opt-in|skip)/i, "README states perf assertions are opt-in / skipped by default");
 	assert.match(VERIFY_MD, /npm run test:perf/, "VERIFY.md §0 mentions the perf gate entry");
 });
+
+// The consumption edge of the guard rail: if someone removes the gate from
+// the perf test file, the default/coverage suites start measuring again and
+// the #121 flake returns. Pin it statically (final-review Minor #1).
+const PERF_FILE = readFileSync(new URL("../test/terminal-model-perf.test.mjs", import.meta.url), "utf8");
+
+test("perf file consumes the gate on all three A11 declarations", () => {
+	assert.match(PERF_FILE, /import \{ perfGateDecision \} from "\.\.\/test-support\/perf-gate\.mjs"/);
+	assert.match(PERF_FILE, /perfGateDecision\(process\.env\)/);
+	const declarations = PERF_FILE.match(/test\("A11:[^"]*", PERF_SKIP,/g) ?? [];
+	assert.equal(declarations.length, 3, "all three A11 tests take PERF_SKIP as the second argument");
+});
