@@ -494,7 +494,7 @@ git commit -m "docs: document the opt-in perf gate in README and VERIFY (issue #
 
 - [ ] **Step 1: A1+A2+A5+A8** — `node --test test/perf-gate.test.mjs test/perf-gate-wiring.test.mjs` → all pass (12 tests).
 - [ ] **Step 2: A3** — `npm run test:perf` → exit 0, `burst:`/`paced:` lines, `pass 3 / fail 0 / skipped 0`.
-- [ ] **Step 3: A4** — `npm test 2>&1 | tail -15` → 3 A11 tests skipped with `npm run test:perf` reason, no perf assertion failures; `npm run test:coverage 2>&1 | tail -15` → same skip behavior; `rg -c "AGENT_BOARD_PERF_GATE" test/terminal-model-perf.test.mjs` → ≥1.
+- [ ] **Step 3: A4** — `npm test 2>&1 | tail -15` → 3 A11 tests skipped with `npm run test:perf` reason, no perf assertion failures; `npm run test:coverage 2>&1 | tail -15` → same skip behavior; `rg -c "perfGateDecision" test/terminal-model-perf.test.mjs` → ≥2.
 - [ ] **Step 4: A6** — `npm run test:coverage` → exit 0; record the `All files` line; assert Lines ≥ 85, Functions ≥ 80, Branches ≥ 70 (R3 baseline at HEAD 794c755: 92.46 / 91.41 / 80.07 — expect the same modulo new files).
 - [ ] **Step 5: A7** — `npm test` three consecutive rounds; record `pass/fail/skipped` per round. Any failure is only acceptable if it lands in the known-flake ledger (#95 family, or the A5 mid-stream assertion from #122) AND is unrelated to this change's files (perf-gate / run-perf-gate / terminal-model-perf / package.json / ci.yml); otherwise it blocks.
 - [ ] **Step 6: Full verify** — `npm run verify` → exit 0 end to end (this is the exact command the release flow uses).
