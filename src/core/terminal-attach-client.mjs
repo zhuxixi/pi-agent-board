@@ -43,6 +43,20 @@
  *   - stray outputs / duplicate markers → ignored
  *   - `snapshot_failed` / `resnapshot_required` → resend; up to 3 recovery
  *     attempts, then `legacy` fallback
+ * - `reconciling` — (phase 5, D4) reconnect gate: `reconcile` sent on the new
+ *   socket, awaiting `reconcile_result` (or the reconcile deadline). Spec D4
+ *   binds the reconnect order hello → reconcile → snapshot/subscribe. All
+ *   runner messages in this state are consumed-and-ignored (the socket is not
+ *   subscribed yet). Resolution:
+ *   - `reconcile_result` → epoch rule: generation CHANGED since last seen ⇒
+ *     discard the cursor (`lastSeq = 0`, `epochReset` event) ⇒ seq-less
+ *     subscribe (fresh snapshot — ring replay across runner generations is
+ *     structurally impossible); same generation ⇒ subscribe with `sinceSeq`
+ *     (seamless replay)
+ *   - deadline without an answer (phase-4 runner) ⇒ phase-4 semantics:
+ *     subscribe with `sinceSeq` (the runner's resnapshot/empty begin flags
+ *     protect correctness)
+ *   - `error instance_mismatch` ⇒ adopt `currentInstanceId`, re-reconcile
  * - `legacy` — mode decided against this runner: inert, every message
  *   returns false so the UI legacy path (screen.log replay + live output +
  *   jiggle) owns everything.
@@ -76,6 +90,26 @@
  *   the event is informational.
  * - `protocolError` — `{ code, message }` for runner-side protocol failures
  *   (observability/diagnostics; recovery is automatic until the fallback).
+ * - `cmdAck` — (phase 5) `{ commandId, type, stage, ... }` for every enveloped
+ *   control ack (`applied`/`observed`/`superseded`) and enveloped errors
+ *   (`stage: "error"`, `code`). Correlation bookkeeping is internal; the UI
+ *   acts only on what it already shows.
+ * - `reconciled` — `{ generation, hostRevision, terminalCursor,
+ *   stateMaterializedRevision, unresolved }` after a reconnect reconcile.
+ * - `epochReset` — `{ previous, current }` when the generation change forced a
+ *   cursor discard (structural fix for the phase-4 epoch ambiguity).
+ *
+ * ## Control commands (phase 5, D4)
+ *
+ * `sendControl(type, payload)` envelopes `resize`/`interrupt`/`terminate`/
+ * `detach` with `{commandId, clientId, seq, viewId, instanceId}` (identity
+ * derived from hello/status — the UI passes no identity options). Returns the
+ * commandId, or `null` when the host has no instance fence (legacy-mode main):
+ * the caller then falls back to the legacy plain message. Keystroke `input`
+ * is never enveloped (fire-and-forget by contract — throws). A resize that
+ * lands in the runner's starting window answers `host_starting`; the client
+ * retries with a fresh commandId (bounded chain, latest-wins) — parity with
+ * the legacy runner-side cachedResize.
  *
  * The frame/DTO version axes live in the runner module. This client advertises
  * its `frameVersion` on every `subscribe_terminal` (the runner's mismatch gate
@@ -88,19 +122,23 @@
  */
 
 import { TERMINAL_FRAME_VERSION } from "./terminal-attach-protocol.mjs";
+import { classifyCommandAck, encodeCommand } from "./control-protocol.mjs";
 
 /**
- * @typedef {"probing" | "collecting" | "live" | "resyncing" | "legacy" | "closed"} AttachClientState
+ * @typedef {"probing" | "collecting" | "live" | "resyncing" | "reconciling" | "legacy" | "closed"} AttachClientState
  */
 
 /**
  * @typedef {(
- *   event: "mode" | "snapshotBegin" | "snapshotReady" | "output" | "resubscribing" | "protocolError",
+ *   event: "mode" | "snapshotBegin" | "snapshotReady" | "output" | "resubscribing" | "protocolError" |
+ *          "cmdAck" | "reconciled" | "epochReset",
  *   payload?: any,
  * ) => void} AttachClientEmit
  */
 
 const MAX_SNAPSHOT_FAILURES = 3; // up to 3 recovery attempts, then legacy fallback
+const MAX_RESIZE_START_RETRIES = 5; // bounded host_starting retry chain (starting-window resize parity with the legacy cachedResize)
+const RESIZE_RETRY_DELAY_MS = 300;
 
 /**
  * @typedef {{
@@ -127,6 +165,8 @@ const defaultScheduleTimeout = (delayMs, fn) => {
  *   probeTimeoutMs?: number,
  *   scheduleTimeout?: (delayMs: number, fn: () => void) => () => void,
  *   forceLegacy?: boolean,
+ *   clientId?: string,
+ *   reconcileTimeoutMs?: number,
  * }} opts
  */
 export function createTerminalAttachClient({
@@ -135,6 +175,8 @@ export function createTerminalAttachClient({
 	probeTimeoutMs = 1500,
 	scheduleTimeout = defaultScheduleTimeout,
 	forceLegacy,
+	clientId = `ui-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+	reconcileTimeoutMs = 1500,
 }) {
 	// Env is read once at factory time (plan contract); the explicit option
 	// wins so tests and embedders can pin behavior regardless of environment.
@@ -147,6 +189,27 @@ export function createTerminalAttachClient({
 	let lastSeq = 0;
 	let probeTimer = null;
 	let snapshotFailures = 0;
+
+	// --- Control lifecycle (issue #91 phase 5, D4) ---
+	// Identity is DERIVED from hello/status (review ruling 1): the UI passes no
+	// viewId/instanceId options. `instanceId === null` means a legacy-mode host
+	// (instance fence does not exist): envelopes are NEVER sent to it — control
+	// commands fall back to the legacy plain messages; the attach snapshot
+	// protocol itself still works there (the legacy main serves subscribe).
+	let instanceId = null;
+	let viewId = null;
+	let generation = null; // last seen generation token (epoch detection)
+	let seq = 0; // per-connection envelope ordering (resets on reconnect)
+	let commandCounter = 0;
+	/** @type {Map<string, { type: string }>} */
+	const pendingCommands = new Map(); // commandId → correlation record
+	let reconcileTimer = null;
+	/** Pending reconnect gate: reconcile must resolve (or time out) before the
+	 *  subscribe decision — spec D4 binds hello → reconcile → snapshot/subscribe. */
+	let reconnectCursor = null;
+	/** Active starting-window resize retry chain (latest-wins: a new user
+	 *  resize replaces it). { commandId, cols, rows, attempt } | null */
+	let resizeStartRetry = null;
 
 	// Partial-snapshot stash (collecting): the runner sends frame, then its
 	// catch-up flush outputs, then end — one microtask batch, tiny by contract
@@ -173,6 +236,13 @@ export function createTerminalAttachClient({
 		if (probeTimer) {
 			probeTimer();
 			probeTimer = null;
+		}
+	};
+
+	const cancelReconcileTimer = () => {
+		if (reconcileTimer) {
+			reconcileTimer();
+			reconcileTimer = null;
 		}
 	};
 
@@ -221,6 +291,109 @@ export function createTerminalAttachClient({
 		}
 		resync(reason);
 	};
+
+	// --- Control lifecycle helpers (phase 5, D4) ---
+
+	/** Capture identity + generation from hello/status (UI-owned messages the
+	 *  client only peeks at; they remain false/non-consumed). */
+	const observeIdentity = (msg) => {
+		const status = msg.status ?? {};
+		// Normalize: an owned host carries a non-empty instanceId; a legacy-mode
+		// host has none (undefined) — both mean "no envelope possible".
+		instanceId = typeof status.instanceId === "string" && status.instanceId ? status.instanceId : null;
+		viewId = typeof status.viewId === "string" && status.viewId ? status.viewId : viewId;
+		if (typeof msg.generation === "string" && msg.generation) generation = msg.generation;
+		// A reconnect waiting for identity on the fresh socket can now reconcile.
+		if (state === "reconciling" && instanceId && reconnectCursor !== null) sendReconcile();
+	};
+
+	const sendReconcile = () => {
+		const commandId = `${clientId}-rec-${++commandCounter}`;
+		seq += 1;
+		send(encodeCommand("reconcile", {}, { commandId, clientId, seq, viewId: viewId ?? "unknown", instanceId }));
+	};
+
+	const issueReconnectSubscribe = (sinceSeq) => {
+		const cursor = reconnectCursor;
+		reconnectCursor = null;
+		cancelReconcileTimer();
+		lastSeq = sinceSeq;
+		partial = { frame: null, empty: false, resnapshot: false, beginSeq: 0, flush: [] };
+		state = "resyncing";
+		send(
+			sinceSeq > 0
+				? { type: "subscribe_terminal", frameVersion: TERMINAL_FRAME_VERSION, sinceSeq }
+				: { type: "subscribe_terminal", frameVersion: TERMINAL_FRAME_VERSION },
+		);
+		return cursor;
+	};
+
+	/** Epoch rule (spec D4 + phase-4 residual fix): a generation CHANGE means
+	 *  the runner (and its child) was replaced — the remembered cursor describes
+	 *  a dead stream, so ring replay across generations is structurally
+	 *  impossible: discard the cursor and take a fresh snapshot. Same generation
+	 *  → seamless replay from the applied cursor. No generation (legacy-mode
+	 *  host, unreachable here because reconcile needs an instanceId) or an
+	 *  unanswered reconcile (phase-4 runner) → phase-4 semantics: the runner's
+	 *  resnapshot/empty begin flags protect correctness. */
+	const resolveReconnect = (result) => {
+		const previousGeneration = generation;
+		const nextGeneration = typeof result?.generation === "string" && result.generation ? result.generation : null;
+		generation = nextGeneration ?? generation;
+		emit("reconciled", {
+			generation,
+			hostRevision: result?.hostRevision,
+			terminalCursor: result?.terminalCursor,
+			stateMaterializedRevision: result?.stateMaterializedRevision,
+			unresolved: result?.unresolved,
+		});
+		if (nextGeneration && previousGeneration && nextGeneration !== previousGeneration) {
+			lastSeq = 0;
+			emit("epochReset", { previous: previousGeneration, current: nextGeneration });
+			issueReconnectSubscribe(0);
+			return;
+		}
+		issueReconnectSubscribe(reconnectCursor ?? 0);
+	};
+
+	const cancelResizeStartRetry = () => {
+		resizeStartRetry = null;
+	};
+
+	const scheduleResizeStartRetry = (cols, rows, attempt) => {
+		if (attempt >= MAX_RESIZE_START_RETRIES) return;
+		resizeStartRetry = { cols, rows, attempt };
+		scheduleTimeout(RESIZE_RETRY_DELAY_MS, () => {
+			if (resizeStartRetry?.attempt !== attempt) return; // superseded by a newer resize
+			resizeStartRetry = null;
+			sendControl("resize", { cols, rows }, attempt + 1);
+		});
+	};
+
+	/**
+	 * Send a control command with the phase-5 envelope (spec D4). Returns the
+	 * commandId, or null when no instance fence is known (legacy-mode host):
+	 * the caller falls back to the legacy plain message. Keystroke `input` is
+	 * deliberately NOT sendable here — plain keyboard input is fire-and-forget
+	 * by contract (never enveloped, never acked, never replayed).
+	 *
+	 * @param {"resize" | "interrupt" | "terminate" | "detach"} type
+	 * @param {Record<string, unknown>} payload
+	 * @param {number} [startRetryAttempt] internal: host_starting retry chain depth
+	 */
+	function sendControl(type, payload = {}, startRetryAttempt = 0) {
+		if (type === "input") throw new TypeError("sendControl: keystroke input is never enveloped (fire-and-forget contract)");
+		if (state === "closed" || state === "legacy" || !instanceId || !viewId) return null;
+		const commandId = `${clientId}-${++commandCounter}`;
+		seq += 1;
+		send(encodeCommand(type, payload, { commandId, clientId, seq, viewId, instanceId }));
+		pendingCommands.set(commandId, { type });
+		if (type === "resize" && startRetryAttempt === 0) {
+			cancelResizeStartRetry(); // latest-wins: a new user resize replaces any retry chain
+			resizeStartRetry = { cols: payload.cols, rows: payload.rows, attempt: 0, commandId };
+		}
+		return { commandId };
+	}
 
 	/** Enter collecting from a begin message (both probing and resyncing).
 	 *  Deliberately does NOT reset the failure budget: a runner that keeps
@@ -290,11 +463,75 @@ export function createTerminalAttachClient({
 	function handleMessage(msg) {
 		if (!msg || typeof msg !== "object" || state === "closed" || state === "legacy") return false;
 		switch (msg.type) {
+			case "hello":
+			case "status": {
+				// Identity/generation peek (UI-owned message, not consumed).
+				observeIdentity(msg);
+				return false;
+			}
+			case "cmd_ack": {
+				// Control-lifecycle correlation (spec D4). The ack is consumed even
+				// for unknown commandIds (a late ack after internal retry cleanup is
+				// not a UI message).
+				const pending = pendingCommands.get(msg.commandId);
+				if (pending) {
+					const verdict = classifyCommandAck(pending.type, msg);
+					if (verdict.ok) {
+						if (verdict.stage === "applied" || verdict.stage === "observed" || verdict.stage === "superseded") {
+							pendingCommands.delete(msg.commandId);
+							if (pending.type === "resize") cancelResizeStartRetry();
+						}
+					} else {
+						emit("protocolError", { code: "ack_invalid", message: verdict.reason, commandId: msg.commandId });
+					}
+				}
+				emit("cmdAck", { commandId: msg.commandId, type: pending?.type, stage: msg.stage, cols: msg.cols, rows: msg.rows, byCommandId: msg.byCommandId, value: msg.value, exitConfirmed: msg.exitConfirmed, runnerFinalizing: msg.runnerFinalizing });
+				return true;
+			}
+			case "reconcile_result": {
+				if (state === "reconciling") resolveReconnect(msg);
+				return true;
+			}
+			case "error": {
+				if (msg.code === "frame_version_mismatch") {
+					// Wire contract mismatch: treat this runner as incompatible.
+					fallbackToLegacy("frame_version_mismatch");
+					return true;
+				}
+				if (msg.code === "snapshot_failed" || msg.code === "invalid_since_seq") {
+					if (state === "probing" || state === "resyncing" || state === "collecting") {
+						resyncOrFail(msg.code);
+						return true;
+					}
+					return false;
+				}
+				if (msg.code === "instance_mismatch" && state === "reconciling" && typeof msg.currentInstanceId === "string" && msg.currentInstanceId) {
+					// Recovery signal (review ruling 1): the host was replaced with a
+					// new instance fence — adopt and re-reconcile (same deadline).
+					instanceId = msg.currentInstanceId;
+					sendReconcile();
+					return true;
+				}
+				if (msg.code === "host_starting" && msg.commandId) {
+					const pending = pendingCommands.get(msg.commandId);
+					pendingCommands.delete(msg.commandId);
+					emit("cmdAck", { commandId: msg.commandId, type: pending?.type, stage: "error", code: msg.code });
+					if (pending?.type === "resize" && typeof resizeStartRetry?.cols === "number") {
+						const { cols, rows, attempt } = resizeStartRetry;
+						resizeStartRetry = null;
+						scheduleResizeStartRetry(cols, rows, attempt + 1);
+					}
+					return true;
+				}
+				return false; // UI-owned status errors
+			}
 			case "snapshot_begin": {
+				if (typeof msg.generation === "string" && msg.generation) generation = msg.generation;
 				if (state === "probing" || state === "resyncing") {
 					beginCollecting(msg);
 					return true;
 				}
+				if (state === "reconciling") return true; // pre-subscribe stray: consume
 				// Unsolicited begin in collecting (duplicate) or live: protocol
 				// violation — strictness surfaces runner bugs; a fresh subscribe
 				// converges either way.
@@ -302,6 +539,7 @@ export function createTerminalAttachClient({
 				return true;
 			}
 			case "snapshot_frame": {
+				if (state === "reconciling") return true; // pre-subscribe stray: consume
 				if (state !== "collecting" || partial.empty || typeof msg.data !== "string") {
 					resyncOrFail("unexpected_snapshot_frame");
 					return true;
@@ -310,6 +548,7 @@ export function createTerminalAttachClient({
 				return true;
 			}
 			case "snapshot_end": {
+				if (state === "reconciling") return true; // pre-subscribe stray: consume
 				if (state !== "collecting") {
 					resyncOrFail("unexpected_snapshot_end");
 					return true;
@@ -322,6 +561,7 @@ export function createTerminalAttachClient({
 					resyncOrFail("resnapshot_required");
 					return true;
 				}
+				if (state === "reconciling") return true; // pre-subscribe stray: consume
 				return false;
 			}
 			case "output": {
@@ -372,6 +612,12 @@ export function createTerminalAttachClient({
 					}
 					return true; // strays (pre-resync in-flight chunks): ignored
 				}
+				if (state === "reconciling") {
+					// The fresh socket is not subscribed yet: everything here is
+					// broadcast stray. Consume so the UI legacy path can never
+					// double-feed bytes the coming snapshot/replay will cover.
+					return true;
+				}
 				// probing: outputs belong to the legacy broadcast window (old
 				// runner, or new runner before subscribe processing). Not ours.
 				return false;
@@ -412,10 +658,14 @@ export function createTerminalAttachClient({
 	}
 
 	/**
-	 * New socket after a drop. Protocol mode: subscribe with the last applied
-	 * cursor (replay → seamless live; otherwise fresh snapshot). Still
-	 * probing: re-issue the probe on the new socket. Legacy: nothing — the UI
-	 * legacy path reconnects on its own.
+	 * New socket after a drop. Protocol mode: spec D4 binds the reconnect order
+	 * `hello → reconcile → snapshot/subscribe` — the reconcile answer's
+	 * generation drives the epoch rule (changed ⇒ discard cursor ⇒ fresh
+	 * snapshot; same ⇒ replay from the applied cursor). Still probing: re-issue
+	 * the probe on the new socket. Legacy: nothing — the UI legacy path
+	 * reconnects on its own. A legacy-mode HOST (instanceId null) cannot be
+	 * reconciled by contract (envelopes are never sent there) → phase-4
+	 * semantics directly (the runner's resnapshot/empty flags protect).
 	 *
 	 * @param {number} cursorSeq last applied protocol seq (getLastSeq())
 	 */
@@ -426,16 +676,31 @@ export function createTerminalAttachClient({
 			fireProbeTimer();
 			return;
 		}
-		lastSeq = cursorSeq;
+		seq = 0; // per-connection ordering resets with the socket (spec D4)
 		snapshotFailures = 0; // fresh connection, fresh recovery budget
 		partial = { frame: null, empty: false, resnapshot: false, beginSeq: 0, flush: [] };
-		state = "resyncing";
-		send({ type: "subscribe_terminal", frameVersion: TERMINAL_FRAME_VERSION, sinceSeq: cursorSeq });
+		if (!instanceId) {
+			issueReconnectSubscribe(cursorSeq);
+			return;
+		}
+		reconnectCursor = cursorSeq;
+		state = "reconciling";
+		cancelReconcileTimer();
+		reconcileTimer = scheduleTimeout(reconcileTimeoutMs, () => {
+			reconcileTimer = null;
+			if (state !== "reconciling") return;
+			// Unanswered reconcile (phase-4 runner or dead window): fall back to
+			// the phase-4 reconnect (sinceSeq; the runner's begin flags protect).
+			issueReconnectSubscribe(reconnectCursor ?? 0);
+		});
+		if (instanceId && viewId) sendReconcile();
+		// else: wait for the fresh hello (observeIdentity triggers sendReconcile).
 	}
 
 	/** Tear down: cancel timers, go inert. */
 	function close() {
 		cancelProbeTimer();
+		cancelReconcileTimer();
 		state = "closed";
 	}
 
@@ -448,6 +713,7 @@ export function createTerminalAttachClient({
 	function onDisconnect() {
 		if (state === "closed" || state === "legacy") return;
 		cancelProbeTimer();
+		cancelReconcileTimer();
 	}
 
 	return {
@@ -458,12 +724,17 @@ export function createTerminalAttachClient({
 		close,
 		/** @returns {"probing" | "protocol" | "legacy" | "closed"} UI-facing mode */
 		getMode() {
-			if (state === "collecting" || state === "live" || state === "resyncing") return "protocol";
+			if (state === "collecting" || state === "live" || state === "resyncing" || state === "reconciling") return "protocol";
 			return state;
 		},
 		/** Last applied protocol seq (reconnect cursor). */
 		getLastSeq() {
 			return lastSeq;
+		},
+		sendControl,
+		/** Identity snapshot (test/diagnostics aid). */
+		getIdentity() {
+			return { instanceId, viewId, generation };
 		},
 	};
 }
