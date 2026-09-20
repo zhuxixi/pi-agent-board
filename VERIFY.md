@@ -10,7 +10,8 @@ Steps you can run yourself to check the extension. Grouped from "no auth needed"
 ```bash
 npm install          # dev + runtime deps
 npm run typecheck    # expect: 0 errors
-npm test             # expect: 0 failures
+npm run test:perf    # expect: `burst:`/`paced:` value lines, pass 3 / skipped 0 — the ONLY path that measures perf assertions; they skip under npm test (issue #121)
+npm test             # expect: 0 failures (the 3 A11 perf tests skip here, reason points at `npm run test:perf`)
 npm run pack:dry     # expect: pi-agent-board-<version>.tgz contents only include deploy files
 ```
 

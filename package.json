@@ -55,8 +55,9 @@
 		"typecheck": "tsc --noEmit",
 		"test": "node --test test/*.test.mjs",
 		"test:coverage": "c8 node --test test/*.test.mjs",
+		"test:perf": "node scripts/run-perf-gate.mjs",
 		"pack:dry": "npm pack --dry-run",
-		"verify": "npm run typecheck && npm test && npm run test:coverage && npm run pack:dry",
+		"verify": "npm run typecheck && npm run test:perf && npm test && npm run test:coverage && npm run pack:dry",
 		"changelog": "node scripts/release_helper.mjs"
 	},
 	"peerDependencies": {

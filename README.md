@@ -377,7 +377,7 @@ npm install
 npm run verify
 ```
 
-`npm run verify` runs typecheck, tests, coverage, and a package dry-run. The same checks run in CI on Node 22 and Node 24. See [VERIFY.md](VERIFY.md) for the full verification checklist and known environment-dependent limitations.
+`npm run verify` runs typecheck, the perf gate (`npm run test:perf`), tests, coverage, and a package dry-run. The A11 perf assertions are opt-in — they skip under `npm test` / `npm run test:coverage` and only measure via `npm run test:perf` (issue #121). The same checks run in CI on Node 22 and Node 24. See [VERIFY.md](VERIFY.md) for the full verification checklist and known environment-dependent limitations.
 
 ## Publishing
 

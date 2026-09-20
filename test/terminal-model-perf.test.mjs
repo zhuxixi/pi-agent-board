@@ -13,6 +13,7 @@ import {
 	assertSnapshotEquivalence,
 } from "../src/core/terminal-snapshot.mjs";
 import { createTerminalSubscription } from "../src/core/terminal-attach-protocol.mjs";
+import { perfGateDecision } from "../test-support/perf-gate.mjs";
 
 /**
  * A11 (spec acceptance matrix): 12.5fps output stream sustained for the
@@ -86,7 +87,14 @@ const FEED_P99_LIMIT = 8;
 const CAPTURE_LIMIT = 50;
 const HYDRATE_LIMIT = 100;
 
-test("A11: 750-chunk burst (60s × 12.5fps equivalent) meets feed/capture/hydrate thresholds", async () => {
+// Perf assertions are opt-in (issue #121): they only measure via
+// `npm run test:perf`. Under the default/parallel/coverage suites they skip —
+// c8 instrumentation inflates latency ~2.5–6× and parallel contention is
+// noise, so measuring there would decide CI on runner busy-ness, not code.
+const GATE = perfGateDecision(process.env);
+const PERF_SKIP = { skip: GATE.run ? false : GATE.reason };
+
+test("A11: 750-chunk burst (60s × 12.5fps equivalent) meets feed/capture/hydrate thresholds", PERF_SKIP, async () => {
 	const model = createTerminalModel({ cols: 80, rows: 24, scrollback: 2000 });
 	const feedLatencies = [];
 	let lastSeq = 0;
@@ -139,7 +147,7 @@ test("A11: 750-chunk burst (60s × 12.5fps equivalent) meets feed/capture/hydrat
 	assert.ok(hydrateMs <= HYDRATE_LIMIT, `hydrate ${hydrateMs.toFixed(2)}ms exceeds ${HYDRATE_LIMIT}ms`);
 });
 
-test("A11: paced stream (80ms interval, ~5s wall) stays within thresholds", async () => {
+test("A11: paced stream (80ms interval, ~5s wall) stays within thresholds", PERF_SKIP, async () => {
 	const model = createTerminalModel({ cols: 80, rows: 24, scrollback: 2000 });
 	const feedLatencies = [];
 	const ticks = 60; // ~4.8s at 80ms
@@ -166,7 +174,7 @@ test("A11: paced stream (80ms interval, ~5s wall) stays within thresholds", asyn
 	assert.ok(p99 <= FEED_P99_LIMIT, `paced feed p99 ${p99.toFixed(3)}ms exceeds ${FEED_P99_LIMIT}ms`);
 });
 
-test("A11: ring overflow mid-stream degrades to resnapshot, never silent loss", async () => {
+test("A11: ring overflow mid-stream degrades to resnapshot, never silent loss", PERF_SKIP, async () => {
 	// Tiny ring: overflow is guaranteed mid-stream.
 	const model = createTerminalModel({ cols: 80, rows: 24, scrollback: 2000, ringChunkCap: 8, ringByteCap: 16 * 1024 });
 	for (let i = 0; i < 200; i++) {

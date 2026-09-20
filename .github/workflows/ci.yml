@@ -31,6 +31,9 @@ jobs:
       - name: Typecheck
         run: npm run typecheck
 
+      - name: "Perf gate (serial, no coverage)"
+        run: npm run test:perf
+
       - name: Unit tests
         run: npm test
 
