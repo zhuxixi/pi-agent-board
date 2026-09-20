@@ -692,7 +692,10 @@ test("reconciling consumes stray broadcast output/begin without corrupting the g
 	const rec = sent.find((m) => m.type === "reconcile");
 	client.handleMessage({ type: "hello", status: { instanceId: "inst-1", viewId: "v1" }, generation: "gen-1" });
 	client.handleMessage({ type: "reconcile_result", commandId: rec.commandId, generation: "gen-1", hostRevision: 5, terminalCursor: { lastSeq: 12 }, stateMaterializedRevision: null, unresolved: [] });
-	assert.deepEqual(sent.at(-1), SUB_SEQ(9), "gate resolves normally after strays");
+	// Stray high-water advances the subscribe cursor: the legacy broadcast and
+	// the replay stream overlap on the wire, so the cursor must start PAST every
+	// stray already delivered (wire-level no-dup; A2 integration pins the same).
+	assert.deepEqual(sent.at(-1), SUB_SEQ(10), "subscribe cursor clears the stray high-water (no wire duplicate)");
 });
 
 test("taxonomy errors correlated by commandId consume the pending entry and surface cmdAck error (task 4, review P2)", () => {
