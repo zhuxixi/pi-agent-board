@@ -33,3 +33,18 @@ for (const [gate, coverage, expectedRun, reasonSubstring] of CASES) {
 		);
 	});
 }
+
+// A2: the entry script refuses loudly under instrumentation — nonzero exit,
+// a clear message, and no measurement output. Setting AGENT_BOARD_PERF_GATE=1
+// too proves the instrumentation check dominates the opt-in.
+const ENTRY_SCRIPT = fileURLToPath(new URL("../scripts/run-perf-gate.mjs", import.meta.url));
+
+test("run-perf-gate.mjs refuses when NODE_V8_COVERAGE is set", () => {
+	const r = spawnSync(process.execPath, [ENTRY_SCRIPT], {
+		env: { ...process.env, NODE_V8_COVERAGE: "/tmp/perf-gate-a2", AGENT_BOARD_PERF_GATE: "1" },
+		encoding: "utf8",
+	});
+	assert.notEqual(r.status, 0);
+	assert.match(r.stderr + r.stdout, /coverage instrumentation|NODE_V8_COVERAGE/);
+	assert.doesNotMatch(r.stdout, /burst:|paced:/);
+});
