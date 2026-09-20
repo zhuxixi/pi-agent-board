@@ -636,21 +636,9 @@ export function createTerminalAttachClient({
 				// runner, or new runner before subscribe processing). Not ours.
 				return false;
 			}
-			case "error": {
-				if (msg.code === "frame_version_mismatch") {
-					// Wire contract mismatch: treat this runner as incompatible.
-					fallbackToLegacy("frame_version_mismatch");
-					return true;
-				}
-				if (msg.code === "snapshot_failed" || msg.code === "invalid_since_seq") {
-					if (state === "probing" || state === "resyncing" || state === "collecting") {
-						resyncOrFail(msg.code);
-						return true;
-					}
-					return false;
-				}
-				return false; // UI-owned status errors
-			}
+			// (A duplicate dead `case "error":` block that survived the phase-5
+			// insertion was removed here — task 3 review P2: the live error case
+			// above returns on every path, so a second label was unreachable.)
 			default:
 				return false;
 		}
