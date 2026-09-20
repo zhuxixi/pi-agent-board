@@ -1323,7 +1323,7 @@ export function createService(opts) {
 	 * async: the item is only completed on input_ack; any failure releases it
 	 * back to queued for a later retry (issue #70 A13).
 	 * @param {string} viewId
-	 * @returns {Promise<{ ok: boolean, error?: string, sent?: boolean, started?: boolean, pending?: boolean, item?: any }>}
+	 * @returns {Promise<{ ok: boolean, error?: string, sent?: boolean, started?: boolean, pending?: boolean, failed?: boolean, item?: any }>} (failed=true: §10 accepted_unknown — marked failed, never re-sent)
 	 */
 	async function drainNextFollowUp(viewId) {
 		const row = loadRow(root, viewId);
@@ -1370,7 +1370,7 @@ export function createService(opts) {
 					// delivering it — a re-send can only return cached stages, so the
 					// honest terminal state is failed-with-reason (mirrors the queue's
 					// existing failure marking; the item keeps its text for re-send).
-					failFollowUp(root, viewId, item.id, "accepted_unknown: accepted by a host that restarted before delivering; not re-sent");
+					failFollowUp(root, viewId, item.id, "accepted_unknown: accepted but never applied; outcome unknowable (§10); not re-sent");
 					appendDiagnostic(root, viewId, { source: "queue", level: "error", code: "follow_up_ambiguous", message: "Queued follow-up accepted_unknown after host restart — marked failed, not re-sent", details: { kind: item.kind, commandId: item.id } });
 					return { ok: true, failed: true, item };
 				}
@@ -1647,7 +1647,7 @@ export function createService(opts) {
 				}
 				if (sent.ambiguous) {
 					// §10: see drainNextFollowUp — never re-queue, never complete.
-					failFollowUp(root, viewId, queued.item.id, "accepted_unknown: accepted by a host that restarted before delivering; not re-sent");
+					failFollowUp(root, viewId, queued.item.id, "accepted_unknown: accepted but never applied; outcome unknowable (§10); not re-sent");
 					appendDiagnostic(root, viewId, { source: "queue", level: "error", code: "follow_up_ambiguous", message: "Queued follow-up accepted_unknown after host restart — marked failed, not re-sent", details: { kind, commandId: queued.item.id } });
 					return { ok: true, failed: true, item: queued.item };
 				}
