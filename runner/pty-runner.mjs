@@ -1468,7 +1468,7 @@ function createControlRuntime({ viewId, root, instanceId, send, diag, actions })
 				// never re-appended (ruling b), never re-written (commandId dedup).
 				if (journalIds.has(msg.commandId)) {
 					const wasApplied = journalRecords.some((r) => r.kind === "applied" && r.commandId === msg.commandId);
-					reply(socket, { type: "cmd_ack", commandId: msg.commandId, stage: wasApplied ? "applied" : "accepted" });
+					reply(socket, { type: "cmd_ack", commandId: msg.commandId, stage: wasApplied ? "applied" : "accepted", durable: true });
 					return;
 				}
 				if (!actions.childReady()) {
@@ -1483,7 +1483,7 @@ function createControlRuntime({ viewId, root, instanceId, send, diag, actions })
 					reply(socket, { type: "error", code: "journal_unavailable", commandId: msg.commandId });
 					return;
 				}
-				reply(socket, { type: "cmd_ack", commandId: msg.commandId, stage: "accepted" });
+				reply(socket, { type: "cmd_ack", commandId: msg.commandId, stage: "accepted", durable: true });
 				try {
 					actions.writeInput(msg.data);
 				} catch (err) {
