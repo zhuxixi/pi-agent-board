@@ -16,6 +16,7 @@ import {
 	validateCommandEnvelope,
 	encodeCommand,
 	classifyCommandAck,
+	checkSeq,
 	retryPolicy,
 	dedupKey,
 	createResizeTracker,
@@ -293,3 +294,38 @@ test("journal GC on a restart-shaped journal: unresolved set derives from the KE
 	const kept = journalGc(records, 1);
 	assert.deepEqual(journalUnresolved(kept), [{ commandId: "c2", command: "prompt\r", acceptedAt: 3 }]);
 });
+
+test("checkSeq: strictly-increasing integer sequence, gaps legal, repeats/regressions rejected", () => {
+	// First message on a connection: any integer >= 1 is fine.
+	assert.deepEqual(checkSeq(0, 1), { ok: true });
+	assert.deepEqual(checkSeq(0, 7), { ok: true });
+	// Increasing and gapped: ok.
+	assert.deepEqual(checkSeq(7, 8), { ok: true });
+	assert.deepEqual(checkSeq(7, 12), { ok: true });
+	// Repeat / regression: rejected.
+	assert.deepEqual(checkSeq(7, 7), { ok: false, reason: "seq_not_monotonic" });
+	assert.deepEqual(checkSeq(7, 3), { ok: false, reason: "seq_not_monotonic" });
+	// Non-integer / non-positive: rejected as invalid, not as ordering.
+	assert.deepEqual(checkSeq(7, 0), { ok: false, reason: "seq_invalid" });
+	assert.deepEqual(checkSeq(7, -1), { ok: false, reason: "seq_invalid" });
+	assert.deepEqual(checkSeq(7, 2.5), { ok: false, reason: "seq_invalid" });
+	assert.deepEqual(checkSeq(7, "8"), { ok: false, reason: "seq_invalid" });
+});
+
+test("encodeCommand: payload keys colliding with envelope-owned fields throw (silent corruption is worse than loud failure)", () => {
+	assert.throws(
+		() => encodeCommand("resize", { cols: 1, seq: 99 }, ENV),
+		/seq/,
+	);
+	assert.throws(
+		() => encodeCommand("input", { data: "x", commandId: "evil" }, ENV),
+		/commandId/,
+	);
+	assert.throws(
+		() => encodeCommand("input", { data: "x", type: "input" }, ENV),
+		/type/,
+	);
+	// Disjoint payload still fine.
+	assert.doesNotThrow(() => encodeCommand("input", { data: "x" }, ENV));
+});
+

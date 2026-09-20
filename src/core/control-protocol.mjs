@@ -95,10 +95,12 @@ export const COMMAND_SEMANTICS = Object.freeze({
 });
 
 /**
- * Classify a message's envelope status. Messages WITHOUT a `commandId` marker
- * are legacy passthrough (`enveloped: false`, no errors) — never an error, so
- * pre-phase-5 clients are untouched. Messages WITH a `commandId` are validated
- * against the full envelope; any gap is a client bug worth surfacing.
+ * Classify a message's envelope status. The passthrough rule is absolute: a
+ * message WITHOUT a non-empty `commandId` is legacy — reported as
+ * `{enveloped: false}` with NO errors, never validated further, never errored,
+ * so pre-phase-5 clients are untouched regardless of what other fields they
+ * carry. Only a message that DOES carry a `commandId` is held to the full
+ * envelope contract; any gap there is a client bug worth surfacing.
  */
 export function validateCommandEnvelope(msg) {
 	if (!msg || typeof msg !== "object") return { enveloped: false, errors: ["msg_not_object"] };
@@ -115,10 +117,21 @@ export function validateCommandEnvelope(msg) {
 }
 
 /**
- * Build an enveloped control command. Throws on missing envelope fields or a
- * non-control type: this is a programmer error at the call site, not runtime
- * input handling.
+ * Build an enveloped control command. Throws on missing envelope fields, a
+ * non-control type, or payload keys colliding with envelope fields (`type`,
+ * `commandId`, `clientId`, `seq`, `viewId`, `instanceId`): all are programmer
+ * errors at the call site, not runtime input handling — a collision would
+ * silently corrupt the envelope, so it fails loud instead.
  */
+const ENVELOPE_OWNED_KEYS = Object.freeze([
+	"type",
+	"commandId",
+	"clientId",
+	"seq",
+	"viewId",
+	"instanceId",
+]);
+
 export function encodeCommand(type, payload, envelope) {
 	if (!CONTROL_COMMAND_TYPES.includes(type)) {
 		throw new TypeError(`encodeCommand: unknown control type ${JSON.stringify(type)}`);
@@ -130,6 +143,12 @@ export function encodeCommand(type, payload, envelope) {
 	}
 	if (!Number.isInteger(envelope?.seq) || envelope.seq < 1) {
 		throw new TypeError("encodeCommand: seq must be an integer >= 1");
+	}
+	if (payload != null) {
+		const collisions = Object.keys(payload).filter((key) => ENVELOPE_OWNED_KEYS.includes(key));
+		if (collisions.length > 0) {
+			throw new TypeError(`encodeCommand: payload collides with envelope-owned keys: ${collisions.join(", ")}`);
+		}
 	}
 	return Object.freeze({
 		type,
@@ -304,6 +323,20 @@ export function createResizeTracker() {
 export const JOURNAL_KEEP_DEFAULT = 256;
 
 /**
+ * Per-connection sequence check (runner-side ordering aid, spec D4). `seq` must
+ * be an integer strictly greater than the last accepted seq on the connection;
+ * gaps are legal (clients may batch), repeats/regressions are not. Ordering
+ * ONLY — dedup keys on `commandId` and never on `seq`.
+ *
+ * @returns {{ok: true} | {ok: false, reason: "seq_invalid" | "seq_not_monotonic"}}
+ */
+export function checkSeq(lastSeq, seq) {
+	if (!Number.isInteger(seq) || seq < 1) return { ok: false, reason: "seq_invalid" };
+	if (seq <= lastSeq) return { ok: false, reason: "seq_not_monotonic" };
+	return { ok: true };
+}
+
+/**
  * Validate and append a journal record (pure: returns a new array). Throws on
  * malformed records — a malformed journal line is a runner bug, not input.
  */
@@ -326,9 +359,12 @@ export function journalAppendRecord(records, record) {
 
 /**
  * GC to the newest `keep` distinct commandIds, dropping WHOLE lifecycles.
- * Record-count GC could drop an `applied` while its `accepted` survives and
- * resurrect a phantom "accepted_unknown" after restart — group GC makes that
- * structurally impossible.
+ * Invariant: every `commandId` in the result keeps ALL of its records or none.
+ * Record-count GC cannot give this guarantee — duplicate accepted records may
+ * legitimately follow a command's applied record, so which records survive a
+ * trim would depend on append order, and a surviving `accepted` beside a
+dropped `applied` would resurrect a phantom "accepted_unknown" after restart.
+ * Group GC removes that dependence entirely.
  */
 export function journalGc(records, keep = JOURNAL_KEEP_DEFAULT) {
 	const lastIndexById = new Map();
