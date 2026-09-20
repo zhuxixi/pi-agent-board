@@ -330,13 +330,38 @@ export function dedupKey(msg) {
  * - `resultFor(commandId)` → cached `{cols, rows}` for same-commandId
  *   re-requests, or undefined.
  */
-export function createResizeTracker() {
+export const RESIZE_TRACKER_KEEP_DEFAULT = 256;
+
+/**
+ * Latest-wins resize tracking with a FIFO retention bound (CR R1 advisory:
+ * the runner is a long-lived process — unbounded knownIds/results grew the
+ * map forever, ~100B per resize). Mirrors the durable journal's keep pattern:
+ * when the insertion-order log exceeds the bound, the OLDEST commandIds are
+ * forgotten everywhere (knownIds, results, and any pendingByClient entry that
+ * still points at one — its supersede chain ends with the eviction, which is
+ * fine: a 256-resize-old pending command is unreachable by construction).
+ *
+ * @param {{keep?: number}} [opts]
+ */
+export function createResizeTracker({ keep = RESIZE_TRACKER_KEEP_DEFAULT } = {}) {
 	/** clientId → the single newest pending command (latest-wins). */
 	const pendingByClient = new Map();
-	/** every commandId ever tracked (duplicate detection across clients) */
+	/** every retained commandId (duplicate detection across clients) */
 	const knownIds = new Set();
 	/** commandId → applied dims */
 	const results = new Map();
+	/** insertion order for FIFO eviction */
+	const order = [];
+	const forgetOldest = () => {
+		while (order.length > keep) {
+			const oldest = order.shift();
+			knownIds.delete(oldest);
+			results.delete(oldest);
+			for (const [clientId, pending] of pendingByClient) {
+				if (pending.commandId === oldest) pendingByClient.delete(clientId);
+			}
+		}
+	};
 	return {
 		track({ commandId, clientId, cols, rows }) {
 			if (typeof commandId !== "string" || commandId.length === 0) {
@@ -344,10 +369,12 @@ export function createResizeTracker() {
 			}
 			if (knownIds.has(commandId)) return { superseded: [], duplicate: true };
 			knownIds.add(commandId);
+			order.push(commandId);
 			const superseded = [];
 			const prev = pendingByClient.get(clientId);
 			if (prev) superseded.push({ commandId: prev.commandId, byCommandId: commandId });
 			pendingByClient.set(clientId, { commandId, cols, rows });
+			forgetOldest();
 			return { superseded, duplicate: false };
 		},
 		applied(commandId, cols, rows) {
@@ -359,6 +386,9 @@ export function createResizeTracker() {
 		},
 		resultFor(commandId) {
 			return results.get(commandId);
+		},
+		size() {
+			return order.length;
 		},
 	};
 }

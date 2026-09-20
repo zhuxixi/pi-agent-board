@@ -1508,21 +1508,22 @@ function createControlRuntime({ viewId, root, instanceId, send, diag, actions })
 				const cols = clampInt(msg.cols, 20, 300, actions.hostCols());
 				const rows = clampInt(msg.rows, 5, 120, actions.hostRows());
 				const tracked = resizes.track({ commandId: msg.commandId, clientId: msg.clientId, cols, rows });
-				pendingResizeSockets.set(msg.commandId, socket);
 				for (const sup of tracked.superseded) {
 					const oldSocket = pendingResizeSockets.get(sup.commandId) ?? socket;
 					pendingResizeSockets.delete(sup.commandId);
 					reply(oldSocket, { type: "cmd_ack", commandId: sup.commandId, stage: "superseded", byCommandId: sup.byCommandId });
 				}
 				if (tracked.duplicate) {
-					// Same commandId re-request: return the cached result when the
-					// command already applied; a still-pending duplicate re-pointed
-					// pendingResizeSockets above, so the original flow's applied ack
-					// reaches this socket instead.
+					// Same commandId re-request: applyResize is synchronous, so a
+					// duplicate always finds the command already applied — return the
+					// cached result. (CR R1 advisory: the pendingResizeSockets entry is
+					// deliberately NOT set here — the original resolved synchronously,
+					// so a re-pointed entry would be a stale leak.)
 					const cached = resizes.resultFor(msg.commandId);
 					if (cached) reply(socket, { type: "cmd_ack", commandId: msg.commandId, stage: "applied", cols: cached.cols, rows: cached.rows });
 					return;
 				}
+				pendingResizeSockets.set(msg.commandId, socket);
 				actions.applyResize(cols, rows);
 				// The paired resize step keeps the model mirroring the REAL PTY
 				// (reflow only on successful child.resize), so the model's dims are
@@ -1534,6 +1535,15 @@ function createControlRuntime({ viewId, root, instanceId, send, diag, actions })
 				return;
 			}
 			case "interrupt": {
+				// Starting-window honesty (CR R1 blocking): applyInterrupt no-ops
+				// without a child, so an unconditional applied ack would be a lie —
+				// same contract as input/resize. The client consumes host_starting
+				// as a cmdAck error (no retry chain: interrupt is transient and
+				// user-timed; a re-send carries a fresh commandId).
+				if (!actions.childReady()) {
+					reply(socket, { type: "error", code: "host_starting", commandId: msg.commandId });
+					return;
+				}
 				actions.applyInterrupt();
 				reply(socket, { type: "cmd_ack", commandId: msg.commandId, stage: "applied" });
 				return;

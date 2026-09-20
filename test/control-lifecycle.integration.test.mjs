@@ -316,6 +316,59 @@ test("interrupt and detach emit applied acks; detach still ends the socket", asy
 	}
 });
 
+test("interrupt starting-window honesty + duplicate resize leaves no stale pending entry (CR R1)", async () => {
+	const root = freshRoot();
+	let runner;
+	let instanceId;
+	try {
+		// Deterministic starting window (issue #70 Task 8 seam): the runner
+		// listens, then waits SPAWN_DELAY before spawning the child — commands
+		// sent in that gap hit childReady() === false every time.
+		const spawned = spawnOwnedRunner(root, "v1", { env: { AGENT_BOARD_TEST_SPAWN_DELAY_MS: "1500" } });
+		runner = spawned.runner;
+		instanceId = spawned.instanceId;
+		const socket = await connectControl(P.hostEndpointPathFor(process.platform, root, "v1", instanceId));
+		const { messages } = listen(socket);
+		const env = makeClient("ctl-1", instanceId);
+
+		send(socket, env({ type: "interrupt", commandId: "int-early" }));
+		await waitFor(() => messages.find((m) => m.commandId === "int-early" && (m.type === "error" || m.type === "cmd_ack")));
+		await waitFor(() => hostReady(root, "v1"));
+		send(socket, env({ type: "interrupt", commandId: "int-ready" }));
+		await waitFor(() => messages.find((m) => m.type === "cmd_ack" && m.commandId === "int-ready" && m.stage === "applied"));
+
+		// Every early interrupt answered host_starting (never applied — ack must
+		// not overstate a no-op write to a nonexistent child).
+		const early = messages.filter((m) => (m.commandId === "int-early") && (m.type === "cmd_ack" || m.type === "error"));
+		assert.ok(early.length >= 1, "early interrupt answered");
+		for (const m of early) {
+			if (m.type === "cmd_ack") assert.fail(`early interrupt got ${m.stage} — false applied in the starting window`);
+			assert.equal(m.code, "host_starting");
+		}
+
+		// Duplicate resize: cached applied for the repeat, and a LATER resize
+		// from another client supersedes nothing stale (the duplicate left no
+		// pending entry behind).
+		send(socket, env({ type: "resize", cols: 100, rows: 30, commandId: "rs-1" }));
+		await waitFor(() => messages.find((m) => m.type === "cmd_ack" && m.commandId === "rs-1" && m.stage === "applied"));
+		send(socket, env({ type: "resize", cols: 100, rows: 30, commandId: "rs-1" }));
+		await waitFor(() => messages.filter((m) => m.type === "cmd_ack" && m.commandId === "rs-1" && m.stage === "applied").length >= 2);
+		// A fresh resize from ANOTHER client must produce exactly one superseded
+		// (for ITS OWN pending, none) — i.e. no spurious superseded acks refer to
+		// rs-1 (the duplicate must not have re-armed it as pending).
+		send(socket, env({ type: "resize", cols: 110, rows: 32, commandId: "rs-2" }));
+		await waitFor(() => messages.find((m) => m.type === "cmd_ack" && m.commandId === "rs-2" && m.stage === "applied"));
+		const stale = messages.find((m) => m.type === "cmd_ack" && m.stage === "superseded" && (m.commandId === "rs-1" || m.byCommandId === "rs-2"));
+		assert.equal(stale, undefined, "duplicate resize left no re-armed pending: no spurious superseded");
+
+		socket.destroy();
+	} finally {
+		await stopRunner(runner);
+		reapChild(root, "v1");
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
 test("instance fence: foreign instanceId rejected with currentInstanceId; legacy (no-envelope) commands stay byte-identical", async () => {
 	const root = freshRoot();
 	let runner;

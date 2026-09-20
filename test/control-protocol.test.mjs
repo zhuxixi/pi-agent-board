@@ -334,3 +334,28 @@ test("classifyCommandAck: terminate observed accepts the runner-finalizing evide
 	assert.equal(classifyCommandAck("terminate", { stage: "observed", commandId: "c", runnerFinalizing: true }).ok, true);
 	assert.equal(classifyCommandAck("terminate", { stage: "observed", commandId: "c", exitConfirmed: false }).reason, "observed_requires_exit_confirmation");
 });
+
+test("createResizeTracker: FIFO retention bound forgets the oldest everywhere (CR R1 advisory 1)", () => {
+	const t = createResizeTracker({ keep: 256 });
+	for (let i = 1; i <= 300; i++) {
+		t.track({ commandId: `r-${i}`, clientId: "c1", cols: 80, rows: 24 });
+		t.applied(`r-${i}`, 80, 24);
+	}
+	assert.equal(t.size(), 256, "retention bound holds");
+	assert.equal(t.resultFor("r-1"), undefined, "oldest result evicted");
+	assert.equal(t.resultFor("r-44"), undefined, "pre-boundary results evicted (300 - 256 = 44)");
+	assert.equal(t.resultFor("r-45").cols, 80, "boundary-surviving result retained");
+	assert.equal(t.resultFor("r-300").cols, 80, "newest result retained");
+	// a re-send of an EVICTED commandId is tracked fresh (not a duplicate) —
+	// pathological after 256 newer resizes, and safe (it re-applies honestly)
+	const again = t.track({ commandId: "r-1", clientId: "c1", cols: 100, rows: 30 });
+	assert.equal(again.duplicate, false);
+	// the supersede chain only sees retained pendings: evicting a clientId's
+	// pending via FIFO removal ends its chain without throwing
+	const t2 = createResizeTracker({ keep: 2 });
+	t2.track({ commandId: "p-1", clientId: "cx", cols: 80, rows: 24 }); // stays pending (never applied)
+	t2.track({ commandId: "p-2", clientId: "cy", cols: 80, rows: 24 });
+	t2.track({ commandId: "p-3", clientId: "cz", cols: 80, rows: 24 }); // evicts p-1 (pending)
+	const sup = t2.track({ commandId: "p-4", clientId: "cz", cols: 90, rows: 26 });
+	assert.deepEqual(sup.superseded, [{ commandId: "p-3", byCommandId: "p-4" }], "chain sees only retained pendings");
+});

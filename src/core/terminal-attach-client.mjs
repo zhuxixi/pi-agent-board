@@ -748,6 +748,10 @@ export function createTerminalAttachClient({
 	function close() {
 		cancelProbeTimer();
 		cancelReconcileTimer();
+		// CR R1 advisory: undeliverable correlation entries must not outlive the
+		// client — a new connection issues fresh commandIds, so a stale entry can
+		// never be consumed by a late ack.
+		pendingCommands.clear();
 		state = "closed";
 	}
 
@@ -765,6 +769,10 @@ export function createTerminalAttachClient({
 		if (generation) generationAtDisconnect = generation;
 		cancelProbeTimer();
 		cancelReconcileTimer();
+		// CR R1 advisory: pending correlation entries cannot be acked through a
+		// dead socket; a reconnect uses fresh commandIds. Clearing here means a
+		// half-open late ack is treated as uncorrelated — fine, the socket died.
+		pendingCommands.clear();
 	}
 
 	return {

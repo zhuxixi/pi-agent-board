@@ -750,3 +750,28 @@ test("CONTROL_ERROR_CODES enumeration is complete (ruling 2)", () => {
 		assert.ok(CONTROL_ERROR_CODES[code], `${code} documented`);
 	}
 });
+
+test("pendingCommands are cleared on disconnect and close (CR R1 advisory 2 — no cross-socket correlation leak)", () => {
+	const { client, events } = liveClient();
+	const resize = client.sendControl("resize", { cols: 100, rows: 30 });
+	assert.ok(resize?.commandId, "pending entry created");
+	client.onDisconnect();
+	// A late ack for the dead socket's commandId arrives UNCORRELATED: the
+	// pending entry is gone, so the surfaced cmdAck carries no type and no
+	// resize retry-cancel side effect can fire for a dead correlation.
+	client.handleMessage({ type: "cmd_ack", commandId: resize.commandId, stage: "applied" });
+	const late = eventsOf(events, "cmdAck").at(-1);
+	assert.equal(late.type, undefined, "late ack after disconnect is uncorrelated (pending cleared)");
+	// A FRESH commandId on the new connection works normally.
+	const next = client.sendControl("resize", { cols: 101, rows: 31 });
+	assert.ok(next?.commandId && next.commandId !== resize.commandId);
+	const errEvents = eventsOf(events, "cmdAck").length;
+	client.handleMessage(err("command_failed", { commandId: next.commandId }));
+	assert.equal(eventsOf(events, "cmdAck").length, errEvents + 1, "new connection correlation unaffected");
+	// close() clears too.
+	const { client: c2, events: ev2 } = liveClient();
+	const r2 = c2.sendControl("resize", { cols: 80, rows: 24 });
+	c2.close();
+	c2.handleMessage({ type: "cmd_ack", commandId: r2.commandId, stage: "applied" });
+	assert.equal(eventsOf(ev2, "cmdAck").length, 0, "close() clears pending entries (state closed — no surface at all)");
+});
