@@ -329,3 +329,8 @@ test("encodeCommand: payload keys colliding with envelope-owned fields throw (si
 	assert.doesNotThrow(() => encodeCommand("input", { data: "x" }, ENV));
 });
 
+
+test("classifyCommandAck: terminate observed accepts the runner-finalizing evidence form too", () => {
+	assert.equal(classifyCommandAck("terminate", { stage: "observed", commandId: "c", runnerFinalizing: true }).ok, true);
+	assert.equal(classifyCommandAck("terminate", { stage: "observed", commandId: "c", exitConfirmed: false }).reason, "observed_requires_exit_confirmation");
+});

@@ -193,9 +193,12 @@ export function classifyCommandAck(type, ack) {
 		}
 		case "observed": {
 			if (!sem.stages.observed) return { ok: false, reason: "observed_not_applicable" };
-			// Structured evidence only: terminate's observation is a confirmed
-			// child exit, never a timer or an assumption.
-			if (type === "terminate" && ack.exitConfirmed !== true) {
+			// Structured evidence only (spec D4), never a timer or an assumption.
+			// Terminate accepts TWO evidence forms: a confirmed child exit, or the
+			// runner's own lifecycle-state confirmation — an owned runner finalizes
+			// in lockstep with the child and structurally cannot send after the
+			// exit lands, so its finalizing state is the best deliverable evidence.
+			if (type === "terminate" && ack.exitConfirmed !== true && ack.runnerFinalizing !== true) {
 				return { ok: false, reason: "observed_requires_exit_confirmation" };
 			}
 			return { ok: true, stage: "observed", commandId };

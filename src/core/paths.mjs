@@ -37,6 +37,10 @@ export const metaPath = (root, viewId) => path.join(viewDir(root, viewId), "meta
 export const statePath = (root, viewId) => path.join(viewDir(root, viewId), "state.json");
 /** @param {string} root @param {string} viewId */
 export const hostPath = (root, viewId) => path.join(viewDir(root, viewId), "host.json");
+/** Durable control-command journal for a view's host (issue #91 phase 5, spec
+ *  D4): one JSONL line per durable-command lifecycle transition
+ *  (accepted/applied). Sibling of host.json in the view dir. */
+export const controlJournalPath = (root, viewId) => path.join(viewDir(root, viewId), "control-journal.jsonl");
 /** @param {string} root @param {string} viewId */
 export const hostConfigPath = (root, viewId) => path.join(viewDir(root, viewId), "host-config.json");
 /**
