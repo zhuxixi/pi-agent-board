@@ -1,0 +1,361 @@
+/**
+ * Pure decision layer for the control-command lifecycle (issue #91 Phase 5, spec D4).
+ *
+ * Single source of truth for the command envelope shape, per-type ack-stage
+ * legality, retry/dedup rules, the resize latest-wins tracker, and the durable
+ * command journal's record shapes/GC/unresolved derivation. The runner shell
+ * (runner/pty-runner.mjs) owns all side effects — sockets, files, child writes,
+ * process lifecycle — and calls into this module for every decision; the UI
+ * client and the service's durable follow-up path consume the same table so
+ * both ends agree on semantics by construction.
+ *
+ * No fs, no net, no timers, no Date.now(): every timestamp is an explicit
+ * argument, so decisions are deterministic and exhaustively unit-testable
+ * (same pattern as state-commands.mjs from Phase 2).
+ *
+ * ## Envelope
+ *
+ * Reliable commands (`input` durable follow-up, `terminate`, `reconcile`) and
+ * transient controls (`resize`, keystroke `input`, `interrupt`, `detach`) all
+ * carry `{commandId, clientId, seq, viewId, instanceId}`. `seq` is a
+ * connection-scoped ordering aid ONLY — dedup and retry decisions key on the
+ * stable `commandId`, never on `seq` (spec D4, binding). A message without a
+ * `commandId` marker is a legacy message: `validateCommandEnvelope` reports it
+ * as passthrough, never as an error, so pre-phase-5 UIs keep working verbatim.
+ *
+ * ## Ack stages
+ *
+ * - `accepted` — durable commands only: the command is recorded in the durable
+ *   command journal. Never emitted for transient controls.
+ * - `applied` — the underlying action ran; carries the ACTUAL applied value
+ *   (resize: real PTY cols/rows post-clamp).
+ * - `observed` — structured observation evidence only (terminate: child exit
+ *   confirmed). `resize` is NEVER observed (calling child.resize() does not
+ *   mean the child finished rendering); `input` is never observed either (no
+ *   stage may claim the child processed the bytes); `detach` has no observed
+ *   stage (socket write success is not a child state change).
+ * - `superseded` — resize latest-wins terminal state, carries `byCommandId`.
+ */
+
+/** Control command types governed by this lifecycle (spec D4 table). */
+export const CONTROL_COMMAND_TYPES = Object.freeze([
+	"input",
+	"resize",
+	"interrupt",
+	"terminate",
+	"detach",
+	"reconcile",
+]);
+
+/** Ack stages (spec D4). `superseded` is a terminal state, not a delivery stage. */
+export const ACK_STAGES = Object.freeze(["accepted", "applied", "observed", "superseded"]);
+
+/**
+ * Per-type delivery semantics — BINDING for runner (Task 2), UI client (Task 3)
+ * and service follow-up (Task 4). Stage legality is what classifyCommandAck
+ * enforces; `retry` names the rule retryPolicy implements.
+ */
+export const COMMAND_SEMANTICS = Object.freeze({
+	input: Object.freeze({
+		durable: "conditional", // requestId/commandId-tagged = durable follow-up; bare = keystroke
+		stages: Object.freeze({ accepted: true, applied: true, observed: false, superseded: false }),
+		appliedValue: null, // child.write ran; no stage may claim the child processed the bytes
+		retry: "conditional", // keystroke: never replays; durable: reconcile-query-first, then dedup-protected
+	}),
+	resize: Object.freeze({
+		durable: "no",
+		stages: Object.freeze({ accepted: false, applied: true, observed: false, superseded: true }),
+		appliedValue: "pty_dims", // real PTY cols/rows post-clamp; never a render claim
+		retry: "latest_wins", // same commandId → cached result; new size → new commandId
+	}),
+	interrupt: Object.freeze({
+		durable: "no",
+		stages: Object.freeze({ accepted: false, applied: true, observed: false, superseded: false }),
+		appliedValue: null,
+		retry: "transient", // never after disconnect; a lost ESC is not worth a replay risk
+	}),
+	terminate: Object.freeze({
+		durable: "no",
+		stages: Object.freeze({ accepted: false, applied: true, observed: true, superseded: false }),
+		appliedValue: "termination_started",
+		retry: "idempotent", // repeats return current lifecycle state
+	}),
+	detach: Object.freeze({
+		durable: "no",
+		stages: Object.freeze({ accepted: false, applied: true, observed: false, superseded: false }),
+		appliedValue: "detach_accepted",
+		retry: "idempotent",
+	}),
+	reconcile: Object.freeze({
+		durable: "no",
+		stages: Object.freeze({ accepted: false, applied: false, observed: false, superseded: false }),
+		appliedValue: null, // reconcile answers with reconcile_result, not cmd_ack stages
+		retry: "readonly", // idempotent baseline read; retrying it is safe
+	}),
+});
+
+/**
+ * Classify a message's envelope status. Messages WITHOUT a `commandId` marker
+ * are legacy passthrough (`enveloped: false`, no errors) — never an error, so
+ * pre-phase-5 clients are untouched. Messages WITH a `commandId` are validated
+ * against the full envelope; any gap is a client bug worth surfacing.
+ */
+export function validateCommandEnvelope(msg) {
+	if (!msg || typeof msg !== "object") return { enveloped: false, errors: ["msg_not_object"] };
+	if (typeof msg.commandId !== "string" || msg.commandId.length === 0) {
+		return { enveloped: false, errors: [] };
+	}
+	const errors = [];
+	if (!Number.isInteger(msg.seq) || msg.seq < 1) errors.push("seq_invalid");
+	if (typeof msg.clientId !== "string" || msg.clientId.length === 0) errors.push("clientid_missing");
+	if (typeof msg.viewId !== "string" || msg.viewId.length === 0) errors.push("viewid_missing");
+	if (typeof msg.instanceId !== "string" || msg.instanceId.length === 0) errors.push("instanceid_missing");
+	if (!CONTROL_COMMAND_TYPES.includes(msg.type)) errors.push("type_not_control");
+	return { enveloped: true, errors };
+}
+
+/**
+ * Build an enveloped control command. Throws on missing envelope fields or a
+ * non-control type: this is a programmer error at the call site, not runtime
+ * input handling.
+ */
+export function encodeCommand(type, payload, envelope) {
+	if (!CONTROL_COMMAND_TYPES.includes(type)) {
+		throw new TypeError(`encodeCommand: unknown control type ${JSON.stringify(type)}`);
+	}
+	for (const field of ["commandId", "clientId", "viewId", "instanceId"]) {
+		if (typeof envelope?.[field] !== "string" || envelope[field].length === 0) {
+			throw new TypeError(`encodeCommand: ${field} must be a non-empty string`);
+		}
+	}
+	if (!Number.isInteger(envelope?.seq) || envelope.seq < 1) {
+		throw new TypeError("encodeCommand: seq must be an integer >= 1");
+	}
+	return Object.freeze({
+		type,
+		commandId: envelope.commandId,
+		clientId: envelope.clientId,
+		seq: envelope.seq,
+		viewId: envelope.viewId,
+		instanceId: envelope.instanceId,
+		...(payload ?? {}),
+	});
+}
+
+/**
+ * Validate/classify an ack record against the command type's stage semantics.
+ * Returns `{ok: true, stage, ...}` or `{ok: false, reason}` — the runner emits
+ * only classified acks; the client classifies before trusting one.
+ */
+export function classifyCommandAck(type, ack) {
+	const sem = COMMAND_SEMANTICS[type];
+	if (!sem) return { ok: false, reason: "unknown_type" };
+	if (!ack || typeof ack !== "object") return { ok: false, reason: "ack_not_object" };
+	const commandId = typeof ack.commandId === "string" && ack.commandId ? ack.commandId : null;
+	switch (ack.stage) {
+		case "accepted": {
+			if (!sem.stages.accepted) return { ok: false, reason: "accepted_not_applicable" };
+			// `accepted` exists only for durable delivery: it means "recorded in
+			// the durable journal". A bare keystroke input must never produce it.
+			if (type === "input" && ack.durable !== true) {
+				return { ok: false, reason: "accepted_requires_durable" };
+			}
+			return { ok: true, stage: "accepted", commandId };
+		}
+		case "applied": {
+			if (!sem.stages.applied) return { ok: false, reason: "applied_not_applicable" };
+			if (sem.appliedValue === "pty_dims") {
+				if (!Number.isInteger(ack.cols) || !Number.isInteger(ack.rows)) {
+					return { ok: false, reason: "applied_requires_dims" };
+				}
+				return { ok: true, stage: "applied", commandId, value: { cols: ack.cols, rows: ack.rows } };
+			}
+			return { ok: true, stage: "applied", commandId };
+		}
+		case "observed": {
+			if (!sem.stages.observed) return { ok: false, reason: "observed_not_applicable" };
+			// Structured evidence only: terminate's observation is a confirmed
+			// child exit, never a timer or an assumption.
+			if (type === "terminate" && ack.exitConfirmed !== true) {
+				return { ok: false, reason: "observed_requires_exit_confirmation" };
+			}
+			return { ok: true, stage: "observed", commandId };
+		}
+		case "superseded": {
+			if (!sem.stages.superseded) return { ok: false, reason: "superseded_not_applicable" };
+			if (typeof ack.byCommandId !== "string" || ack.byCommandId.length === 0) {
+				return { ok: false, reason: "superseded_requires_by" };
+			}
+			if (ack.byCommandId === ack.commandId) return { ok: false, reason: "superseded_self" };
+			return { ok: true, stage: "superseded", commandId, byCommandId: ack.byCommandId };
+		}
+		default:
+			return { ok: false, reason: "unknown_stage" };
+	}
+}
+
+/**
+ * Retry/dedup decision per command type given the observed history.
+ *
+ * `history` fields: `{durable?, disconnected?, timedOut?, query?}` where
+ * `query` is a reconcile/query outcome for a durable command: `"applied"`
+ * (already applied — done), `"accepted_unknown"` (accepted but the applying
+ * runner died before `applied` — the spec §10 window; NEVER auto-replay),
+ * `"unknown"` (the runner never saw this commandId — retry is safe because
+ * commandId dedup protects against double delivery).
+ */
+export function retryPolicy(type, history = {}) {
+	switch (type) {
+		case "input": {
+			if (history.durable !== true) return { action: "never", reason: "keystroke_never_replays" };
+			if (history.query === "applied") return { action: "done", reason: "already_applied" };
+			if (history.query === "accepted_unknown") {
+				return { action: "ambiguous", reason: "accepted_write_window_lost" };
+			}
+			if (history.query === "unknown") return { action: "retry_same_command", reason: "dedup_protects" };
+			// Timeout or disconnect without a query result: the client cannot
+			// assume failure (spec D4) — reconcile first.
+			return { action: "query_then_decide", reason: "timeout_cannot_assume_failure" };
+		}
+		case "resize":
+			// The user asked for a size; a retry of the OLD command is pointless —
+			// send the current size as a NEW command (latest-wins supersedes).
+			return { action: "new_command", reason: "latest_wins" };
+		case "interrupt":
+			return { action: "never", reason: "transient_lost_interrupt_not_replayed" };
+		case "terminate":
+		case "detach":
+			return { action: "retry_same_command", reason: "idempotent" };
+		case "reconcile":
+			return { action: "retry_same_command", reason: "readonly_baseline_read" };
+		default:
+			return { action: "never", reason: "unknown_type" };
+	}
+}
+
+/**
+ * Dedup key for control commands: the stable `commandId`, nothing else.
+ * `seq` is connection-scoped ordering and must never participate (spec D4).
+ * Returns null for legacy (envelope-less) messages — they are not deduped.
+ */
+export function dedupKey(msg) {
+	return typeof msg?.commandId === "string" && msg.commandId.length > 0 ? msg.commandId : null;
+}
+
+/**
+ * Client-side resize latest-wins mirror. The runner is authoritative for
+ * supersession (receipt order on the socket); this tracker lets the UI know
+ * which of its own resizes are dead (superseded) and reuse results when the
+ * same commandId is re-requested.
+ *
+ * - `track({commandId, clientId, cols, rows})` → `{superseded: [{commandId,
+ *   byCommandId}], duplicate}` — a NEW size from a client supersedes that
+ *   client's still-unapplied pending resize; re-tracking the same commandId
+ *   (send retry) is a duplicate, superseding nothing.
+ * - `applied(commandId, cols, rows)` → cache the runner's actual applied dims.
+ * - `resultFor(commandId)` → cached `{cols, rows}` for same-commandId
+ *   re-requests, or undefined.
+ */
+export function createResizeTracker() {
+	/** clientId → the single newest pending command (latest-wins). */
+	const pendingByClient = new Map();
+	/** every commandId ever tracked (duplicate detection across clients) */
+	const knownIds = new Set();
+	/** commandId → applied dims */
+	const results = new Map();
+	return {
+		track({ commandId, clientId, cols, rows }) {
+			if (typeof commandId !== "string" || commandId.length === 0) {
+				throw new TypeError("resizeTracker.track: commandId required");
+			}
+			if (knownIds.has(commandId)) return { superseded: [], duplicate: true };
+			knownIds.add(commandId);
+			const superseded = [];
+			const prev = pendingByClient.get(clientId);
+			if (prev) superseded.push({ commandId: prev.commandId, byCommandId: commandId });
+			pendingByClient.set(clientId, { commandId, cols, rows });
+			return { superseded, duplicate: false };
+		},
+		applied(commandId, cols, rows) {
+			results.set(commandId, { cols, rows });
+			for (const [clientId, pending] of pendingByClient) {
+				if (pending.commandId === commandId) pendingByClient.delete(clientId);
+			}
+			return { ok: true };
+		},
+		resultFor(commandId) {
+			return results.get(commandId);
+		},
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Durable command journal (record shapes + GC + unresolved derivation)
+//
+// The runner appends one JSONL line per lifecycle transition of a durable
+// command: `{kind:"accepted", commandId, command, acceptedAt}` on accept and
+// `{kind:"applied", commandId, appliedAt}` once `child.write` ran. On restart
+// the journal is loaded and `journalUnresolved` derives the spec §10
+// "accepted_unknown" set — commands the PREVIOUS runner accepted but whose
+// applied outcome is unknown. These are NEVER auto-replayed (spec §10 binding
+// rule); the service decides per its own queue semantics via reconcile.
+// ---------------------------------------------------------------------------
+
+export const JOURNAL_KEEP_DEFAULT = 256;
+
+/**
+ * Validate and append a journal record (pure: returns a new array). Throws on
+ * malformed records — a malformed journal line is a runner bug, not input.
+ */
+export function journalAppendRecord(records, record) {
+	if (!record || typeof record !== "object") throw new TypeError("journal record must be an object");
+	if (record.kind !== "accepted" && record.kind !== "applied") {
+		throw new TypeError(`journal record kind must be "accepted"|"applied", got ${JSON.stringify(record.kind)}`);
+	}
+	if (typeof record.commandId !== "string" || record.commandId.length === 0) {
+		throw new TypeError("journal record requires a non-empty commandId");
+	}
+	if (record.kind === "accepted") {
+		if (typeof record.acceptedAt !== "number") throw new TypeError("accepted record requires numeric acceptedAt");
+		if (typeof record.command !== "string") throw new TypeError("accepted record requires a command string");
+	} else if (typeof record.appliedAt !== "number") {
+		throw new TypeError("applied record requires numeric appliedAt");
+	}
+	return [...records, record];
+}
+
+/**
+ * GC to the newest `keep` distinct commandIds, dropping WHOLE lifecycles.
+ * Record-count GC could drop an `applied` while its `accepted` survives and
+ * resurrect a phantom "accepted_unknown" after restart — group GC makes that
+ * structurally impossible.
+ */
+export function journalGc(records, keep = JOURNAL_KEEP_DEFAULT) {
+	const lastIndexById = new Map();
+	records.forEach((record, index) => lastIndexById.set(record.commandId, index));
+	const keepIds = new Set(
+		[...lastIndexById.entries()]
+			.sort((a, b) => b[1] - a[1])
+			.slice(0, keep)
+			.map(([id]) => id),
+	);
+	return records.filter((record) => keepIds.has(record.commandId));
+}
+
+/**
+ * Derive the unresolved set: commands with an `accepted` but no `applied`
+ * record, in accept order, deduped by commandId. This is exactly the
+ * "accepted_unknown" set reconcile reports after a runner restart.
+ */
+export function journalUnresolved(records) {
+	const applied = new Set(records.filter((r) => r.kind === "applied").map((r) => r.commandId));
+	const seen = new Set();
+	const out = [];
+	for (const record of records) {
+		if (record.kind !== "accepted") continue;
+		if (applied.has(record.commandId) || seen.has(record.commandId)) continue;
+		seen.add(record.commandId);
+		out.push({ commandId: record.commandId, command: record.command, acceptedAt: record.acceptedAt });
+	}
+	return out;
+}
