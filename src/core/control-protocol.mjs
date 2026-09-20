@@ -29,10 +29,15 @@
  *   command journal. Never emitted for transient controls.
  * - `applied` — the underlying action ran; carries the ACTUAL applied value
  *   (resize: real PTY cols/rows post-clamp).
- * - `observed` — structured observation evidence only (terminate: child exit
- *   confirmed). `resize` is NEVER observed (calling child.resize() does not
- *   mean the child finished rendering); `input` is never observed either (no
- *   stage may claim the child processed the bytes); `detach` has no observed
+ * - `observed` — structured observation evidence only. For terminate on the
+ *   owned main the evidence is `runnerFinalizing: true` (the finishHost ladder
+ *   destroys client sockets before the child exits, so a post-exit
+ *   `exitConfirmed` ack would be undeliverable there); the legacy main sends
+ *   `exitConfirmed` after the child exit is confirmed. Either field is
+ *   terminal evidence for terminate. `resize` is NEVER observed (calling
+ *   child.resize() does not mean the child finished rendering); `input` is
+ *   never observed either (no stage may claim the child processed the bytes);
+ *   `detach` has no observed
  *   stage (socket write success is not a child state change).
  * - `superseded` — resize latest-wins terminal state, carries `byCommandId`.
  */

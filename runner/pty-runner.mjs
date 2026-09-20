@@ -1394,14 +1394,6 @@ function createControlRuntime({ viewId, root, instanceId, send, diag, actions })
 		pendingTerminates.clear();
 	};
 
-	const completeHeldResize = (commandId) => {
-		const dims = actions.currentDims();
-		resizes.applied(commandId, dims.cols, dims.rows);
-		const sock = pendingResizeSockets.get(commandId);
-		pendingResizeSockets.delete(commandId);
-		if (sock) reply(sock, { type: "cmd_ack", commandId, stage: "applied", cols: dims.cols, rows: dims.rows });
-	};
-
 	/**
 	 * Dispatch an enveloped control command. Caller guarantees
 	 * `env.enveloped && CONTROL_COMMAND_TYPES.includes(msg.type)`.
@@ -1585,7 +1577,10 @@ function createControlRuntime({ viewId, root, instanceId, send, diag, actions })
 		for (const [commandId, sock] of pendingTerminates) if (sock === socket) pendingTerminates.delete(commandId);
 	};
 
-	return { handle, closeSocket, flushTerminateObservations, completeHeldResize, journalIds };
+	// (completeHeldResize was removed as dead code: the starting-window resize
+	// path rejects with host_starting instead of holding, and applyResize is
+	// synchronous — there is no held-resize completion path. Task 2 review P2-C.)
+	return { handle, closeSocket, flushTerminateObservations, journalIds };
 }
 
 /** POSIX process start token — /proc/<pid>/stat field 22 (starttime), stable

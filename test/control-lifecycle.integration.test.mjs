@@ -262,11 +262,15 @@ test("terminate: applied (started) then observed (runner-finalizing evidence); i
 		const env = makeClient("ctl-1", instanceId);
 
 // node-pty fires onExit synchronously inside kill, so finalization (including
-// socket teardown) completes within the first terminate's handler — a repeat
-// arriving in the same batch is answered by the already-delivered terminal
-// evidence (observed + exit broadcast), not a second fresh applied ack. The
-// idempotency contract under test: NO error, NO fresh-start side effects, and
-// exactly one terminal observed stage per commandId.
+// socket teardown) completes within the first terminate's handler. A repeat
+// arriving in the same batch re-enters the fresh-start branch but its applied
+// ack is undeliverable (socket already destroyed) — the client's answer for
+// the repeat is the already-delivered terminal evidence (observed + exit).
+// The idempotency contract under test: NO error, NO observable second
+// fresh-start side effects, and exactly one terminal observed stage per
+// commandId. (On the legacy main, whose host keeps serving, a post-exit
+// repeat would return a stale termination_started — a known imprecision,
+// ledgered; nothing double-applies.)
 		send(socket, env({ type: "terminate", commandId: "term-1" }));
 		send(socket, env({ type: "terminate", commandId: "term-1" }));
 		await waitFor(() => messages.some((m) => m.type === "cmd_ack" && m.commandId === "term-1" && m.stage === "observed"));
