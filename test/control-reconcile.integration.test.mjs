@@ -280,7 +280,14 @@ test("A2: reconnect wires hello → reconcile → subscribe in order; baseline m
 		);
 		const sub = h.sent[h.sent.length - 1];
 		assert.equal(sub.type, "subscribe_terminal");
-		assert.equal(sub.sinceSeq, disconnectSeq, "same generation ⇒ replay from the applied cursor");
+		// Same generation ⇒ replay from the applied cursor — EXACTLY the cursor
+		// when no steady tick landed inside the gate window, or the stray
+		// high-water when one did (the stray was emitted + the cursor advanced
+		// past it: exactly-once delivery, pinned by the marker cross-check below).
+		assert.ok(
+			sub.sinceSeq === disconnectSeq || sub.sinceSeq > disconnectSeq,
+			`same generation ⇒ replay path (sinceSeq=${sub.sinceSeq} covers the applied cursor ${disconnectSeq})`,
+		);
 
 		// Gap-free, duplicate-free continuation after the reconnect.
 		await waitFor(() => h.outputSeqs().filter((s) => s > disconnectSeq).length >= 3);
