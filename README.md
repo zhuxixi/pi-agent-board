@@ -93,7 +93,7 @@ From the board:
 - In Peek, press `r` to reply without attaching.
 - Press `v` for a read-only transcript, or `e` for evidence and diagnostics.
 - Press `Enter`, `Right`, or `>` to attach to the real Pi session.
-- In PTY attach mode, press `Left` on an empty child input line to return to the board, or `Ctrl+Left` at any time (even mid-draft). `Ctrl+]` is not a detach key — it is passed through to the child Pi editor. When the host is disconnected, `Left` always exits.
+- In PTY attach mode, press `Ctrl+Left` to return to the board at any time (even mid-draft). `Left` detaches only while the child Pi reports an empty editor; otherwise (draft, or unknown editor state) it is forwarded to the child. `Ctrl+]` is not a detach key — it is passed through to the child Pi editor. When the host is disconnected, `Left` always exits.
 
 ## Dashboard Workflow
 
@@ -192,7 +192,7 @@ The `e` view shows durable session evidence, including changed files, commands a
 
 ### PTY attach
 
-PTY attach opens the real interactive Pi session. On an empty child input line, use `Left` to detach and return to the board; while you are editing text, `Left` is forwarded to the Pi editor, `Ctrl+Left` detaches regardless of editor state, and a disconnected host can always be exited with `Left`. `Ctrl+]` is not a detach key — it is passed through to the child Pi editor. While attached, `PageUp`, `PageDown`, `Home`, `End`, and the mouse wheel scroll local scrollback. Mouse drag or double-click selects and copies text, clicks open detected links, and middle-click paste is available on systems with the required X11 tooling.
+PTY attach opens the real interactive Pi session. `Ctrl+Left` detaches and returns to the board regardless of editor state. `Left` detaches only while the child Pi reports an empty editor; while you are editing text — or when the child's editor state is unknown (e.g. the child extension is missing) — `Left` is forwarded to the Pi editor. A disconnected host can always be exited with `Left`. `Ctrl+]` is not a detach key — it is passed through to the child Pi editor. While attached, `PageUp`, `PageDown`, `Home`, `End`, and the mouse wheel scroll local scrollback. Mouse drag or double-click selects and copies text, clicks open detected links, and middle-click paste is available on systems with the required X11 tooling.
 
 The attach surface can forward terminal clipboard and image/file passthrough sequences. These behaviors can be disabled individually in [Configuration](#configuration). Cold hosts may briefly show a loading/reconnect surface while their PTY becomes ready.
 
@@ -315,6 +315,8 @@ Set these variables before starting Pi. Model-backed features fall back graceful
 | `AGENT_BOARD_FORWARD_IMAGES` | enabled; `0` disables | Disable terminal image/file passthrough forwarding from an attached session. |
 | `AGENT_BOARD_IME_FIX` | enabled; `0` disables | Disable the attach-view IME cursor coalescer if your terminal has compatibility problems. |
 | `AGENT_BOARD_TERMINAL_SNAPSHOT` | enabled; `0` forces legacy | Force the pre-phase-4 attach path (screen.log replay + jiggle); escape hatch / rollback switch for the snapshot+subscribe attach protocol. |
+
+`AGENT_BOARD_TERMINAL_SNAPSHOT=0` routes attach onto the legacy fallback family: the screen.log replay tail plus the shrink-and-hold jiggle redraw. These paths exist only for pre-protocol runners and as a rollback hatch — they are not part of the snapshot+subscribe protocol path (issue #91 phase 4). They will be retired once the installed runner fleet is on the snapshot protocol baseline (detectable on the wire via hello protocol fields).
 
 Older `AGENT_VIEW_*` names are still read in selected compatibility paths. Prefer `AGENT_BOARD_*` for new setups. Internal child markers are managed by Agent Board and are not user settings.
 

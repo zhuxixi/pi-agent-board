@@ -31,13 +31,20 @@ export function evaluateAttachReconnect({ everConnected, disconnectedAt, connect
 }
 
 /**
- * Detach-key policy: while the socket is down a key can never reach the child,
- * so treat ← / ctrl+] as "leave the view" unconditionally; otherwise keep the
- * existing empty-input-line gate (issue #48 comment 1).
+ * Detach-key policy (issue #91 Phase 6, spec §D1): while the socket is down a
+ * key can never reach the child, so treat ← as "leave the view"
+ * unconditionally; otherwise detach only when the pushed editorEmpty side
+ * channel is exactly true. false and null/undefined mean "forward" — the
+ * explicit conservative policy; callers pass `editorEmpty === true` so an
+ * unknown state can never arm the detach, and no terminal-buffer heuristic is
+ * consulted (the deleted terminal-buffer heuristic family — issues
+ * #42/#66/#69/#103 — stays deleted).
  * @param {boolean} connected
- * @param {boolean} childInputLooksEmpty
+ * @param {boolean | null | undefined} editorEmpty
  * @returns {boolean}
  */
-export function shouldEscapeAttach(connected, childInputLooksEmpty) {
-	return !connected || childInputLooksEmpty;
+export function shouldEscapeAttach(connected, editorEmpty) {
+	// Normalize to a strict boolean: a null/undefined editorEmpty (unknown)
+	// forwards — never escapes — and must not leak through the return value.
+	return !connected || editorEmpty === true;
 }

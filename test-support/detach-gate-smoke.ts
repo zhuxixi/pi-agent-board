@@ -1,15 +1,18 @@
-// Detach-gate regression harness (issues #42/#48/#66): construct
-// PtyAttachComponent with a fake TUI, feed it Pi-like buffer states (fake
-// cursor, garbled replay, streaming working line), then verify:
+// Detach-gate regression harness (issues #42/#48/#66/#89, then issue #91
+// Phase 6 / spec §D1): construct PtyAttachComponent with a fake TUI, feed it
+// Pi-like buffer states, then verify the ← gate reads ONLY the pushed
+// editorEmpty side channel:
 //   A. ctrl+] passes through as Pi's native editor shortcut.
-//   B. ← stays gated: NOT detached while the editor line carries a draft.
-//   B1. ← escapes on a garbled buffer with no recoverable editor line.
+//   B.* Without a pushed editor_state (null), ← ALWAYS forwards — every
+//       heuristic-era buffer shape (draft, empty, garbled, glyph, chat
+//       inverse content) pins the same conservative policy; buffer content
+//       must be irrelevant to the gate.
 //   B2. ← escapes unconditionally while disconnected (issue #48).
-//   B3. ← detaches when the editor line is empty but the cursor is elsewhere.
-//   C. ← still detaches on a genuinely empty prompt line.
+//   C. ← escapes when the socket never connected.
 //   D. ← detach restores the held PTY size before a graceful socket end.
-//   E. ← detaches on an empty editor line that renders no fake cursor.
-//   F. ← detaches via the glyph fallback when a glyph line renders without a fake cursor.
+//   H/I/J. The pushed editor_state is authoritative; hello null resets a
+//       stale cache to the conservative forward policy.
+//   L/M/N. Ctrl+← detaches unconditionally (issue #89).
 // Run via `node --experimental-transform-types` (TS parameter properties).
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
@@ -77,9 +80,10 @@ const out: Record<string, boolean> = {};
 	attach.dispose();
 }
 
-// B. ← must NOT detach while attached with a draft in the editor line (child
-// is mid-draft and ← is also the editor's cursor-left key). The draft line
-// carries Pi's inverse-video fake cursor (ESC[7m).
+// B. Without a pushed editor_state the gate must forward ← regardless of the
+// buffer: null means "unknown", and the conservative policy forwards. This
+// shape (a draft-looking line with Pi's inverse fake cursor) used to be read
+// by the tier-1 heuristic; that heuristic is deleted (issue #91 Phase 6).
 {
 	const { attach, sent, didDetach } = makeAttach();
 	await writeToTerm(attach, "chat content\r\n> \x1b[7m草\x1b[27m稿");
@@ -89,31 +93,30 @@ const out: Record<string, boolean> = {};
 	attach.dispose();
 }
 
-// B1. The garbled replay buffer (`────── ◊◊ ──────`) carries no inverse fake
-// cursor and no prompt glyph, so no editor line is recoverable — the escape
-// fallback treats the input as empty and ← must detach rather than trap the
-// user. The socket is pinned connected=true explicitly: when it is down,
-// issue #48 makes ← escape unconditionally instead (see B2).
+// B1. Without a pushed editor_state, even a garbled replay buffer forwards ←
+// — the heuristic-era "no editor line recoverable, treat as empty" escape is
+// gone (issue #91 Phase 6). The escape guarantee is Ctrl+← / a down socket,
+// never a buffer guess. The socket is pinned connected=true explicitly: when
+// it is down, issue #48 makes ← escape unconditionally instead (see B2).
 {
 	const { attach, sent, didDetach } = makeAttach();
 	await poisonCursorLine(attach);
 	(attach as unknown as { connected: boolean }).connected = true;
 	attach.handleInput("\x1b[D");
-	out.leftEscapesOnGarbledBuffer = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	out.leftForwardsOnGarbledBufferWithoutEditorState = !didDetach() && sent.length === 1 && sent[0].type === "input" && sent[0].data === "\x1b[D";
 	attach.dispose();
 }
 
-// B3. The streaming case from issue #66: the editor line is empty (bottom of
-// the buffer, with its fake cursor) but the terminal cursor rests on the
-// working line because Pi's differential frames only repaint the changed
-// line. The gate must be judged from the fake-cursor line, not the cursor.
+// B3. The streaming shape from issue #66 (empty editor line at the bottom,
+// terminal cursor parked on a working line) also forwards without a pushed
+// editor_state — buffer shape is irrelevant to the gate (issue #91 Phase 6).
 {
 	const { attach, sent, didDetach } = makeAttach();
 	await writeToTerm(attach, "chat content\r\n> \x1b[7m \x1b[27m");
 	await writeToTerm(attach, "\x1b[3;1H⠙ Working...");
 	(attach as unknown as { connected: boolean }).connected = true;
 	attach.handleInput("\x1b[D");
-	out.leftDetachesWhenCursorOffEmptyInputLine = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	out.leftForwardsOnEmptyEditorLineWithoutEditorState = !didDetach() && sent.length === 1 && sent[0].type === "input" && sent[0].data === "\x1b[D";
 	attach.dispose();
 }
 
@@ -129,17 +132,20 @@ const out: Record<string, boolean> = {};
 	attach.dispose();
 }
 
-// C. ← still detaches on an empty prompt line (no output received yet).
+// C. ← escapes when the socket never connected (issue #48): the key could
+// never reach the child, so the view must stay exitable.
 {
 	const { attach, didDetach } = makeAttach();
 	attach.handleInput("\x1b[D");
-	out.leftDetachesOnEmptyInput = didDetach();
+	out.leftEscapesWhenSocketNeverConnected = didDetach();
 	attach.dispose();
 }
 
 // D. When detach happens while the jiggle hold is active, restore the original
 // PTY size before ending the control socket (G3). The runner closes the socket
 // after detach, so the client must use a graceful end rather than destroy.
+// editor_state empty:true is pushed so ← actually detaches (issue #91 Phase 6:
+// only the side channel can arm the detach).
 {
 	const attach = new PtyAttachComponent(
 		tui as never,
@@ -165,6 +171,7 @@ const out: Record<string, boolean> = {};
 	internals.connected = true;
 	internals.receivedOutput = false;
 	internals.jiggleRetry.start(80, 22);
+	(attach as unknown as { onSocketData: (t: string) => void }).onSocketData(JSON.stringify({ type: "editor_state", empty: true }) + "\n");
 	wire.length = 0;
 	attach.handleInput("\x1b[D");
 	const packets = wire.filter((entry) => entry !== "END" && entry !== "DESTROY").map((entry) => JSON.parse(entry));
@@ -172,62 +179,61 @@ const out: Record<string, boolean> = {};
 	attach.dispose();
 }
 
-// E. Empty input line rendered WITHOUT a fake cursor: no inverse cell and no
-// glyph anywhere, and the terminal cursor sits on a non-empty output line.
-// Falls through to the escape fallback — treat as empty, detach.
+// E. Empty-looking buffer (no fake cursor, no glyph) without a pushed
+// editor_state: forward — only editorEmpty === true detaches (issue #91
+// Phase 6; the old escape fallback is deleted).
 {
 	const { attach, sent, didDetach } = makeAttach();
 	await writeToTerm(attach, "chat content\r\n");
 	await writeToTerm(attach, "\x1b[1;1H"); // park the cursor on the non-empty line
 	(attach as unknown as { connected: boolean }).connected = true;
 	attach.handleInput("\x1b[D");
-	out.leftDetachesOnEmptyInputWithoutFakeCursor = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	out.leftForwardsWithoutEditorStateEvenOnEmptyLookingBuffer = !didDetach() && sent.length === 1 && sent[0].type === "input" && sent[0].data === "\x1b[D";
 	attach.dispose();
 }
 
-// F. Prompt-glyph line rendered WITHOUT an inverse fake cursor (a Pi variant
-// that skips the fake cursor): tier-2 glyph fallback must find the editor
-// line and detach on the empty `> ` prompt.
+// F. Prompt-glyph line rendered WITHOUT a fake cursor, no pushed
+// editor_state: forward — the tier-2 glyph fallback is deleted (issue #69 is
+// dissolved by D1: there is no heuristic left to misfire).
 {
 	const { attach, sent, didDetach } = makeAttach();
 	await writeToTerm(attach, "chat content\r\n> ");
 	await writeToTerm(attach, "\x1b[1;1H"); // park the cursor on the non-empty line
 	(attach as unknown as { connected: boolean }).connected = true;
 	attach.handleInput("\x1b[D");
-	out.leftDetachesOnGlyphLineWithoutFakeCursor = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	out.leftForwardsOnGlyphLineWithoutEditorState = !didDetach() && sent.length === 1 && sent[0].type === "input" && sent[0].data === "\x1b[D";
 	attach.dispose();
 }
 
-// H. The pushed editor state is authoritative over the render heuristic: the
-// buffer holds a draft-looking line (heuristic would forward ←) but the
-// child reports empty → ← detach.
+// H. The pushed editor state is the ONLY detach signal: the buffer holds a
+// draft-looking line, but the child reports empty → ← detaches.
 {
 	const { attach, sent, didDetach } = makeAttach();
 	await writeToTerm(attach, "chat content\r\n> \x1b[7m草\x1b[27m稿");
 	(attach as unknown as { onSocketData: (t: string) => void }).onSocketData(JSON.stringify({ type: "editor_state", empty: true }) + "\n");
 	(attach as unknown as { connected: boolean }).connected = true;
 	attach.handleInput("\x1b[D");
-	out.leftEditorStateOverridesHeuristicEmpty = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	out.leftDetachesWhenEditorStateReportsEmpty = didDetach() && sent.length === 1 && sent[0].type === "detach";
 	attach.dispose();
 }
 
-// I. The pushed editor state is authoritative the other way: the heuristic
-// would say "empty" (nothing in the buffer), but the child reports a draft →
-// ← is forwarded (editor protection), NOT detach.
+// I. The pushed editor state is authoritative the other way: the buffer
+// looks empty, but the child reports a draft → ← is forwarded (editor
+// protection), NOT detach.
 {
 	const { attach, sent, didDetach } = makeAttach();
 	await writeToTerm(attach, "chat content\r\n");
 	(attach as unknown as { onSocketData: (t: string) => void }).onSocketData(JSON.stringify({ type: "editor_state", empty: false }) + "\n");
 	(attach as unknown as { connected: boolean }).connected = true;
 	attach.handleInput("\x1b[D");
-	out.leftEditorStateBlocksDetachOnDraft = !didDetach() && sent.length === 1 && sent[0].type === "input" && sent[0].data === "\x1b[D";
+	out.leftForwardsWhenEditorStateReportsDraft = !didDetach() && sent.length === 1 && sent[0].type === "input" && sent[0].data === "\x1b[D";
 	attach.dispose();
 }
 
 // J. A hello carrying null editorEmpty (fresh runner after a crash) resets a
-// stale cached draft state — the gate falls back to the heuristic instead of
-// mis-detaching. The heuristic sees a draft (fake cursor on a glyph line) →
-// ← forwarded.
+// stale cached draft state — the gate lands on the conservative forward
+// policy (no heuristic fallback; issue #91 Phase 6). The buffer holds a
+// draft-looking line → ← forwarded either way.
 {
 	const { attach, sent, didDetach } = makeAttach();
 	await writeToTerm(attach, "chat content\r\n> \x1b[7m草\x1b[27m稿");
@@ -239,73 +245,67 @@ const out: Record<string, boolean> = {};
 	attach.dispose();
 }
 
-// K1. Issue #69 real-world shape: zero inverse cells anywhere in the buffer,
-// the chat area carries a markdown table row (`│ … │`) and a quote line
-// (`> …`) that isProbablyPiInputLine misreads as a draft-bearing input line,
-// and editor_state never arrives (editorEmpty stays null — child without the
-// reporter). tier-2 must skip content glyph lines and ← must detach: the
-// gate philosophy is "never trap the user" (issues #42/#48).
+// K1. Issue #69's real-world shape (zero inverse cells, markdown table row
+// and quote glyph lines, no pushed editor_state): forwards — the tier-2
+// fallback that #69 tightened is deleted, so the issue is dissolved rather
+// than re-tuned (issue #91 Phase 6).
 {
 	const { attach, sent, didDetach } = makeAttach();
 	await writeToTerm(attach, "chat content\r\n│ Issue #778 │ open │\r\n> quote line\r\n");
 	(attach as unknown as { connected: boolean }).connected = true;
 	attach.handleInput("\x1b[D");
-	out.leftDetachesOnTableRowsWithoutFakeCursor = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	out.leftForwardsOnTableRowsWithoutEditorState = !didDetach() && sent.length === 1 && sent[0].type === "input" && sent[0].data === "\x1b[D";
 	attach.dispose();
 }
 
-// K2. The deliberate flip side of K1 — pair with scenario B: the SAME draft
-// shape (`> draft`) is gated when the fake cursor is present (tier-1, scenario
-// B) but detaches when the buffer carries no inverse cells (tier-2 fallback
-// cannot tell a real draft from a table row; a spurious detach beats a trapped
-// user, and detach never loses the draft — the child session keeps running).
-// This pins the intentional loss of fallback draft protection (issue #69);
-// restoring it needs the mid-term dock-structure anchor, not a revert.
+// K2. The flip side of K1 — the SAME draft shape (`> draft`) forwards without
+// a pushed editor_state, exactly like every other buffer shape: only
+// editorEmpty === true detaches. The heuristic-era asymmetry (gated with a
+// fake cursor, detached without one) is gone (issue #91 Phase 6).
 {
 	const { attach, sent, didDetach } = makeAttach();
 	await writeToTerm(attach, "chat content\r\n> draft\r\n");
 	(attach as unknown as { connected: boolean }).connected = true;
 	attach.handleInput("\x1b[D");
-	out.leftDetachesOnContentGlyphFallback = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	out.leftForwardsOnContentGlyphWithoutEditorState = !didDetach() && sent.length === 1 && sent[0].type === "input" && sent[0].data === "\x1b[D";
 	attach.dispose();
 }
 
-// O1. Issue #103: a chat-area diff hunk paints its changed fragments with
-// inverse video (renderDiff) and there is no fake-cursor line in the buffer.
-// The old tier-1 anchor grabbed that hunk and read "draft", so ← was forwarded
-// and the user was trapped. Chat content must never veto detach.
+// O1. Issue #103's diff hunk (chat-area inverse content) without a pushed
+// editor_state: forwards — chat content is render-only now, never a gate
+// input (issue #91 Phase 6 dissolves #103's anchor-hijack class).
 {
 	const { attach, sent, didDetach } = makeAttach();
 	const DIFF_LINE = "\x1b[48;2;230;233;239m \x1b[38;2;64;160;43m+ 65 ## \x1b[7mR2 · \x1b[27m#\x1b[7m822 新 step 挂链顺序调研\x1b[27m";
 	await writeToTerm(attach, "chat\r\n" + DIFF_LINE + "\r\n  ");
 	(attach as unknown as { connected: boolean }).connected = true;
 	attach.handleInput("\x1b[D");
-	out.leftDetachesWithDiffHighlightInChat = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	out.leftForwardsWithDiffHighlightWithoutEditorState = !didDetach() && sent.length === 1 && sent[0].type === "input" && sent[0].data === "\x1b[D";
 	attach.dispose();
 }
 
-// O2. Issue #103: the notification banner renders the whole entry inverse
-// (`\x1b[7m … \x1b[27m`) — same hijack, same requirement.
+// O2. The notification banner renders the whole entry inverse — same shape,
+// same conservative forward without a pushed editor_state.
 {
 	const { attach, sent, didDetach } = makeAttach();
 	await writeToTerm(attach, "chat\r\n\x1b[7m Session saved \x1b[27m\r\n  ");
 	(attach as unknown as { connected: boolean }).connected = true;
 	attach.handleInput("\x1b[D");
-	out.leftDetachesWithInverseBannerInChat = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	out.leftForwardsWithInverseBannerWithoutEditorState = !didDetach() && sent.length === 1 && sent[0].type === "input" && sent[0].data === "\x1b[D";
 	attach.dispose();
 }
 
-// O3. The R1 trade-off, pinned on purpose (spec §2.1; same spirit as K2): a
-// new-style draft line (text + one inverse fake cursor, no prompt glyph) with
-// no pushed editor_state is NOT trusted by the anchor rule, so ← escapes
-// instead of being forwarded. Detach keeps the child session running, so the
-// draft is not lost — a spurious detach beats a trapped user (#42/#48).
+// O3. The #103 R1 trade-off is superseded (spec §D1): a new-style draft line
+// (text + one inverse fake cursor, no prompt glyph) with no pushed
+// editor_state now FORWARDS — without the side channel the gate never
+// detaches, which restores draft protection instead of trading it away
+// (issue #91 Phase 6). Escape remains Ctrl+←.
 {
 	const { attach, sent, didDetach } = makeAttach();
 	await writeToTerm(attach, "chat content\r\n\x1b[7m草\x1b[27m稿");
 	(attach as unknown as { connected: boolean }).connected = true;
 	attach.handleInput("\x1b[D");
-	out.leftDetachesOnNewStyleDraftWithoutReporter = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	out.leftForwardsOnNewStyleDraftWithoutReporter = !didDetach() && sent.length === 1 && sent[0].type === "input" && sent[0].data === "\x1b[D";
 	attach.dispose();
 }
 
