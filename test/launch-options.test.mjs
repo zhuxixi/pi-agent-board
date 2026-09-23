@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import os, { tmpdir } from "node:os";
+import path, { join } from "node:path";
 import test from "node:test";
-import { existingCwdCandidates, filterCwdCandidates, listDirectorySuggestions, modelRefAvailable, nextCwdPickerState } from "../src/core/launch-options.mjs";
+import { browseTabCompletion, existingCwdCandidates, filterCwdCandidates, listDirectorySuggestions, modelRefAvailable, nextCwdPickerState, sameResolvedDir } from "../src/core/launch-options.mjs";
 
 const ranked = [
 	{ path: "/home/elling", count: 107 },
@@ -89,3 +89,43 @@ test("modelRefAvailable matches case-insensitive exact provider/id and conservat
 	assert.equal(modelRefAvailable("glm/glm-5.3", undefined), true, "no list = cannot judge, allow");
 	assert.equal(modelRefAvailable("glm/glm-5.3", []), true, "empty list = cannot judge, allow");
 });
+
+// ---- issue #127: cwd picker browse-mode Tab completion helpers ----
+
+test("sameResolvedDir: matches across trailing separator and ~; blank never matches", () => {
+	const home = os.homedir();
+	assert.equal(sameResolvedDir("~/work", `${home}/work/`), true);
+	assert.equal(sameResolvedDir("/a/b", "/a/c"), false);
+	assert.equal(sameResolvedDir("", "/a"), false);
+	assert.equal(sameResolvedDir("   ", "/a"), false);
+});
+
+test("browseTabCompletion: completes highlighted suggestion with trailing separator", () => {
+	const res = browseTabCompletion("/tmp/x/wo", ["/tmp/x/work"], 0);
+	assert.deepEqual(res, { query: `/tmp/x/work${path.sep}`, completed: "/tmp/x/work", usedIndex: 0 });
+});
+
+test("browseTabCompletion: no-progress highlight advances cyclically", () => {
+	const s = ["/tmp/x/work", "/tmp/x/work/app", "/tmp/x/work/notes"];
+	const res = browseTabCompletion(`/tmp/x/work${path.sep}`, s, 0);
+	assert.equal(res.usedIndex, 1);
+	assert.equal(res.query, `/tmp/x/work/app${path.sep}`);
+	// wraps from the last entry back to the first
+	const res2 = browseTabCompletion("/tmp/x/work/notes", ["/tmp/x/work", "/tmp/x/work/notes"], 1);
+	assert.equal(res2.usedIndex, 0);
+	assert.equal(res2.query, `/tmp/x/work${path.sep}`);
+});
+
+test("browseTabCompletion: single self suggestion stays put (drill naturally stops)", () => {
+	const res = browseTabCompletion(`/tmp/x/work${path.sep}`, ["/tmp/x/work"], 0);
+	assert.equal(res.query, `/tmp/x/work${path.sep}`);
+	assert.equal(res.usedIndex, 0);
+});
+
+test("browseTabCompletion: empty suggestions -> null; out-of-range index clamps", () => {
+	assert.equal(browseTabCompletion("x", [], 0), null);
+	assert.equal(browseTabCompletion("x", null, 0), null);
+	const res = browseTabCompletion("x", ["/a"], 7);
+	assert.equal(res.usedIndex, 0);
+});
+

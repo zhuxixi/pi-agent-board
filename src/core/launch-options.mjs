@@ -362,6 +362,43 @@ export function filterCwdCandidates(candidates, query) {
 }
 
 /**
+ * Whether two path strings resolve to the same directory. Blank inputs never
+ * match (path.resolve("") would silently equal process.cwd()).
+ * @param {string} a
+ * @param {string} b
+ * @returns {boolean}
+ */
+export function sameResolvedDir(a, b) {
+	const na = String(a ?? "").trim();
+	const nb = String(b ?? "").trim();
+	if (!na || !nb) return false;
+	return path.resolve(expandHome(na)) === path.resolve(expandHome(nb));
+}
+
+/**
+ * Browse-mode Tab completion for the cwd picker. Completes to the highlighted
+ * suggestion with a trailing separator (so the next recompute lists that
+ * directory's children); when the highlight already equals the current query
+ * (no progress), advances cyclically so repeated Tab drills downward. A lone
+ * self suggestion stays put, so drilling stops naturally at leaf directories.
+ * @param {string} query
+ * @param {string[]} suggestions
+ * @param {number} index
+ * @returns {{query: string, completed: string, usedIndex: number} | null}
+ */
+export function browseTabCompletion(query, suggestions, index) {
+	if (!suggestions || suggestions.length === 0) return null;
+	const len = suggestions.length;
+	let usedIndex = ((index % len) + len) % len;
+	let completed = suggestions[usedIndex];
+	if (len > 1 && sameResolvedDir(completed, query)) {
+		usedIndex = (usedIndex + 1) % len;
+		completed = suggestions[usedIndex];
+	}
+	return { query: completed + path.sep, completed, usedIndex };
+}
+
+/**
  * Decide cwd picker mode + suggestions for a query: favorites when the query
  * is empty or matches ranked candidates, filesystem browse otherwise.
  * @param {string} query
