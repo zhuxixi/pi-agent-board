@@ -16,7 +16,7 @@ attach 客户端用 headless xterm 重建屏幕，宿主 Pi 的终端能力查�
 ### D2 亮暗桥：`onTerminalColorSchemeChange` → 宿主
 
 - attach 时 `this.tui.onTerminalColorSchemeChange(scheme => this.send({type:"input", data: toColorSchemeReport(scheme)}))`；detach 时退订（生命周期对称）
-- 原理：本地 pi-tui 消费 996 报告/2031 通知时**同步通知**该监听器——桥把消费事件重打包为 996 报告形态写宿主 pty，宿主 pi-tui 同 parser 消费并通知宿主的 query/2031 监听
+- 原理：本地 pi-tui 消费 996 报告/2031 通知时**同步通知**该监听器——桥把消费事件重打包为颜色方案报告（`\x1b[?997;Ps n`，2=light 1=dark——报告码点是 997，996 是查询 DSR；task 1 实测对齐 pi-tui terminal-colors.js:19）写宿主 pty，宿主 pi-tui 同 parser 消费并通知宿主的 query/2031 监听
 - `toColorSchemeReport(scheme)` 纯函数；格式对齐 pi-tui `parseTerminalColorSchemeReport` 的接受形态（实现时从其源码对齐）
 
 ### D3 首帧回放：attach settle 时主动发一条探测
@@ -37,7 +37,7 @@ kitty flags/DA/OSC 11 应答不被本地消费链 ①②④ 消费 → 流到 at
 | A1 | 查询提取器 | 自动化验证（unit） | `node --test test/pty-attach-osc-query.test.mjs` | 查询（BEL/ST）转发、设置形态不转发、2031h/l 转发、跨 chunk carry 正确 |
 | A2 | scheme→报告序列 | 自动化验证（unit） | 同上 | `toColorSchemeReport` 输出与 pi-tui parser 接受形态一致（light/dark 两态） |
 | A3 | 出站转发接线 | 自动化验证（smoke） | `node --test test/pty-attach-detach-gate.test.mjs`（扩展场景） | 远端 output 含 OSC 11 查询 → 本地 terminal.write 收到；含 `rgb:` 设置 → 不写 |
-| A4 | 亮暗桥接线 | 自动化验证（smoke） | 同上 | 伪 tui 触发 colorScheme listener → socket 收到 `type:"input"` 且 data 为 996 报告；detach 后触发不再发 |
+| A4 | 亮暗桥接线 | 自动化验证（smoke） | 同上 | 伪 tui 触发 colorScheme listener → socket 收到 `type:"input"` 且 data 为颜色方案报告（`\x1b[?997;2n` / `\x1b[?997;1n`）；detach 后触发不再发 |
 | A5 | 首帧回放 | 自动化验证（smoke） | 同上 | attach settle → 本地 terminal.write 恰好一条 `\x1b]11;?\x07`；detach/未 settle 不写 |
 | A6 | kitty/DA 不转发 | 自动化验证（smoke） | 同上 | 含 `\x1b[>7u\x1b[?u\x1b[c` 的远端 output 不写本地终端 |
 | A7 | 桥生命周期 | 自动化验证（unit） | 同 A4 用例内 | 注册/退订对称，无泄漏监听 |
