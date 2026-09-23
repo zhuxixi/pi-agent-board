@@ -1237,6 +1237,15 @@ export class PtyAttachComponent implements Component {
 		}
 	}
 
+	/** LEGACY FALLBACK (issue #91 phase 6 marking): the screen.log tail replay
+	 * is kept only for pre-protocol runners and the
+	 * AGENT_BOARD_TERMINAL_SNAPSHOT=0 kill switch. It is NOT a correctness
+	 * path of the snapshot+subscribe protocol — the protocol hydrates from
+	 * runner-owned snapshots and resumes from a sequence cursor (phase 4),
+	 * and this replay runs before the probe resolves. Removal condition: the
+	 * installed runner fleet is on the snapshot protocol baseline
+	 * (wire-detectable via hello protocol fields).
+	 */
 	private replayScreenLog(): void {
 		if (!this.opts.screenLogPath || !existsSync(this.opts.screenLogPath)) return;
 		try {

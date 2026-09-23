@@ -1,4 +1,13 @@
 /**
+ * LEGACY FALLBACK (issue #91 phase 6 marking): the shrink-and-hold jiggle is
+ * kept only for pre-protocol runners and the AGENT_BOARD_TERMINAL_SNAPSHOT=0
+ * kill switch. It is NOT a success condition of the snapshot+subscribe
+ * protocol path — the protocol re-baselines the view from runner-owned
+ * snapshots (phase 4), and jiggle arming is skipped once the probe resolves
+ * to the protocol attach mode. Removal condition: the installed runner fleet
+ * is on the snapshot protocol baseline (wire-detectable via hello protocol
+ * fields).
+ *
  * Injectable orchestration for the attach shrink-and-hold jiggle protocol.
  *
  * Replaces the pulse-pair jiggle (shrink → 200ms → restore) with a
