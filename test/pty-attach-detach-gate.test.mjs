@@ -43,6 +43,16 @@ test("attach detach gate: ctrl+] passes through, ← reads only editor_state", (
 	assert.equal(parsed.ctrlLeftDetachesOnDraft, true, "Ctrl+← must detach even when editor_state reports a draft (issue #89)");
 	assert.equal(parsed.ctrlLeftDetachesOnEmptyInput, true, "Ctrl+← must detach from an empty editor too (issue #89)");
 	assert.equal(parsed.headerMentionsCtrlLeft, true, "the live header must advertise the Ctrl+← chord (issue #89)");
+	// Issue #126: Ctrl+\ is the unconditional, terminal-independent escape —
+	// every editor/socket quadrant detaches, across all three real-world
+	// keyboard encodings (raw 0x1c, kitty CSI-u, modifyOtherKeys).
+	assert.equal(parsed.ctrlBackslashDetachesOnDraft, true, "Ctrl+\ must detach even with a pushed draft (issue #126)");
+	assert.equal(parsed.ctrlBackslashDetachesOnEmptyEditor, true, "Ctrl+\ must detach from an empty editor (issue #126)");
+	assert.equal(parsed.ctrlBackslashDetachesWithoutEditorState, true, "Ctrl+\ must detach with no editor_state at all (issue #126)");
+	assert.equal(parsed.ctrlBackslashDetachesWhileDisconnected, true, "Ctrl+\ must end the surface while disconnected (issue #126)");
+	assert.equal(parsed.ctrlBackslashDetachesViaKittyEncoding, true, "Ctrl+\ must detach from the kitty CSI-u encoding (issue #126)");
+	assert.equal(parsed.ctrlBackslashDetachesViaModifyOtherKeys, true, "Ctrl+\ must detach from the modifyOtherKeys encoding (issue #126)");
+	assert.equal(parsed.printableQStillForwardsToChild, true, "printable keys must still forward to the child (issue #126 isolation)");
 	assert.equal(parsed.minimumSizeAvoidsInvalidShrink, true, "minimum terminal size must avoid an invalid shrink");
 	assert.equal(parsed.staleSocketEventsDoNotClearCurrent, true, "stale socket events must not clear a replacement connection");
 });

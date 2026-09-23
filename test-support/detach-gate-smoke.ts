@@ -13,6 +13,9 @@
 //   H/I/J. The pushed editor_state is authoritative; hello null resets a
 //       stale cache to the conservative forward policy.
 //   L/M/N. Ctrl+← detaches unconditionally (issue #89).
+//   P1-P7. Ctrl+\ detaches unconditionally in every editor/socket state and
+//       across raw/kitty/modifyOtherKeys encodings; printable keys still
+//       forward (issue #126).
 // Run via `node --experimental-transform-types` (TS parameter properties).
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
@@ -340,6 +343,89 @@ const out: Record<string, boolean> = {};
 	await writeToTerm(attach, "chat content\r\n");
 	const lines = attach.render(80);
 	out.headerMentionsCtrlLeft = lines.some((line) => line.includes("Ctrl+←"));
+	attach.dispose();
+}
+
+// P1. Issue #126: Ctrl+\ (raw 0x1c) detaches even with a pushed draft — the
+// unconditional escape never consults the editor gate (contrast scenario I
+// where a draft forwards single ←). It is the bottom layer of the ladder:
+// ← (editor-gated) → Ctrl+← (modifier encoding) → Ctrl+\ (raw byte).
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat content\r\n");
+	(attach as unknown as { onSocketData: (t: string) => void }).onSocketData(JSON.stringify({ type: "editor_state", empty: false }) + "\n");
+	(attach as unknown as { connected: boolean }).connected = true;
+	attach.handleInput("\x1c");
+	out.ctrlBackslashDetachesOnDraft = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	attach.dispose();
+}
+
+// P2. Issue #126: the empty-editor quadrant — same unconditional detach.
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat content\r\n");
+	(attach as unknown as { onSocketData: (t: string) => void }).onSocketData(JSON.stringify({ type: "editor_state", empty: true }) + "\n");
+	(attach as unknown as { connected: boolean }).connected = true;
+	attach.handleInput("\x1c");
+	out.ctrlBackslashDetachesOnEmptyEditor = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	attach.dispose();
+}
+
+// P3. Issue #126: the null quadrant (no editor_state ever pushed) — the
+// conservative-forward policy for ← must not trap Ctrl+\.
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat content\r\n");
+	(attach as unknown as { connected: boolean }).connected = true;
+	attach.handleInput("\x1c");
+	out.ctrlBackslashDetachesWithoutEditorState = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	attach.dispose();
+}
+
+// P4. Issue #126: the disconnected quadrant — Ctrl+\ still ends the surface
+// (issue #48's always-exitable guarantee does not depend on the key chosen).
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat content\r\n");
+	attach.handleInput("\x1c");
+	out.ctrlBackslashDetachesWhileDisconnected = didDetach() && !sent.some((msg) => msg.type === "input");
+	attach.dispose();
+}
+
+// P5. Issue #126: terminals in kitty keyboard protocol mode encode the same
+// chord as CSI-u (\x1b[92;5u) instead of the raw byte — matchesKey covers
+// that form; pin it so a parser change cannot silently drop the escape.
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat content\r\n");
+	(attach as unknown as { onSocketData: (t: string) => void }).onSocketData(JSON.stringify({ type: "editor_state", empty: false }) + "\n");
+	(attach as unknown as { connected: boolean }).connected = true;
+	attach.handleInput("\x1b[92;5u");
+	out.ctrlBackslashDetachesViaKittyEncoding = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	attach.dispose();
+}
+
+// P6. Issue #126: modifyOtherKeys mode (\x1b[27;5;92~) — the third real-world
+// encoding (pi itself enables modifyOtherKeys in its TUI), same guarantee.
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat content\r\n");
+	(attach as unknown as { onSocketData: (t: string) => void }).onSocketData(JSON.stringify({ type: "editor_state", empty: false }) + "\n");
+	(attach as unknown as { connected: boolean }).connected = true;
+	attach.handleInput("\x1b[27;5;92~");
+	out.ctrlBackslashDetachesViaModifyOtherKeys = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	attach.dispose();
+}
+
+// P7. Isolation: an ordinary printable key keeps forwarding to the child —
+// adding the unconditional escape must not widen into a generic interceptor.
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat content\r\n");
+	(attach as unknown as { onSocketData: (t: string) => void }).onSocketData(JSON.stringify({ type: "editor_state", empty: false }) + "\n");
+	(attach as unknown as { connected: boolean }).connected = true;
+	attach.handleInput("q");
+	out.printableQStillForwardsToChild = !didDetach() && sent.length === 1 && sent[0].type === "input" && sent[0].data === "q";
 	attach.dispose();
 }
 

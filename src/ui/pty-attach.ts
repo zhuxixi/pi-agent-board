@@ -287,6 +287,15 @@ export class PtyAttachComponent implements Component {
 			this.send({ type: "input", data });
 			return;
 		}
+		if (matchesKey(data, "ctrl+\\")) {
+			// Unconditional, terminal-independent escape (issue #126): 0x1c is a
+			// single raw byte every terminal sends — no modifier-encoding
+			// dependency like Ctrl+Left (macOS Terminal.app never emits it,
+			// WezTerm consumes it for tab switching). matchesKey also covers the
+			// kitty CSI-u and modifyOtherKeys encodings of the same chord.
+			this.detach();
+			return;
+		}
 		if (matchesKey(data, Key.ctrl("left"))) {
 			// Explicit detach chord (issue #89): single ← is gated on editor state
 			// (it doubles as cursor-left inside a non-empty draft), so a user with
