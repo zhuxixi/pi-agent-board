@@ -7,11 +7,12 @@ import {
 	shouldEscapeAttach,
 } from "../src/core/pty-attach-reconnect.mjs";
 
-test("shouldEscapeAttach detaches unconditionally while disconnected", () => {
+test("shouldEscapeAttach: disconnected always escapes; connected detaches only on editorEmpty === true", () => {
 	assert.equal(shouldEscapeAttach(false, false), true);
 	assert.equal(shouldEscapeAttach(false, true), true);
+	// Connected + pushed editorEmpty === true is the ONLY detach condition.
 	assert.equal(shouldEscapeAttach(true, true), true);
-	// Connected + non-empty child input line → the key must be forwarded, not detach.
+	// Connected + editorEmpty false → the key must be forwarded to the child.
 	assert.equal(shouldEscapeAttach(true, false), false);
 });
 

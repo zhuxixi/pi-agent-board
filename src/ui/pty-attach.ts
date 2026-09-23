@@ -5,7 +5,6 @@ import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import type { Component, KeybindingsManager, TUI } from "@earendil-works/pi-tui";
 import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import { isProbablyEmptyPiInputLine, isProbablyPiInputLine, pickEditorAnchorLine, resolveEditorEmpty } from "../core/pty-input.mjs";
 import { findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
 import { createAttachOutputRenderScheduler, detectCursorDesync, isPtyCursorHidden, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
 import { evaluateAttachReconnect, shouldEscapeAttach } from "../core/pty-attach-reconnect.mjs";
@@ -302,7 +301,15 @@ export class PtyAttachComponent implements Component {
 			// escape unconditionally — the view must always be exitable, even
 			// after the host crashes mid-output (issue #48). Note: ctrl+] is NOT
 			// a detach key — it passes through to Pi (tui.editor.jumpForward).
-			if (shouldEscapeAttach(this.connected, resolveEditorEmpty(this.editorEmpty, this.childInputLooksEmpty()))) {
+			// Issue #91 Phase 6 (spec §D1): the gate reads ONLY the pushed
+			// editorEmpty side channel — true detaches; false and null (child
+			// extension missing, hello not yet arrived, old runner) forward via
+			// the explicit conservative policy. The old terminal-buffer
+			// heuristics are deleted for good: rendered bytes carry no
+			// input-buffer semantics, so that chain guessed at a fact it
+			// could not know (issues #42/#66/#69/#103). Escape without a pushed
+			// state is Ctrl+← (issue #89), never a buffer guess.
+			if (shouldEscapeAttach(this.connected, this.editorEmpty === true)) {
 				this.detach();
 				return;
 			}
@@ -378,61 +385,6 @@ export class PtyAttachComponent implements Component {
 		}
 		this.close(true);
 		this.done({ action: "detached" });
-	}
-
-	/** Bottom-up projection of every buffer line carrying inverse-video cells,
-	 * with the inverse CHARACTER count. Pi's editor fake cursor is exactly one
-	 * inverse character; chat-area diff hunks (renderDiff) and the inverse
-	 * notification banner are multi-character runs — pickEditorAnchorLine does
-	 * the discrimination. Counting characters rather than cells keeps wide
-	 * glyphs (2 cells, 1 char) counted once (issue #103). */
-	private collectInverseCellLines(active: {
-		baseY: number;
-		length: number;
-		getLine(index: number): BufferLineLike | undefined;
-	}): Array<{ text: string; inverseCharCount: number }> {
-		const lines: Array<{ text: string; inverseCharCount: number }> = [];
-		for (let y = active.baseY + active.length - 1; y >= active.baseY; y--) {
-			const line = active.getLine(y);
-			if (!line) continue;
-			let inverseCharCount = 0;
-			for (let x = 0; x < line.length; x++) {
-				const cell = line.getCell(x);
-				if (cell?.isInverse()) inverseCharCount += cell.getChars().length;
-			}
-			if (inverseCharCount > 0) lines.push({ text: line.translateToString(true) ?? "", inverseCharCount });
-		}
-		return lines;
-	}
-
-	private childInputLooksEmpty(): boolean {
-		if (!this.receivedOutput) return true;
-		const active = this.term.buffer.active;
-		// The terminal cursor is not a reliable anchor for the editor line:
-		// while Pi streams output (or right after attach) the cursor rests on
-		// working/output lines, never the input line, so a genuinely empty
-		// editor was misread as non-empty and ← stopped detaching (issue #66).
-		// Pi's editor line carries an inverse fake cursor, but the chat area is
-		// full of inverse content too (diff hunks, the notification banner), and
-		// the editor line is often missing from the buffer entirely — so the
-		// anchor must also look like an editor line, and chat content must be
-		// skipped rather than trusted (issue #103).
-		const anchor = pickEditorAnchorLine(this.collectInverseCellLines(active));
-		if (anchor !== null) return anchor.empty;
-		// Fallback: Pi variants that render no fake cursor — look for an EMPTY
-		// prompt-glyph line. Only an empty glyph line proves an empty editor:
-		// content glyph lines (markdown table rows `│ … │`, quotes `> …`, or a
-		// real draft in a no-fake-cursor Pi variant) cannot be told apart, and
-		// trapping the user is worse than a spurious detach (issue #69) — skip
-		// them and keep scanning; the loop-end escape below stays authoritative.
-		for (let y = active.baseY + active.length - 1; y >= active.baseY; y--) {
-			const line = active.getLine(y)?.translateToString(true) ?? "";
-			if (isProbablyPiInputLine(line) && isProbablyEmptyPiInputLine(line)) return true;
-		}
-		// No editor line recoverable (e.g. a garbled replay buffer): treat the
-		// input as empty — ← is the only detach key left on the attach surface,
-		// so it must always escape rather than trap the user.
-		return true;
 	}
 
 	private connect(): void {
