@@ -28,7 +28,7 @@ Base: main 4ccb427
   - settle 路径接线两方法；确认 settle 判定处（attach loading banner 消失点）只调一次
 - `test-support/detach-gate-smoke.ts` 扩展场景（P8-P11）+ `test/pty-attach-detach-gate.test.mjs` 断言：
   - A3: 远端 output 含 `\x1b]11;?\x07` → localTerminalWrites 含之；含 `\x1b]11;rgb:ffff/ffff/ffff\x07` → 不写
-  - A4: 伪 tui 触发 colorScheme listener("light") → socket 收到 `type:"input"` + 996 报告；模拟 detach 后再触发 → 不发（A7）
+  - A4: 伪 tui 触发 colorScheme listener("light") → socket 收到 `type:"input"` + 997 报告；模拟 detach 后再触发 → 不发（A7）
   - A5: attach settle → localTerminalWrites 恰一条 `\x1b]11;?\x07`；kill switch=0 时零条
   - A6: 远端 output 含 `\x1b[>7u\x1b[?u\x1b[c` → localTerminalWrites 不含任何一段
 
