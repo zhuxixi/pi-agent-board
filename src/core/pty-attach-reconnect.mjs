@@ -44,5 +44,7 @@ export function evaluateAttachReconnect({ everConnected, disconnectedAt, connect
  * @returns {boolean}
  */
 export function shouldEscapeAttach(connected, editorEmpty) {
-	return !connected || editorEmpty;
+	// Normalize to a strict boolean: a null/undefined editorEmpty (unknown)
+	// forwards — never escapes — and must not leak through the return value.
+	return !connected || editorEmpty === true;
 }
