@@ -8,7 +8,7 @@ Base: main 4ccb427
 **Files:**
 - 新建 `src/core/terminal-query-sequences.mjs`：
   - `extractOscQuerySequences(input) → { sequences, carry }` — 转发 `\x1b]11;?` + BEL(`\x07`)/ST(`\x1b\\`) 定界、`\x1b[?2031h`、`\x1b[?2031l`；**排除** `\x1b]11;rgb:...` 设置形态与 kitty/DA（`\x1b[>7u`/`\x1b[?u`/`\x1b[c`）；carry 模式照抄 `extractOsc52Sequences` 结构（部分前缀保留、carry 上限）
-  - `toColorSchemeReport(scheme) → string` — light/dark → 996 报告序列；**格式先读 pi-tui `parseTerminalColorSchemeReport`（node_modules/@earendil-works/pi-tui/dist/tui.js）源码对齐**，来源在测试注释标注
+  - `toColorSchemeReport(scheme) → string` — light/dark → 颜色方案报告序列（997）；**格式先读 pi-tui `parseTerminalColorSchemeReport`（node_modules/@earendil-works/pi-tui/dist/tui.js）源码对齐**，来源在测试注释标注
   - `OSC_QUERY_CARRY_MAX_BYTES` 常量（对齐既有家族取值）
 - 新建 `test/terminal-query-sequences.test.mjs`（unit）：
   - A1: 查询 BEL/ST 各转发一次；设置形态不转发；2031h/l 转发；跨 chunk（查询截半 → carry 拼接后识别）；carry 不含完整序列时丢弃防积压

@@ -34,7 +34,7 @@ kitty flags/DA/OSC 11 应答不被本地消费链 ①②④ 消费 → 流到 at
 
 | ID | 功能点 | 验收方式 | 具体验证 | 通过标准 |
 |----|--------|----------|----------|----------|
-| A1 | 查询提取器 | 自动化验证（unit） | `node --test test/pty-attach-osc-query.test.mjs` | 查询（BEL/ST）转发、设置形态不转发、2031h/l 转发、跨 chunk carry 正确 |
+| A1 | 查询提取器 | 自动化验证（unit） | `node --test test/terminal-query-sequences.test.mjs` | 查询（BEL/ST）转发、设置形态不转发、2031h/l 转发、跨 chunk carry 正确 |
 | A2 | scheme→报告序列 | 自动化验证（unit） | 同上 | `toColorSchemeReport` 输出与 pi-tui parser 接受形态一致（light/dark 两态） |
 | A3 | 出站转发接线 | 自动化验证（smoke） | `node --test test/pty-attach-detach-gate.test.mjs`（扩展场景） | 远端 output 含 OSC 11 查询 → 本地 terminal.write 收到；含 `rgb:` 设置 → 不写 |
 | A4 | 亮暗桥接线 | 自动化验证（smoke） | 同上 | 伪 tui 触发 colorScheme listener → socket 收到 `type:"input"` 且 data 为颜色方案报告（`\x1b[?997;2n` / `\x1b[?997;1n`）；detach 后触发不再发 |
