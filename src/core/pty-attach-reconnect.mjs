@@ -40,7 +40,7 @@ export function evaluateAttachReconnect({ everConnected, disconnectedAt, connect
  * consulted (the deleted terminal-buffer heuristic family — issues
  * #42/#66/#69/#103 — stays deleted).
  * @param {boolean} connected
- * @param {boolean} editorEmpty
+ * @param {boolean | null | undefined} editorEmpty
  * @returns {boolean}
  */
 export function shouldEscapeAttach(connected, editorEmpty) {
