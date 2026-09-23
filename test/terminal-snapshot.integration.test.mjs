@@ -236,7 +236,19 @@ test("A5: mid-stream subscribe via the real client module — no gap, no dup, al
 		const endB = messagesB.find((m) => m.type === "snapshot_end");
 		assert.equal(beginB.frameVersion, 1);
 		assert.equal(endB.nextSeq, beginB.snapshotSeq + 1);
-		const seqsB = messagesB.filter((m) => m.type === "output").map((m) => m.seq);
+		// Socket B must catch up on its OWN progress before the contiguity
+		// assertion: clientA's lastSeq proves the model advanced, not that this
+		// socket drained its subscription (issue #132 D2).
+		await waitFor(() => messagesB.filter((m) => m.type === "output" && m.seq >= endB.nextSeq).length >= ticks);
+		// Count only post-snapshot protocol outputs (issue #132 D1): pre-subscribe
+		// legacy broadcast rows share the seq axis but carry seq <= snapshotSeq <
+		// nextSeq — the runner's broadcast branch (runner/pty-runner.mjs:~342-345)
+		// still writes the additive-seq legacy line to any socket whose
+		// subscription has not fully decided — so windowing at endB.nextSeq drops
+		// them and leaves a pure protocol stream.
+		const seqsB = messagesB
+			.filter((m) => m.type === "output" && m.seq >= endB.nextSeq)
+			.map((m) => m.seq);
 		assert.ok(seqsB.length >= ticks);
 		assert.deepEqual(seqsB, seqsB.map((_, i) => endB.nextSeq + i), "subscriber seqs strictly contiguous, no dup");
 
