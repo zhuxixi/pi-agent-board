@@ -14,6 +14,7 @@ import { requestDashboardRender } from "../core/dashboard-render.mjs";
 import { normalizeGenericStatusText } from "../core/derive.mjs";
 import { firstSentence, truncate } from "../core/heuristics.mjs";
 import {
+	browseTabCompletion,
 	canonicalModelRef,
 	clampThinkingLevel,
 	listDirectorySuggestions,
@@ -596,13 +597,24 @@ export class DashboardComponent implements Component {
 			return;
 		}
 		if (launch.picker === "cwd" && matchesKey(data, Key.tab)) {
-			if (launch.cwdPickerMode === "favorites" && launch.cwdSuggestions.length > 0) {
-				const completed = launch.cwdSuggestions[launch.cwdSuggestionIndex] ?? launch.cwdSuggestions[0];
-				launch.cwdQuery = completed;
-				const state = nextCwdPickerState(launch.cwdQuery, launch.cwdRanked, launch.cwd);
-				launch.cwdPickerMode = state.mode;
-				launch.cwdSuggestions = state.suggestions;
-				launch.cwdSuggestionIndex = Math.max(0, state.suggestions.indexOf(completed));
+			if (launch.cwdSuggestions.length > 0) {
+				if (launch.cwdPickerMode === "browse") {
+					const completion = browseTabCompletion(launch.cwdQuery, launch.cwdSuggestions, launch.cwdSuggestionIndex);
+					if (completion) {
+						launch.cwdQuery = completion.query;
+						const state = nextCwdPickerState(launch.cwdQuery, launch.cwdRanked, launch.cwd);
+						launch.cwdPickerMode = state.mode;
+						launch.cwdSuggestions = state.suggestions;
+						launch.cwdSuggestionIndex = Math.max(0, state.suggestions.indexOf(completion.completed));
+					}
+				} else {
+					const completed = launch.cwdSuggestions[launch.cwdSuggestionIndex] ?? launch.cwdSuggestions[0];
+					launch.cwdQuery = completed;
+					const state = nextCwdPickerState(launch.cwdQuery, launch.cwdRanked, launch.cwd);
+					launch.cwdPickerMode = state.mode;
+					launch.cwdSuggestions = state.suggestions;
+					launch.cwdSuggestionIndex = Math.max(0, state.suggestions.indexOf(completed));
+				}
 			}
 			return;
 		}
@@ -1583,7 +1595,7 @@ export class DashboardComponent implements Component {
 			} else {
 				lines.push(...this.renderLaunchSuggestions(inner, launch.cwdSuggestions, launch.cwdSuggestionIndex, (value) => displayPath(value)));
 				lines.push("");
-				lines.push(t.fg("dim", "type to filter folders · enter choose · esc back"));
+				lines.push(t.fg("dim", "type to filter folders · tab complete · enter choose · esc back"));
 			}
 		} else if (launch.picker === "model") {
 			lines.push(t.fg("warning", `model› ${singleLineInput(launch.modelQuery)}${cursor()}`));
