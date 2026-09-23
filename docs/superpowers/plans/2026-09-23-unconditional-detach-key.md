@@ -27,10 +27,13 @@ Spec: docs/superpowers/specs/2026-09-23-unconditional-detach-key-design.md（首
 ```ts
 		if (matchesKey(data, "ctrl+\\")) {
 			// Unconditional, terminal-independent escape (issue #126): 0x1c is a
-			// single raw byte every terminal sends — no modifier-encoding
-			// dependency like Ctrl+Left (macOS Terminal.app never emits it,
-			// WezTerm consumes it for tab switching). matchesKey also covers the
-			// kitty CSI-u and modifyOtherKeys encodings of the same chord.
+			// single raw ASCII byte every terminal forwards unchanged in raw
+			// mode — no modifier-encoding dependency like Ctrl+Left (macOS
+			// Terminal.app never emits it, WezTerm consumes it for tab
+			// switching). Only caveat (documented in README): layouts where
+			// `\` sits on AltGr may never produce this byte; the escape ladder
+			// still covers those. matchesKey also covers the kitty CSI-u and
+			// modifyOtherKeys encodings of the same chord.
 			this.detach();
 			return;
 		}
