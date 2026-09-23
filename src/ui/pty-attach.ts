@@ -289,10 +289,13 @@ export class PtyAttachComponent implements Component {
 		}
 		if (matchesKey(data, "ctrl+\\")) {
 			// Unconditional, terminal-independent escape (issue #126): 0x1c is a
-			// single raw byte every terminal sends — no modifier-encoding
-			// dependency like Ctrl+Left (macOS Terminal.app never emits it,
-			// WezTerm consumes it for tab switching). matchesKey also covers the
-			// kitty CSI-u and modifyOtherKeys encodings of the same chord.
+			// single raw ASCII byte every terminal forwards unchanged in raw
+			// mode — no modifier-encoding dependency like Ctrl+Left (macOS
+			// Terminal.app never emits it, WezTerm consumes it for tab
+			// switching). Only caveat (documented in README): layouts where
+			// `\` sits on AltGr may never produce this byte; the escape ladder
+			// still covers those. matchesKey also covers the kitty CSI-u and
+			// modifyOtherKeys encodings of the same chord.
 			this.detach();
 			return;
 		}
@@ -349,7 +352,7 @@ export class PtyAttachComponent implements Component {
 		}
 		const header =
 			this.theme.fg("accent", this.theme.bold(` ${this.opts.title} `)) +
-			this.theme.fg("muted", `${this.status} · click opens links · dblclick/drag selects+copies · Ctrl+← detach`);
+			this.theme.fg("muted", `${this.status} · opens links · drag selects+copies · Ctrl+←/Ctrl+\\ detach`);
 		return [clip(header, width), ...body.map((l) => clipTerminalLine(l, width)), this.theme.fg("dim", "─".repeat(width))];
 	}
 
@@ -365,7 +368,7 @@ export class PtyAttachComponent implements Component {
 		out.push(center(this.theme.fg("accent", this.theme.bold(title)), width));
 		out.push(center(this.theme.fg("muted", detail), width));
 		out.push("");
-		out.push(center(this.theme.fg("dim", "Ctrl+← to detach"), width));
+		out.push(center(this.theme.fg("dim", "Ctrl+←/Ctrl+\\ to detach"), width));
 		while (out.length < height) out.push("");
 		return out.slice(0, height);
 	}

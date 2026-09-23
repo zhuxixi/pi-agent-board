@@ -343,6 +343,7 @@ const out: Record<string, boolean> = {};
 	await writeToTerm(attach, "chat content\r\n");
 	const lines = attach.render(80);
 	out.headerMentionsCtrlLeft = lines.some((line) => line.includes("Ctrl+←"));
+	out.headerMentionsCtrlBackslash = lines.some((line) => line.includes("Ctrl+\\"));
 	attach.dispose();
 }
 
