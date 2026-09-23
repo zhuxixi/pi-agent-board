@@ -111,3 +111,32 @@ test("A2: unknown/invalid scheme maps to empty string", () => {
 	assert.equal(toColorSchemeReport(""), "");
 	assert.equal(toColorSchemeReport(undefined), "");
 });
+
+// Review F1a: a stale carry that fails to join a target is dropped, not kept.
+test("stale carry is discarded when the next chunk fails to complete a target", () => {
+	const first = extractOscQuerySequences("\x1b]1");
+	assert.deepEqual(first, { sequences: [], carry: "\x1b]1" });
+	// "\x1b]1" + "9xyz" never forms a target prefix chain ("9" cannot follow "]1")
+	const second = extractOscQuerySequences("9xyz");
+	assert.deepEqual(second, { sequences: [], carry: "" });
+});
+
+// Review F1b: the carry cap actually truncates (flood beyond OSC_QUERY_CARRY_MAX_BYTES).
+test("unterminated tail is truncated to OSC_QUERY_CARRY_MAX_BYTES", () => {
+	const flood = "\x1b]11;?" + "x".repeat(OSC_QUERY_CARRY_MAX_BYTES + 100);
+	const { sequences, carry } = extractOscQuerySequences(flood);
+	assert.deepEqual(sequences, []);
+	assert.equal(carry.length, OSC_QUERY_CARRY_MAX_BYTES);
+});
+
+// Review F3a: nearest terminator wins when both BEL and ST follow the query.
+test("nearest terminator wins when both BEL and ST are present", () => {
+	const { sequences } = extractOscQuerySequences("\x1b]11;?\x07junk\x1b\\");
+	assert.deepEqual(sequences, ["\x1b]11;?\x07"]);
+});
+
+// Review F3b: scan resumes correctly after a rejected junk OSC in the same chunk.
+test("valid query after a rejected junk-form OSC is still forwarded", () => {
+	const { sequences } = extractOscQuerySequences("\x1b]11;?junk\x07\x1b]11;?\x07");
+	assert.deepEqual(sequences, ["\x1b]11;?\x07"]);
+});

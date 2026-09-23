@@ -128,5 +128,5 @@ const COLOR_SCHEME_REPORTS = {
  * on empty.
  */
 export function toColorSchemeReport(scheme) {
-	return COLOR_SCHEME_REPORTS[scheme] ?? "";
+	return Object.hasOwn(COLOR_SCHEME_REPORTS, scheme) ? COLOR_SCHEME_REPORTS[scheme] : "";
 }
