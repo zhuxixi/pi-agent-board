@@ -201,7 +201,8 @@ export class PtyAttachComponent implements Component {
 	private lastClickPoint: MousePoint | null = null;
 	private lastClickAt = 0;
 	/** Authoritative editor emptiness pushed by the child Pi extension via the
-	 * control socket (issue #68). null = unknown — fall back to the heuristic. */
+	 * control socket (issue #68). null = unknown — forward conservatively
+	 * (spec §D1); only true detaches. */
 	private editorEmpty: boolean | null = null;
 	// Whether any PTY output (live or replayed) has been shown yet. Until then we paint a
 	// loading banner instead of an empty buffer so a slow (cold) host start doesn't leave
@@ -339,7 +340,7 @@ export class PtyAttachComponent implements Component {
 		}
 		const header =
 			this.theme.fg("accent", this.theme.bold(` ${this.opts.title} `)) +
-			this.theme.fg("muted", `${this.status} · click opens links · dblclick/drag selects+copies · ←/Ctrl+← detach`);
+			this.theme.fg("muted", `${this.status} · click opens links · dblclick/drag selects+copies · Ctrl+← detach`);
 		return [clip(header, width), ...body.map((l) => clipTerminalLine(l, width)), this.theme.fg("dim", "─".repeat(width))];
 	}
 
@@ -355,7 +356,7 @@ export class PtyAttachComponent implements Component {
 		out.push(center(this.theme.fg("accent", this.theme.bold(title)), width));
 		out.push(center(this.theme.fg("muted", detail), width));
 		out.push("");
-		out.push(center(this.theme.fg("dim", "←/Ctrl+← to detach"), width));
+		out.push(center(this.theme.fg("dim", "Ctrl+← to detach"), width));
 		while (out.length < height) out.push("");
 		return out.slice(0, height);
 	}

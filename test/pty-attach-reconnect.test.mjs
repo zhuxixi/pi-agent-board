@@ -14,6 +14,10 @@ test("shouldEscapeAttach: disconnected always escapes; connected detaches only o
 	assert.equal(shouldEscapeAttach(true, true), true);
 	// Connected + editorEmpty false → the key must be forwarded to the child.
 	assert.equal(shouldEscapeAttach(true, false), false);
+	// null/undefined (unknown) forwards too — the documented conservative
+	// contract; never a buffer-heuristic fallback.
+	assert.equal(shouldEscapeAttach(true, null), false);
+	assert.equal(shouldEscapeAttach(true, undefined), false);
 });
 
 test("evaluateAttachReconnect: previously-connected host gives 15s after disconnect", () => {

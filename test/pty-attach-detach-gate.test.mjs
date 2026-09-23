@@ -53,6 +53,8 @@ const HEURISTIC_IDENTIFIERS = [
 	"isProbablyPiInputLine",
 	"isProbablyEmptyPiInputLine",
 	"resolveEditorEmpty",
+	"collectInverseCellLines",
+	"PROMPT_GLYPHS",
 ];
 
 function listSourceFiles(dir) {
