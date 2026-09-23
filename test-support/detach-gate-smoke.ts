@@ -24,17 +24,36 @@ import { join } from "node:path";
 import { once } from "node:events";
 import { PtyAttachComponent } from "../src/ui/pty-attach.ts";
 
-const tui = {
-	terminal: { rows: 24, cols: 80, columns: 80, write: () => {} },
-	requestRender: () => {},
-};
 const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
 const keybindings = {} as never;
 
+// Minimal fake TUI for scenarios that need no write/scheme capture.
+const plainTui = {
+	terminal: { rows: 24, cols: 80, columns: 80, write: () => {} },
+	requestRender: () => {},
+	onTerminalColorSchemeChange: (_listener: (scheme: string) => void) => () => {},
+};
+
 function makeAttach() {
 	let result: unknown = null;
+	// Issue #128: per-attach fake TUI with terminal-write capture and a
+	// color-scheme listener registry (the bridge under test registers here).
+	const terminalWrites: string[] = [];
+	const colorSchemeListeners = new Set<(scheme: string) => void>();
+	const scopedTui = {
+		terminal: { rows: 24, cols: 80, columns: 80, write: (s: string) => { terminalWrites.push(s); } },
+		requestRender: () => {},
+		onTerminalColorSchemeChange: (listener: (scheme: string) => void) => {
+			colorSchemeListeners.add(listener);
+			return () => { colorSchemeListeners.delete(listener); };
+		},
+		fireColorScheme: (scheme: string) => {
+			for (const listener of [...colorSchemeListeners]) listener(scheme);
+		},
+		listenerCount: () => colorSchemeListeners.size,
+	};
 	const attach = new PtyAttachComponent(
-		tui as never,
+		scopedTui as never,
 		theme,
 		keybindings,
 		(r) => { result = r; },
@@ -45,8 +64,14 @@ function makeAttach() {
 	return {
 		attach,
 		sent,
+		terminalWrites,
+		scopedTui,
 		didDetach: () => (result as { action?: string } | null)?.action === "detached",
 	};
+}
+
+function countWrites(writes: string[], needle: string): number {
+	return writes.filter((w) => w.includes(needle)).length;
 }
 
 async function writeToTerm(attach: PtyAttachComponent, data: string): Promise<void> {
@@ -151,7 +176,7 @@ const out: Record<string, boolean> = {};
 // only the side channel can arm the detach).
 {
 	const attach = new PtyAttachComponent(
-		tui as never,
+		plainTui as never,
 		theme,
 		keybindings,
 		() => {},
@@ -430,6 +455,73 @@ const out: Record<string, boolean> = {};
 	attach.dispose();
 }
 
+// P8. Issue #128 A3: the child's OSC 11 query and 2031 notify switch reach
+// the real terminal via the D1 forwarder; the rgb SET-form must not (it
+// would repaint the local terminal's own colors). Driven through the
+// production forwarding entry point (pushOutput with forwardProtocols).
+{
+	const { attach, terminalWrites } = makeAttach();
+	const push = (attach as unknown as { pushOutput: (d: string, o?: { forwardProtocols?: boolean }) => void });
+	push.pushOutput("hello\x1b]11;?\x07world", { forwardProtocols: true });
+	push.pushOutput("\x1b]11;rgb:ffff/ffff/ffff\x07", { forwardProtocols: true });
+	push.pushOutput("\x1b[?2031h", { forwardProtocols: true });
+	out.queriesForwardedToTerminal = countWrites(terminalWrites, "\x1b]11;?\x07") === 1;
+	out.oscSetFormNotForwarded = !terminalWrites.some((w) => w.includes("rgb:ffff/ffff/ffff"));
+	out.notifySwitchForwarded = countWrites(terminalWrites, "\x1b[?2031h") === 1;
+	attach.dispose();
+}
+
+// P9. Issue #128 A4/A7: after settle the color-scheme bridge repackages the
+// local TUI's scheme events as 997 reports on the child pty; detaching must
+// unsubscribe (no leaked listener) and silence further sends.
+{
+	const { attach, sent, scopedTui } = makeAttach();
+	(attach as unknown as { finishAttachTransition: () => void }).finishAttachTransition();
+	scopedTui.fireColorScheme("light");
+	out.schemeBridgeSendsReport = sent.length === 1 && sent[0].type === "input" && sent[0].data === "\x1b[?997;2n";
+	attach.handleInput("\x1c");
+	const sentAfterDetach = sent.length;
+	out.schemeBridgeUnsubscribesOnDetach = scopedTui.listenerCount() === 0;
+	scopedTui.fireColorScheme("dark");
+	out.schemeBridgeSilentAfterDetach = sent.length === sentAfterDetach;
+	attach.dispose();
+}
+
+// P10. Issue #128 A5: settle writes the background probe to the real
+// terminal exactly once (double-settle is a no-op: `attaching` never re-arms);
+// the kill switch silences forwarding, replay, AND the bridge.
+{
+	const { attach, terminalWrites } = makeAttach();
+	const settle = (attach as unknown as { finishAttachTransition: () => void });
+	settle.finishAttachTransition();
+	settle.finishAttachTransition();
+	out.replayProbeWrittenOnceOnSettle = countWrites(terminalWrites, "\x1b]11;?\x07") === 1;
+	attach.dispose();
+
+	process.env.AGENT_BOARD_FORWARD_TERMINAL_QUERIES = "0";
+	try {
+		const killed = makeAttach();
+		const killPush = (killed.attach as unknown as { pushOutput: (d: string, o?: { forwardProtocols?: boolean }) => void });
+		killPush.pushOutput("\x1b]11;?\x07", { forwardProtocols: true });
+		(killed.attach as unknown as { finishAttachTransition: () => void }).finishAttachTransition();
+		out.killSwitchSilencesQueriesAndReplay = !killed.terminalWrites.some((w) => w.includes("\x1b]11;?\x07"));
+		out.killSwitchSkipsBridge = killed.scopedTui.listenerCount() === 0;
+		killed.attach.dispose();
+	} finally {
+		delete process.env.AGENT_BOARD_FORWARD_TERMINAL_QUERIES;
+	}
+}
+
+// P11. Issue #128 A6: kitty keyboard protocol / DA1 negotiation must NOT be
+// forwarded — the child negotiated at spawn (before attach) and pushing
+// flags would retune the shared real-terminal keyboard stack.
+{
+	const { attach, terminalWrites } = makeAttach();
+	(attach as unknown as { pushOutput: (d: string, o?: { forwardProtocols?: boolean }) => void }).pushOutput("\x1b[>7u\x1b[?u\x1b[c", { forwardProtocols: true });
+	out.kittyNegotiationNotForwarded = !terminalWrites.some((w) => w.includes("\x1b[>7u") || w.includes("\x1b[?u") || w.includes("\x1b[c"));
+	attach.dispose();
+}
+
 // E2. A terminal at the minimum supported size must not emit a shrink that the
 // runner immediately clamps back, because that is not a real width delta.
 {
@@ -461,8 +553,13 @@ async function runStaleSocketIdentityScenario(): Promise<boolean> {
 		server.listen(socketPath, resolve);
 	});
 
+	const identityTui = {
+		terminal: { rows: 24, cols: 80, columns: 80, write: () => {} },
+		requestRender: () => {},
+		onTerminalColorSchemeChange: (_listener: (scheme: string) => void) => () => {},
+	};
 	const attach = new PtyAttachComponent(
-		tui as never,
+		identityTui as never,
 		theme,
 		keybindings,
 		() => {},

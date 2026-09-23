@@ -11,6 +11,7 @@ import { evaluateAttachReconnect, shouldEscapeAttach } from "../core/pty-attach-
 import { installImeCursorCoalesce } from "../core/ime-cursor-coalesce.mjs";
 import { createJiggleRetryController } from "../core/pty-attach-jiggle-controller.mjs";
 import { createTerminalAttachClient } from "../core/terminal-attach-client.mjs";
+import { extractOscQuerySequences, toColorSchemeReport } from "../core/terminal-query-sequences.mjs";
 import { clampInt, parseMouseInputChunk, resolveWheelLines, scrollViewportTop, selectionDragScrollLines } from "../core/pty-scroll.mjs";
 
 export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null };
@@ -170,6 +171,7 @@ export class PtyAttachComponent implements Component {
 	private jiggleStartTimer: ReturnType<typeof setTimeout> | null = null;
 	private osc52Carry = "";
 	private passthroughCarry = "";
+	private oscQueryCarry = "";
 	private readonly connectStartedAt = Date.now();
 	// Set once the first socket connect succeeds; drives the reconnect give-up
 	// policy (short window after a live session dies, long window during cold
@@ -214,6 +216,10 @@ export class PtyAttachComponent implements Component {
 	private attaching = true;
 	private attachSettleTimer: ReturnType<typeof setTimeout> | null = null;
 	private attachHardTimeout: ReturnType<typeof setTimeout> | null = null;
+	// Issue #128 D2: unsubscriber for the color-scheme bridge registered at
+	// attach settle; nulled on every terminal path so the TUI never keeps a
+	// listener pointing at a dead attach surface.
+	private colorSchemeBridgeUnsubscribe: (() => void) | null = null;
 	private gracefulSocketCloseTimer: ReturnType<typeof setTimeout> | null = null;
 	// Force a single full-clear on the first paint so the prior session/dashboard can't
 	// ghost behind this overlay; every later paint uses the TUI's coalesced, throttled,
@@ -580,6 +586,56 @@ export class PtyAttachComponent implements Component {
 		// buffer, instead of diffing banner lines into buffer lines.
 		this.scheduleRender(true);
 		this.startDesyncProbe();
+		// Issue #128: the settle transition is the single point where `attaching`
+		// flips false (never re-armed), so both hooks run at most once per attach.
+		this.attachColorSchemeBridge();
+		this.replayBackgroundQuery();
+	}
+
+	/** Issue #128 D2: the local pi-tui consumes the child's color-scheme
+	 * traffic (996 queries / 2031 notifications forwarded by D1) — reports
+	 * never reach the child. onTerminalColorSchemeChange fires from that same
+	 * consumption point, so the bridge repackages each event as a 997 report
+	 * on the child pty, where the child's pi-tui parser consumes it. Once per
+	 * attach (settle is single-shot + explicit guard); kill switch skips it. */
+	private attachColorSchemeBridge(): void {
+		if (process.env.AGENT_BOARD_FORWARD_TERMINAL_QUERIES === "0") return;
+		if (this.colorSchemeBridgeUnsubscribe) return;
+		try {
+			this.colorSchemeBridgeUnsubscribe = this.tui.onTerminalColorSchemeChange((scheme) => {
+				const data = toColorSchemeReport(scheme);
+				if (data) this.send({ type: "input", data });
+			});
+		} catch {
+			/* best-effort: an unbridgeable TUI keeps pre-#128 behavior */
+		}
+	}
+
+	/** Called on every terminal path (close() covers detach/dispose; the exit
+	 * branch calls done() without close(), so it unsubscribes explicitly). */
+	private detachColorSchemeBridge(): void {
+		const unsubscribe = this.colorSchemeBridgeUnsubscribe;
+		this.colorSchemeBridgeUnsubscribe = null;
+		if (!unsubscribe) return;
+		try {
+			unsubscribe();
+		} catch {
+			/* best-effort: a stale listener must not block teardown */
+		}
+	}
+
+	/** Issue #128 D3: the child probed OSC 11 at spawn, before any attach
+	 * client existed, so its background-color answer was lost. Re-ask the REAL
+	 * terminal once now; the reply travels back through the existing input
+	 * passthrough (handleInput fallback) to the child. Silent on failure — a
+	 * missing answer keeps the pre-#128 fallback theme. */
+	private replayBackgroundQuery(): void {
+		if (process.env.AGENT_BOARD_FORWARD_TERMINAL_QUERIES === "0") return;
+		try {
+			this.tui.terminal.write("\x1b]11;?\x07");
+		} catch {
+			/* best-effort: enhancement, never critical */
+		}
 	}
 
 	private startDesyncProbe(): void {
@@ -1129,6 +1185,10 @@ export class PtyAttachComponent implements Component {
 					this.editorEmpty = typeof msg.empty === "boolean" ? msg.empty : null;
 				} else if (msg.type === "exit") {
 					this.status = "host exited";
+					// The exit path calls done() directly (host disposes later);
+					// drop the #128 bridge now so A7 symmetry doesn't depend on
+					// the host honoring dispose().
+					this.detachColorSchemeBridge();
 					this.done({ action: "closed", exitCode: msg.exitCode ?? null });
 				} else if (msg.type === "error") this.status = `error: ${msg.message ?? "host error"}`;
 				if (shouldScheduleAttachRenderForMessage(msg.type)) needsRender = true;
@@ -1240,6 +1300,15 @@ export class PtyAttachComponent implements Component {
 			this.passthroughCarry = carry;
 			toWrite.push(...sequences);
 		}
+		if (process.env.AGENT_BOARD_FORWARD_TERMINAL_QUERIES !== "0") {
+			// Issue #128 D1: forward the child's terminal capability queries
+			// (OSC 11 background probe, 2031 scheme-notify switch) to the real
+			// terminal; set-forms and kitty/DA negotiation stay excluded (see
+			// extractOscQuerySequences).
+			const { sequences, carry } = extractOscQuerySequences(this.oscQueryCarry + data);
+			this.oscQueryCarry = carry;
+			toWrite.push(...sequences);
+		}
 		for (const seq of toWrite) {
 			try {
 				this.tui.terminal.write(seq);
@@ -1334,6 +1403,7 @@ export class PtyAttachComponent implements Component {
 		}
 		this.closed = true;
 		this.imeCoalesceUninstall?.();
+		this.detachColorSchemeBridge();
 		this.attachClient.close();
 		this.jiggleRetry.restoreAndStop();
 		this.disableMouseScroll();

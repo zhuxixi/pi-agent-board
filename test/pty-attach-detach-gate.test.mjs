@@ -54,6 +54,19 @@ test("attach detach gate: ctrl+] passes through, ← reads only editor_state", (
 	assert.equal(parsed.ctrlBackslashDetachesViaKittyEncoding, true, "Ctrl+\\ must detach from the kitty CSI-u encoding (issue #126)");
 	assert.equal(parsed.ctrlBackslashDetachesViaModifyOtherKeys, true, "Ctrl+\\ must detach from the modifyOtherKeys encoding (issue #126)");
 	assert.equal(parsed.printableQStillForwardsToChild, true, "printable keys must still forward to the child (issue #126 isolation)");
+	// Issue #128: terminal capability forwarding — child queries reach the real
+	// terminal, scheme events bridge back as 997 reports, settle replays the
+	// lost background probe once, and kitty/DA stays excluded.
+	assert.equal(parsed.queriesForwardedToTerminal, true, "the child's OSC 11 query must be forwarded to the real terminal (issue #128)");
+	assert.equal(parsed.oscSetFormNotForwarded, true, "the OSC 11 rgb SET-form must NOT be forwarded (it would repaint the local terminal)");
+	assert.equal(parsed.notifySwitchForwarded, true, "the 2031 scheme-notify switch must be forwarded to the real terminal (issue #128)");
+	assert.equal(parsed.schemeBridgeSendsReport, true, "a color-scheme event must bridge to the child as a 997 report (issue #128)");
+	assert.equal(parsed.schemeBridgeUnsubscribesOnDetach, true, "detaching must unsubscribe the color-scheme bridge (issue #128)");
+	assert.equal(parsed.schemeBridgeSilentAfterDetach, true, "the bridge must not send after detach (issue #128)");
+	assert.equal(parsed.replayProbeWrittenOnceOnSettle, true, "settle must replay the background probe exactly once even across double-settle (issue #128)");
+	assert.equal(parsed.killSwitchSilencesQueriesAndReplay, true, "AGENT_BOARD_FORWARD_TERMINAL_QUERIES=0 must silence forwarding and the replay (issue #128)");
+	assert.equal(parsed.killSwitchSkipsBridge, true, "AGENT_BOARD_FORWARD_TERMINAL_QUERIES=0 must skip the color-scheme bridge (issue #128)");
+	assert.equal(parsed.kittyNegotiationNotForwarded, true, "kitty/DA negotiation must NOT be forwarded (spawn-time-only + keyboard-stack safety, issue #128)");
 	assert.equal(parsed.minimumSizeAvoidsInvalidShrink, true, "minimum terminal size must avoid an invalid shrink");
 	assert.equal(parsed.staleSocketEventsDoNotClearCurrent, true, "stale socket events must not clear a replacement connection");
 });
