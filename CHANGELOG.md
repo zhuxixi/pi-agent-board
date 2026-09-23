@@ -5,6 +5,32 @@ conventional commits by `scripts/release_helper.mjs`. Entries are
 forward-only: they begin with the first release after this file landed —
 for earlier history, see the git log and the pull-request list.
 
+## [0.8.0] - 2026-09-23
+
+### Features
+
+- **attach**: detach gate reads only editor_state — delete buffer heuristics (issue #91 phase 6, D1) (#135)
+- control command lifecycle — staged acks, durable journal, reconcile, generation token (issue #91 phase 5, D4) (#134)
+- switch attach to snapshot+subscribe with legacy fallback (issue #91 phase 4, D2 closure) (#122)
+- canonical terminal model and capture-and-subscribe protocol (issue #91 phase 3, D2+D5) (#117)
+- reader-side revision consistency, beat bootstrap, and paired-revision invariant (issue #91, D3 arc closure) (#111)
+
+### Fixes
+
+- **attach**: editor-shaped ← detach anchor + restore the editor-state reporter endpoint (issue #103) (#119)
+- **paths**: normalize root before hashing the win32 coordinator pipe name (issue #124) (#125)
+- **locks**: reclaim Windows lease orphans on publish-rename EPERM (issue #114) (#123)
+- **attach**: stop painting the PTY cursor block when the child hides it (issue #102) (#120)
+- **attach**: learn TUI frame cognition in terminal chain states (issue #106) (#118)
+- **host**: reclaim orphaned host-meta locks and add contention diagnostics (issue #112) (#116)
+- foreground preview read-your-writes cache for coordinator write races (issue #113) (#115)
+
+### Changes
+
+- move the A11 perf gate out of coverage instrumentation (issue #121) (#133)
+
+[0.8.0]: https://github.com/zhuxixi/pi-agent-board/compare/v0.7.0...v0.8.0
+
 ## [0.7.0] - 2026-09-10
 
 ### Features
