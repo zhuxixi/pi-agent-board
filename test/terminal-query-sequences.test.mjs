@@ -64,6 +64,15 @@ test("A1: query split mid-escape is recognized after carry join", () => {
 	assert.equal(joined.carry, "");
 });
 
+test("A1: ST terminator itself split across chunks is recognized after carry join", () => {
+	const first = extractOscQuerySequences("x" + Q_ST.slice(0, -1)); // ...\x1b
+	assert.deepEqual(first.sequences, []);
+	assert.equal(first.carry, Q_ST.slice(0, -1));
+	const joined = extractOscQuerySequences(first.carry + Q_ST.slice(-1) + "tail");
+	assert.deepEqual(joined.sequences, [Q_ST]);
+	assert.equal(joined.carry, "");
+});
+
 test("A1: notify switch split across chunks is recognized after carry join", () => {
 	const first = extractOscQuerySequences("a\x1b[?20");
 	assert.deepEqual(first.sequences, []);
