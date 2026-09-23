@@ -9,7 +9,7 @@ Base: main 1e832a1
 
 **Changes:**
 1. **D1（A1）**: `:241` 附近——`seqsB` 构造改为窗口限定：`messagesB.filter((m) => m.type === "output" && m.seq >= endB.nextSeq).map((m) => m.seq)`；断言注释补一句为什么（订阅前 legacy 行 seq ≤ snapshotSeq < nextSeq，被过滤——引用 runner/pty-runner.mjs 广播分支行号）
-2. **D2（A2）**: `:227` 的 clientA waitFor 之后，加 `await waitFor(() => messagesB.filter((m) => m.type === "output" && m.seq >= endB.nextSeq).length >= ticks)`——显式等 socket B 追平再断言（30s 天花板沿用文件既有 waitFor 默认）
+2. **D2（A2）**: `:227` 的 clientA waitFor 之后，加 `await waitFor(() => messagesB.filter((m) => m.type === "output" && m.seq >= endB.nextSeq).length >= ticks)`——显式等 socket B 追平再断言（沿用文件既有 waitFor 默认——15s，:29；A5-burst 的显式 30s 参数不在本 case）
 3. 断言本体不变（严格连续形态保留——窗口限定后就是纯协议流）
 4. **A3 stress 验证**：在 worktree 里跑 3 轮并行全量 `node --test test/*.test.mjs`（背靠背，高争用）——记录每轮 A5 mid-stream 结果；**若任何一轮 A5 mid-stream 仍失败且错误为 "strictly contiguous"** → 立即回炉报告，不许带病交付；账本 flake（subscribe_terminal / stop-finalize / A5-burst）照常隔离复跑不算回炉条件
 5. **A4**：全量其余断言绿
