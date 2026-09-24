@@ -378,7 +378,7 @@ In the `finally` block, extend the cleanup line to:
 
 - [ ] **Step 3: Run the test 5 times**
 
-Run: `for i in 1 2 3 4 5; do node --test --test-name-pattern="A2: reconnect wires" test/control-reconcile.integration.test.mjs 2>&1 | grep -c "^not ok"; done`
+Run: `for i in 1 2 3 4 5; do node --test --test-reporter=tap --test-name-pattern="A2: reconnect wires" test/control-reconcile.integration.test.mjs 2>&1 | grep -c "^not ok"; done`
 Expected: `0` five times, and each run exercises the overlap (the `waitFor(hasWireOverlap)` must not time out). If the non-vacuity wait proves flaky, apply spec D7: remove this phase, record the reason in the PR description, and note it in the issue.
 
 - [ ] **Step 4: Commit**
@@ -444,7 +444,7 @@ with:
 
 - [ ] **Step 3: Run the epoch test 5 times**
 
-Run: `for i in 1 2 3 4 5; do node --test --test-name-pattern="A2 epoch" test/control-reconcile.integration.test.mjs 2>&1 | grep -c "^not ok"; done`
+Run: `for i in 1 2 3 4 5; do node --test --test-reporter=tap --test-name-pattern="A2 epoch" test/control-reconcile.integration.test.mjs 2>&1 | grep -c "^not ok"; done`
 Expected: `0` five times.
 
 - [ ] **Step 4: Commit**
@@ -536,7 +536,7 @@ test("A2 epoch (slow consumer): the fresh baseline lags behind the epoch reset â
 
 - [ ] **Step 2: Run 5 times**
 
-Run: `for i in 1 2 3 4 5; do node --test --test-name-pattern="A2 epoch" test/control-reconcile.integration.test.mjs 2>&1 | grep -c "^not ok"; done`
+Run: `for i in 1 2 3 4 5; do node --test --test-reporter=tap --test-name-pattern="A2 epoch" test/control-reconcile.integration.test.mjs 2>&1 | grep -c "^not ok"; done`
 Expected: `0` five times (both epoch tests run). If the non-vacuity assertion proves flaky, apply spec D7 (remove the test, record why).
 
 - [ ] **Step 3: Commit**
@@ -677,7 +677,7 @@ Expected: FAIL with `delivered to the UI exactly once`.
 ```bash
 fails=0
 for i in $(seq 1 100); do
-	if ! timeout 120 node --test --test-name-pattern="A2: reconnect|A2 epoch" test/control-reconcile.integration.test.mjs > /tmp/a8-$i.log 2>&1; then
+	if ! timeout 120 node --test --test-reporter=tap --test-name-pattern="A2: reconnect|A2 epoch" test/control-reconcile.integration.test.mjs > /tmp/a8-$i.log 2>&1; then
 		fails=$((fails+1)); echo "FAIL run $i"; grep -m3 "^not ok\|error:" /tmp/a8-$i.log
 	fi
 done
