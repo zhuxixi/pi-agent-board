@@ -519,6 +519,11 @@ test("A2 epoch: runner restart with a generation change discards the cursor — 
 		// The fresh hello carries the NEW identity; the client remembers the
 		// pre-drop generation baseline for the epoch comparison.
 		await waitFor(() => h.messages.some((m) => m.type === "hello" && m.status?.instanceId === second.instanceId));
+		// Taken before the reconnect can possibly fire the epoch reset: the
+		// fresh snapshotReady must be counted from HERE, not from assertion
+		// time (the old `.at(-1)`-on-existence wait returned the stale
+		// pre-restart event instantly — #140 signature B).
+		const readyCountBeforeReconnect = h.eventsOf("snapshotReady").length;
 		h.client.reconnect(disconnectSeq);
 
 		// Generation changed ⇒ the cursor is dead: epochReset + seq-less
@@ -533,12 +538,18 @@ test("A2 epoch: runner restart with a generation change discards the cursor — 
 		assert.equal(sub.sinceSeq, undefined, "fresh snapshot after an epoch change — no ring replay");
 
 		// The fresh baseline: snapshot (empty or framed) then live continuation
-		// from ITS nextSeq — the old cursor is gone.
-		const ready2 = await waitFor(() => h.eventsOf("snapshotReady").at(-1));
+		// from ITS nextSeq — the old cursor is gone. Wait for the snapshotReady
+		// COUNT to grow (the old existence-check never waited), and assert the
+		// invariant client-level: the applied cursor reaches the new baseline
+		// and then advances with a live chunk beyond it. The old wire-level
+		// `.at(-1)` compared a cross-socket accumulator against a possibly
+		// stale baseline — not a valid invariant (#140 signature B).
+		const ready2 = await waitFor(
+			() => (h.eventsOf("snapshotReady").length > readyCountBeforeReconnect ? h.eventsOf("snapshotReady").at(-1) : null),
+			10000,
+		);
 		assert.equal(typeof ready2.nextSeq, "number");
-		await waitFor(() => h.outputSeqs().length >= 1, 10000);
-		assert.ok(h.outputSeqs().at(-1) >= ready2.nextSeq, "live output continues from the new baseline");
-		assert.ok(h.client.getLastSeq() >= ready2.nextSeq - 1);
+		await waitFor(() => h.client.getLastSeq() >= ready2.nextSeq, 10000);
 
 		socket2.destroy();
 	} finally {
