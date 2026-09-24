@@ -79,6 +79,88 @@ function listen(socket) {
 	return { messages };
 }
 
+/** Distinct seqs strictly greater than `from`, in first-occurrence order. */
+function distinctSeqsFrom(seqs, from) {
+	const seen = new Set();
+	const out = [];
+	for (const s of seqs) {
+		if (typeof s !== "number" || s <= from) continue;
+		if (!seen.has(s)) {
+			seen.add(s);
+			out.push(s);
+		}
+	}
+	return out;
+}
+
+/** True when the wire repeated at least one seq — the broadcast→replay overlap. */
+function hasWireOverlap(seqs) {
+	return new Set(seqs).size !== seqs.length;
+}
+
+/** The first `count` distinct seqs must be exactly from+1 .. from+count (no gap). */
+function isContiguousFrom(distinct, from, count) {
+	if (distinct.length < count) return false;
+	for (let i = 0; i < count; i += 1) {
+		if (distinct[i] !== from + i + 1) return false;
+	}
+	return true;
+}
+
+/**
+ * Cross-socket wire/event recorder with windows (#140): `mark()` snapshots the
+ * current lengths; `messagesSince(mark)` / `eventsSince(mark)` scope reads to
+ * everything recorded AFTER the mark, so pre-reconnect residue can never leak
+ * into post-reconnect assertions. `messages` / `events` stay live arrays for
+ * the legacy accessors.
+ */
+function createRecorder() {
+	const messages = [];
+	const events = [];
+	return {
+		messages,
+		events,
+		mark: () => ({ m: messages.length, e: events.length }),
+		messagesSince: (mark) => messages.slice(mark.m),
+		eventsSince: (mark) => events.slice(mark.e),
+	};
+}
+
+// --- #140: seq-window predicates (pure) and the windowed recorder ----------
+
+test("seq window predicates: distinctSeqsFrom keeps first-occurrence order and drops <= from", () => {
+	assert.deepEqual(distinctSeqsFrom([7, 7, 8, 9, 7], 6), [7, 8, 9]);
+	assert.deepEqual(distinctSeqsFrom([9, 10, 9, 11], 8), [9, 10, 11]);
+	assert.deepEqual(distinctSeqsFrom([13, 14, 15, 16, 17, 18, 13, 14, 15, 16, 17, 18], 12), [13, 14, 15, 16, 17, 18]);
+	assert.deepEqual(distinctSeqsFrom([1, 2, 3], 3), []); // boundary: `from` itself excluded
+});
+
+test("seq window predicates: hasWireOverlap", () => {
+	assert.equal(hasWireOverlap([7, 7, 8]), true);
+	assert.equal(hasWireOverlap([7, 8, 9]), false);
+	assert.equal(hasWireOverlap([]), false);
+});
+
+test("seq window predicates: isContiguousFrom", () => {
+	assert.equal(isContiguousFrom([7, 8, 9], 6, 3), true);
+	assert.equal(isContiguousFrom([8, 9, 10], 6, 3), false); // replay start too high (gap at 7)
+	assert.equal(isContiguousFrom([7, 9, 10], 6, 3), false); // a dropped chunk
+	assert.equal(isContiguousFrom([7, 8], 6, 3), false); // not enough yet
+});
+
+test("recorder window: since(mark) excludes everything before the mark", () => {
+	const rec = createRecorder();
+	rec.messages.push({ type: "hello" });
+	rec.events.push({ event: "snapshotReady", payload: { nextSeq: 1 } });
+	const mark = rec.mark();
+	rec.messages.push({ type: "output", seq: 7 });
+	rec.events.push({ event: "output", payload: "x" });
+	assert.equal(rec.messagesSince(mark).length, 1);
+	assert.equal(rec.messagesSince(mark)[0].seq, 7);
+	assert.equal(rec.eventsSince(mark)[0].event, "output");
+	assert.equal(rec.messages.length, 2); // live arrays: legacy accessors keep working
+});
+
 let instanceCounter = 0;
 
 /** Spawn the OWNED main (instance-scoped endpoint) — same shape as the
