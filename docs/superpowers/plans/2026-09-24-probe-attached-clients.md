@@ -330,15 +330,14 @@ import { classifyClientHello, helloBookkeeping } from "../src/core/host-protocol
 					terminalSubscriptions.delete(socket);
 				}
 				if (book.registerReporter) editorReporters.add(socket);
-				// Legacy has no probe-socket close suppression, so this is a no-op
-				// here; it is kept so the shared policy stays readable in both paths.
-				if (book.suppressCloseWrite) socket.markProbe?.();
 				if (book.flipAttachedEver) update({ attachedEver: true });
 				else if (book.persist) update();
 				send(socket, { type: "hello", status: host, editorEmpty, generation: GENERATION });
 				break;
 			}
 ```
+
+> `book.suppressCloseWrite` 在 legacy 分支**不出现**：legacy 的 socket 从未被赋 `markProbe`（只有 owned 的 listen 块赋值），调用它会是恒空操作。描述符仍然导出该字段，A1 单测照旧钉住「probe 不得靠 close 写 host.json」这条路径无关的不变量。
 
 > 注意：legacy reporter 分支原来无条件 `update()`，现在由 `book.persist === true` 驱动，行为等价；probe 分支原来什么都不做，现在**只**移出集合、不 `update()` —— 这正是本任务的行为修复。
 
