@@ -252,14 +252,24 @@ function durableInput({ clientId, seq, instanceId, viewId = "v1", commandId, dat
 /** Drive the real client module over real sockets. The hello is UI-owned and
  *  routed through the same wire recorder so the reconnect ORDER assertion sees
  *  every client-side byte. */
-function attachClientOverSocket(socket, { clientId = "reconcile-ui" } = {}) {
+function attachClientOverSocket(socket, { clientId = "reconcile-ui", deferWrite = () => 0, deferFeed = () => 0 } = {}) {
 	const sent = [];
-	const events = [];
-	const messages = [];
+	const rec = createRecorder();
+	const { messages, events } = rec;
 	let buf = "";
 	let current = socket;
 	const route = (msg) => {
 		sent.push(msg);
+		// Injection seam (#140 A4): defer the WRITE only. `sent` records before
+		// the deferral, so wire-order assertions stay truthful.
+		const writeDelay = deferWrite(msg);
+		if (writeDelay > 0) {
+			const target = current;
+			setTimeout(() => {
+				try { target.write(JSON.stringify(msg) + "\n"); } catch { /* socket death is the close handler's job */ }
+			}, writeDelay);
+			return;
+		}
 		try { current.write(JSON.stringify(msg) + "\n"); } catch { /* socket death is the close handler's job */ }
 	};
 	const feed = (chunk) => {
@@ -270,6 +280,16 @@ function attachClientOverSocket(socket, { clientId = "reconcile-ui" } = {}) {
 			if (!line.trim()) continue;
 			let msg;
 			try { msg = JSON.parse(line); } catch { continue; }
+			// Injection seam (#140 A6): defer BOTH the recording and the client
+			// handling — a slow consumer, for one message class only.
+			const feedDelay = deferFeed(msg);
+			if (feedDelay > 0) {
+				setTimeout(() => {
+					messages.push(msg);
+					client.handleMessage(msg);
+				}, feedDelay);
+				continue;
+			}
 			messages.push(msg);
 			client.handleMessage(msg);
 		}
@@ -296,6 +316,9 @@ function attachClientOverSocket(socket, { clientId = "reconcile-ui" } = {}) {
 			bind(next);
 		},
 		eventsOf: (name) => events.filter((e) => e.event === name).map((e) => e.payload),
+		mark: () => rec.mark(),
+		messagesSince: (mark) => rec.messagesSince(mark),
+		eventsSince: (mark) => rec.eventsSince(mark),
 		// The client's "output" event payload is the bare data string — read
 		// seqs/content from the wire-level messages instead (this socket carries
 		// ONLY the subscribed stream once subscribe_terminal was sent: sticky
