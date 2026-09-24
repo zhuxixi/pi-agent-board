@@ -37,7 +37,7 @@ import {
 } from "../src/core/control-protocol.mjs";
 import { readHost, readState, updateOwnedHost, writeHost } from "../src/core/store.mjs";
 import { sendStateCommand } from "../src/core/coordinator-client.mjs";
-import { classifyClientHello } from "../src/core/host-protocol.mjs";
+import { classifyClientHello, helloBookkeeping } from "../src/core/host-protocol.mjs";
 import { markRowFailedDirect } from "./pty-runner-legacy.mjs";
 import { ensureNodePtySpawnHelperExecutable } from "../src/core/pty-support.mjs";
 
@@ -421,17 +421,19 @@ function legacyMain(config) {
 		switch (msg.type) {
 			case "hello": {
 				// Bookkeeping-only clients must never pin the host against warm-host
-				// reclaim (issue #103 §C): probes are read-only, the editor reporter
-				// is resident. A reporter socket leaves `clients` (the attachedClients
-				// source) but stays writable so editor_state keeps flowing.
-				const kind = classifyClientHello(msg);
-				if (kind === "client") update({ attachedEver: true });
-				if (kind === "editor-reporter") {
+				// reclaim (issue #103 §C / #130): probes are read-only and transient,
+				// the editor reporter is resident. Both leave `clients` — the sole
+				// source of `attachedClients` — while their socket stays writable so
+				// probe replies and editor_state keep flowing. The policy lives in
+				// `helloBookkeeping`, so this path and the owned one cannot drift.
+				const book = helloBookkeeping(classifyClientHello(msg));
+				if (!book.keepInClients) {
 					clients.delete(socket);
 					terminalSubscriptions.delete(socket);
-					editorReporters.add(socket);
-					update();
 				}
+				if (book.registerReporter) editorReporters.add(socket);
+				if (book.flipAttachedEver) update({ attachedEver: true });
+				else if (book.persist) update();
 				send(socket, { type: "hello", status: host, editorEmpty, generation: GENERATION });
 				break;
 			}

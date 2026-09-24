@@ -8,6 +8,7 @@ import { spawn } from "node:child_process";
 import { test } from "node:test";
 import { atomicWriteJson } from "../src/core/atomic.mjs";
 import { readDiagnostics } from "../src/core/diagnostics.mjs";
+import { probeHost } from "../src/core/host-probe.mjs";
 import * as P from "../src/core/paths.mjs";
 import { claimHost, createView, readHost, readMeta, readState, updateOwnedHost, writeHost, writeState } from "../src/core/store.mjs";
 import { readJournal } from "../src/core/coordinator-journal.mjs";
@@ -1372,6 +1373,112 @@ test("legacy runner keeps the editor reporter and probes out of attachedClients/
 		}, 3000);
 		assert.equal(released.attachedClients, 0, "reporter-only host must read as detached for warm-host reclaim");
 		reporter.destroy();
+
+		// Cleanup stays on the tested path: natural child exit.
+		const exitClient = createConnection(socketPath);
+		exitClient.on("error", () => {});
+		await once(exitClient, "connect");
+		send(exitClient, { type: "input", data: "exit\r" });
+		await waitForExit(runner, 5000);
+		exitClient.destroy();
+	} finally {
+		await stopRunner(runner);
+		reapChild(root, "v1");
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("legacy runner: a connected probe never inflates attachedClients (issue #130)", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	try {
+		// Legacy host: host-config WITHOUT `instanceId`, so `main()` dispatches
+		// `legacyMain()` and binds the stable control.sock endpoint.
+		const meta = createView(root, { id: "v1", name: "legacy-probe-count", cwd: process.cwd() });
+		const configPath = P.hostConfigPath(root, "v1");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "v1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" },
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+		await waitFor(() => hostReady(root, "v1"));
+		childPid = readHost(root, "v1")?.childPid ?? null;
+		const socketPath = P.controlSocketPath(root, "v1");
+		const revBefore = readHost(root, "v1").revision;
+
+		// A probe that STAYS connected: the resolver's real pattern is
+		// connect → probe hello → destroy, but the count must already be clean
+		// after the hello — before the close is observed.
+		const probe = createConnection(socketPath);
+		probe.on("error", () => {});
+		await once(probe, "connect");
+		const probeMessages = [];
+		let probeBuf = "";
+		probe.on("data", (chunk) => {
+			probeBuf += chunk.toString();
+			const lines = probeBuf.split("\n");
+			probeBuf = lines.pop() ?? "";
+			for (const line of lines) if (line.trim()) probeMessages.push(JSON.parse(line));
+		});
+		probe.write(JSON.stringify({ type: "hello", clientId: "probe", wantOutput: false }) + "\n");
+		// Two hellos = the unsolicited one sent on connect + the reply to ours,
+		// which is sent AFTER classification ran — so the count is settled here.
+		await waitFor(() => probeMessages.filter((m) => m.type === "hello").length >= 2, 5000);
+
+		// A5/A3: cross at least one heartbeat write while the probe stays
+		// connected. That is exactly the write that used to persist 1.
+		const afterHeartbeat = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.revision > revBefore ? h : false;
+		}, 5000);
+		assert.equal(afterHeartbeat.attachedClients, 0, "a connected probe must not be counted as attached");
+		assert.notEqual(afterHeartbeat.attachedEver, true, "a probe must never mark the host attached");
+
+		// A4: a real client alongside the probe must count exactly 1 — a probe
+		// still sitting in `clients` would make this 2.
+		const client = createConnection(socketPath);
+		client.on("error", () => {});
+		await once(client, "connect");
+		client.write(JSON.stringify({ type: "hello", clientId: "ui-test" }) + "\n");
+		const counted = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.attachedClients === 1 ? h : false;
+		}, 3000);
+		assert.equal(counted.attachedClients, 1, "exactly one attached client — a counted probe would make this 2");
+		assert.equal(counted.attachedEver, true, "a real client still flips attachedEver");
+		client.destroy();
+		const released = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.attachedClients === 0 ? h : false;
+		}, 3000);
+		assert.equal(released.attachedClients, 0, "probe-only host must read as detached for warm-host reclaim");
+
+		// A5 again, driven by the probe's own close: the persisted record must
+		// still read 0 after the probe goes away and a heartbeat lands.
+		const revAfterClient = readHost(root, "v1").revision;
+		probe.destroy();
+		const settled = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.revision > revAfterClient ? h : false;
+		}, 5000);
+		assert.equal(settled.attachedClients, 0, "the record must stay at 0 once the probe is gone");
+
+		// A6: the real resolver probe still classifies this legacy host as ready
+		// (no expectedInstanceId → the legacy ready fallback).
+		const probeResult = await probeHost(socketPath, { expectedViewId: "v1", expectedInstanceId: null });
+		assert.equal(probeResult.classification, "ready", "the real resolver probe must still classify the host ready");
 
 		// Cleanup stays on the tested path: natural child exit.
 		const exitClient = createConnection(socketPath);
