@@ -394,10 +394,20 @@ test("A2: reconnect wires hello → reconcile → subscribe in order; baseline m
 			`same generation ⇒ replay path (sinceSeq=${sub.sinceSeq} covers the applied cursor ${disconnectSeq})`,
 		);
 
-		// Gap-free, duplicate-free continuation after the reconnect.
-		await waitFor(() => h.outputSeqs().filter((s) => s > disconnectSeq).length >= 3);
-		const resumed = h.outputSeqs().filter((s) => s > disconnectSeq).slice(0, 3);
-		assert.deepEqual(resumed, [disconnectSeq + 1, disconnectSeq + 2, disconnectSeq + 3], "no gap, no duplicate after reconnect");
+		// Gap-free continuation after the reconnect. The WIRE may legally repeat
+		// seqs at the broadcast→replay handoff (#140 signature A): a stray the
+		// runner raw-wrote before processing our subscribe can only be DELIVERED
+		// after we sent it, so the client cannot fold it into the cursor — the
+		// ring replay re-sends it and seq-checked consumption dedups. The
+		// invariant is "no gap over the distinct seqs"; a UI-level duplicate is
+		// the marker guard's job below.
+		await waitFor(() => distinctSeqsFrom(h.outputSeqs(), disconnectSeq).length >= 3);
+		const distinct = distinctSeqsFrom(h.outputSeqs(), disconnectSeq);
+		assert.ok(
+			isContiguousFrom(distinct, disconnectSeq, 3),
+			`no gap after reconnect: distinct seqs past the cursor were ${JSON.stringify(distinct.slice(0, 8))}`,
+		);
+		await waitFor(() => h.client.getLastSeq() >= disconnectSeq + 3, 10000);
 		// Task-5 review P0 regression guard: every wire-delivered seq past the
 		// cursor must reach the UI exactly once (gate strays are EMITTED, replay
 		// covers the rest). Compare steady markers: wire vs emitted events.
