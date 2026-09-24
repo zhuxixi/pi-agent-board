@@ -1204,6 +1204,99 @@ test("probe connections leave host.json untouched; real clients flip attachedEve
 	}
 });
 
+test("owned runner: a connected probe never inflates attachedClients (issue #130)", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid;
+	try {
+		const { runner: r, socketPath } = await launchOwnedRunner(root, "v1", "i130");
+		runner = r;
+		const host = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h?.readyAt != null && h?.childPid ? h : false;
+		});
+		childPid = host.childPid;
+		const revBefore = readHost(root, "v1").revision;
+
+		// A probe that STAYS connected. The owned path suppresses the probe's
+		// close-time write on purpose (the resolver probes every 150ms), so the
+		// count has to be right at hello time — waiting for close is not enough.
+		const probe = createConnection(socketPath);
+		probe.on("error", () => {});
+		await once(probe, "connect");
+		const probeMessages = [];
+		let probeBuf = "";
+		probe.on("data", (chunk) => {
+			probeBuf += chunk.toString();
+			const lines = probeBuf.split("\n");
+			probeBuf = lines.pop() ?? "";
+			for (const line of lines) if (line.trim()) probeMessages.push(JSON.parse(line));
+		});
+		probe.write(JSON.stringify({ type: "hello", clientId: "probe", wantOutput: false }) + "\n");
+		// Two hellos = the unsolicited one sent on connect + the reply to ours,
+		// which is sent AFTER classification ran — so the count is settled here.
+		await waitFor(() => probeMessages.filter((m) => m.type === "hello").length >= 2, 5000);
+
+		// A2: cross at least one heartbeat write while the probe stays connected.
+		// That is exactly the write that used to persist attachedClients=1 and
+		// then keep it wrong for a full heartbeat period (measured: ~975ms).
+		const afterHeartbeat = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.revision > revBefore ? h : false;
+		}, 5000);
+		assert.equal(afterHeartbeat.attachedClients, 0, "a connected probe must not be counted as attached");
+		assert.notEqual(afterHeartbeat.attachedEver, true, "a probe must never mark the host attached");
+
+		// A4: a real client alongside the probe must count exactly 1 — a probe
+		// still sitting in `clients` would make this 2.
+		const client = createConnection(socketPath);
+		client.on("error", () => {});
+		await once(client, "connect");
+		client.write(JSON.stringify({ type: "hello", clientId: "ui-test" }) + "\n");
+		const counted = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.attachedClients === 1 ? h : false;
+		}, 3000);
+		assert.equal(counted.attachedClients, 1, "exactly one attached client — a counted probe would make this 2");
+		assert.equal(counted.attachedEver, true, "a real client still flips attachedEver");
+		client.destroy();
+		const released = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.attachedClients === 0 ? h : false;
+		}, 3000);
+		assert.equal(released.attachedClients, 0, "probe-only host must read as detached for warm-host reclaim");
+
+		// A5: the probe's own close is write-suppressed on this path, so the
+		// record must already be 0 and stay 0 across the next heartbeat.
+		const revAfterClient = readHost(root, "v1").revision;
+		probe.destroy();
+		const settled = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h && h.revision > revAfterClient ? h : false;
+		}, 5000);
+		assert.equal(settled.attachedClients, 0, "the record must stay at 0 once the probe is gone");
+
+		// A6: the real resolver probe still classifies this host as ready, and
+		// leaves no residue behind.
+		const probeResult = await probeHost(socketPath, { expectedViewId: "v1", expectedInstanceId: "i130" });
+		assert.equal(probeResult.classification, "ready", "the real resolver probe must still classify the host ready");
+		assert.equal(readHost(root, "v1").attachedEver, true, "probeHost must not disturb the record's attachment history");
+
+		// Cleanup stays on the tested path: natural child exit.
+		const exitClient = createConnection(socketPath);
+		exitClient.on("error", () => {});
+		await once(exitClient, "connect");
+		send(exitClient, { type: "input", data: "exit\r" });
+		await waitForExit(runner, 5000);
+		exitClient.destroy();
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
 test("editor reporter connections leave attachedClients/attachedEver untouched (issue #103)", async () => {
 	const root = freshRoot();
 	const envCapture = join(root, "child-env.txt");

@@ -865,7 +865,9 @@ async function ownedMain(config) {
 		const onError = (err) => resolveListen({ ok: false, error: err });
 		// Probe connections (clientId:"probe" hello) must not write host.json: the
 		// attach resolver's 150ms probe loop would amplify fenced writes and flip
-		// attachedEver with no client ever attached (CR round-1 finding 3).
+		// attachedEver with no client ever attached (CR round-1 finding 3). The
+		// "not counted" half is handled at hello time instead (#130): the socket
+		// leaves `clients` there, so this WeakSet only suppresses the write.
 		const probeSockets = new WeakSet();
 		server = createServer((socket) => {
 			clients.add(socket);
@@ -1091,20 +1093,25 @@ async function ownedMain(config) {
 		}
 		switch (msg.type) {
 			case "hello": {
-				// Probe and reporter sockets are bookkeeping-only: neither may flip
-				// attachedEver nor keep attachedClients non-zero, or warm-host reclaim
-				// never fires and hosts leak (issue #103 §C).
-				const kind = classifyClientHello(msg);
-				if (kind === "probe") {
-					socket.markProbe?.();
-				} else if (kind === "editor-reporter") {
+				// Same bookkeeping contract as the legacy path (issue #103 §C /
+				// #130): probes and the resident editor reporter are
+				// bookkeeping-only — neither may flip attachedEver nor keep
+				// attachedClients non-zero, or warm-host reclaim never fires and
+				// hosts leak. The policy lives in `helloBookkeeping`.
+				const book = helloBookkeeping(classifyClientHello(msg));
+				if (!book.keepInClients) {
 					clients.delete(socket);
 					terminalSubscriptions.delete(socket);
-					editorReporters.add(socket);
-					ownedUpdate((cur) => ({ ...cur }));
-				} else {
-					ownedUpdate((cur) => ({ ...cur, attachedEver: true }));
 				}
+				if (book.registerReporter) editorReporters.add(socket);
+				// The probe's close-time host.json refresh stays suppressed: the
+				// resolver probes every HOST_PROBE_RETRY_MS, so flushing there
+				// would amplify fenced writes (see the probeSockets comment at the
+				// listen block). Being out of `clients` is what keeps the count
+				// right — this only avoids a pointless write.
+				if (book.suppressCloseWrite) socket.markProbe?.();
+				if (book.flipAttachedEver) ownedUpdate((cur) => ({ ...cur, attachedEver: true }));
+				else if (book.persist) ownedUpdate((cur) => ({ ...cur }));
 				send(socket, { type: "hello", status: host, editorEmpty, generation: GENERATION });
 				break;
 			}
