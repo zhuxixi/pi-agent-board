@@ -332,14 +332,18 @@ test("A2: reconnect wires hello → reconcile → subscribe in order; baseline m
 	const root = freshRoot();
 	let runner;
 	let socket2 = null;
+	let socket3 = null;
 	try {
 		const spawned = spawnOwnedRunner(root, "v1");
 		runner = spawned.runner;
 		const { instanceId, socketPath } = spawned;
 		await waitFor(() => hostReady(root, "v1"));
 
+		let deferSecondSubscribe = false;
 		const socket1 = await connectControl(socketPath);
-		const h = attachClientOverSocket(socket1);
+		const h = attachClientOverSocket(socket1, {
+			deferWrite: (msg) => (deferSecondSubscribe && msg.type === "subscribe_terminal" ? 150 : 0),
+		});
 		h.hello();
 		await waitFor(() => h.messages.some((m) => m.type === "hello" && m.generation));
 		const gen1 = h.client.getIdentity().generation;
@@ -433,11 +437,49 @@ test("A2: reconnect wires hello → reconcile → subscribe in order; baseline m
 		await waitFor(() => h.messages.filter((m) => m.type === "cmd_ack" && m.commandId === "follow-1" && m.stage === "applied").length >= 2);
 		assert.equal(h.echoCount("echo:resume-probe"), 1, "commandId dedup: the retry never re-writes the child");
 
+		// --- #140 signature A: deterministic overlap interleaving (A4) --------
+		// Second reconnect on the SAME runner, with the subscribe WRITE deferred
+		// past ~6 steady ticks (150ms >= 4x the 25ms tick; 40ms measured only
+		// 2/5). During the deferral the runner keeps raw-broadcasting to the
+		// unsubscribed socket — exactly the CI window. `sent` records before the
+		// deferral, so the wire-order assertion above stays truthful.
+		const drop2 = h.client.getLastSeq();
 		socket2.destroy();
+		socket3 = await connectControl(socketPath);
+		h.switchSocket(socket3);
+		const phase2 = h.mark();
+		deferSecondSubscribe = true;
+		h.hello();
+		h.client.reconnect(drop2);
+
+		// Non-vacuity: the overlap must actually appear (in-flight strays the
+		// client could not fold in, re-sent by the ring replay).
+		await waitFor(() => hasWireOverlap(h.outputSeqs().filter((s) => s > drop2)), 5000);
+		const distinct2 = distinctSeqsFrom(h.outputSeqs(), drop2);
+		assert.ok(
+			isContiguousFrom(distinct2, drop2, 3),
+			`no gap under the wire overlap: distinct seqs were ${JSON.stringify(distinct2.slice(0, 8))}`,
+		);
+		await waitFor(() => h.client.getLastSeq() >= drop2 + 3, 10000);
+		// UI exactly-once still holds under the overlap (marker guard, phase 2).
+		{
+			const wireMarkers2 = h.messagesSince(phase2)
+				.filter((m) => m.type === "output" && typeof m.seq === "number" && m.seq > drop2)
+				.flatMap((m) => String(m.data ?? "").match(/steady-\d+/g) ?? []);
+			const uiMarkers2 = h.events
+				.filter((e) => e.event === "output")
+				.flatMap((e) => String(e.payload ?? "").match(/steady-\d+/g) ?? []);
+			const uiCounts2 = new Map();
+			for (const mk of uiMarkers2) uiCounts2.set(mk, (uiCounts2.get(mk) ?? 0) + 1);
+			for (const mk of new Set(wireMarkers2)) {
+				assert.equal(uiCounts2.get(mk) ?? 0, 1, `steady marker ${mk} delivered to the UI exactly once (overlap phase)`);
+			}
+		}
+		socket3.destroy();
 	} finally {
 		await stopRunner(runner);
 		reapChild(root, "v1");
-		try { socket2?.destroy(); } catch {}
+		try { socket2?.destroy(); socket3?.destroy(); } catch {}
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
 });
