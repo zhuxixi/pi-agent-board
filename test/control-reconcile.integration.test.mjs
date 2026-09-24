@@ -581,7 +581,13 @@ test("A2 epoch (slow consumer): the fresh baseline lags behind the epoch reset �
 		await waitFor(() => hostReady(root, "v1"));
 		const socket1 = await connectControl(first.socketPath);
 		const h = attachClientOverSocket(socket1, {
-			deferFeed: (msg) => (slowSnapshots && typeof msg.type === "string" && msg.type.startsWith("snapshot") ? 300 : 0),
+			// RELATIVE delay on all DATA messages (snapshot frames + output); the
+			// reconcile reply stays immediate so the epoch reset fires on time.
+			// With outputs delayed too, no stray can flip the client out of
+			// resyncing during the lag window — the client waits there until the
+			// whole snapshot batch lands, then converges on the single
+			// collecting→live path (no resync amplification). (#140 A8 finding B)
+			deferFeed: (msg) => (slowSnapshots && typeof msg.type === "string" && (msg.type.startsWith("snapshot") || msg.type === "output") ? 300 : 0),
 		});
 		h.hello();
 		await waitFor(() => h.messages.some((m) => m.type === "hello" && m.generation));
@@ -607,10 +613,11 @@ test("A2 epoch (slow consumer): the fresh baseline lags behind the epoch reset �
 		const reset = await waitFor(() => h.eventsOf("epochReset")[0]);
 		assert.equal(typeof reset.current, "string");
 		// Non-vacuity: we proceeded past the epoch reset while the fresh
-		// baseline was still in flight — the relative delay guarantees it. (A
-		// stray landing in resyncing can flip the client to live early; the
-		// delayed snapshot_begin then triggers a resync and the flow still
-		// converges — the 10s waits absorb that extra round trip.)
+		// baseline was still in flight — the relative delay guarantees it. The
+		// relative delay holds every snapshot-frame and output back 300ms while
+		// the reconcile reply lands immediately, so the epoch reset fires into
+		// a client still waiting in resyncing; the fresh snapshot then
+		// converges on the single collecting→live path.
 		assert.equal(h.eventsOf("snapshotReady").length, readyCount, "no fresh snapshotReady yet (the lag window is real)");
 
 		const ready2 = await waitFor(
