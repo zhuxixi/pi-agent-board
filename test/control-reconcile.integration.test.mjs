@@ -98,11 +98,12 @@ function hasWireOverlap(seqs) {
 	return new Set(seqs).size !== seqs.length;
 }
 
-/** The first `count` distinct seqs must be exactly from+1 .. from+count (no gap). */
-function isContiguousFrom(distinct, from, count) {
-	if (distinct.length < count) return false;
+/** No-gap over the SET: distinct seqs (sorted) must include from+1 .. from+count. Arrival ORDER is not part of the invariant — at the broadcast→replay handoff a stray can arrive ahead of the chunk the replay re-sends (#140 A8 finding). */
+function coversRange(seqs, from, count) {
+	const sorted = [...new Set(seqs.filter((s) => typeof s === "number" && s > from))].sort((a, b) => a - b);
+	if (sorted.length < count) return false;
 	for (let i = 0; i < count; i += 1) {
-		if (distinct[i] !== from + i + 1) return false;
+		if (sorted[i] !== from + i + 1) return false;
 	}
 	return true;
 }
@@ -141,11 +142,14 @@ test("seq window predicates: hasWireOverlap", () => {
 	assert.equal(hasWireOverlap([]), false);
 });
 
-test("seq window predicates: isContiguousFrom", () => {
-	assert.equal(isContiguousFrom([7, 8, 9], 6, 3), true);
-	assert.equal(isContiguousFrom([8, 9, 10], 6, 3), false); // replay start too high (gap at 7)
-	assert.equal(isContiguousFrom([7, 9, 10], 6, 3), false); // a dropped chunk
-	assert.equal(isContiguousFrom([7, 8], 6, 3), false); // not enough yet
+test("seq window predicates: coversRange checks set coverage, not arrival order", () => {
+	assert.equal(coversRange([7, 8, 9], 6, 3), true);
+	assert.equal(coversRange([12, 13, 14, 15, 16, 17, 11], 10, 3), true); // arrival-order artifact from the A8 loop
+	assert.equal(coversRange([12, 13, 14, 15, 16, 17, 11], 10, 7), true); // full set covered
+	assert.equal(coversRange([8, 9, 10], 6, 3), false); // replay start too high (gap at 7)
+	assert.equal(coversRange([7, 9, 10], 6, 3), false); // dropped chunk
+	assert.equal(coversRange([7, 8], 6, 3), false); // not enough yet
+	assert.equal(coversRange([1, 2, 3], 3, 1), false); // boundary: `from` excluded
 });
 
 test("recorder window: since(mark) excludes everything before the mark", () => {
@@ -405,11 +409,10 @@ test("A2: reconnect wires hello → reconcile → subscribe in order; baseline m
 		// ring replay re-sends it and seq-checked consumption dedups. The
 		// invariant is "no gap over the distinct seqs"; a UI-level duplicate is
 		// the marker guard's job below.
-		await waitFor(() => distinctSeqsFrom(h.outputSeqs(), disconnectSeq).length >= 3);
-		const distinct = distinctSeqsFrom(h.outputSeqs(), disconnectSeq);
+		await waitFor(() => coversRange(h.outputSeqs(), disconnectSeq, 3));
 		assert.ok(
-			isContiguousFrom(distinct, disconnectSeq, 3),
-			`no gap after reconnect: distinct seqs past the cursor were ${JSON.stringify(distinct.slice(0, 8))}`,
+			coversRange(h.outputSeqs(), disconnectSeq, 3),
+			`no gap after reconnect: distinct seqs past the cursor were ${JSON.stringify(distinctSeqsFrom(h.outputSeqs(), disconnectSeq).slice(0, 8))}`,
 		);
 		await waitFor(() => h.client.getLastSeq() >= disconnectSeq + 3, 10000);
 		// Task-5 review P0 regression guard: every wire-delivered seq past the
@@ -455,10 +458,10 @@ test("A2: reconnect wires hello → reconcile → subscribe in order; baseline m
 		// Non-vacuity: the overlap must actually appear (in-flight strays the
 		// client could not fold in, re-sent by the ring replay).
 		await waitFor(() => hasWireOverlap(h.outputSeqs().filter((s) => s > drop2)), 5000);
-		const distinct2 = distinctSeqsFrom(h.outputSeqs(), drop2);
+		await waitFor(() => coversRange(h.outputSeqs(), drop2, 3));
 		assert.ok(
-			isContiguousFrom(distinct2, drop2, 3),
-			`no gap under the wire overlap: distinct seqs were ${JSON.stringify(distinct2.slice(0, 8))}`,
+			coversRange(h.outputSeqs(), drop2, 3),
+			`no gap under the wire overlap: distinct seqs were ${JSON.stringify(distinctSeqsFrom(h.outputSeqs(), drop2).slice(0, 8))}`,
 		);
 		await waitFor(() => h.client.getLastSeq() >= drop2 + 3, 10000);
 		// UI exactly-once still holds under the overlap (marker guard, phase 2).
