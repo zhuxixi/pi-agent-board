@@ -48,8 +48,9 @@
  *   binds the reconnect order hello → reconcile → snapshot/subscribe. All
  *   runner messages in this state are consumed; outputs are ALSO EMITTED —
  *   they are legacy-broadcast strays that must reach the UI exactly once
- *   (strays cover (cursor, strayHighWater]; the replay starts past the
- *   high-water; see the reconciling output branch). Resolution:
+ *   (OBSERVED strays cover (cursor, strayHighWater]; the replay starts past
+ *   the high-water; in-flight strays are re-sent by the replay and deduped —
+ *   see the reconciling output branch). Resolution:
  *   - `reconcile_result` → epoch rule: generation CHANGED since last seen ⇒
  *     discard the cursor (`lastSeq = 0`, `epochReset` event) ⇒ seq-less
  *     subscribe (fresh snapshot — ring replay across runner generations is
@@ -336,7 +337,11 @@ export function createTerminalAttachClient({
 
 	const issueReconnectSubscribe = (sinceSeq) => {
 		// The cursor must clear every stray the legacy broadcast already
-		// delivered to this socket during the gate (wire-level no-dup).
+		// DELIVERED to this socket during the gate. Strays still in flight when
+		// the subscribe is written cannot be folded in: the ring replay re-sends
+		// them and seq-checked consumption dedups — the guarantee is UI-level
+		// exactly-once; a wire-level repeat at the broadcast→replay handoff is
+		// expected (#140).
 		const effective = Math.max(sinceSeq, strayHighWater);
 		strayHighWater = 0;
 		const cursor = reconnectCursor;
