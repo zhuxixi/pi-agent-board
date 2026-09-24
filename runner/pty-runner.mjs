@@ -432,6 +432,8 @@ function legacyMain(config) {
 					terminalSubscriptions.delete(socket);
 				}
 				if (book.registerReporter) editorReporters.add(socket);
+				// A real client writes via flipAttachedEver alone (hence the `else
+				// if`); `persist` is the write flag for rows that write as-is (reporter).
 				if (book.flipAttachedEver) update({ attachedEver: true });
 				else if (book.persist) update();
 				send(socket, { type: "hello", status: host, editorEmpty, generation: GENERATION });
@@ -1110,6 +1112,8 @@ async function ownedMain(config) {
 				// listen block). Being out of `clients` is what keeps the count
 				// right — this only avoids a pointless write.
 				if (book.suppressCloseWrite) socket.markProbe?.();
+				// A real client writes via flipAttachedEver alone (hence the `else
+				// if`); `persist` is the write flag for rows that write as-is (reporter).
 				if (book.flipAttachedEver) ownedUpdate((cur) => ({ ...cur, attachedEver: true }));
 				else if (book.persist) ownedUpdate((cur) => ({ ...cur }));
 				send(socket, { type: "hello", status: host, editorEmpty, generation: GENERATION });

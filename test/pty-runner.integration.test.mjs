@@ -1280,6 +1280,7 @@ test("owned runner: a connected probe never inflates attachedClients (issue #130
 		// leaves no residue behind.
 		const probeResult = await probeHost(socketPath, { expectedViewId: "v1", expectedInstanceId: "i130" });
 		assert.equal(probeResult.classification, "ready", "the real resolver probe must still classify the host ready");
+		assert.equal(readHost(root, "v1").attachedClients, 0, "the real resolver probe must leave attachedClients at 0");
 		assert.equal(readHost(root, "v1").attachedEver, true, "probeHost must not disturb the record's attachment history");
 
 		// Cleanup stays on the tested path: natural child exit.
@@ -1572,6 +1573,7 @@ test("legacy runner: a connected probe never inflates attachedClients (issue #13
 		// (no expectedInstanceId → the legacy ready fallback).
 		const probeResult = await probeHost(socketPath, { expectedViewId: "v1", expectedInstanceId: null });
 		assert.equal(probeResult.classification, "ready", "the real resolver probe must still classify the host ready");
+		assert.equal(readHost(root, "v1").attachedClients, 0, "the real resolver probe must leave attachedClients at 0");
 
 		// Cleanup stays on the tested path: natural child exit.
 		const exitClient = createConnection(socketPath);

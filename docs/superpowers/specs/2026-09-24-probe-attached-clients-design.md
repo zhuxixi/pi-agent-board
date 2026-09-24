@@ -160,7 +160,7 @@ A2/A3（probe 在连 → attachedClients 落盘为 0）
 
 | 拆分单元 | 位置 | 形态 | 测试边界 |
 |---|---|---|---|
-| `helloBookkeeping(kind)` | `src/core/host-protocol.mjs`（新增） | **纯函数**：入参三值字符串，出参冻结的记账描述符；零 IO、零 socket | `test/host-protocol.test.mjs` 表驱动直接单测 → A1 |
+| `helloBookkeeping(kind)` | `src/core/host-protocol.mjs`（新增） | **纯函数**：入参三值字符串，出参为每次调用新建的记账描述符对象（不冻结，各次调用互不共享实例，别名安全）；零 IO、零 socket | `test/host-protocol.test.mjs` 表驱动直接单测 → A1 |
 | `classifyClientHello(msg)` | `src/core/host-protocol.mjs`（既有，不改） | 纯函数 | 既有单测保持 → A1 |
 | hello 分支副作用 | `runner/pty-runner.mjs` 两处 | 只消费描述符、只做 `clients`/`terminalSubscriptions`/`editorReporters`/`update` 的副作用调用；**判定逻辑一律不得回流进分支** | 真实进程 integration → A2–A7 |
 | 计数落盘点 | 不改（`clients.size`，legacy `:256` / owned `:611`） | 保持单一来源 | 由 A2–A5 观测 |
