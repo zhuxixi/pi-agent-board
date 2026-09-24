@@ -469,7 +469,7 @@ test("A2: reconnect wires hello → reconcile → subscribe in order; baseline m
 			const wireMarkers2 = h.messagesSince(phase2)
 				.filter((m) => m.type === "output" && typeof m.seq === "number" && m.seq > drop2)
 				.flatMap((m) => String(m.data ?? "").match(/steady-\d+/g) ?? []);
-			const uiMarkers2 = h.events
+			const uiMarkers2 = h.eventsSince(phase2)
 				.filter((e) => e.event === "output")
 				.flatMap((e) => String(e.payload ?? "").match(/steady-\d+/g) ?? []);
 			const uiCounts2 = new Map();

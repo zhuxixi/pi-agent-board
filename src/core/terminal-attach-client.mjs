@@ -671,8 +671,9 @@ export function createTerminalAttachClient({
 					// The fresh socket is not subscribed yet: everything here is
 					// broadcast stray. Consume so the UI legacy path can never
 					// double-feed — and EMIT it: these bytes must reach the UI exactly
-					// once (strays cover (cursor, strayHighWater]; the replay starts
-					// past strayHighWater). Consuming WITHOUT emitting would silently
+					// once (OBSERVED strays cover (cursor, strayHighWater]; the replay
+					// starts past the high-water; in-flight strays are re-sent by the
+					// replay and deduped). Consuming WITHOUT emitting would silently
 					// drop them from the rendered output — a data-loss regression the
 					// task-5 review caught. lastSeq deliberately does NOT advance here:
 					// the subscribe cursor (max(cursor, strayHighWater)) carries the

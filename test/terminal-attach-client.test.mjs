@@ -694,7 +694,8 @@ test("reconciling consumes stray broadcast output/begin without corrupting the g
 	client.handleMessage({ type: "reconcile_result", commandId: rec.commandId, generation: "gen-1", hostRevision: 5, terminalCursor: { lastSeq: 12 }, stateMaterializedRevision: null, unresolved: [] });
 	// Stray high-water advances the subscribe cursor: the legacy broadcast and
 	// the replay stream overlap on the wire, so the cursor must start PAST every
-	// stray already delivered (wire-level no-dup; A2 integration pins the same).
+	// stray already delivered (no dup for OBSERVED strays; in-flight strays are
+	// re-sent by the replay and deduped — UI-level exactly-once, #140).
 	assert.deepEqual(sent.at(-1), SUB_SEQ(10), "subscribe cursor clears the stray high-water (no wire duplicate)");
 });
 
