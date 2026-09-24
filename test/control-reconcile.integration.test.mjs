@@ -561,6 +561,72 @@ test("A2 epoch: runner restart with a generation change discards the cursor — 
 	}
 });
 
+test("A2 epoch (slow consumer): the fresh baseline lags behind the epoch reset — stale-baseline window pinned (#140 A6)", async () => {
+	const root = freshRoot();
+	let runner;
+	let runner2;
+	let socket2 = null;
+	try {
+		// Same shape as the epoch test above, but the snapshot-path messages on
+		// the new socket are fed late (RELATIVE delay — a uniform delay shifts
+		// everything equally and proves nothing). The epoch reset fires
+		// immediately; the fresh baseline lags 300ms behind. That is exactly
+		// the window in which the old :383 assertion read a stale baseline.
+		let slowSnapshots = false;
+		const first = spawnOwnedRunner(root, "v1");
+		runner = first.runner;
+		await waitFor(() => hostReady(root, "v1"));
+		const socket1 = await connectControl(first.socketPath);
+		const h = attachClientOverSocket(socket1, {
+			deferFeed: (msg) => (slowSnapshots && typeof msg.type === "string" && msg.type.startsWith("snapshot") ? 300 : 0),
+		});
+		h.hello();
+		await waitFor(() => h.messages.some((m) => m.type === "hello" && m.generation));
+		h.client.start();
+		await waitFor(() => h.eventsOf("snapshotReady")[0]);
+		await waitFor(() => h.client.getLastSeq() >= 3, 10000);
+		const disconnectSeq = h.client.getLastSeq();
+
+		await stopRunner(runner);
+		reapChild(root, "v1");
+		const second = spawnOwnedRunner(root, "v1");
+		runner2 = second.runner;
+		await waitFor(() => hostReady(root, "v1"));
+
+		socket2 = await connectControl(second.socketPath);
+		h.switchSocket(socket2);
+		h.hello();
+		await waitFor(() => h.messages.some((m) => m.type === "hello" && m.status?.instanceId === second.instanceId));
+		const readyCount = h.eventsOf("snapshotReady").length;
+		slowSnapshots = true;
+		h.client.reconnect(disconnectSeq);
+
+		const reset = await waitFor(() => h.eventsOf("epochReset")[0]);
+		assert.equal(typeof reset.current, "string");
+		// Non-vacuity: we proceeded past the epoch reset while the fresh
+		// baseline was still in flight — the relative delay guarantees it. (A
+		// stray landing in resyncing can flip the client to live early; the
+		// delayed snapshot_begin then triggers a resync and the flow still
+		// converges — the 10s waits absorb that extra round trip.)
+		assert.equal(h.eventsOf("snapshotReady").length, readyCount, "no fresh snapshotReady yet (the lag window is real)");
+
+		const ready2 = await waitFor(
+			() => (h.eventsOf("snapshotReady").length > readyCount ? h.eventsOf("snapshotReady").at(-1) : null),
+			10000,
+		);
+		assert.equal(typeof ready2.nextSeq, "number");
+		await waitFor(() => h.client.getLastSeq() >= ready2.nextSeq, 10000);
+
+		socket2.destroy();
+	} finally {
+		await stopRunner(runner);
+		await stopRunner(runner2);
+		reapChild(root, "v1");
+		try { socket2?.destroy(); } catch {}
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
 /** host.json for a LIVE host whose socket does not exist yet (reply queues the
  *  prompt against the dead socket — the launch path must not fire). */
 function writeLiveHostFor(root, viewId, socketPath, instanceId) {
