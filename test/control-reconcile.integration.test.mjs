@@ -79,6 +79,92 @@ function listen(socket) {
 	return { messages };
 }
 
+/** Distinct seqs strictly greater than `from`, in first-occurrence order. */
+function distinctSeqsFrom(seqs, from) {
+	const seen = new Set();
+	const out = [];
+	for (const s of seqs) {
+		if (typeof s !== "number" || s <= from) continue;
+		if (!seen.has(s)) {
+			seen.add(s);
+			out.push(s);
+		}
+	}
+	return out;
+}
+
+/** True when the wire repeated at least one seq — the broadcast→replay overlap. */
+function hasWireOverlap(seqs) {
+	return new Set(seqs).size !== seqs.length;
+}
+
+/** No-gap over the SET: distinct seqs (sorted) must include from+1 .. from+count. Arrival ORDER is not part of the invariant — at the broadcast→replay handoff a stray can arrive ahead of the chunk the replay re-sends (#140 A8 finding). */
+function coversRange(seqs, from, count) {
+	const sorted = [...new Set(seqs.filter((s) => typeof s === "number" && s > from))].sort((a, b) => a - b);
+	if (sorted.length < count) return false;
+	for (let i = 0; i < count; i += 1) {
+		if (sorted[i] !== from + i + 1) return false;
+	}
+	return true;
+}
+
+/**
+ * Cross-socket wire/event recorder with windows (#140): `mark()` snapshots the
+ * current lengths; `messagesSince(mark)` / `eventsSince(mark)` scope reads to
+ * everything recorded AFTER the mark, so pre-reconnect residue can never leak
+ * into post-reconnect assertions. `messages` / `events` stay live arrays for
+ * the legacy accessors.
+ */
+function createRecorder() {
+	const messages = [];
+	const events = [];
+	return {
+		messages,
+		events,
+		mark: () => ({ m: messages.length, e: events.length }),
+		messagesSince: (mark) => messages.slice(mark.m),
+		eventsSince: (mark) => events.slice(mark.e),
+	};
+}
+
+// --- #140: seq-window predicates (pure) and the windowed recorder ----------
+
+test("seq window predicates: distinctSeqsFrom keeps first-occurrence order and drops <= from", () => {
+	assert.deepEqual(distinctSeqsFrom([7, 7, 8, 9, 7], 6), [7, 8, 9]);
+	assert.deepEqual(distinctSeqsFrom([9, 10, 9, 11], 8), [9, 10, 11]);
+	assert.deepEqual(distinctSeqsFrom([13, 14, 15, 16, 17, 18, 13, 14, 15, 16, 17, 18], 12), [13, 14, 15, 16, 17, 18]);
+	assert.deepEqual(distinctSeqsFrom([1, 2, 3], 3), []); // boundary: `from` itself excluded
+});
+
+test("seq window predicates: hasWireOverlap", () => {
+	assert.equal(hasWireOverlap([7, 7, 8]), true);
+	assert.equal(hasWireOverlap([7, 8, 9]), false);
+	assert.equal(hasWireOverlap([]), false);
+});
+
+test("seq window predicates: coversRange checks set coverage, not arrival order", () => {
+	assert.equal(coversRange([7, 8, 9], 6, 3), true);
+	assert.equal(coversRange([12, 13, 14, 15, 16, 17, 11], 10, 3), true); // arrival-order artifact from the A8 loop
+	assert.equal(coversRange([12, 13, 14, 15, 16, 17, 11], 10, 7), true); // full set covered
+	assert.equal(coversRange([8, 9, 10], 6, 3), false); // replay start too high (gap at 7)
+	assert.equal(coversRange([7, 9, 10], 6, 3), false); // dropped chunk
+	assert.equal(coversRange([7, 8], 6, 3), false); // not enough yet
+	assert.equal(coversRange([1, 2, 3], 3, 1), false); // boundary: `from` excluded
+});
+
+test("recorder window: since(mark) excludes everything before the mark", () => {
+	const rec = createRecorder();
+	rec.messages.push({ type: "hello" });
+	rec.events.push({ event: "snapshotReady", payload: { nextSeq: 1 } });
+	const mark = rec.mark();
+	rec.messages.push({ type: "output", seq: 7 });
+	rec.events.push({ event: "output", payload: "x" });
+	assert.equal(rec.messagesSince(mark).length, 1);
+	assert.equal(rec.messagesSince(mark)[0].seq, 7);
+	assert.equal(rec.eventsSince(mark)[0].event, "output");
+	assert.equal(rec.messages.length, 2); // live arrays: legacy accessors keep working
+});
+
 let instanceCounter = 0;
 
 /** Spawn the OWNED main (instance-scoped endpoint) — same shape as the
@@ -170,14 +256,24 @@ function durableInput({ clientId, seq, instanceId, viewId = "v1", commandId, dat
 /** Drive the real client module over real sockets. The hello is UI-owned and
  *  routed through the same wire recorder so the reconnect ORDER assertion sees
  *  every client-side byte. */
-function attachClientOverSocket(socket, { clientId = "reconcile-ui" } = {}) {
+function attachClientOverSocket(socket, { clientId = "reconcile-ui", deferWrite = () => 0, deferFeed = () => 0 } = {}) {
 	const sent = [];
-	const events = [];
-	const messages = [];
+	const rec = createRecorder();
+	const { messages, events } = rec;
 	let buf = "";
 	let current = socket;
 	const route = (msg) => {
 		sent.push(msg);
+		// Injection seam (#140 A4): defer the WRITE only. `sent` records before
+		// the deferral, so wire-order assertions stay truthful.
+		const writeDelay = deferWrite(msg);
+		if (writeDelay > 0) {
+			const target = current;
+			setTimeout(() => {
+				try { target.write(JSON.stringify(msg) + "\n"); } catch { /* socket death is the close handler's job */ }
+			}, writeDelay);
+			return;
+		}
 		try { current.write(JSON.stringify(msg) + "\n"); } catch { /* socket death is the close handler's job */ }
 	};
 	const feed = (chunk) => {
@@ -188,6 +284,16 @@ function attachClientOverSocket(socket, { clientId = "reconcile-ui" } = {}) {
 			if (!line.trim()) continue;
 			let msg;
 			try { msg = JSON.parse(line); } catch { continue; }
+			// Injection seam (#140 A6): defer BOTH the recording and the client
+			// handling — a slow consumer, for one message class only.
+			const feedDelay = deferFeed(msg);
+			if (feedDelay > 0) {
+				setTimeout(() => {
+					messages.push(msg);
+					client.handleMessage(msg);
+				}, feedDelay);
+				continue;
+			}
 			messages.push(msg);
 			client.handleMessage(msg);
 		}
@@ -214,6 +320,9 @@ function attachClientOverSocket(socket, { clientId = "reconcile-ui" } = {}) {
 			bind(next);
 		},
 		eventsOf: (name) => events.filter((e) => e.event === name).map((e) => e.payload),
+		mark: () => rec.mark(),
+		messagesSince: (mark) => rec.messagesSince(mark),
+		eventsSince: (mark) => rec.eventsSince(mark),
 		// The client's "output" event payload is the bare data string — read
 		// seqs/content from the wire-level messages instead (this socket carries
 		// ONLY the subscribed stream once subscribe_terminal was sent: sticky
@@ -227,14 +336,18 @@ test("A2: reconnect wires hello → reconcile → subscribe in order; baseline m
 	const root = freshRoot();
 	let runner;
 	let socket2 = null;
+	let socket3 = null;
 	try {
 		const spawned = spawnOwnedRunner(root, "v1");
 		runner = spawned.runner;
 		const { instanceId, socketPath } = spawned;
 		await waitFor(() => hostReady(root, "v1"));
 
+		let deferSecondSubscribe = false;
 		const socket1 = await connectControl(socketPath);
-		const h = attachClientOverSocket(socket1);
+		const h = attachClientOverSocket(socket1, {
+			deferWrite: (msg) => (deferSecondSubscribe && msg.type === "subscribe_terminal" ? 150 : 0),
+		});
 		h.hello();
 		await waitFor(() => h.messages.some((m) => m.type === "hello" && m.generation));
 		const gen1 = h.client.getIdentity().generation;
@@ -289,10 +402,19 @@ test("A2: reconnect wires hello → reconcile → subscribe in order; baseline m
 			`same generation ⇒ replay path (sinceSeq=${sub.sinceSeq} covers the applied cursor ${disconnectSeq})`,
 		);
 
-		// Gap-free, duplicate-free continuation after the reconnect.
-		await waitFor(() => h.outputSeqs().filter((s) => s > disconnectSeq).length >= 3);
-		const resumed = h.outputSeqs().filter((s) => s > disconnectSeq).slice(0, 3);
-		assert.deepEqual(resumed, [disconnectSeq + 1, disconnectSeq + 2, disconnectSeq + 3], "no gap, no duplicate after reconnect");
+		// Gap-free continuation after the reconnect. The WIRE may legally repeat
+		// seqs at the broadcast→replay handoff (#140 signature A): a stray the
+		// runner raw-wrote before processing our subscribe can only be DELIVERED
+		// after we sent it, so the client cannot fold it into the cursor — the
+		// ring replay re-sends it and seq-checked consumption dedups. The
+		// invariant is "no gap over the distinct seqs"; a UI-level duplicate is
+		// the marker guard's job below.
+		await waitFor(() => coversRange(h.outputSeqs(), disconnectSeq, 3));
+		assert.ok(
+			coversRange(h.outputSeqs(), disconnectSeq, 3),
+			`no gap after reconnect: distinct seqs past the cursor were ${JSON.stringify(distinctSeqsFrom(h.outputSeqs(), disconnectSeq).slice(0, 8))}`,
+		);
+		await waitFor(() => h.client.getLastSeq() >= disconnectSeq + 3, 10000);
 		// Task-5 review P0 regression guard: every wire-delivered seq past the
 		// cursor must reach the UI exactly once (gate strays are EMITTED, replay
 		// covers the rest). Compare steady markers: wire vs emitted events.
@@ -318,11 +440,49 @@ test("A2: reconnect wires hello → reconcile → subscribe in order; baseline m
 		await waitFor(() => h.messages.filter((m) => m.type === "cmd_ack" && m.commandId === "follow-1" && m.stage === "applied").length >= 2);
 		assert.equal(h.echoCount("echo:resume-probe"), 1, "commandId dedup: the retry never re-writes the child");
 
+		// --- #140 signature A: deterministic overlap interleaving (A4) --------
+		// Second reconnect on the SAME runner, with the subscribe WRITE deferred
+		// past ~6 steady ticks (150ms >= 4x the 25ms tick; 40ms measured only
+		// 2/5). During the deferral the runner keeps raw-broadcasting to the
+		// unsubscribed socket — exactly the CI window. `sent` records before the
+		// deferral, so the wire-order assertion above stays truthful.
+		const drop2 = h.client.getLastSeq();
 		socket2.destroy();
+		socket3 = await connectControl(socketPath);
+		h.switchSocket(socket3);
+		const phase2 = h.mark();
+		deferSecondSubscribe = true;
+		h.hello();
+		h.client.reconnect(drop2);
+
+		// Non-vacuity: the overlap must actually appear (in-flight strays the
+		// client could not fold in, re-sent by the ring replay).
+		await waitFor(() => hasWireOverlap(h.outputSeqs().filter((s) => s > drop2)), 5000);
+		await waitFor(() => coversRange(h.outputSeqs(), drop2, 3));
+		assert.ok(
+			coversRange(h.outputSeqs(), drop2, 3),
+			`no gap under the wire overlap: distinct seqs were ${JSON.stringify(distinctSeqsFrom(h.outputSeqs(), drop2).slice(0, 8))}`,
+		);
+		await waitFor(() => h.client.getLastSeq() >= drop2 + 3, 10000);
+		// UI exactly-once still holds under the overlap (marker guard, phase 2).
+		{
+			const wireMarkers2 = h.messagesSince(phase2)
+				.filter((m) => m.type === "output" && typeof m.seq === "number" && m.seq > drop2)
+				.flatMap((m) => String(m.data ?? "").match(/steady-\d+/g) ?? []);
+			const uiMarkers2 = h.eventsSince(phase2)
+				.filter((e) => e.event === "output")
+				.flatMap((e) => String(e.payload ?? "").match(/steady-\d+/g) ?? []);
+			const uiCounts2 = new Map();
+			for (const mk of uiMarkers2) uiCounts2.set(mk, (uiCounts2.get(mk) ?? 0) + 1);
+			for (const mk of new Set(wireMarkers2)) {
+				assert.equal(uiCounts2.get(mk) ?? 0, 1, `steady marker ${mk} delivered to the UI exactly once (overlap phase)`);
+			}
+		}
+		socket3.destroy();
 	} finally {
 		await stopRunner(runner);
 		reapChild(root, "v1");
-		try { socket2?.destroy(); } catch {}
+		try { socket2?.destroy(); socket3?.destroy(); } catch {}
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
 });
@@ -362,6 +522,11 @@ test("A2 epoch: runner restart with a generation change discards the cursor — 
 		// The fresh hello carries the NEW identity; the client remembers the
 		// pre-drop generation baseline for the epoch comparison.
 		await waitFor(() => h.messages.some((m) => m.type === "hello" && m.status?.instanceId === second.instanceId));
+		// Taken before the reconnect can possibly fire the epoch reset: the
+		// fresh snapshotReady must be counted from HERE, not from assertion
+		// time (the old `.at(-1)`-on-existence wait returned the stale
+		// pre-restart event instantly — #140 signature B).
+		const readyCountBeforeReconnect = h.eventsOf("snapshotReady").length;
 		h.client.reconnect(disconnectSeq);
 
 		// Generation changed ⇒ the cursor is dead: epochReset + seq-less
@@ -376,12 +541,91 @@ test("A2 epoch: runner restart with a generation change discards the cursor — 
 		assert.equal(sub.sinceSeq, undefined, "fresh snapshot after an epoch change — no ring replay");
 
 		// The fresh baseline: snapshot (empty or framed) then live continuation
-		// from ITS nextSeq — the old cursor is gone.
-		const ready2 = await waitFor(() => h.eventsOf("snapshotReady").at(-1));
+		// from ITS nextSeq — the old cursor is gone. Wait for the snapshotReady
+		// COUNT to grow (the old existence-check never waited), and assert the
+		// invariant client-level: the applied cursor reaches the new baseline
+		// and then advances with a live chunk beyond it. The old wire-level
+		// `.at(-1)` compared a cross-socket accumulator against a possibly
+		// stale baseline — not a valid invariant (#140 signature B).
+		const ready2 = await waitFor(
+			() => (h.eventsOf("snapshotReady").length > readyCountBeforeReconnect ? h.eventsOf("snapshotReady").at(-1) : null),
+			10000,
+		);
 		assert.equal(typeof ready2.nextSeq, "number");
-		await waitFor(() => h.outputSeqs().length >= 1, 10000);
-		assert.ok(h.outputSeqs().at(-1) >= ready2.nextSeq, "live output continues from the new baseline");
-		assert.ok(h.client.getLastSeq() >= ready2.nextSeq - 1);
+		await waitFor(() => h.client.getLastSeq() >= ready2.nextSeq, 10000);
+
+		socket2.destroy();
+	} finally {
+		await stopRunner(runner);
+		await stopRunner(runner2);
+		reapChild(root, "v1");
+		try { socket2?.destroy(); } catch {}
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("A2 epoch (slow consumer): the fresh baseline lags behind the epoch reset — stale-baseline window pinned (#140 A6)", async () => {
+	const root = freshRoot();
+	let runner;
+	let runner2;
+	let socket2 = null;
+	try {
+		// Same shape as the epoch test above, but the snapshot-path messages on
+		// the new socket are fed late (RELATIVE delay — a uniform delay shifts
+		// everything equally and proves nothing). The epoch reset fires
+		// immediately; the fresh baseline lags 300ms behind. That is exactly
+		// the window in which the old :383 assertion read a stale baseline.
+		let slowSnapshots = false;
+		const first = spawnOwnedRunner(root, "v1");
+		runner = first.runner;
+		await waitFor(() => hostReady(root, "v1"));
+		const socket1 = await connectControl(first.socketPath);
+		const h = attachClientOverSocket(socket1, {
+			// RELATIVE delay on all DATA messages (snapshot frames + output); the
+			// reconcile reply stays immediate so the epoch reset fires on time.
+			// With outputs delayed too, no stray can flip the client out of
+			// resyncing during the lag window — the client waits there until the
+			// whole snapshot batch lands, then converges on the single
+			// collecting→live path (no resync amplification). (#140 A8 finding B)
+			deferFeed: (msg) => (slowSnapshots && typeof msg.type === "string" && (msg.type.startsWith("snapshot") || msg.type === "output") ? 300 : 0),
+		});
+		h.hello();
+		await waitFor(() => h.messages.some((m) => m.type === "hello" && m.generation));
+		h.client.start();
+		await waitFor(() => h.eventsOf("snapshotReady")[0]);
+		await waitFor(() => h.client.getLastSeq() >= 3, 10000);
+		const disconnectSeq = h.client.getLastSeq();
+
+		await stopRunner(runner);
+		reapChild(root, "v1");
+		const second = spawnOwnedRunner(root, "v1");
+		runner2 = second.runner;
+		await waitFor(() => hostReady(root, "v1"));
+
+		socket2 = await connectControl(second.socketPath);
+		h.switchSocket(socket2);
+		h.hello();
+		await waitFor(() => h.messages.some((m) => m.type === "hello" && m.status?.instanceId === second.instanceId));
+		const readyCount = h.eventsOf("snapshotReady").length;
+		slowSnapshots = true;
+		h.client.reconnect(disconnectSeq);
+
+		const reset = await waitFor(() => h.eventsOf("epochReset")[0]);
+		assert.equal(typeof reset.current, "string");
+		// Non-vacuity: we proceeded past the epoch reset while the fresh
+		// baseline was still in flight — the relative delay guarantees it. The
+		// relative delay holds every snapshot-frame and output back 300ms while
+		// the reconcile reply lands immediately, so the epoch reset fires into
+		// a client still waiting in resyncing; the fresh snapshot then
+		// converges on the single collecting→live path.
+		assert.equal(h.eventsOf("snapshotReady").length, readyCount, "no fresh snapshotReady yet (the lag window is real)");
+
+		const ready2 = await waitFor(
+			() => (h.eventsOf("snapshotReady").length > readyCount ? h.eventsOf("snapshotReady").at(-1) : null),
+			10000,
+		);
+		assert.equal(typeof ready2.nextSeq, "number");
+		await waitFor(() => h.client.getLastSeq() >= ready2.nextSeq, 10000);
 
 		socket2.destroy();
 	} finally {
