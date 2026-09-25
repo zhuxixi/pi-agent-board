@@ -385,19 +385,17 @@ npm run verify
 
 ## Publishing
 
-Before publishing a release, verify the package, generate the changelog, then bump, and publish — the changelog must be generated **before** `npm version`, because `npm version` commits and tags the bump, which would empty the generation range:
+Releases run through `scripts/release.mjs` and are published by CI when a GitHub Release is created. The flow checks the parts that are easy to get wrong — the changelog range, tag ancestry against `main`, and drift from a late merge — instead of assuming them. See [docs/RELEASE.md](docs/RELEASE.md) for the full process, the one-time npm trusted-publisher setup, and failure recovery.
 
 ```bash
-npm run verify
-npm run changelog -- --dry-run     # preview the next section (version = current + patch)
-npm run changelog -- patch         # inserts the section into CHANGELOG.md
-node scripts/release_helper.mjs verify   # must exit 0: no functional PR missing from the top section
-git add CHANGELOG.md && git commit -m "docs(changelog): <version>"
-npm version patch                  # bumps package.json, commits, and tags vX.Y.Z
-npm publish
+node scripts/release.mjs precheck          # gate: clean main, nothing in flight
+node scripts/release.mjs prepare minor     # changelog + verify + bump + tag + release branch
+node scripts/release.mjs open-pr 0.9.0     # push the branch and tag, open the release PR
+# merge the PR with a merge commit, then:
+node scripts/release.mjs finish 0.9.0      # GitHub Release → CI publishes to npm
 ```
 
-Use `minor`/`major` in both the changelog and `npm version` steps when appropriate. The changelog is generated from conventional commits since the last `vX.Y.Z` tag (`scripts/release_helper.mjs`, ported from the jfox release flow); review the preview before committing. The `verify` step guards against PRs merged after the changelog was generated — rerun it after any late merge and, after removing the stale top section, re-run `npm run changelog -- <bump>` if it reports missing PRs (apply refuses when the section already exists — remove the stale section first). Release notes for the GitHub Release are the top CHANGELOG section. After publishing, users install the scoped package with:
+After publishing, users install the scoped package with:
 
 ```bash
 pi install npm:@zhuxixi/pi-agent-board
@@ -408,6 +406,7 @@ The Pi package gallery uses the `pi.video` and `pi.image` URLs from `package.jso
 ## Further Reading
 
 - [Manual verification](VERIFY.md) — static checks, Pi loading, provider authentication, persistence, and dashboard flows.
+- [Release process](docs/RELEASE.md) — release commands, trusted publishing setup, and failure recovery.
 - [Product requirements](PRD.md) — original product scope and design context.
 - [Progress log](PROGRESS.md) — implementation checkpoints and known environment notes.
 - [Exploration notes](docs/EXPLORATION.md) — Pi API and integration research.

@@ -1,0 +1,80 @@
+name: Publish to npm
+
+# A GitHub Release is the publish trigger: `node scripts/release.mjs finish`
+# creates the release, and this job turns it into an npm release.
+#
+# Trusted publishing (OIDC) means no NPM_TOKEN secret exists anywhere — the npm
+# package lists this repository and this workflow file as its trusted publisher
+# instead. See docs/RELEASE.md for the one-time setup and for failure recovery.
+on:
+  release:
+    types: [published]
+  # Recovery hatch: publish a release whose CI publish failed (npm outage, a
+  # lapsed configuration) without re-creating the release. Same tag, same code.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to publish, for example v0.9.0
+        required: true
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the released tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: "Check npm >= 11.5.1 (trusted publishing needs it)"
+        run: |
+          NPM_VERSION=$(npm --version)
+          echo "npm ${NPM_VERSION}"
+          LOWEST=$(printf '%s\n%s\n' "11.5.1" "${NPM_VERSION}" | sort -V | head -n1)
+          if [ "${LOWEST}" != "11.5.1" ]; then
+            echo "::error::npm ${NPM_VERSION} is older than 11.5.1 — trusted publishing would fail"
+            exit 1
+          fi
+
+      - name: Check the tag matches package.json
+        run: |
+          PKG_VERSION=$(node -p "require('./package.json').version")
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "package.json: ${PKG_VERSION}, tag: ${TAG_VERSION}"
+          [ "${PKG_VERSION}" = "${TAG_VERSION}" ]
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Check whether this version is already on npm
+        id: published
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if npm view "@zhuxixi/pi-agent-board@${VERSION}" version >/dev/null 2>&1; then
+            echo "already=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::@zhuxixi/pi-agent-board@${VERSION} is already published — skipping the publish step"
+          else
+            echo "already=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to npm with provenance
+        if: steps.published.outputs.already == 'false'
+        run: npm publish --provenance --access public
