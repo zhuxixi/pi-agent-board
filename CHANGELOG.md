@@ -5,6 +5,26 @@ conventional commits by `scripts/release_helper.mjs`. Entries are
 forward-only: they begin with the first release after this file landed —
 for earlier history, see the git log and the pull-request list.
 
+## [0.9.0] - 2026-09-25
+
+### Features
+
+- **attach**: forward terminal queries to the real terminal — automatic theme works in attach sessions (issue #128) (#138)
+- **attach**: unconditional Ctrl+\ detach key, terminal-independent (issue #126) (#137)
+
+### Fixes
+
+- **runner**: probes leave attachedClients at hello (issue #130) (#142)
+- browse-mode Tab completes and drills down directories in cwd picker (issue #127) (#141)
+
+### Changes
+
+- **release**: orchestrate releases and publish from CI (#144)
+- control-reconcile flaky assertions — windowed recorder + invariant realignment (issue #140) (#143)
+- **attach**: scope A5 mid-stream seq assertion to post-snapshot window (issue #132) (#139)
+
+[0.9.0]: https://github.com/zhuxixi/pi-agent-board/compare/v0.8.0...v0.9.0
+
 ## [0.8.0] - 2026-09-23
 
 ### Features
