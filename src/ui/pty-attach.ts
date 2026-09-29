@@ -59,12 +59,14 @@ const DESYNC_QUIET_MS = 1500;
 const DESYNC_PROBE_INTERVAL_MS = 2000;
 /** Minimum spacing between two runtime heals (issue #11). */
 const HEAL_RATELIMIT_MS = 10000;
-/** Issue #148: per-attempt budget and attempt count for asking the REAL terminal
- * for its background color. Retries exist because the LOCAL pi-tui can eat a
- * reply first (its own leaked pending-query state consumes the oldest entry,
- * one reply per stale entry), so a single probe may time out with no answer. */
-const REAL_TERMINAL_SCHEME_PROBE_TIMEOUT_MS = 300;
-const REAL_TERMINAL_SCHEME_PROBE_ATTEMPTS = 3;
+/** Issue #148: probe budget for asking the REAL terminal for its background
+ * color. Deliberately ONE probe: every timed-out probe leaves a settled entry in
+ * the LOCAL pi-tui's pending-query queue (its timeout path neither dequeues nor
+ * decrements) and that stale entry eats the next reply, so a retry loop cannot
+ * converge — it would only add another stale entry per attempt and degrade the
+ * host's own background detection. One probe keeps the clean-queue case working
+ * and the leaked case degrading silently. */
+const REAL_TERMINAL_SCHEME_PROBE_TIMEOUT_MS = 500;
 /** How many tail bytes of the screen log to replay on attach. Read from the file tail
  * (not the whole file) so multi-MB logs don't block startup; ~60KB covers the last
  * handful of screens, which is all a fresh attach needs. */
@@ -654,32 +656,29 @@ export class PtyAttachComponent implements Component {
 	 * probe entirely: it asks the REAL terminal itself (pi-tui's public query API)
 	 * and hands the child a 997 color-scheme report, which Pi consumes
 	 * unconditionally (no pending-query precondition — see
-	 * consumeTerminalColorSchemeReport). Same kill switch as #128 D1-D3. */
+	 * consumeTerminalColorSchemeReport). Same kill switch as #128 D1-D3.
+	 *
+	 * One probe only (CR round-1 advisory): the local pi-tui has the same leak, so
+	 * when a stale entry sits in ITS queue the reply is swallowed before this
+	 * promise can see it, and retrying would append another stale entry per
+	 * attempt — failing identically while poisoning the host's own detection. The
+	 * degraded case stays the documented pre-#148 silence. */
 	private reportRealTerminalColorScheme(): void {
 		if (process.env.AGENT_BOARD_FORWARD_TERMINAL_QUERIES === "0") return;
 		void this.probeAndReportRealTerminalColorScheme();
 	}
 
 	private async probeAndReportRealTerminalColorScheme(): Promise<void> {
-		const scheme = await this.detectRealTerminalColorScheme();
+		let rgb: RgbColor | undefined;
+		try {
+			rgb = await this.tui.queryTerminalBackgroundColor({ timeoutMs: REAL_TERMINAL_SCHEME_PROBE_TIMEOUT_MS });
+		} catch {
+			/* best-effort: a failed probe keeps the pre-#148 behavior */
+		}
+		const scheme: TerminalColorScheme | undefined = colorSchemeForBackgroundRgb(rgb) ?? undefined;
 		if (!scheme || this.closed) return;
 		const data = toColorSchemeReport(scheme);
 		if (data) this.send({ type: "input", data });
-	}
-
-	private async detectRealTerminalColorScheme(): Promise<TerminalColorScheme | undefined> {
-		for (let attempt = 0; attempt < REAL_TERMINAL_SCHEME_PROBE_ATTEMPTS; attempt++) {
-			if (this.closed) return undefined;
-			let rgb: RgbColor | undefined;
-			try {
-				rgb = await this.tui.queryTerminalBackgroundColor({ timeoutMs: REAL_TERMINAL_SCHEME_PROBE_TIMEOUT_MS });
-			} catch {
-				/* best-effort: a failed probe keeps the pre-#148 behavior */
-			}
-			const scheme: TerminalColorScheme | undefined = colorSchemeForBackgroundRgb(rgb) ?? undefined;
-			if (scheme) return scheme;
-		}
-		return undefined;
 	}
 
 	private startDesyncProbe(): void {

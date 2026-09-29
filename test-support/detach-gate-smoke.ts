@@ -17,9 +17,10 @@
 //       across raw/kitty/modifyOtherKeys encodings; printable keys still
 //       forward (issue #126).
 //   P12. Issue #148: the settle probe asks the real terminal itself (pi-tui's
-//       query API) and reports the scheme to the child as a 997 report — with
-//       a retry when the first reply is swallowed locally, and silence when
-//       the terminal never answers.
+//       query API) and reports the scheme to the child as a 997 report — light
+//       and dark replies map to their 997 forms, exactly one probe runs (a
+//       swallowed reply cannot be retried into success, CR round-1 advisory),
+//       and the kill switch silences it.
 // Run via `node --experimental-transform-types` (TS parameter properties).
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
@@ -551,19 +552,20 @@ const out: Record<string, boolean> = {};
 	out.settleProbeReportsRealTerminalScheme = lightReported && light.sent[0].type === "input" && light.sent[0].data === "\x1b[?997;2n";
 	light.attach.dispose();
 
-	// A locally swallowed first reply (local pi-tui's own stale entry eats it)
-	// must not abandon the scheme: the retry has to report dark.
-	const retrying = makeAttach({ backgroundReplies: [undefined, { r: 30, g: 30, b: 46 }] });
-	settle(retrying.attach);
-	const retried = await waitFor(() => retrying.sent.length === 1, 1000);
-	out.settleProbeRetriesAfterSwallowedReply = retried && retrying.sent[0].data === "\x1b[?997;1n" && retrying.backgroundProbeCalls.length >= 2;
-	retrying.attach.dispose();
+	// A dark reply maps to 997;1 (the pair the host's parser round-trips).
+	const dark = makeAttach({ backgroundReplies: [{ r: 30, g: 30, b: 46 }] });
+	settle(dark.attach);
+	const darkReported = await waitFor(() => dark.sent.length === 1, 1000);
+	out.settleProbeReportsDarkScheme = darkReported && dark.sent[0].data === "\x1b[?997;1n";
+	dark.attach.dispose();
 
-	// No answer at all keeps the pre-#148 behavior: full attempt budget, no send.
+	// Exactly ONE probe: a swallowed reply cannot be retried into success — each
+	// timed-out probe would leave a settled entry in the local pi-tui's queue and
+	// eat the next reply (CR round-1 advisory). No answer => silence.
 	const silent = makeAttach({ backgroundReplies: [undefined] });
 	settle(silent.attach);
 	await new Promise((resolve) => setTimeout(resolve, 50));
-	out.settleProbeSilentWithoutAnswer = silent.sent.length === 0 && silent.backgroundProbeCalls.length === 3;
+	out.settleProbeIsSingleShotWithoutAnswer = silent.sent.length === 0 && silent.backgroundProbeCalls.length === 1;
 	silent.attach.dispose();
 
 	// The #128 kill switch also silences the #148 probe (no query API call at all).
