@@ -221,7 +221,10 @@ export function reduceEvidence(snapshot, event, now = Date.now()) {
 /** @param {import("./types.mjs").EvidenceSnapshot} snapshot @param {import("./types.mjs").RunStatus} status @param {number} now */
 export function finalizeEvidence(snapshot, status, now = Date.now()) {
 	snapshot.outcome = status.semanticState === "idle" ? "ready" : status.semanticState;
-	snapshot.ready = status.semanticState === "idle" || status.semanticState === "completed";
+	// holding keeps ready=true (issue #145 spec D8): an on-hold row's evidence is
+	// reviewable like a completed one; `ready` feeds display + the review:ready
+	// filter only (verified — no functional gate reads it).
+	snapshot.ready = status.semanticState === "idle" || status.semanticState === "completed" || status.semanticState === "holding";
 	snapshot.usage = mergeUsage(snapshot.usage, status.usage ?? null);
 	snapshot.updatedAt = now;
 	return snapshot;
