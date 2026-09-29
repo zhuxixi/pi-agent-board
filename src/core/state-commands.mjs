@@ -29,7 +29,7 @@
 import {
 	applyAutoStateToStatus,
 	applyAutoStateToViewState,
-	isManualCompletion,
+	isManualVerdict,
 } from "./auto-state.mjs";
 import { finalizeRun, projectViewState } from "./events.mjs";
 
@@ -119,11 +119,11 @@ export const PATCHABLE_FIELDS = Object.freeze({
 	// lastVisitedAt (markVisited): visiting is a user action, so it routes as
 	// dashboard-user — the manual fence only fences non-human sources, and
 	// legacy stamped lastVisitedAt unconditionally (visit-recency tracking
-	// must keep working on manually-completed rows).
+	// must keep working on rows carrying a manual verdict).
 	"dashboard-user": Object.freeze({ state: Object.freeze(["lastVisitedAt"]), status: Object.freeze([]) }),
 });
 
-/** Who may originate a state command. Non-human sources are fenced by manual completions. */
+/** Who may originate a state command. Non-human sources are fenced by manual verdicts. */
 export const COMMAND_SOURCES = Object.freeze([
 	"dashboard-user",
 	"service",
@@ -279,17 +279,17 @@ export function decideStateTransition(command, currentState, currentStatus, now 
 	) {
 		return reject("stale_run");
 	}
-	// Manual completions are user verdicts: only a human source may act on a
+	// Manual verdicts are user judgments: only a human source may act on a
 	// fenced row (this is the #46 invariant — late classifications lose).
-	if (command.source !== "dashboard-user" && isManualCompletion(currentState)) {
+	if (command.source !== "dashboard-user" && isManualVerdict(currentState)) {
 		return reject("manual_fence");
 	}
 	switch (command.kind) {
 		case "mark_completed": {
 			if (currentState.processState === "alive") return reject("busy");
-			// autoState: null on both artifacts is the manual-completion fence
+			// autoState: null on both artifacts is the manual-verdict fence
 			// signal that later auto-state commands (and the auto-state rules
-			// themselves) key off — see isManualCompletion().
+			// themselves) key off — see isManualVerdict().
 			return {
 				action: "apply",
 				reason: "manual_completion",

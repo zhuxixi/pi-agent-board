@@ -21,6 +21,12 @@ test("auto_state_classified rejected when manual fence active", () => {
 	assert.deepEqual(d, { action: "reject", reason: "manual_fence" });
 });
 
+test("non-user commands stay fenced on a holding row (issue #145, spec A5)", () => {
+	const holding = { ...manualCompletedState, semanticState: "holding" };
+	const d = decideStateTransition(baseCmd, holding, null);
+	assert.deepEqual(d, { action: "reject", reason: "manual_fence" });
+});
+
 test("auto_state_classified rejected for stale runId", () => {
 	const d = decideStateTransition(baseCmd, { ...manualCompletedState, currentRunId: "r2", semanticState: "idle", autoState: {} }, null);
 	assert.equal(d.action, "reject");

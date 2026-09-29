@@ -9,7 +9,7 @@ import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { createConnection } from "node:net";
 import { resolve } from "node:path";
-import { applyAutoStateToStatus, autoStateEnabled, heuristicAutoState, isManualCompletion } from "../core/auto-state.mjs";
+import { applyAutoStateToStatus, autoStateEnabled, heuristicAutoState, isManualVerdict } from "../core/auto-state.mjs";
 import { appendLine, atomicWriteJson, removeFile } from "../core/atomic.mjs";
 import { finalizeRun, projectViewState, reduceEvent } from "../core/events.mjs";
 import { clearDiagnostics, appendDiagnostic, tailDiagnostics } from "../core/diagnostics.mjs";
@@ -481,8 +481,8 @@ export function createService(opts) {
 		// mark_queued must lift the fence for the rest of the new run (otherwise a
 		// reply on a done row would execute invisibly while the row stays
 		// completed). Automated re-launch stays guarded upstream: the job-runner's
-		// post-exit follow-up claim refuses manually-completed rows
-		// (drainQueuedFollowUp: `if (isManualCompletion(readState(...))) return;`),
+		// post-exit follow-up claim refuses rows carrying a manual verdict
+		// (drainQueuedFollowUp: `if (isManualVerdict(readState(...))) return;`),
 		// and the service-side drain path delivers already-queued user follow-ups
 		// with no fence by design (prompt-not-lost, issue #70 — its live-host input
 		// path never fenced either).
@@ -579,7 +579,7 @@ export function createService(opts) {
 		state.lastActivityAt = Date.now();
 		state.updatedAt = Date.now();
 		// Also clear autoState in the run status so in-flight model passes
-		// (job-runner / state-runner) see the manual completion and skip refinement.
+		// (job-runner / state-runner) see the manual verdict and skip refinement.
 		if (state.currentRunId) {
 			const status = readStatus(root, state.viewId, state.currentRunId);
 			if (status) {
@@ -593,7 +593,7 @@ export function createService(opts) {
 	/**
 	 * Explicitly mark an inactive session as done via the View State Coordinator
 	 * (issue #91): the command is journaled and materialized by the single owner,
-	 * which also rejects stale-run and fenced manual-completion overwrites.
+	 * which also rejects stale-run and fenced manual-verdict overwrites.
 	 * @param {string} viewId
 	 * @returns {Promise<{ ok: boolean, error?: string }>}
 	 */
@@ -1456,14 +1456,14 @@ export function createService(opts) {
 		}
 
 		if (event.type === "agent_end") {
-			// #46-class fence (issue #91): a manual completion is a user verdict that
+			// #46-class fence (issue #91): a manual verdict is a user judgment that
 			// outlives the turn. A late/duplicate agent_end after markCompleted must
 			// not resurrect the row via finalizeRun + projection — skip all semantic
 			// writes (baseline, steering, classification) and keep evidence only.
 			// The fence read is repeated after the classification await below; the
 			// window between the two reads is covered by the coordinator's own
 			// manual_fence rejection plus the guarded tail write.
-			if (isManualCompletion(readState(root, row.meta.id))) {
+			if (isManualVerdict(readState(root, row.meta.id))) {
 				status.evidenceSummary = summarizeEvidence(evidence);
 				writeEvidence(root, evidence);
 				return false;
@@ -1494,11 +1494,11 @@ export function createService(opts) {
 			status.evidenceSummary = summarizeEvidence(evidence);
 			writeEvidence(root, evidence);
 			updateCodeRefsFromEvidence(root, row.meta.id, evidence, row.meta);
-			// Re-read the fence after the classification await: a completion landing
+			// Re-read the fence after the classification await: a manual verdict landing
 			// between the baseline write and the coordinator's decision read gets
 			// manual_fence back (classificationQueued=false), and writing the stale
 			// in-memory projection here would clobber it (#46 class).
-			if (!isManualCompletion(readState(root, row.meta.id)) && !(classificationQueued && !coordinatorDisabled())) await writeForegroundState(row, status);
+			if (!isManualVerdict(readState(root, row.meta.id)) && !(classificationQueued && !coordinatorDisabled())) await writeForegroundState(row, status);
 			pruneWarmHosts({ keepViewId: row.meta.id });
 			// Async delivery (ack-gated, issue #70 A13): fire-and-forget here — the
 			// queue item's own state records the outcome, ordering is preserved by

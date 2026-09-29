@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 import { appendLine, readJson } from "../src/core/atomic.mjs";
 import { createRunStatus, finalizeRun, reduceEvent } from "../src/core/events.mjs";
 import { encodePromptForCliArg } from "../src/core/prompt-transport.mjs";
-import { applyAutoStateToStatus, autoStateEnabled, autoStateFromModelOrHeuristic, autoStateModel, buildAutoStatePrompt, heuristicAutoState, isManualCompletion } from "../src/core/auto-state.mjs";
+import { applyAutoStateToStatus, autoStateEnabled, autoStateFromModelOrHeuristic, autoStateModel, buildAutoStatePrompt, heuristicAutoState, isManualVerdict } from "../src/core/auto-state.mjs";
 import { appendDiagnostic } from "../src/core/diagnostics.mjs";
 import { emptyEvidenceSnapshot, finalizeEvidence, reduceEvidence, summarizeEvidence, writeEvidence, writeRunEvidence } from "../src/core/evidence.mjs";
 import { updateCodeRefsFromEvidence } from "../src/core/code-refs-store.mjs";
@@ -177,14 +177,14 @@ async function bootstrapRun({ root, viewId, runId, config, status, meta, evidenc
 	};
 
 	/**
-	 * Persist only if the user hasn't marked the row done manually since the last
+	 * Persist only if the row hasn't taken a manual verdict since the last
 	 * persist. projectViewState() overwrites the row state unconditionally, so a
 	 * post-exit model pass must never persist its stale in-memory status over a
-	 * fresh manual completion.
+	 * fresh manual verdict.
 	 */
 	const persistUnlessManual = (force = false) => {
 		const latestView = readState(root, viewId);
-		if (isManualCompletion(latestView)) return false;
+		if (isManualVerdict(latestView)) return false;
 		persist(force);
 		return true;
 	};
@@ -204,8 +204,8 @@ async function bootstrapRun({ root, viewId, runId, config, status, meta, evidenc
 	 * Refresh the evidence mirrors (status.evidenceSummary / state.review)
 	 * through the coordinator: `patch_fields` carries only whitelisted mirror
 	 * fields, and the coordinator's generic manual fence (source != user on a
-	 * manually-completed row) is the authoritative guard — the old fresh-read
-	 * + isManualCompletion pre-checks are no longer needed. Designed fences
+	 * row carrying a manual verdict) is the authoritative guard — the old
+	 * fresh-read pre-checks are no longer needed. Designed fences
 	 * (manual_fence / no_change) are informational; ambiguous outcomes never
 	 * fall back to a direct write.
 	 */
@@ -232,12 +232,12 @@ async function bootstrapRun({ root, viewId, runId, config, status, meta, evidenc
 		if (result.reason === "coordinator_disabled") {
 			// Legacy escape hatch: fresh-read + fence, pre-coordinator semantics.
 			const freshStatus = readStatus(root, viewId, runId);
-			if (freshStatus && !isManualCompletion(freshStatus)) {
+			if (freshStatus && !isManualVerdict(freshStatus)) {
 				freshStatus.evidenceSummary = status.evidenceSummary;
 				legacyWriteStatus(root, viewId, runId, freshStatus);
 			}
 			const freshState = readState(root, viewId);
-			if (freshState && !isManualCompletion(freshState)) {
+			if (freshState && !isManualVerdict(freshState)) {
 				freshState.review = status.evidenceSummary;
 				legacyWriteState(root, viewId, freshState);
 			}
@@ -465,10 +465,11 @@ async function bootstrapRun({ root, viewId, runId, config, status, meta, evidenc
 async function finalizeSteeringIfNeeded(config, status, evidence) {
 	if (config.kind !== "plan" && config.kind !== "plan_change") return;
 	if (status.semanticState === "failed" || status.semanticState === "stopped") return;
-	// A manual completion racing the exit chain must not be resurrected for
+	// A manual verdict racing the exit chain must not be resurrected for
 	// approval: the user already closed this row. Same signal as the other
-	// post-exit guards (completeView writes completed+autoState null to state.json).
-	if (isManualCompletion(readState(config.root, config.viewId))) return;
+	// post-exit guards (mark_completed/mark_holding write the verdict state
+	// + autoState null to state.json).
+	if (isManualVerdict(readState(config.root, config.viewId))) return;
 	recordPlanReady(config.root, config.viewId, {
 		runId: config.runId,
 		planText: latestEvidenceText(evidence) || status.latestAssistantPreview || status.summary || "Plan ready",
@@ -494,11 +495,11 @@ async function finalizeSteeringIfNeeded(config, status, evidence) {
 /** @param {import("../src/core/types.mjs").RunConfig} config @param {import("../src/core/types.mjs").RunStatus} status */
 async function drainQueuedFollowUp(config, status) {
 	if (status.semanticState !== "idle" && status.semanticState !== "completed") return;
-	// A manual completion racing the exit chain must never be followed up: the
-	// user just finished this row, so don't launch a new run over it. The
+	// A manual verdict racing the exit chain must never be followed up: the
+	// user just closed this row, so don't launch a new run over it. The
 	// in-memory status may be stale (fresh-read guards skip classification), so
 	// check the authoritative state.json signal.
-	if (isManualCompletion(readState(config.root, config.viewId))) return;
+	if (isManualVerdict(readState(config.root, config.viewId))) return;
 	if (config.kind === "plan" || config.kind === "plan_change") return;
 	const claimed = claimNextFollowUp(config.root, config.viewId);
 	if (!claimed.ok || !claimed.item) return;
@@ -654,9 +655,9 @@ async function applyHeuristicAutoState(config, status, evidence) {
 	if (!canAutoState(config, status, evidence)) return false;
 	// Cheap pre-check kept as an optimization (avoids a pointless command);
 	// correctness no longer depends on it — the coordinator fences manual
-	// completions authoritatively (manual_fence).
+	// verdicts authoritatively (manual_fence).
 	const latestState = readState(config.root, config.viewId);
-	if (isManualCompletion(latestState)) return false;
+	if (isManualVerdict(latestState)) return false;
 	const latest = latestEvidenceText(evidence) || status.latestAssistantPreview || status.summary || "";
 	const classification = heuristicAutoState(latest, { lastAgentActivityAt: status.lastAgentActivityAt ?? null });
 	return classifyThroughCoordinator(config, status, classification);
@@ -673,11 +674,11 @@ async function maybeModelAutoState(config, status, evidence) {
 		[...config.piArgsPrefix, "--mode", "json", "-p", "--no-session", "--model", model, prompt],
 		15000,
 	);
-	// The user may have marked the row done manually during the model call. The
-	// cheap pre-check avoids a pointless command; the coordinator's manual_fence
+	// The user may have placed a manual verdict on the row during the model call.
+	// The cheap pre-check avoids a pointless command; the coordinator's manual_fence
 	// is the authoritative guard for races after this read.
 	const fresh = readStatus(config.root, config.viewId, config.runId);
-	if (!fresh || isManualCompletion(fresh)) return false;
+	if (!fresh || isManualVerdict(fresh)) return false;
 	Object.assign(status, fresh);
 	const classification = autoStateFromModelOrHeuristic(out, latest, { lastAgentActivityAt: status.lastAgentActivityAt ?? null });
 	return classifyThroughCoordinator(config, status, classification);
@@ -708,10 +709,10 @@ async function maybeModelSummary(config, status) {
 		[...config.piArgsPrefix, "--mode", "json", "-p", "--no-session", "--model", model, prompt],
 		15000,
 	);
-	// The user may have marked the row done manually during the summary call.
+	// The user may have placed a manual verdict on the row during the summary call.
 	// Updating the stale status and letting the caller persist would clobber the
-	// manual completion, so bail out before touching the in-memory status.
-	if (isManualCompletion(readState(config.root, config.viewId))) return false;
+	// manual verdict, so bail out before touching the in-memory status.
+	if (isManualVerdict(readState(config.root, config.viewId))) return false;
 	const text = out.trim().split("\n").slice(-1)[0]?.trim();
 	if (text) {
 		status.summary = text.replace(/^["']|["']$/g, "").slice(0, 80);
