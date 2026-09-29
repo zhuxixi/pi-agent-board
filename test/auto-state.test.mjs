@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { applyAutoStateToStatus, autoStateDoneDisabled, autoStateFromModelOrHeuristic, buildAutoStatePrompt, heuristicAutoState, isManualCompletion, parseAutoStateModelOutput } from "../src/core/auto-state.mjs";
+import { applyAutoStateToStatus, autoStateDoneDisabled, autoStateFromModelOrHeuristic, buildAutoStatePrompt, heuristicAutoState, isManualCompletion, isManualVerdict, parseAutoStateModelOutput } from "../src/core/auto-state.mjs";
 
 test("parseAutoStateModelOutput normalizes model JSON", () => {
 	const c = parseAutoStateModelOutput('{"state":"done","confidence":"high","reason":"tests passed","question":null}', {
@@ -145,9 +145,11 @@ test("applyAutoStateToStatus refines auto-classified completed rows but protects
 	assert.equal(manualCompleted.semanticState, "completed");
 });
 
-test("isManualCompletion distinguishes manual from auto-classified completed rows", () => {
-	assert.equal(isManualCompletion({ semanticState: "completed", autoState: null }), true);
-	assert.equal(isManualCompletion({ semanticState: "completed", autoState: { kind: "done" } }), false);
-	assert.equal(isManualCompletion({ semanticState: "idle", autoState: null }), false);
-	assert.equal(isManualCompletion(null), false);
+test("isManualVerdict recognizes both manual verdict states (issue #145)", () => {
+	assert.equal(isManualVerdict({ semanticState: "completed", autoState: null }), true);
+	assert.equal(isManualVerdict({ semanticState: "holding", autoState: null }), true);
+	assert.equal(isManualVerdict({ semanticState: "completed", autoState: { kind: "done" } }), false);
+	assert.equal(isManualVerdict({ semanticState: "holding", autoState: { kind: "done" } }), false);
+	assert.equal(isManualVerdict({ semanticState: "idle", autoState: null }), false);
+	assert.equal(isManualVerdict(null), false);
 });

@@ -191,6 +191,19 @@ export function autoStateFromModelOrHeuristic(modelOutput, latestAssistantText, 
 }
 
 /**
+ * Whether a row/status carries a manual verdict (issue #145): the user placed a
+ * terminal judgment ("completed" or "holding") that no automated writer may
+ * overwrite. mark_completed and mark_holding both clear autoState on
+ * state.json and status.json, so `autoState == null` combined with a verdict
+ * state is the persisted signal. Supersedes isManualCompletion (no call site
+ * needs the narrow completed-only form — spec D15).
+ * @param {{ semanticState?: string, autoState?: unknown|null }|null|undefined} state
+ */
+export function isManualVerdict(state) {
+	return Boolean(state && (state.semanticState === "completed" || state.semanticState === "holding") && state.autoState == null);
+}
+
+/**
  * Whether a row/status shows a manual completion. completeView clears autoState on
  * both state.json and status.json when the user marks done, so `autoState == null`
  * combined with `completed` is the manual-completion signal. Auto-classified
