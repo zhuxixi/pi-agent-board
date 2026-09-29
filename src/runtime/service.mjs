@@ -53,7 +53,7 @@ import {
 } from "../core/store.mjs";
 import { diagnoseNodePtyFailure, ensureNodePtySpawnHelperExecutable, nodePtyFallbackMessage, probeNodePtyEnvironment } from "../core/pty-support.mjs";
 import { normalizeScreenLogMaxBytes, pruneScreenLogs } from "../core/screen-log-gc.mjs";
-import { hasPendingQuestions, isAgentBusy, selectIdleHostsToEvict } from "../core/warm-host-sweeper.mjs";
+import { canAutoDrain, hasPendingQuestions, isAgentBusy, selectIdleHostsToEvict } from "../core/warm-host-sweeper.mjs";
 
 /** @typedef {import("../core/types.mjs").RunKind} RunKind */
 
@@ -2272,12 +2272,6 @@ function isExternalSession(meta) {
 /** @param {import("../core/types.mjs").EvidenceSnapshot} evidence */
 function latestEvidenceText(evidence) {
 	return evidence.assistantEvidence?.[evidence.assistantEvidence.length - 1]?.text ?? "";
-}
-
-/** @param {import("../core/store.mjs").Row} row */
-function canAutoDrain(row) {
-	const st = row.state?.semanticState;
-	return !isAgentBusy(row) && (st === "idle" || st === "completed");
 }
 
 /** @param {import("../core/types.mjs").ViewState} state */
