@@ -16,6 +16,10 @@
 //   P1-P7. Ctrl+\ detaches unconditionally in every editor/socket state and
 //       across raw/kitty/modifyOtherKeys encodings; printable keys still
 //       forward (issue #126).
+//   P12. Issue #148: the settle probe asks the real terminal itself (pi-tui's
+//       query API) and reports the scheme to the child as a 997 report — with
+//       a retry when the first reply is swallowed locally, and silence when
+//       the terminal never answers.
 // Run via `node --experimental-transform-types` (TS parameter properties).
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
@@ -34,18 +38,28 @@ const plainTui = {
 	onTerminalColorSchemeChange: (_listener: (scheme: string) => void) => () => {},
 };
 
-function makeAttach() {
+function makeAttach(options: { backgroundReplies?: Array<{ r: number; g: number; b: number } | undefined> } = {}) {
 	let result: unknown = null;
 	// Issue #128: per-attach fake TUI with terminal-write capture and a
 	// color-scheme listener registry (the bridge under test registers here).
 	const terminalWrites: string[] = [];
 	const colorSchemeListeners = new Set<(scheme: string) => void>();
+	// Issue #148: the settle probe asks the REAL terminal through pi-tui's
+	// public query API; the reply queue drives it (undefined = swallowed).
+	const backgroundProbeCalls: Array<{ timeoutMs: number }> = [];
 	const scopedTui = {
 		terminal: { rows: 24, cols: 80, columns: 80, write: (s: string) => { terminalWrites.push(s); } },
 		requestRender: () => {},
 		onTerminalColorSchemeChange: (listener: (scheme: string) => void) => {
 			colorSchemeListeners.add(listener);
 			return () => { colorSchemeListeners.delete(listener); };
+		},
+		queryTerminalBackgroundColor: async (probeOptions: { timeoutMs: number }) => {
+			const index = backgroundProbeCalls.length;
+			backgroundProbeCalls.push(probeOptions);
+			const replies = options.backgroundReplies;
+			if (!replies || replies.length === 0) return undefined;
+			return replies[Math.min(index, replies.length - 1)];
 		},
 		fireColorScheme: (scheme: string) => {
 			for (const listener of [...colorSchemeListeners]) listener(scheme);
@@ -66,6 +80,7 @@ function makeAttach() {
 		sent,
 		terminalWrites,
 		scopedTui,
+		backgroundProbeCalls,
 		didDetach: () => (result as { action?: string } | null)?.action === "detached",
 	};
 }
@@ -520,6 +535,48 @@ const out: Record<string, boolean> = {};
 	(attach as unknown as { pushOutput: (d: string, o?: { forwardProtocols?: boolean }) => void }).pushOutput("\x1b[>7u\x1b[?u\x1b[c", { forwardProtocols: true });
 	out.kittyNegotiationNotForwarded = !terminalWrites.some((w) => w.includes("\x1b[>7u") || w.includes("\x1b[?u") || w.includes("\x1b[c"));
 	attach.dispose();
+}
+
+// P12. Issue #148: the client answers the scheme question ITSELF — it asks the
+// real terminal through pi-tui's public query API and hands the child a 997
+// report, so a child stuck on Pi's leaked pending-query state (a timed-out
+// probe swallows the next arriving reply) still resolves the right theme.
+{
+	const settle = (attach: PtyAttachComponent) => (attach as unknown as { finishAttachTransition: () => void }).finishAttachTransition();
+
+	// Light reply (Catppuccin Latte background) must become a 997;2 report.
+	const light = makeAttach({ backgroundReplies: [{ r: 239, g: 241, b: 245 }] });
+	settle(light.attach);
+	const lightReported = await waitFor(() => light.sent.length === 1, 1000);
+	out.settleProbeReportsRealTerminalScheme = lightReported && light.sent[0].type === "input" && light.sent[0].data === "\x1b[?997;2n";
+	light.attach.dispose();
+
+	// A locally swallowed first reply (local pi-tui's own stale entry eats it)
+	// must not abandon the scheme: the retry has to report dark.
+	const retrying = makeAttach({ backgroundReplies: [undefined, { r: 30, g: 30, b: 46 }] });
+	settle(retrying.attach);
+	const retried = await waitFor(() => retrying.sent.length === 1, 1000);
+	out.settleProbeRetriesAfterSwallowedReply = retried && retrying.sent[0].data === "\x1b[?997;1n" && retrying.backgroundProbeCalls.length >= 2;
+	retrying.attach.dispose();
+
+	// No answer at all keeps the pre-#148 behavior: full attempt budget, no send.
+	const silent = makeAttach({ backgroundReplies: [undefined] });
+	settle(silent.attach);
+	await new Promise((resolve) => setTimeout(resolve, 50));
+	out.settleProbeSilentWithoutAnswer = silent.sent.length === 0 && silent.backgroundProbeCalls.length === 3;
+	silent.attach.dispose();
+
+	// The #128 kill switch also silences the #148 probe (no query API call at all).
+	process.env.AGENT_BOARD_FORWARD_TERMINAL_QUERIES = "0";
+	try {
+		const killed = makeAttach({ backgroundReplies: [{ r: 239, g: 241, b: 245 }] });
+		settle(killed.attach);
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		out.killSwitchSkipsSchemeProbe = killed.backgroundProbeCalls.length === 0 && killed.sent.length === 0;
+		killed.attach.dispose();
+	} finally {
+		delete process.env.AGENT_BOARD_FORWARD_TERMINAL_QUERIES;
+	}
 }
 
 // E2. A terminal at the minimum supported size must not emit a shrink that the

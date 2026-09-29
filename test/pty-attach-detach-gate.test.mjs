@@ -67,6 +67,13 @@ test("attach detach gate: ctrl+] passes through, ← reads only editor_state", (
 	assert.equal(parsed.killSwitchSilencesQueriesAndReplay, true, "AGENT_BOARD_FORWARD_TERMINAL_QUERIES=0 must silence forwarding and the replay (issue #128)");
 	assert.equal(parsed.killSwitchSkipsBridge, true, "AGENT_BOARD_FORWARD_TERMINAL_QUERIES=0 must skip the color-scheme bridge (issue #128)");
 	assert.equal(parsed.kittyNegotiationNotForwarded, true, "kitty/DA negotiation must NOT be forwarded (spawn-time-only + keyboard-stack safety, issue #128)");
+	// Issue #148: the client answers the scheme question itself instead of
+	// relying on the child's probe being resolved (Pi's leaked pending state
+	// swallows the first late reply), so attach recovers the right theme.
+	assert.equal(parsed.settleProbeReportsRealTerminalScheme, true, "settle must ask the real terminal and report its scheme to the child as a 997 report (issue #148)");
+	assert.equal(parsed.settleProbeRetriesAfterSwallowedReply, true, "a locally swallowed reply must be retried, not abandoned (issue #148)");
+	assert.equal(parsed.settleProbeSilentWithoutAnswer, true, "an unanswered probe must stay silent after the full attempt budget (issue #148)");
+	assert.equal(parsed.killSwitchSkipsSchemeProbe, true, "AGENT_BOARD_FORWARD_TERMINAL_QUERIES=0 must also skip the scheme probe (issue #148)");
 	assert.equal(parsed.minimumSizeAvoidsInvalidShrink, true, "minimum terminal size must avoid an invalid shrink");
 	assert.equal(parsed.staleSocketEventsDoNotClearCurrent, true, "stale socket events must not clear a replacement connection");
 });

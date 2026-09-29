@@ -130,3 +130,29 @@ const COLOR_SCHEME_REPORTS = {
 export function toColorSchemeReport(scheme) {
 	return Object.hasOwn(COLOR_SCHEME_REPORTS, scheme) ? COLOR_SCHEME_REPORTS[scheme] : "";
 }
+
+/**
+ * Issue #148: derive the color scheme from an OSC 11 background reply, so the
+ * attach client can answer the scheme question itself instead of relying on
+ * the child's own probe being resolved (Pi's leaked pending state swallows the
+ * first late reply — see the issue for the exact swallow path).
+ *
+ * Mirrors Pi's own threshold (`getRgbColorLuminance` + `>= 0.5` in the theme
+ * detection code) so a client-side answer matches what Pi would have
+ * concluded from the same reply. Relative luminance per WCAG/sRGB.
+ *
+ * @param rgb - parsed reply channels ({r,g,b} in 0-255), or undefined.
+ * @returns "light" / "dark", or undefined when the input is not a usable rgb.
+ */
+export function colorSchemeForBackgroundRgb(rgb) {
+	if (!rgb || typeof rgb !== "object") return undefined;
+	const { r, g, b } = rgb;
+	if (![r, g, b].every((channel) => Number.isFinite(channel))) return undefined;
+	const luminance = 0.2126 * toLinearChannel(r) + 0.7152 * toLinearChannel(g) + 0.0722 * toLinearChannel(b);
+	return luminance >= 0.5 ? "light" : "dark";
+}
+
+function toLinearChannel(channel) {
+	const value = channel / 255;
+	return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+}

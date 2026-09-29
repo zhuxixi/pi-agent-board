@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractOscQuerySequences, toColorSchemeReport, OSC_QUERY_CARRY_MAX_BYTES } from "../src/core/terminal-query-sequences.mjs";
+import { extractOscQuerySequences, toColorSchemeReport, colorSchemeForBackgroundRgb, OSC_QUERY_CARRY_MAX_BYTES } from "../src/core/terminal-query-sequences.mjs";
 // Test-only import: round-trips our produced report through pi-tui's real
 // parser. Production code must NOT import pi-tui (see module docblock).
-import { parseTerminalColorSchemeReport } from "@earendil-works/pi-tui/dist/terminal-colors.js";
+import { parseOsc11BackgroundColor, parseTerminalColorSchemeReport } from "@earendil-works/pi-tui/dist/terminal-colors.js";
 
 const Q_BEL = "\x1b]11;?\x07";
 const Q_ST = "\x1b]11;?\x1b\\";
@@ -110,6 +110,27 @@ test("A2: unknown/invalid scheme maps to empty string", () => {
 	assert.equal(toColorSchemeReport("sepia"), "");
 	assert.equal(toColorSchemeReport(""), "");
 	assert.equal(toColorSchemeReport(undefined), "");
+});
+
+// Issue #148 A3: the client answers the scheme question itself from a real OSC 11
+// reply. The threshold mirrors Pi's own detection (relative luminance >= 0.5).
+test("A3: parsed OSC 11 replies map to the scheme Pi would have derived", () => {
+	assert.equal(colorSchemeForBackgroundRgb(parseOsc11BackgroundColor(SET_BEL)), "light");
+	assert.equal(colorSchemeForBackgroundRgb(parseOsc11BackgroundColor("\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\")), "dark");
+});
+
+test("A3: luminance threshold sits between gray 187 (dark) and 188 (light)", () => {
+	assert.equal(colorSchemeForBackgroundRgb({ r: 187, g: 187, b: 187 }), "dark");
+	assert.equal(colorSchemeForBackgroundRgb({ r: 188, g: 188, b: 188 }), "light");
+	assert.equal(colorSchemeForBackgroundRgb({ r: 255, g: 255, b: 255 }), "light");
+	assert.equal(colorSchemeForBackgroundRgb({ r: 0, g: 0, b: 0 }), "dark");
+});
+
+test("A3: unusable rgb input maps to undefined (probe keeps pre-#148 behavior)", () => {
+	assert.equal(colorSchemeForBackgroundRgb(undefined), undefined);
+	assert.equal(colorSchemeForBackgroundRgb(null), undefined);
+	assert.equal(colorSchemeForBackgroundRgb({}), undefined);
+	assert.equal(colorSchemeForBackgroundRgb({ r: 200, g: Number.NaN, b: 200 }), undefined);
 });
 
 // Review F1a: a stale carry that fails to join a target is dropped, not kept.
