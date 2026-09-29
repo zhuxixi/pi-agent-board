@@ -374,6 +374,7 @@ export class DashboardComponent implements Component {
 		if (matchesKey(data, Key.ctrl("t"))) return this.togglePin();
 		if (matchesKey(data, Key.ctrl("s"))) return this.stopSelected();
 		if (data === "d") return this.confirmDone();
+		if (data === "h") return this.toggleHold();
 		if (matchesKey(data, Key.ctrl("x"))) return this.handleDeleteKey();
 		if (data === "X") return this.confirmDeleteState();
 		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
@@ -431,6 +432,7 @@ export class DashboardComponent implements Component {
 		if (matchesKey(data, Key.enter) || data === "r") return this.startReply();
 		if (data === "e") return this.openEvidenceView();
 		if (data === "d") return this.confirmDone();
+		if (data === "h") return this.toggleHold();
 		if (data === "a") return this.attachPeek();
 		if (data === "!") return this.openPtyHelp("peek");
 	}
@@ -468,6 +470,7 @@ export class DashboardComponent implements Component {
 			return;
 		}
 		if (data === "d") return this.confirmDone();
+		if (data === "h") return this.toggleHold();
 		if (data === "a" || matchesKey(data, Key.enter)) return this.attachSelected();
 	}
 
@@ -982,6 +985,21 @@ export class DashboardComponent implements Component {
 		this.mode = "confirm";
 	}
 
+	// On-hold toggle (issue #145): manual-only state, so the command travels as
+	// dashboard-user; the coordinator's source guard rejects any other writer.
+	private toggleHold(): void {
+		const row = this.selectedRow();
+		if (!row) return;
+		const holding = row.state?.semanticState === "holding";
+		if (!holding && isAgentBusy(row)) return this.notice("Wait for the active run to finish before placing on hold", "warn");
+		const run = holding ? this.deps.service.clearHoldView(row.meta.id) : this.deps.service.holdView(row.meta.id);
+		void Promise.resolve(run).then((res) => {
+			if (!res.ok) this.notice(res.error ?? (holding ? "Resume failed" : "Hold failed"), "error");
+			else this.notice(holding ? "Resumed — needs instructions" : "On hold", "info");
+			this.refresh();
+		});
+	}
+
 	private confirmDoneSelection(): void {
 		const rows = this.selectedBatchRows();
 		if (rows.length === 0) return this.notice("Select one or more sessions first", "warn");
@@ -1313,7 +1331,7 @@ export class DashboardComponent implements Component {
 			]);
 		}
 		const primary = this.input.trim() ? "enter launch" : live ? "enter attach live" : "enter resume";
-		const hints = ["i insert", primary, "→ attach", "m multi-select", ...(unread > 0 ? [`•${unread} unread`] : []), "d done", "space peek", "v transcript", "e evidence", "ctrl+n new session", "ctrl+r rename", "ctrl+x x2 delete", "X delete state", "/ filter", "! pty", "? help"];
+		const hints = ["i insert", primary, "→ attach", "m multi-select", ...(unread > 0 ? [`•${unread} unread`] : []), "d done", "h hold", "space peek", "v transcript", "e evidence", "ctrl+n new session", "ctrl+r rename", "ctrl+x x2 delete", "X delete state", "/ filter", "! pty", "? help"];
 		if (this.input.trim()) hints.splice(1, 0, "esc clear");
 		return this.hintLine("NORMAL", "muted", hints);
 	}
@@ -1659,6 +1677,7 @@ export class DashboardComponent implements Component {
 			["ctrl/alt+←/→", "Jump by word in insert mode"],
 			["→ or >", "Attach to the selected real Pi session"],
 			["d", "Confirm and mark selected inactive session done"],
+			["h", "Hold / unhold the selected inactive session (on-hold state)"],
 			["space", "Peek when input is empty; in multi-select: toggle current row"],
 			["e", "Open evidence / diagnostics panel for selected session"],
 			["/", "Filter in normal mode; use i then / for slash commands"],
