@@ -590,6 +590,36 @@ export function createService(opts) {
 		writeState(root, state);
 	}
 
+	/** Direct write for holdView — coordinator_disabled escape hatch only. */
+	function holdViewDirect(state) {
+		state.semanticState = "holding";
+		state.processState = "exited";
+		state.needsInput = false;
+		state.hasError = false;
+		state.question = null;
+		state.pendingQuestions = [];
+		state.error = null;
+		state.autoState = null;
+		state.lastActivityAt = Date.now();
+		state.updatedAt = Date.now();
+		writeState(root, state);
+	}
+
+	/** Direct write for clearHoldView — coordinator_disabled escape hatch only. */
+	function clearHoldViewDirect(state) {
+		state.semanticState = "idle";
+		state.processState = "exited";
+		state.needsInput = false;
+		state.hasError = false;
+		state.question = null;
+		state.pendingQuestions = [];
+		state.error = null;
+		state.autoState = null;
+		state.lastActivityAt = Date.now();
+		state.updatedAt = Date.now();
+		writeState(root, state);
+	}
+
 	/**
 	 * Explicitly mark an inactive session as done via the View State Coordinator
 	 * (issue #91): the command is journaled and materialized by the single owner,
@@ -622,6 +652,53 @@ export function createService(opts) {
 		// Ambiguous outcomes (timeout / connection_reset: the command MAY already be
 		// journaled) and real rejections surface verbatim — never fall back to a
 		// direct write here, it would bypass the single-writer fence.
+		return { ok: false, error: result.reason ?? "state_command_failed" };
+	}
+
+	/** Place an inactive session on hold (issue #145; template: completeView). */
+	async function holdView(viewId) {
+		const row = loadRow(root, viewId);
+		if (!row) return { ok: false, error: "Unknown session" };
+		if (isAgentBusy(row)) return { ok: false, error: "Wait for the active run to finish before placing on hold" };
+		const state = readState(root, viewId) ?? row.state ?? blankState(viewId);
+		const result = await sendStateCommandImpl(root, {
+			type: "state_command",
+			viewId,
+			runId: state.currentRunId ?? null,
+			source: "dashboard-user",
+			kind: "mark_holding",
+			expectedRevision: null,
+			payload: {},
+		});
+		if (result.status === "applied") return { ok: true };
+		if (result.reason === "busy") return { ok: false, error: "Wait for the active run to finish before placing on hold" };
+		if (result.reason === "coordinator_disabled") {
+			holdViewDirect(state);
+			return { ok: true };
+		}
+		return { ok: false, error: result.reason ?? "state_command_failed" };
+	}
+
+	/** Resume an on-hold session back to Needs-instructions (issue #145). */
+	async function clearHoldView(viewId) {
+		const row = loadRow(root, viewId);
+		if (!row) return { ok: false, error: "Unknown session" };
+		const state = readState(root, viewId) ?? row.state ?? blankState(viewId);
+		const result = await sendStateCommandImpl(root, {
+			type: "state_command",
+			viewId,
+			runId: state.currentRunId ?? null,
+			source: "dashboard-user",
+			kind: "clear_holding",
+			expectedRevision: null,
+			payload: {},
+		});
+		if (result.status === "applied") return { ok: true };
+		if (result.reason === "no_change") return { ok: true };
+		if (result.reason === "coordinator_disabled") {
+			clearHoldViewDirect(state);
+			return { ok: true };
+		}
 		return { ok: false, error: result.reason ?? "state_command_failed" };
 	}
 
@@ -1861,6 +1938,16 @@ export function createService(opts) {
 		 */
 		markCompleted(viewId) {
 			return completeView(viewId);
+		},
+
+		/** @param {string} viewId @returns {Promise<{ ok: boolean, error?: string }>} */
+		holdView(viewId) {
+			return holdView(viewId);
+		},
+
+		/** @param {string} viewId @returns {Promise<{ ok: boolean, error?: string }>} */
+		clearHoldView(viewId) {
+			return clearHoldView(viewId);
 		},
 
 		/**

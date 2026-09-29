@@ -1347,6 +1347,71 @@ test("completeView does not fall back to a direct write on ambiguous coordinator
 	}
 });
 
+test("holdView and clearHoldView submit user-sourced commands (issue #145)", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const sent = [];
+		const svc = service(root, { sendStateCommand: async (_root, cmd) => { sent.push(cmd); return { status: "applied" }; } });
+		assert.equal((await svc.holdView("v1")).ok, true);
+		assert.equal(sent[0].kind, "mark_holding");
+		assert.equal(sent[0].source, "dashboard-user");
+		assert.equal((await svc.clearHoldView("v1")).ok, true);
+		assert.equal(sent[1].kind, "clear_holding");
+		assert.equal(sent[1].source, "dashboard-user");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("holdView refuses busy rows with the same wording as markCompleted (issue #145)", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const svc = service(root, { sendStateCommand: async () => ({ status: "rejected", reason: "busy" }) });
+		const res = await svc.holdView("v1");
+		assert.equal(res.ok, false);
+		assert.equal(res.error, "Wait for the active run to finish before placing on hold");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("markCompletedMany completes holding rows — d-key semantics need zero UI change (spec D4)", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const s = readState(root, "v1");
+		s.semanticState = "holding";
+		s.processState = "exited";
+		writeState(root, s);
+		const svc = service(root, { sendStateCommand: async (_root, cmd) => (cmd.kind === "mark_completed" ? { status: "applied" } : { status: "rejected", reason: "busy" }) });
+		const res = await svc.markCompletedMany(["v1"]);
+		assert.equal(res.completed, 1);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("reconcile leaves holding rows untouched even with a terminal host record (issue #145)", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		// Seed a holding row whose host record is exited: reconcile must not
+		// finalize it (looksActive allow-list skips exited/holding rows).
+		const st = readState(root, "v1");
+		st.semanticState = "holding";
+		st.processState = "exited";
+		writeState(root, st);
+		writeHost(root, { viewId: "v1", state: "exited", runnerPid: null, childPid: null, instanceId: "i1", socketPath: "/no/s.sock" });
+		const svc = service(root, { sendStateCommand: async () => ({ status: "rejected", reason: "manual_fence" }) });
+		await svc.reconcile();
+		assert.equal(readState(root, "v1").semanticState, "holding");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("markVisited records a durable lastVisitedAt timestamp", async () => {
 	const root = freshRoot();
 	const { coord, restore } = await startTrackedCoordinator(root);
