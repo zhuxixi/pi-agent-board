@@ -819,9 +819,12 @@ export function createService(opts) {
 	/**
 	 * @param {import("../core/store.mjs").Row} row
 	 * @param {import("../core/types.mjs").RunStatus} status
+	 * @param {{ source?: string }} [opts] F-lift (issue #145): pass "dashboard-user"
+	 *   when the mirror was triggered by a human submitting input — the manual
+	 *   fence must not outlive the user speaking to the row.
 	 * @returns {Promise<void>}
 	 */
-	async function writeForegroundState(row, status) {
+	async function writeForegroundState(row, status, opts = {}) {
 		const projected = projectViewState(status, Date.now(), readState(root, row.meta.id) ?? row.state ?? null);
 		// Foreground turns are driven by the interactive Pi process, not a detached
 		// runner, so keep currentRunId null. This prevents reconcile()/stop() from
@@ -841,7 +844,7 @@ export function createService(opts) {
 			type: "state_command",
 			viewId: row.meta.id,
 			runId: null,
-			source: "service",
+			source: opts.source ?? "service",
 			kind: "sync_foreground",
 			expectedRevision: null,
 			payload: { projection: projected },
@@ -1527,8 +1530,18 @@ export function createService(opts) {
 			status.error = null;
 			status.summary = "Running…";
 			status.lastActivityAt = now;
+			// F-lift (issue #145): pi's InputEvent carries source; "interactive"
+			// means a human submitted this text (attach keystrokes, a dashboard
+			// reply injected into a live host, or an auto-drained follow-up — all
+			// arrive as PTY bytes, which pi classifies as interactive). A manual
+			// verdict must not outlive the user speaking to the row, so this one
+			// mirror travels as dashboard-user and passes the manual_fence guard.
+			// Safe by construction: stale_run cannot fire (runId stays null) and
+			// the coordinator shell never reads source — manual_fence is the only
+			// guard this crosses. rpc/extension injections keep source "service".
+			const userSpoke = event.type === "input" && event.source === "interactive";
 			// Throughput path: periodic self-healing mirror, fire-and-forget.
-			void writeForegroundState(row, status);
+			void writeForegroundState(row, status, userSpoke ? { source: "dashboard-user" } : {});
 			return true;
 		}
 

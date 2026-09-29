@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { once } from "node:events";
 import { test, beforeEach } from "node:test";
 import { createService, shouldProbePtySupport } from "../src/runtime/service.mjs";
+import { isManualVerdict } from "../src/core/auto-state.mjs";
 import { foregroundPreviewCache } from "../src/core/foreground-preview-cache.mjs";
 import { readCodeRefs } from "../src/core/code-refs-store.mjs";
 import { diagnoseNodePtyFailure } from "../src/core/pty-support.mjs";
@@ -958,6 +959,66 @@ test("syncHostedEvent persists interactive questions and resets them on new inpu
 		assert.deepEqual(resumed.pendingQuestions, []);
 	} finally {
 		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("syncRowEvent routes interactive input as dashboard-user; rpc/extension stay service (issue #145)", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const sent = [];
+		const svc = service(root, { sendStateCommand: async (_root, cmd) => { sent.push(cmd); return { status: "applied" }; } });
+		await svc.syncHostedEvent("v1", { type: "input", source: "interactive", text: "go" });
+		await svc.syncHostedEvent("v1", { type: "input", source: "rpc", text: "auto" });
+		await svc.syncHostedEvent("v1", { type: "agent_start" });
+		// The working-state mirror is a fire-and-forget sync_foreground beat
+		// (syncForegroundEvent precedent above) — poll instead of asserting immediately.
+		const beats = await waitFor(() => {
+			const found = sent.filter((c) => c.kind === "sync_foreground");
+			return found.length >= 3 ? found : null;
+		});
+		assert.ok(beats, "three sync_foreground beats were sent");
+		assert.equal(beats[0].source, "dashboard-user");
+		assert.equal(beats[1].source, "service");
+		assert.equal(beats[2].source, "service");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("interactive input on a manual completed row lifts the fence and resumes the row (issue #145, spec A16)", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const st = readState(root, "v1");
+		st.semanticState = "completed";
+		st.processState = "exited";
+		st.autoState = null; // manual-verdict signal
+		writeState(root, st);
+		// Mini coordinator: the real manual_fence guard plus a disk-applying
+		// sync_foreground — exactly the behavior the fix depends on end to end.
+		const svc = service(root, {
+			sendStateCommand: async (_root, cmd) => {
+				if (cmd.source !== "dashboard-user" && isManualVerdict(readState(root, cmd.viewId))) {
+					return { status: "rejected", reason: "manual_fence" };
+				}
+				if (cmd.kind === "sync_foreground") {
+					const state = readState(root, cmd.viewId);
+					writeState(root, { ...state, ...cmd.payload.projection });
+					return { status: "applied" };
+				}
+				return { status: "applied" };
+			},
+		});
+		assert.equal(await svc.syncHostedEvent("v1", { type: "input", source: "interactive", text: "go" }), true);
+		const next = await waitFor(() => {
+			const s = readState(root, "v1");
+			return s?.semanticState === "working" ? s : null;
+		});
+		assert.ok(next, "the interactive mirror lifted the manual fence and resumed the completed row");
+		assert.equal(next.processState, "alive");
+	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
 });

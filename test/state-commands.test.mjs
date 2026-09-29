@@ -539,6 +539,18 @@ test("sync_foreground applies the caller projection but forces currentRunId null
 	assert.equal(d.mutate.state.processState, "exited");
 });
 
+// -- F-lift (issue #145): interactive input lifts the manual fence --
+
+test("sync_foreground as dashboard-user passes the fence; as service it stays fenced", () => {
+	const holding = { ...manualCompletedState, semanticState: "holding" };
+	const payload = { projection: { semanticState: "working", processState: "alive" } };
+	const fenced = decideStateTransition({ ...baseCmd, source: "service", kind: "sync_foreground", payload }, holding, null);
+	assert.equal(fenced.action, "reject");
+	assert.equal(fenced.reason, "manual_fence");
+	const lifted = decideStateTransition({ ...baseCmd, source: "dashboard-user", kind: "sync_foreground", payload }, holding, null);
+	assert.equal(lifted.action, "apply");
+});
+
 // -- plan_ready --
 
 test("plan_ready stamps needs-input on an exited row with legacy parity (R3)", () => {
