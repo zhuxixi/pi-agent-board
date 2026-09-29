@@ -23,7 +23,8 @@
  *   finalize would recompute it from a possibly stale preview.
  *
  * Reject reasons: "unknown_view" | "revision_conflict" | "stale_run" |
- * "manual_fence" | "busy" | "no_change" | "field_not_allowed".
+ * "manual_fence" | "busy" | "no_change" | "field_not_allowed" |
+ * "source_not_allowed".
  */
 import {
 	applyAutoStateToStatus,
@@ -35,6 +36,8 @@ import { finalizeRun, projectViewState } from "./events.mjs";
 /** Command kinds accepted by the View State Coordinator (issue #91 scope). */
 export const STATE_COMMAND_KINDS = Object.freeze([
 	"mark_completed",
+	"mark_holding",
+	"clear_holding",
 	"auto_state_classified",
 	"run_finalized",
 	"mark_queued",
@@ -77,6 +80,7 @@ export const DECIDED_REJECT_REASONS = Object.freeze(new Set([
 	"unknown_view",
 	"unknown_kind",
 	"field_not_allowed",
+	"source_not_allowed",
 ]));
 
 /**
@@ -292,6 +296,56 @@ export function decideStateTransition(command, currentState, currentStatus, now 
 				mutate: {
 					state: {
 						semanticState: "completed",
+						processState: "exited",
+						needsInput: false,
+						hasError: false,
+						question: null,
+						pendingQuestions: [],
+						error: null,
+						autoState: null,
+					},
+					status: { autoState: null },
+				},
+			};
+		}
+		case "mark_holding": {
+			// Manual-only (spec D14): an on-hold verdict is a human judgment; any
+			// automated source is rejected before the fence can matter.
+			if (command.source !== "dashboard-user") return reject("source_not_allowed");
+			if (currentState.processState === "alive") return reject("busy");
+			// autoState: null on both artifacts is the manual-verdict fence signal
+			// (see isManualVerdict). Full field-set patch: idempotent under the
+			// coordinator's sparse merge, mirrors mark_completed's shape.
+			return {
+				action: "apply",
+				reason: "manual_holding",
+				mutate: {
+					state: {
+						semanticState: "holding",
+						processState: "exited",
+						needsInput: false,
+						hasError: false,
+						question: null,
+						pendingQuestions: [],
+						error: null,
+						autoState: null,
+					},
+					status: { autoState: null },
+				},
+			};
+		}
+		case "clear_holding": {
+			if (command.source !== "dashboard-user") return reject("source_not_allowed");
+			if (currentState.semanticState !== "holding") return reject("no_change");
+			if (currentState.processState === "alive") return reject("busy");
+			// Un-hold returns the row to automated management (idle = the row is
+			// waiting for the next directive; queued follow-ups may drain again).
+			return {
+				action: "apply",
+				reason: "manual_resume",
+				mutate: {
+					state: {
+						semanticState: "idle",
 						processState: "exited",
 						needsInput: false,
 						hasError: false,
