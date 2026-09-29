@@ -1922,6 +1922,7 @@ const STAGE_RGB = {
 	working: [56, 189, 248],
 	needs_input: [245, 158, 11],
 	idle: [129, 140, 248],
+	holding: [251, 191, 36],
 	completed: [34, 197, 94],
 	failed: [248, 113, 113],
 	stopped: [100, 116, 139],

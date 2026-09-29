@@ -3,7 +3,7 @@
  * extension via `allowJs`) plus the canonical state vocabularies as runtime constants.
  */
 
-/** Semantic (task) state of a row. @typedef {"queued"|"working"|"needs_input"|"idle"|"completed"|"failed"|"stopped"} SemanticState */
+/** Semantic (task) state of a row. @typedef {"queued"|"working"|"needs_input"|"idle"|"holding"|"completed"|"failed"|"stopped"} SemanticState */
 /** Process/liveness state. @typedef {"alive"|"exited"} ProcessState */
 /** PTY host mode. @typedef {"json-runner"|"pty"} HostMode */
 /** PTY host liveness. @typedef {"starting"|"alive"|"stopping"|"exited"|"failed"} HostState */
@@ -11,7 +11,7 @@
 /** Worktree isolation mode for a row. @typedef {"off"|"worktree"} WorktreeMode */
 /** Diagnostic severity. @typedef {"info"|"warn"|"error"} DiagnosticLevel */
 /** Diagnostic event source. @typedef {"runner"|"host"|"service"|"queue"|"steering"|"evidence"|"store"} DiagnosticSource */
-/** Evidence outcome. @typedef {"unknown"|"in_progress"|"ready"|"needs_input"|"failed"|"stopped"|"queued"|"working"|"idle"|"completed"} EvidenceOutcome */
+/** Evidence outcome. @typedef {"unknown"|"in_progress"|"ready"|"needs_input"|"failed"|"stopped"|"queued"|"working"|"idle"|"holding"|"completed"} EvidenceOutcome */
 /** Command kind. @typedef {"test"|"build"|"lint"|"git"|"install"|"other"} EvidenceCommandKind */
 /** Command status. @typedef {"started"|"passed"|"failed"|"unknown"} EvidenceCommandStatus */
 /** File change action. @typedef {"edited"|"written"|"deleted"|"unknown"} EvidenceFileAction */
@@ -42,6 +42,7 @@ export const SEMANTIC_STATES = /** @type {const} */ ([
 	"working",
 	"needs_input",
 	"idle",
+	"holding",
 	"completed",
 	"failed",
 	"stopped",
@@ -55,6 +56,7 @@ export const GROUP_ORDER = /** @type {const} */ ([
 	"working",
 	"needs_input",
 	"idle",
+	"holding",
 	"completed",
 	"failed",
 	"stopped",
@@ -68,6 +70,7 @@ export const GROUP_LABELS = {
 	failed: "Failed",
 	completed: "Done",
 	idle: "Needs instructions",
+	holding: "On hold",
 	stopped: "Stopped",
 };
 
