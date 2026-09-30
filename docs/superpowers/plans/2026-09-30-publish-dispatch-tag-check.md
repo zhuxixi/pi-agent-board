@@ -22,13 +22,14 @@
 - TDD：Task 1 的测试必须在当前未修复文件上先红，Task 2 修完再绿。
 - 提交按文件 `git add <file>`，不用 `git add -A`；commit message 用英文 conventional 格式。
 - push / 开 PR 前必须获得用户明确许可（用户 AGENTS.md 硬规则）。
+- 探针 tag 不得使用 `v*` 前缀（`release.mjs:207` / `release_helper.mjs:182` 以 `git describe --tags --match v*` 定 changelog 基线，`v*` 探针泄漏会污染下一次发版）。
 
 ## Review Focus
 
 本改动的输入类别与失败模式，按最可能踩到的顺序：
 
 1. **dispatch 的 ref 是分支、而 tag 输入是 tag**（原始 bug 形状）→ 期望：自检通过。由 Task 3 的 A1 覆盖（`--ref issue-154-...` + `-f tag=v0.9.0`）。
-2. **tag 输入与 checkout 出来的 `package.json` 不一致** → 期望：自检 fail-closed，不得静默发布。由 Task 3 的 A2 覆盖（探针 tag `v0.0.0-mismatch-probe`）。
+2. **tag 输入与 checkout 出来的 `package.json` 不一致** → 期望：自检 fail-closed，不得静默发布。由 Task 3 的 A2 覆盖（探针 tag `issue-154-mismatch-probe`——checkout 跟随 `inputs.tag`，错配只能人为制造）。
 3. **回归：有人把 tag 来源重新写成 ref 名派生** → 期望：静态测试红。由 Task 1 的 A3 覆盖。
 4. **release 事件自动路径被改坏** → 期望：行为不变（原 `GITHUB_REF_NAME` 在该路径恰好等于 tag）。本 fix 不改变该路径的输入来源，但**无法在本地验证**，只能由下一次真实发版观察（Task 3 的 U1，标注 pending）。
 5. **`-f tag=` 传了不带 `v` 前缀的值**（如 `0.9.0`）：`${RELEASE_TAG#v}` 成为空操作。期望：因本仓所有 tag 均带 `v` 前缀，checkout 无法解析该 ref 而 fail-closed，不会走到自检或发布。此行为**不由本 fix 引入也不受其影响**，故不新增测试，记录于此以免被误认为遗漏。
@@ -64,12 +65,24 @@ const PACKAGE_ROOT = fileURLToPath(new URL("..", import.meta.url));
  * carries it in `inputs.tag`. Deriving it from `GITHUB_REF_NAME` breaks every
  * manual recovery run, because that variable holds the *branch* the run was
  * dispatched from (issue #154).
+ *
+ * The expression must appear in BOTH the checkout step and the tag-check
+ * step: deleting the check step's `env:` block must fail this suite, so the
+ * count is asserted, not just presence.
  */
-const TAG_SOURCE = "github.event.release.tag_name || inputs.tag";
+const TAG_SOURCE = /github\.event\.release\.tag_name\s*\|\|\s*inputs\.tag/g;
 
-/** Read a workflow file as text -- the only side effect in this file. */
+/**
+ * Read a workflow file as text -- the only side effect in this file. Full-line
+ * comments are stripped so prose about this invariant (e.g. a comment warning
+ * against ref-name derivation) cannot trip the guard.
+ */
 function readWorkflowSource(name) {
-	return readFileSync(join(PACKAGE_ROOT, ".github", "workflows", name), "utf8");
+	const raw = readFileSync(join(PACKAGE_ROOT, ".github", "workflows", name), "utf8");
+	return raw
+		.split("\n")
+		.filter((line) => !line.trimStart().startsWith("#"))
+		.join("\n");
 }
 
 test("publish.yml never derives the release tag from the run's ref", () => {
@@ -81,11 +94,12 @@ test("publish.yml never derives the release tag from the run's ref", () => {
 	);
 });
 
-test("publish.yml resolves the release tag from the event payload or the dispatch input", () => {
+test("publish.yml derives the release tag from the event payload or dispatch input in both places", () => {
 	const source = readWorkflowSource("publish.yml");
+	const uses = source.match(TAG_SOURCE)?.length ?? 0;
 	assert.ok(
-		source.includes(TAG_SOURCE),
-		`publish.yml must resolve the release tag via "${TAG_SOURCE}"`,
+		uses >= 2,
+		`expected the tag source in both the checkout step and the tag-check step (>= 2 occurrences), found ${uses}`,
 	);
 });
 ```
@@ -96,7 +110,7 @@ Run:
 ```bash
 cd $WT && node --test test/publish-workflow.test.mjs
 ```
-Expected: `pass 1` / `fail 1` —— 失败的必是 `publish.yml never derives the release tag from the run's ref`（当前 `:57` 仍含 `GITHUB_REF_NAME`）；`resolves the release tag from ...` 通过（`:32` 的 checkout 已含该表达式）。
+Expected: `pass 0` / `fail 2` —— 两条断言都红：`GITHUB_REF_NAME` 仍在 `:57`；表达式当前只在 checkout（`:32`）出现 1 次，不满足 ≥2。两条都转绿只能发生在 Task 2 修复之后。
 
 - [ ] **Step 3: 提交（红态）**
 
@@ -162,7 +176,7 @@ cd $WT && git add .github/workflows/publish.yml && git commit -m "fix(ci): read 
 
 ---
 
-### Task 3: 验收取证（A4 · A1 · A2 · U1）
+### Task 3: 验收取证（A4 · A1a · A2 · U1，A1b 合并后补验）
 
 **Files:**
 - 不修改任何文件；产出证据记录（写入 issue 评论，必要时追加到 spec 的验收结论段）
@@ -171,7 +185,14 @@ cd $WT && git add .github/workflows/publish.yml && git commit -m "fix(ci): read 
 - Consumes: Task 2 的分支状态（`--ref` 必须指向本分支，才能跑到修好的 workflow 定义）
 - Produces: 每个验收 ID 的实际命令与结果字符串
 
-> **机制说明（决定命令怎么写）**：`gh workflow run --ref <ref>` 运行的**是该 ref 上的 workflow 定义**，而 checkout 用的是 `inputs.tag`。所以验收 dispatch 必须 `--ref issue-154-publish-workflow-dispatch-tag-check`（本分支，含修复）；这正是原始 bug 的形状——ref 是分支、tag 来自输入。
+> **机制说明（决定命令怎么写）**：`gh workflow run --ref <ref>` 运行的**是该 ref 上的 workflow 定义**（ref 在远端解析，本地分支不可见），而 checkout 用的是 `inputs.tag`。所以验收 dispatch 必须 `--ref issue-154-publish-workflow-dispatch-tag-check`（本分支，含修复）；这正是原始 bug 的形状——ref 是分支、tag 来自输入。
+
+- [ ] **Step 0: 推分支到 origin（用户许可门禁）**
+
+```bash
+cd $WT && git push -u origin issue-154-publish-workflow-dispatch-tag-check
+```
+Expected: 远端出现同名分支。**没有这一步，后续 `--ref issue-154-...` 会因远端无此 ref 报「workflow/ref not found」类错误。** 此 push 与后续开 PR 共用同一次用户许可。
 
 - [ ] **Step 1: A4 —— 完整校验**
 
@@ -181,7 +202,7 @@ cd $WT && npm run verify
 ```
 Expected: typecheck + perf gate + 全量测试 + 覆盖率阈值 + pack dry-run 全绿。记录覆盖率三行数字。
 
-- [ ] **Step 2: A1 —— 正向：从分支 ref 触发、tag=v0.9.0 应通过并走 skip 分支**
+- [ ] **Step 2: A1a —— 正向：从分支 ref 触发、tag=v0.9.0 应通过并走 skip 分支**
 
 Run:
 ```bash
@@ -192,30 +213,31 @@ Expected: 新 run 出现；随后取该 run 的日志：
 ```bash
 gh run view <run-id> --log | grep -E "package.json:|already published|Publishing to"
 ```
-Expected: `package.json: 0.9.0, tag: 0.9.0`；`@zhuxixi/pi-agent-board@0.9.0 is already published — skipping the publish step`；**无** `Publishing to https://registry.npmjs.org`（证明零发布风险）。整 run `success`。
+Expected: `package.json: 0.9.0, tag: 0.9.0`；`@zhuxixi/pi-agent-board@0.9.0 is already published — skipping the publish step`；**无** `Publishing to https://registry.npmjs.org`（证明零发布风险）。整 run `success`。注意：本条只证明修复生效 + skip 分支，**恢复路径的 `npm publish` 环节本次不执行**（与 release 路径共用、未改动，见 spec §5 A1a 行注记）。
 
 - [ ] **Step 3: A2 —— 负向：护栏仍然会对不一致的 tag fail-closed**
 
-先建探针 tag（指向分支 HEAD，该提交的 `package.json` 是 0.9.0，而 tag 名是 `v0.0.0-mismatch-probe`，二者必然不一致）：
+先建探针 tag（指向分支 HEAD：该提交的 `package.json` 是 0.9.0，而 tag 名不是版本号，二者必然不一致；**tag 名不带 `v` 前缀**，避免落入 release 工具链的 `v*` 基线通配）：
 
 ```bash
-cd $WT && git tag v0.0.0-mismatch-probe && git push origin v0.0.0-mismatch-probe
+cd $WT && git tag issue-154-mismatch-probe && git push origin issue-154-mismatch-probe
 ```
-> ⚠️ 这一步 push 需要用户许可；与开 PR 的许可一并取得。
+> ⚠️ 此 push 需要用户许可；与 Step 0 的分支 push 共用同一次许可。
 
 ```bash
-cd $WT && gh workflow run publish.yml -f tag=v0.0.0-mismatch-probe --ref issue-154-publish-workflow-dispatch-tag-check
+cd $WT && gh workflow run publish.yml -f tag=issue-154-mismatch-probe --ref issue-154-publish-workflow-dispatch-tag-check
 sleep 8 && gh run list --workflow=publish.yml --limit 4
 gh run view <run-id> --log-failed | grep -E "package.json:|error|exit code"
 ```
-Expected: 自检步骤 `package.json: 0.9.0, tag: 0.0.0-mismatch-probe` → `##[error]Process completed with exit code 1`；run `failure`。**证明护栏没被改成「永远通过」。**
+Expected: 自检步骤 `package.json: 0.9.0, tag: issue-154-mismatch-probe`（`${RELEASE_TAG#v}` 对无 `v` 前缀的 tag 名是空操作）→ `##[error]Process completed with exit code 1`；run `failure`。**证明护栏没被改成「永远通过」。**
 
-清理探针 tag（本地 + 远端）：
+清理探针 tag（本地 + 远端，远端以 ls-remote 为准）：
 
 ```bash
-cd $WT && git push origin --delete v0.0.0-mismatch-probe && git tag -d v0.0.0-mismatch-probe
+cd $WT && git push origin --delete issue-154-mismatch-probe && git tag -d issue-154-mismatch-probe
+git ls-remote --tags origin | grep issue-154-mismatch-probe
 ```
-Expected: 远端与本地均删除成功；`git tag --list 'v0.0.0*'` 为空。
+Expected: 第二条 grep **无输出**（远端已删）；`git tag --list 'issue-154-*'` 本地为空。
 
 - [ ] **Step 4: U1 —— release 事件路径（本任务不执行，标注 pending）**
 
@@ -223,4 +245,15 @@ Expected: 远端与本地均删除成功；`git tag --list 'v0.0.0*'` 为空。
 
 - [ ] **Step 5: 证据登记**
 
-把 Step 1–4 的实际命令与结果（含 run id、run URL、关键日志行）评论到 issue #154，并对每个验收 ID 标注 `passed` / `pending`。
+把 Step 0–4 的实际命令与结果（含 run id、run URL、关键日志行）评论到 issue #154，并对每个验收 ID 标注 `passed` / `pending`。
+
+- [ ] **Step 6: A1b —— 合并后按文档字面路径复跑一次（post-merge）**
+
+PR 合并进 main 后（`git checkout main && git pull`），按 `docs/RELEASE.md:117-118` 的字面操作跑一遍：
+
+```bash
+gh workflow run publish.yml -f tag=v0.9.0 --ref main
+sleep 8 && gh run list --workflow=publish.yml --limit 4
+gh run view <run-id> --log | grep -E "package.json:|already published"
+```
+Expected: `package.json: 0.9.0, tag: 0.9.0`；命中 skip 分支；run `success`。这一步验证的不是修复本身，而是**文档承诺的路径从用户视角成立**（ref=main、只填 tag）。结果同样登记到 issue #154。
