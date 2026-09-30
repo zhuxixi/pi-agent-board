@@ -54,6 +54,7 @@ import {
 import { diagnoseNodePtyFailure, ensureNodePtySpawnHelperExecutable, nodePtyFallbackMessage, probeNodePtyEnvironment } from "../core/pty-support.mjs";
 import { normalizeScreenLogMaxBytes, pruneScreenLogs } from "../core/screen-log-gc.mjs";
 import { canAutoDrain, hasPendingQuestions, isAgentBusy, selectIdleHostsToEvict } from "../core/warm-host-sweeper.mjs";
+import { resolveTestMs } from "../core/test-knobs.mjs";
 
 /** @typedef {import("../core/types.mjs").RunKind} RunKind */
 
@@ -67,6 +68,32 @@ export const HOST_RECOVERY_GRACE_MS = 5_000;
 const HOST_RECOVERY_POLL_MS = 150;
 /** Default wall-clock budget for one attach resolution (issue #70 Task 12). */
 const ATTACH_RESOLVE_TIMEOUT_MS = 120_000;
+
+/**
+ * Dynamic readers for the ladder constants above (issue #95 F4). Module-load-time
+ * constants cannot see env set after import, so every ladder decision reads the
+ * knob at use time; unset env keeps the exact production default.
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {number}
+ */
+export function resolveHostStartGraceMs(env = process.env) {
+	return resolveTestMs(env, "AGENT_BOARD_TEST_HOST_START_GRACE_MS", HOST_START_GRACE_MS);
+}
+
+/** @param {NodeJS.ProcessEnv} [env] @returns {number} */
+export function resolveHostRecoveryGraceMs(env = process.env) {
+	return resolveTestMs(env, "AGENT_BOARD_TEST_HOST_RECOVERY_GRACE_MS", HOST_RECOVERY_GRACE_MS);
+}
+
+/** @param {NodeJS.ProcessEnv} [env] @returns {number} */
+export function resolveHostRecoveryPollMs(env = process.env) {
+	return resolveTestMs(env, "AGENT_BOARD_TEST_HOST_RECOVERY_POLL_MS", HOST_RECOVERY_POLL_MS);
+}
+
+/** @param {NodeJS.ProcessEnv} [env] @returns {number} */
+export function resolveAttachResolveTimeoutMs(env = process.env) {
+	return resolveTestMs(env, "AGENT_BOARD_TEST_ATTACH_RESOLVE_TIMEOUT_MS", ATTACH_RESOLVE_TIMEOUT_MS);
+}
 
 /**
  * @param {{
@@ -973,7 +1000,7 @@ export function createService(opts) {
 		let childTermSent = false;
 		let childKillSent = false;
 		let childTermAt = 0;
-		while (nowImpl() - startedAt < HOST_RECOVERY_GRACE_MS) {
+		while (nowImpl() - startedAt < resolveHostRecoveryGraceMs()) {
 			const host = readHost(root, viewId);
 			if (!host || host.instanceId !== expectedInstanceId) return { ok: false, error: "already_recovered" };
 			const runnerObservation = observeHostRole(host, "runner");
@@ -987,7 +1014,7 @@ export function createService(opts) {
 				if (!runnerTermSent) {
 					signalOwnedProcessImpl(host.runnerIdentity, "SIGTERM");
 					runnerTermSent = true;
-				} else if (elapsed >= HOST_RECOVERY_GRACE_MS / 2 && !runnerKillSent) {
+				} else if (elapsed >= resolveHostRecoveryGraceMs() / 2 && !runnerKillSent) {
 					signalOwnedProcessImpl(host.runnerIdentity, "SIGKILL");
 					runnerKillSent = true;
 				}
@@ -1003,7 +1030,7 @@ export function createService(opts) {
 					childKillSent = true;
 				}
 			}
-			await sleepFnImpl(HOST_RECOVERY_POLL_MS);
+			await sleepFnImpl(resolveHostRecoveryPollMs());
 		}
 		// Grace exhausted or loop broke — verify both roles are confirmed ended before claiming.
 		const finalHost = readHost(root, viewId);
@@ -1081,7 +1108,7 @@ export function createService(opts) {
 		// claims with a live claimPid stay untouched: their launcher may legitimately be
 		// between claim and spawn inside the grace window.
 		if (host?.state === "starting" && host.runnerSpawnedAt == null && host.instanceId != null) {
-			const claimStale = nowImpl() - (host.claimAt ?? 0) > HOST_START_GRACE_MS;
+			const claimStale = nowImpl() - (host.claimAt ?? 0) > resolveHostStartGraceMs();
 			const claimerGone = !isAlive(host.claimPid ?? null);
 			if (claimStale || claimerGone) return adoptClaimedHost(viewId, row.meta, host);
 		}
@@ -1239,7 +1266,7 @@ export function createService(opts) {
 				if (
 					(host?.state === "exited" || host?.state === "failed") &&
 					lastAdoptAt > 0 &&
-					nowImpl() - lastAdoptAt >= HOST_START_GRACE_MS
+					nowImpl() - lastAdoptAt >= resolveHostStartGraceMs()
 				) {
 					ensured = false;
 				}
@@ -1264,7 +1291,7 @@ export function createService(opts) {
 		// deadlock (SIGKILLed runner never finalizes; nothing else covers stopping)
 			// — finalize it through the same bounded recovery path (CR r1 f2).
 			if (host.state === "stopping") {
-				const staleStop = host.instanceId != null && nowImpl() - (host.stopRequestedAt ?? host.claimAt ?? 0) >= HOST_RECOVERY_GRACE_MS;
+				const staleStop = host.instanceId != null && nowImpl() - (host.stopRequestedAt ?? host.claimAt ?? 0) >= resolveHostRecoveryGraceMs();
 				if (staleStop && !recovered) {
 					const runnerObs = observeHostRole(host, "runner");
 					const childObs = observeHostRole(host, "child");
@@ -1291,7 +1318,7 @@ export function createService(opts) {
 			}
 
 			const legacy = host.instanceId == null;
-			const withinGrace = host.state === "starting" && (legacy || (host.claimPid != null && nowImpl() - (host.claimAt ?? 0) < HOST_START_GRACE_MS));
+			const withinGrace = host.state === "starting" && (legacy || (host.claimPid != null && nowImpl() - (host.claimAt ?? 0) < resolveHostStartGraceMs()));
 			const probe = await probeHostImpl(host.socketPath ?? "", { expectedViewId: viewId, expectedInstanceId: host.instanceId ?? null });
 			if (probe.classification === "ready") {
 				return { kind: "pty", socketPath: host.socketPath ?? null, sessionFile, instanceId: host.instanceId ?? null };
@@ -1832,7 +1859,7 @@ export function createService(opts) {
 		async resolveAttachTarget(viewId, resolveOpts = {}) {
 			const existing = inflightAttachResolvers.get(viewId);
 			if (existing) return existing;
-			const run = resolveAttachTargetInner(viewId, resolveOpts.timeoutMs ?? ATTACH_RESOLVE_TIMEOUT_MS)
+			const run = resolveAttachTargetInner(viewId, resolveOpts.timeoutMs ?? resolveAttachResolveTimeoutMs())
 				.finally(() => { inflightAttachResolvers.delete(viewId); });
 			inflightAttachResolvers.set(viewId, run);
 			return run;
@@ -2126,7 +2153,7 @@ export function createService(opts) {
 				if (row.host && !row.hostAlive && (row.host.state === "starting" || row.host.state === "alive" || row.host.state === "exited" || row.host.state === "failed")) {
 					// A starting claim inside the launch grace is a normal cold start (issue #70):
 					// its runner pid may legitimately be absent — never finalize it to failed yet.
-					if (row.host.state === "starting" && now - (row.host.claimAt ?? row.host.startedAt ?? 0) < HOST_START_GRACE_MS) continue;
+					if (row.host.state === "starting" && now - (row.host.claimAt ?? row.host.startedAt ?? 0) < resolveHostStartGraceMs()) continue;
 						const failed = row.host.state === "starting" || row.host.state === "alive" || row.host.state === "failed" || Boolean(row.host.error) || (row.host.exitCode !== null && row.host.exitCode !== 0);
 						// F6: failed verdicts must carry a reason (legacy guaranteed an
 						// error string). The row has no currentRunId here, so only the

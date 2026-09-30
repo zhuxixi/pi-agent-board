@@ -7,11 +7,22 @@
  *  - never connected: the host may still be cold-starting (service launches it
  *    right before attach) — allow a long window before declaring it unreachable.
  */
+import { resolveTestMs } from "./test-knobs.mjs";
 
 /** Give-up delay after a previously-established connection drops (ms). */
 export const ATTACH_RECONNECT_TIMEOUT_MS = 15_000;
 /** Give-up delay while waiting for the initial host connection (ms). */
 export const ATTACH_HOST_START_TIMEOUT_MS = 120_000;
+
+/**
+ * Dynamic reader for ATTACH_RECONNECT_TIMEOUT_MS (issue #95 F4): env set after
+ * module load must still reach the reconnect policy, so read per evaluation.
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {number}
+ */
+export function resolveAttachReconnectTimeoutMs(env = process.env) {
+	return resolveTestMs(env, "AGENT_BOARD_TEST_ATTACH_RECONNECT_TIMEOUT_MS", ATTACH_RECONNECT_TIMEOUT_MS);
+}
 
 /**
  * @param {{ everConnected: boolean, disconnectedAt: number|null, connectStartedAt: number, now: number }} input
@@ -20,7 +31,7 @@ export const ATTACH_HOST_START_TIMEOUT_MS = 120_000;
 export function evaluateAttachReconnect({ everConnected, disconnectedAt, connectStartedAt, now }) {
 	if (everConnected && disconnectedAt !== null) {
 		const elapsed = now - disconnectedAt;
-		return elapsed >= ATTACH_RECONNECT_TIMEOUT_MS
+		return elapsed >= resolveAttachReconnectTimeoutMs()
 			? { giveUp: true, status: "host exited" }
 			: { giveUp: false, status: null };
 	}

@@ -12,11 +12,22 @@
 import { createConnection } from "node:net";
 import { lstatSync } from "node:fs";
 import { classifyProbeResult } from "./host-coordination.mjs";
+import { resolveTestMs } from "./test-knobs.mjs";
 
 /** Default probe timeout. */
 export const HOST_PROBE_TIMEOUT_MS = 250;
 /** Poll cadence between attach-resolver probes / retries (issue #70 Task 12). */
 export const HOST_PROBE_RETRY_MS = 150;
+
+/**
+ * Dynamic reader for HOST_PROBE_TIMEOUT_MS (issue #95 F4): env set after module
+ * load must still reach the probe, so read the knob at each use site.
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {number}
+ */
+export function resolveHostProbeTimeoutMs(env = process.env) {
+	return resolveTestMs(env, "AGENT_BOARD_TEST_HOST_PROBE_TIMEOUT_MS", HOST_PROBE_TIMEOUT_MS);
+}
 
 /**
  * @typedef {object} ProbeResult
@@ -45,7 +56,7 @@ export const HOST_PROBE_RETRY_MS = 150;
  * @returns {Promise<ProbeResult>}
  */
 export function probeHost(socketPath, opts = {}) {
-	const timeoutMs = opts.timeoutMs ?? HOST_PROBE_TIMEOUT_MS;
+	const timeoutMs = opts.timeoutMs ?? resolveHostProbeTimeoutMs();
 	const expectedViewId = opts.expectedViewId ?? null;
 	const expectedInstanceId = opts.expectedInstanceId ?? null;
 	const connect = opts.connect ?? createConnection;
