@@ -374,6 +374,7 @@ export class DashboardComponent implements Component {
 		if (matchesKey(data, Key.ctrl("t"))) return this.togglePin();
 		if (matchesKey(data, Key.ctrl("s"))) return this.stopSelected();
 		if (data === "d") return this.confirmDone();
+		if (data === "x") return this.confirmDelete();
 		if (matchesKey(data, Key.ctrl("x"))) return this.handleDeleteKey();
 		if (data === "X") return this.confirmDeleteState();
 		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
@@ -1030,6 +1031,27 @@ export class DashboardComponent implements Component {
 		}
 		this.deleteArm = { id: row.meta.id, at: now };
 		this.notifyInputState(`Press ctrl+x again quickly to delete "${row.meta.name}"${isAgentBusy(row) ? " (stops the active run)" : ""}`, "warning");
+	}
+
+	private confirmDelete(): void {
+		const row = this.selectedRow();
+		if (!row) return;
+		// Confirmation-style delete (issue #150): `x` then `y`, mirroring the
+		// `d`-then-`y` flow. The legacy ctrl+x double-press stays as the
+		// no-confirm shortcut.
+		this.pending = {
+			prompt: `Delete "${row.meta.name}"?${isAgentBusy(row) ? " Stops the active run." : ""} Session file is preserved. (y/N)`,
+			onYes: () => {
+				// archive is async (routes through the view-state coordinator, issue #91);
+				// the notice + refresh land when the command settles.
+				void Promise.resolve(this.deps.service.archive(row.meta.id)).then((res) => {
+					if (!res.ok) this.notice(res.error ?? "Delete failed", "error");
+					else this.notice(`Deleted "${row.meta.name}"`, "info");
+					this.refresh();
+				});
+			},
+		};
+		this.mode = "confirm";
 	}
 
 	private confirmDeleteState(): void {

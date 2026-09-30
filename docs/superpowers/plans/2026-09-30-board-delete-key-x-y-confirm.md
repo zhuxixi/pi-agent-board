@@ -118,7 +118,7 @@ const tui = {
 const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
 
 function makeDash(env: ReturnType<typeof makeEnv>): DashboardComponent {
-	return new DashboardComponent(tui as never, theme as never, {} as never, () => {}, {
+	return new DashboardComponent(tui as never, theme as never, { matches: () => false } as never, () => {}, {
 		service: env.service,
 		root: env.root,
 		defaultCwd: env.root,
@@ -218,7 +218,7 @@ const report: Record<string, unknown> = {};
 		launchHost: () => ({ pid: null, configPath: "/no/host-config.json" }),
 		launchTitle: () => ({ pid: null, configPath: "/no/title-config.json" }),
 	});
-	const dash = new DashboardComponent(tui as never, theme as never, {} as never, () => {}, {
+	const dash = new DashboardComponent(tui as never, theme as never, { matches: () => false } as never, () => {}, {
 		service,
 		root,
 		defaultCwd: root,
