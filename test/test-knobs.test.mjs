@@ -31,6 +31,8 @@ function captureStderr(fn) {
 test("resolveTestMs: unset or empty falls back to the default", () => {
 	assert.equal(resolveTestMs({}, "AGENT_BOARD_TEST_UNIT_UNSET", 42), 42);
 	assert.equal(resolveTestMs({ AGENT_BOARD_TEST_UNIT_UNSET: "" }, "AGENT_BOARD_TEST_UNIT_UNSET", 42), 42);
+	// Whitespace-only is blank, not Number(" ") === 0 ⇒ a 0ms hot spin.
+	assert.equal(resolveTestMs({ AGENT_BOARD_TEST_HOST_RECOVERY_POLL_MS: " " }, "AGENT_BOARD_TEST_HOST_RECOVERY_POLL_MS", 150), 150);
 });
 
 test("resolveTestMs: a numeric string is read as a number", () => {
