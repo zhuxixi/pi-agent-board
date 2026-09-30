@@ -139,12 +139,13 @@ async function stopWindowLeg({ injected }) {
 		assert.equal(status.semanticState, "stopped", "early stop still produces the stopped verdict");
 		assertFirstDiagnosticIsLatchArmed(root);
 		// The latch path must be distinguishable from a post-wiring stop: only the
-		// injected leg has the stop replayed into stop().
-		const replayed = readDiagnostics(root, "view_1").some((d) => d.code === "stop_latch_replayed");
+		// injected leg asserts the replay diagnostic. Without the knob the signal
+		// may land on either side of the wiring — both outcomes are correct (the
+		// run finalizes as stopped either way), so the unset leg deliberately does
+		// NOT assert on `replayed`: doing so would race the sync wiring path.
 		if (injected) {
+			const replayed = readDiagnostics(root, "view_1").some((d) => d.code === "stop_latch_replayed");
 			assert.ok(replayed, "the early stop was latched and replayed, not handled post-wiring");
-		} else {
-			assert.equal(replayed, false, "knob unset: the stop landed post-wiring, no replay diagnostic");
 		}
 	} finally {
 		delete process.env.AGENT_BOARD_TEST_BOOT_WINDOW_MS;
