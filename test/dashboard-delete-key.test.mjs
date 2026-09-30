@@ -83,3 +83,10 @@ test("A7: hints and help advertise x (y/N) alongside the legacy shortcut", () =>
 	assert.match(report.copy.help, /x\s+Delete selected session \(y\/N confirm\)/);
 	assert.match(report.copy.help, /ctrl\+x x2\s+Delete selected session \(quick double-press, no confirm\)/);
 });
+
+test("A4c: x clears a pending ctrl+x arm — no stacked deletion", () => {
+	assert.match(report.armClear.armedNotice, /Press ctrl\+x again quickly/);
+	assert.equal(report.armClear.afterX, "confirm");
+	assert.equal(report.armClear.final.mode, "list");
+	assert.deepEqual(report.armClear.final.archived, [], "the interrupted arm never fires");
+});

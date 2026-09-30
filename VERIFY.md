@@ -82,7 +82,8 @@ Inside pi:
 4. **enter** on an empty input = attach to the selected full session (confirms first if it's still running).
    You're now in the real Pi session; run `/agent-board` again to return.
 5. Other keys: **/** filter (`s:running`, or free text), **Ctrl+R** rename, **Ctrl+T** pin, **Ctrl+S** stop,
-   **Ctrl+X** delete (archives the row, keeps the session file), **?** help, **Esc** clears input / quits when empty.
+   **x** then **y** delete (confirm prompt; archives the row, keeps the session file), **Ctrl+X** ×2 quick delete (no confirm),
+   **?** help, **Esc** clears input / quits when empty.
 
 ## 5. Inspect the durable store on disk
 

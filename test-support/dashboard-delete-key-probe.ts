@@ -238,4 +238,19 @@ const report: Record<string, unknown> = {};
 	dash.dispose();
 }
 
+// 11) x clears a pending ctrl+x arm — no stacked deletion (post-review pin)
+{
+	const env = makeEnv();
+	const dash = makeDash(env);
+	dash.handleInput("\x18"); // arm the legacy double-press
+	const d = dash as unknown as { mode: string; inputNotice: { text: string } | null };
+	const armedNotice = d.inputNotice?.text ?? null;
+	dash.handleInput("x"); // must clear the arm and open the confirm prompt instead
+	const afterX = d.mode;
+	dash.handleInput("\x18"); // confirm mode: cancels (key consumed, no re-arm)
+	dash.handleInput("\x18"); // back in list mode: fresh arm, no delete
+	report.armClear = { armedNotice, afterX, final: snap(dash, env) };
+	dash.dispose();
+}
+
 console.log(JSON.stringify(report));

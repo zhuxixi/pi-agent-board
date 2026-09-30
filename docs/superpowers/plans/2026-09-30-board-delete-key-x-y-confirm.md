@@ -618,6 +618,16 @@ git commit -m "chore: record issue-150 verification results"
 
 ---
 
+## Post-review fixes（最终分支 review 后的一轮修复，2026-09-30）
+
+Review 结论：Ready to merge (Yes)，无 Critical/Important；3 个 Minor 全部修掉：
+
+1. `VERIFY.md:85` 键位清单同步 `x` → `y` 与 `Ctrl+X` ×2 双路径（原文只列了 Ctrl+X）。
+2. 新增探针场景 11 + 测试 A4c：`ctrl+x` arm 状态下按 `x` 必须清 arm 并打开确认，不叠加触发双击（Review Focus 5 原本声称 A4 覆盖但无测试钉住；arm 提示读 `inputNotice` 而非 `flash`）。
+3. `package-lock.json` 被 worktree 内 `npm install` 重写（tab 缩进差异，未入 commit），已 `git checkout --` 还原。
+
+测试：`node --test test/dashboard-delete-key.test.mjs` → 11/11。
+
 ## 验证结果（2026-09-30，worktree 内实测）
 
 - `node --test test/dashboard-delete-key.test.mjs` → 10/10 pass（A1, A1b, A1c, A2, A3, A4, A4b, A5, A6, A7）。
