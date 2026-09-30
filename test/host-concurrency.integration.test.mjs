@@ -255,3 +255,49 @@ test("A10: SIGKILLed runner is recovered by the attach resolver without double c
 		throw err;
 	}
 });
+
+test("A7: ladder knobs compress the A10 recovery chain without weakening it", { skip: !hasNodePty }, async () => {
+	// issue #95 F4: the ladder readers are dynamic, so in-process env reaches the
+	// helper (inherited at spawn), the pty host, and this test's own service.
+	process.env.AGENT_BOARD_TEST_HOST_START_GRACE_MS = "1000";
+	process.env.AGENT_BOARD_TEST_HOST_RECOVERY_GRACE_MS = "500";
+	process.env.AGENT_BOARD_TEST_HOST_RECOVERY_POLL_MS = "50";
+	process.env.AGENT_BOARD_TEST_ATTACH_RESOLVE_TIMEOUT_MS = "30000";
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "knob", cwd: process.cwd() });
+		ensureSessionFile(root, "v1");
+
+		const capture = () => formatPostmortem(capturePostmortem(root, "v1", null));
+
+		const first = await runHelper(root, "v1");
+		assert.equal(first.result?.started, true, `first helper started: ${JSON.stringify(first)}`);
+		const original = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h.readyAt != null && h.childPid && isAlive(h.runnerPid) ? h : false;
+		}, 30_000, capture);
+
+		// Same hard orphan as A10: SIGKILL the runner, leaving a stale endpoint,
+		// host.json claiming alive, and a live orphaned child.
+		process.kill(original.runnerPid, "SIGKILL");
+		await waitFor(() => !isAlive(original.runnerPid), 10_000, capture);
+
+		// The compressed chain must converge well inside the 30s resolve budget —
+		// the same budget the production default would need 150s of headroom for.
+		const service = testService(root);
+		const resolved = await service.resolveAttachTarget("v1", { timeoutMs: 30_000 }); // budget: app deadline 30s, F4-knob-compressed chain converges in ~2s; node-default test timeout accepted
+		assert.equal(resolved.kind, "pty", `resolver produced a pty target: ${JSON.stringify(resolved)}`);
+		assert.notEqual(resolved.instanceId, original.instanceId, "replacement is a new instance");
+		assert.equal(isAlive(original.childPid), false, "old child is dead once the resolver returns");
+
+		await teardownHost(root, "v1", service);
+	} catch (err) {
+		await teardownHost(root, "v1", testService(root)).catch(() => {});
+		throw err;
+	} finally {
+		delete process.env.AGENT_BOARD_TEST_HOST_START_GRACE_MS;
+		delete process.env.AGENT_BOARD_TEST_HOST_RECOVERY_GRACE_MS;
+		delete process.env.AGENT_BOARD_TEST_HOST_RECOVERY_POLL_MS;
+		delete process.env.AGENT_BOARD_TEST_ATTACH_RESOLVE_TIMEOUT_MS;
+	}
+});
