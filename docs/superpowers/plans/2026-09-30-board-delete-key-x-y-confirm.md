@@ -493,9 +493,11 @@ git commit -m "test(ui): pin legacy ctrl+x and multi-select delete paths (issue 
 	const env = makeEnv();
 	const dash = makeDash(env);
 	const d = dash as unknown as { mode: string };
-	const hints = dash.render(120).join("\n");
+	// 240 cols: the hints line clips at narrow widths (pre-existing behavior);
+	// assert against the unclipped source string.
+	const hints = dash.render(240).join("\n");
 	d.mode = "help";
-	const help = dash.render(120).join("\n");
+	const help = dash.render(240).join("\n");
 	report.copy = { hints, help };
 	dash.dispose();
 }
@@ -507,8 +509,8 @@ git commit -m "test(ui): pin legacy ctrl+x and multi-select delete paths (issue 
 test("A7: hints and help advertise x (y/N) alongside the legacy shortcut", () => {
 	assert.match(report.copy.hints, /x delete/);
 	assert.match(report.copy.hints, /ctrl\+x x2/);
-	assert.match(report.copy.help, /x {2}Delete selected session \(y\/N confirm\)/);
-	assert.match(report.copy.help, /ctrl\+x x2 {2}Delete selected session \(quick double-press, no confirm\)/);
+	assert.match(report.copy.help, /x\s+Delete selected session \(y\/N confirm\)/);
+	assert.match(report.copy.help, /ctrl\+x x2\s+Delete selected session \(quick double-press, no confirm\)/);
 });
 ```
 

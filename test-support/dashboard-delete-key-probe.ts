@@ -224,4 +224,18 @@ const report: Record<string, unknown> = {};
 	dash.dispose();
 }
 
+// 10) copy: list hints and the help overlay both advertise the new key
+{
+	const env = makeEnv();
+	const dash = makeDash(env);
+	const d = dash as unknown as { mode: string };
+	// 240 cols: the hints line clips at narrow widths (pre-existing behavior);
+	// assert against the unclipped source string.
+	const hints = dash.render(240).join("\n");
+	d.mode = "help";
+	const help = dash.render(240).join("\n");
+	report.copy = { hints, help };
+	dash.dispose();
+}
+
 console.log(JSON.stringify(report));

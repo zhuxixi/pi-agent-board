@@ -76,3 +76,10 @@ test("A6: multi-select keeps ctrl+x and ignores plain x", () => {
 	assert.deepEqual(report.selectMode.confirmed.archiveManyCalls, [[report.selectMode.target]], "y routes the batch through archiveMany");
 	assert.ok(!report.selectMode.confirmed.orderedIds.includes(report.selectMode.target), "deleted row leaves the list");
 });
+
+test("A7: hints and help advertise x (y/N) alongside the legacy shortcut", () => {
+	assert.match(report.copy.hints, /x delete/);
+	assert.match(report.copy.hints, /ctrl\+x x2/);
+	assert.match(report.copy.help, /x\s+Delete selected session \(y\/N confirm\)/);
+	assert.match(report.copy.help, /ctrl\+x x2\s+Delete selected session \(quick double-press, no confirm\)/);
+});

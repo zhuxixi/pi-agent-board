@@ -1335,7 +1335,7 @@ export class DashboardComponent implements Component {
 			]);
 		}
 		const primary = this.input.trim() ? "enter launch" : live ? "enter attach live" : "enter resume";
-		const hints = ["i insert", primary, "→ attach", "m multi-select", ...(unread > 0 ? [`•${unread} unread`] : []), "d done", "space peek", "v transcript", "e evidence", "ctrl+n new session", "ctrl+r rename", "ctrl+x x2 delete", "X delete state", "/ filter", "! pty", "? help"];
+		const hints = ["i insert", primary, "→ attach", "m multi-select", ...(unread > 0 ? [`•${unread} unread`] : []), "d done", "space peek", "v transcript", "e evidence", "ctrl+n new session", "ctrl+r rename", "x delete (y/N)", "ctrl+x x2 quick", "X delete state", "/ filter", "! pty", "? help"];
 		if (this.input.trim()) hints.splice(1, 0, "esc clear");
 		return this.hintLine("NORMAL", "muted", hints);
 	}
@@ -1687,6 +1687,7 @@ export class DashboardComponent implements Component {
 			["!", "Open node-pty diagnostics and fix steps"],
 			["ctrl+n", "Open the new-session launch dialog (prompt pre-filled)"],
 			["ctrl+r/t/s", "Rename · pin · stop selected"],
+			["x", "Delete selected session (y/N confirm)"],
 			["ctrl+x x2", "Delete selected session (quick double-press, no confirm)"],
 			["X", "Delete all inactive sessions in selected state"],
 			["v", "Open read-only transcript view"],

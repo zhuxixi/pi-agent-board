@@ -114,7 +114,7 @@ Launch preferences are persisted and reused for later sessions. **Start & attach
 Session actions are deliberately confirmation-aware:
 
 - `d` confirms moving an inactive session to **Done**. Manual completion is the default.
-- Press `Ctrl+X` twice quickly to archive/delete the selected row. Archiving removes the row from the board but preserves its underlying Pi session file.
+- Press `x`, then `y` to confirm deleting the selected row. `Ctrl+X` twice quickly still deletes without confirmation. Archiving removes the row from the board but preserves its underlying Pi session file.
 - `X` archives inactive rows in the selected state; live work is skipped.
 - `m` enters multi-select mode. Use `Space` to toggle rows, `a` to select all visible rows, `u` to clear the selection, `d` to mark inactive rows Done, or `Ctrl+X` to delete selected Done rows.
 
@@ -139,7 +139,8 @@ Shortcuts are scoped to the view where they are available:
 | `Ctrl+T` | Pin or unpin the selected session. |
 | `Ctrl+S` | Stop the selected active session. |
 | `d` | Confirm marking the selected inactive session Done. |
-| `Ctrl+X` twice quickly | Archive/delete the selected row. |
+| `x`, then `y` | Archive/delete the selected row (confirmation prompt). |
+| `Ctrl+X` twice quickly | Archive/delete the selected row without confirmation. |
 | `X` | Delete inactive rows in the selected state. |
 | `m` | Enter multi-select mode. |
 | `!` | Open node-pty diagnostics and repair hints. |
