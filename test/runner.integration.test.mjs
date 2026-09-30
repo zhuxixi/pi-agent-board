@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
@@ -547,6 +546,103 @@ test("runner does not clobber a manual completion made during post-exit model pa
 		);
 	} finally {
 		await killDetached(runnerPid);
+		await coord.kill();
+		delete process.env.FAKE_PI_MODE;
+		delete process.env.FAKE_PI_SUMMARY_DELAY_MS;
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("runner drain fence: holding and completed verdicts are never auto-resumed (issue #145, A18)", { timeout: 45000 }, async () => {
+	const root = mkdtempSync(join(tmpdir(), "agentview-run-drain-fence-"));
+	process.env.FAKE_PI_MODE = "completed";
+	process.env.FAKE_PI_SUMMARY_DELAY_MS = "2000";
+	const runnerPids = [];
+	// Tracked coordinator: the manual verdicts travel the real coordinator path
+	// (mark_holding / mark_completed), and an unfenced drain's follow-up bootstrap
+	// would too — without this fixture the client's ensure path could spawn an
+	// untracked detached coordinator that outlives the rmSync below.
+	const coord = await startCoordinator(root);
+	try {
+		const { writeState } = await import("../src/core/store.mjs");
+		const { enqueueFollowUp, readFollowUpQueue } = await import("../src/core/follow-up-queue.mjs");
+		const { readDiagnostics } = await import("../src/core/diagnostics.mjs");
+		const { createService } = await import("../src/runtime/service.mjs");
+		const svc = createService({ root });
+
+		// One leg per manual verdict. Each leg races the verdict into the runner's
+		// post-exit model-pass window (fake --model calls slowed 2s) while a queued
+		// follow-up is waiting, then asserts drainQueuedFollowUp's verdict fence
+		// (isManualVerdict on state.json) held: no claim, no spawned follow-up run,
+		// no drain diagnostics, and the verdict intact in state.json.
+		const runLeg = async (viewId, verdict) => {
+			const meta = createView(root, { id: viewId, name: viewId, cwd: root });
+			const config = makeConfig(root, viewId, "run_1", meta.sessionFile, root, "fix the bug");
+			const st = readState(root, viewId);
+			st.currentRunId = "run_1";
+			writeState(root, st);
+			// Seed the queue the way production's enqueue writer does
+			// (queueFollowUp → enqueueFollowUp): the fence must stop the drain
+			// before claimNextFollowUp ever fires.
+			assert.ok(enqueueFollowUp(root, viewId, "next step").ok, "queued follow-up seeded");
+
+			const pid = launchRun(root, config, { runnerScript: RUNNER }).pid;
+			runnerPids.push(pid);
+			assert.ok(pid && pid > 0, "runner spawned");
+
+			// Worker exited (terminal status persisted) — the runner is now inside
+			// its slowed post-exit model passes, the race window.
+			const status = await waitFor(() => {
+				const s = readStatus(root, viewId, "run_1");
+				return s && s.endedAt ? s : null;
+			});
+			assert.ok(status, "status reached terminal state");
+
+			// Race the manual verdict into the window. Poll to success: the same
+			// status-before-state persist ordering as the manual-completion test
+			// above can transiently reject ("active run") right after endedAt
+			// becomes visible.
+			await waitFor(async () => {
+				const res = verdict === "holding" ? await svc.holdView(viewId) : await svc.markCompleted(viewId);
+				return res.ok ? res : null;
+			});
+
+			// Let the runner finish its passes and exit — drainQueuedFollowUp runs
+			// in the exit chain, before process.exit.
+			await waitFor(() => {
+				try {
+					process.kill(pid, 0);
+					return false;
+				} catch {
+					return true;
+				}
+			}, 25000);
+
+			// The verdict survived the whole exit chain.
+			const state = readState(root, viewId);
+			assert.equal(state.semanticState, verdict, `state.json keeps the ${verdict} verdict`);
+			assert.equal(state.autoState, null, "manual verdict clears autoState");
+
+			// No second run was spawned: the fence must stop the drain before
+			// claimNextFollowUp, so only the original run directory exists, the
+			// queue item stays queued, and no follow-up diagnostics appear.
+			assert.deepEqual(readdirSync(P.runsDir(root, viewId)).sort(), ["run_1"], "no follow-up run directory appeared");
+			assert.equal(readFollowUpQueue(root, viewId).items.filter((i) => i.status === "queued").length, 1, "queued follow-up was never claimed");
+			assert.deepEqual(
+				readDiagnostics(root, viewId).filter((d) => String(d.code).startsWith("follow_up")).map((d) => d.code),
+				[],
+				"no follow-up drain diagnostics were emitted",
+			);
+		};
+
+		// The holding leg is the widened-fence proof: with the pre-#145 fence
+		// (completed-only) a holding row fell through to claimNextFollowUp and
+		// spawned a follow-up runner — every assertion above would fail. The
+		// completed twin is the fence's original leg, kept as regression coverage.
+		await runLeg("hold_v", "holding");
+		await runLeg("done_v", "completed");
+	} finally {
+		for (const pid of runnerPids) await killDetached(pid);
 		await coord.kill();
 		delete process.env.FAKE_PI_MODE;
 		delete process.env.FAKE_PI_SUMMARY_DELAY_MS;
