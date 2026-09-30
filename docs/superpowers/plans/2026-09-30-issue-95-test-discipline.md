@@ -257,9 +257,192 @@ async function waitFor(predicate, timeoutMs = 15000, capture = null) {
 **Interfaces:**
 - Produces: `parseTestBudgets(source) → {fileDefaultWaitMs, tests: [{name, declaredTimeoutMs, waitLiterals[], deadlineLiterals[]}]}` and `auditBudgets(sources) → violations[]` (pure; `sources` = `[{path, source}]`).
 
-- [ ] **Step 1: Failing tests** — `test/budget-audit.test.mjs` with fixture sources: (i) rule-a violation `test("x", { timeout: 20000 }, ... waitFor(fn, 20000))`; (ii) rule-a pass (`timeout: 26000` with `waitFor(fn, 20000)` — 26000 ≥ 20000+max(5000, 6667)); (iii) rule-b violation (`resolveAttachTarget("v", { timeoutMs: 150_000 })` in a test with no declared timeout); (iv) rule-b clean via `// budget: knob` on the same line; (v) file-default violation (declared `timeout: 10000`, file helper `waitFor(p, timeoutMs = 15000)`, a default-arg wait call); (vi) real tree: `auditBudgets(read all test/*.test.mjs)` returns `[]`. Assert exact violation counts and rule labels.
+- [ ] **Step 1: Write the failing tests** — `test/budget-audit.test.mjs`:
+
+```js
+/** F2 budget-audit gate (issue #95): fixtures must bite, the real tree must be clean. */
+import assert from "node:assert/strict";
+import { readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { test } from "node:test";
+import { auditBudgets, parseTestBudgets } from "../scripts/budget-audit.mjs";
+
+const FIX_A_VIOLATION = `async function waitFor(predicate, timeoutMs = 15000) { /* poll */ }
+test("rule-a violation", { timeout: 20000 }, async () => {
+	await waitFor(() => null, 20000);
+});
+`;
+const FIX_A_PASS = `async function waitFor(predicate, timeoutMs = 15000) { /* poll */ }
+test("rule-a pass", { timeout: 27000 }, async () => {
+	await waitFor(() => null, 20000);
+});
+`;
+const FIX_DEFAULT_VIOLATION = `async function waitFor(predicate, timeoutMs = 15000) { /* poll */ }
+test("default violation", { timeout: 10000 }, async () => {
+	await waitFor(() => null);
+});
+`;
+const FIX_RULE_B_VIOLATION = `test("rule-b violation", async () => {
+	const r = await resolveAttachTarget("v1", { timeoutMs: 150_000 });
+	return r;
+});
+`;
+const FIX_RULE_B_ESCAPE = `test("rule-b escape", async () => {
+	const r = await resolveAttachTarget("v1", { timeoutMs: 150_000 }); // budget: knob
+	return r;
+});
+`;
+
+function violations(source) {
+	return auditBudgets([{ path: "fixture.mjs", source }]);
+}
+
+test("A5: rule-a flags a declared timeout that cannot contain its wait", () => {
+	const v = violations(FIX_A_VIOLATION);
+	assert.equal(v.length, 1);
+	assert.equal(v[0].rule, "rule-a");
+	assert.match(v[0].message, /20000/);
+});
+
+test("A5: rule-a passes when the timeout covers max wait + margin", () => {
+	assert.deepEqual(violations(FIX_A_PASS), []);
+});
+
+test("A5: the file's default wait participates when a call omits the budget", () => {
+	const v = violations(FIX_DEFAULT_VIOLATION);
+	assert.equal(v.length, 1);
+	assert.equal(v[0].rule, "rule-a");
+	assert.match(v[0].message, /15000/);
+});
+
+test("A5: an app-level deadline >= 30s needs a covering timeout or an escape", () => {
+	const v = violations(FIX_RULE_B_VIOLATION);
+	assert.equal(v.length, 1);
+	assert.equal(v[0].rule, "rule-b");
+	assert.match(v[0].message, /150000/);
+});
+
+test("A5: a // budget: escape line exempts the deadline", () => {
+	assert.deepEqual(violations(FIX_RULE_B_ESCAPE), []);
+});
+
+test("A5: parseTestBudgets exposes the declared timeout and waits", () => {
+	const parsed = parseTestBudgets(FIX_A_VIOLATION);
+	assert.equal(parsed.fileDefaultWaitMs, 15000);
+	assert.equal(parsed.tests[0].declaredTimeoutMs, 20000);
+	assert.deepEqual(parsed.tests[0].waitLiterals, [20000]);
+});
+
+test("A5: the real test tree audits clean", () => {
+	const dir = join(import.meta.dirname, "..");
+	const sources = readdirSync(join(dir, "test"))
+		.filter((f) => f.endsWith(".test.mjs"))
+		.map((f) => ({ path: f, source: readFileSync(join(dir, "test", f), "utf8") }));
+	assert.ok(sources.length > 50, "found the test tree");
+	assert.deepEqual(auditBudgets(sources), []);
+});
+```
+
 - [ ] **Step 2: RED run** — `node --test test/budget-audit.test.mjs` → module-not-found.
-- [ ] **Step 3: Implement `scripts/budget-audit.mjs`:** line-based scanner — strip lines containing `// budget:`; find file default via `/async function waitFor\([^)]*\)\s*\{/ ... timeoutMs\s*=\s*([0-9_]+)/` (search window 400 chars); split into test chunks at `/^test\(/m` boundaries; per chunk take `declaredTimeoutMs` from `/timeout:\s*([0-9_]+)/` within the first 200 chars, wait literals from `/waitFor\((?:[^()]|\([^()]*\))*?,\s*([0-9_]+)/g`, deadline literals from `/timeoutMs:\s*([0-9_]+)/g` excluding those inside a `waitFor(` call's own signature line (positional vs named disambiguates). Rules: (a) `declaredTimeoutMs < maxWait + max(5000, round(maxWait/3))` where `maxWait = max(waitLiterals ∪ (any waitFor call present ? [fileDefault] : []))` → violation "rule-a"; (b) any deadline ≥ 30000 with `!declaredTimeoutMs || declaredTimeoutMs < deadline` → "rule-b". Export both functions; no I/O.
+
+- [ ] **Step 3: Implement `scripts/budget-audit.mjs`:**
+
+```js
+/**
+ * Budget audit for test files (issue #95 F2).
+ *
+ * Mechanical discipline: a test's declared timeout must be able to contain
+ * its waits (rule a), and an app-level deadline a test drives must be covered
+ * by the test's own budget unless explicitly escaped (rule b). Pure functions
+ * only — the gate lives in test/budget-audit.test.mjs, which runs these over
+ * fixture sources AND the real test tree.
+ */
+
+/** Strip escaped lines (`// budget: <reason>`) from a source. @param {string} source @returns {string} */
+export function stripEscapedLines(source) {
+	return source.split("\n").filter((line) => !line.includes("// budget:")).join("\n");
+}
+
+/** @param {string} source @returns {number | null} */
+export function parseFileDefaultWaitMs(source) {
+	const m = /async function waitFor\([^)]*\)\s*\{[\s\S]{0,400}?timeoutMs\s*=\s*([0-9_]+)/.exec(source);
+	return m ? Number(m[1].replace(/_/g, "")) : null;
+}
+
+/** Balanced-paren argument text for the call whose `(` sits at fromIndex. @param {string} text @param {number} fromIndex @returns {string | null} */
+function callArgs(text, fromIndex) {
+	let depth = 0;
+	for (let i = fromIndex; i < text.length; i++) {
+		if (text[i] === "(") depth++;
+		else if (text[i] === ")") {
+			depth--;
+			if (depth === 0) return text.slice(fromIndex + 1, i);
+		}
+	}
+	return null;
+}
+
+/**
+ * @param {string} source
+ * @returns {{ fileDefaultWaitMs: number | null, tests: Array<{ name: string, declaredTimeoutMs: number | null, waitLiterals: number[], hasDefaultWaitCall: boolean, deadlineLiterals: number[] }> }}
+ */
+export function parseTestBudgets(source) {
+	const clean = stripEscapedLines(source);
+	const fileDefaultWaitMs = parseFileDefaultWaitMs(clean);
+	const tests = [];
+	const starts = [];
+	const re = /^(?:export )?test\(/gm;
+	for (let m = re.exec(clean); m; m = re.exec(clean)) starts.push(m.index);
+	for (let i = 0; i < starts.length; i++) {
+		const chunk = clean.slice(starts[i], starts[i + 1] ?? clean.length);
+		const nameM = /^(?:export )?test\("([^"]+)"/.exec(chunk);
+		const toM = /timeout:\s*([0-9_]+)/.exec(chunk.slice(0, 240));
+		const waitLiterals = [];
+		let hasDefaultWaitCall = false;
+		const waitRe = /waitFor\(/g;
+		for (let w = waitRe.exec(chunk); w; w = waitRe.exec(chunk)) {
+			const args = callArgs(chunk, w.index + "waitFor".length);
+			if (args == null) continue;
+			const trailing = /,\s*([0-9_]+)\s*,?\s*$/.exec(args.trim());
+			if (trailing) waitLiterals.push(Number(trailing[1].replace(/_/g, "")));
+			else hasDefaultWaitCall = true;
+		}
+		const deadlineLiterals = [];
+		const dlRe = /timeoutMs:\s*([0-9_]+)/g;
+		for (let d = dlRe.exec(chunk); d; d = dlRe.exec(chunk)) deadlineLiterals.push(Number(d[1].replace(/_/g, "")));
+		tests.push({ name: nameM ? nameM[1] : `<test ${i + 1}>`, declaredTimeoutMs: toM ? Number(toM[1].replace(/_/g, "")) : null, waitLiterals, hasDefaultWaitCall, deadlineLiterals });
+	}
+	return { fileDefaultWaitMs, tests };
+}
+
+/**
+ * Rule (a): declared timeout >= max(single explicit wait, file default when a
+ * call omits it) + margin, margin = max(5000, wait / 3).
+ * Rule (b): an app deadline >= 30s needs a declared timeout >= it (escape via
+ * `// budget:` lines, stripped upstream).
+ * @param {Array<{ path: string, source: string }>} sources
+ * @returns {Array<{ path: string, test: string, rule: string, message: string }>}
+ */
+export function auditBudgets(sources) {
+	const violations = [];
+	for (const { path, source } of sources) {
+		const parsed = parseTestBudgets(source);
+		for (const t of parsed.tests) {
+			const waits = [...t.waitLiterals];
+			if (t.hasDefaultWaitCall && parsed.fileDefaultWaitMs != null) waits.push(parsed.fileDefaultWaitMs);
+			if (t.declaredTimeoutMs != null && waits.length > 0) {
+				const maxWait = Math.max(...waits);
+				const margin = Math.max(5000, Math.round(maxWait / 3));
+				if (t.declaredTimeoutMs < maxWait + margin) violations.push({ path, test: t.name, rule: "rule-a", message: `declared timeout ${t.declaredTimeoutMs}ms cannot contain max wait ${maxWait}ms + margin ${margin}ms` });
+			}
+			for (const d of t.deadlineLiterals) {
+				if (d >= 30000 && (t.declaredTimeoutMs == null || t.declaredTimeoutMs < d)) violations.push({ path, test: t.name, rule: "rule-b", message: `app deadline ${d}ms needs a declared test timeout >= it (or a // budget: escape)` });
+			}
+		}
+	}
+	return violations;
+}
+```
 - [ ] **Step 4: GREEN** — all fixtures report as designed AND the real tree is clean after adding this line to host-concurrency A10 (immediately after the `resolveAttachTarget` line): `// budget: app deadline 150s, runtime-compressed by the F4 knob; node-default test timeout accepted`
 - [ ] **Step 5:** `node --test test/host-concurrency.integration.test.mjs` still green (comment-only change).
 - [ ] **Step 6:** Commit — `git add scripts/budget-audit.mjs test/budget-audit.test.mjs test/host-concurrency.integration.test.mjs && git commit -m "test: budget audit gate for test timeout/wait nesting (issue #95)"`
