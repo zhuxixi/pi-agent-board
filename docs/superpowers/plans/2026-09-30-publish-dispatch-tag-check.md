@@ -131,7 +131,7 @@ cd $WT && git add test/publish-workflow.test.mjs && git commit -m "test(ci): pin
 
 - [ ] **Step 1: 改自检步骤**
 
-把 `.github/workflows/publish.yml` 的自检步骤替换为（原文 5 行 → 新文 6 行，新增 `env:` 块、`GITHUB_REF_NAME` 换成 `RELEASE_TAG`）：
+把 `.github/workflows/publish.yml` 的自检步骤替换为（原文 6 行 → 新文 8 行，新增 `env:` 块、`GITHUB_REF_NAME` 换成 `RELEASE_TAG`）：
 
 ```yaml
       - name: Check the tag matches package.json
