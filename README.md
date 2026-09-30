@@ -158,6 +158,7 @@ Peek shows the selected session's summary, blocker or question, latest output, a
 | `a`, `Right`, or `>` | Attach to the session. |
 | `v` | Open the read-only transcript. |
 | `e` | Open Evidence / Diagnostics. |
+| `d` | Confirm marking the inactive session Done. |
 | `h` | Hold or unhold the session. |
 | `Up` / `Down` | Move to the previous or next session. |
 | `Esc` | Return to the main list. |
@@ -212,7 +213,7 @@ Agent Board separates a session's semantic task state from whether a worker proc
 | **Running** | The session is actively processing. |
 | **Needs answer** | The session is waiting for user input or an answer to a question. |
 | **Needs instructions** | The run ended without being marked complete and needs the next directive. |
-| **On hold** | The user parked this session intentionally (manual verdict, `h` to toggle). It stays out of Done until resumed; queued follow-ups do not wake it. |
+| **On hold** | The user parked this session intentionally (manual verdict, `h` to toggle). Automated writers can't push it to Done; queued follow-ups do not wake it. |
 | **Done** | The user marked the inactive session complete; this is the default completion path. |
 | **Failed** | The worker or host ended with an error. |
 | **Stopped** | The user stopped the active work. |

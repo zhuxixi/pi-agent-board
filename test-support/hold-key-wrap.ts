@@ -6,15 +6,17 @@ import { DashboardComponent } from "../src/ui/dashboard.ts";
 const stateById: Record<string, { semanticState: string; processState: string; pendingQuestions: unknown[] }> = {
 	v1: { semanticState: "idle", processState: "exited", pendingQuestions: [] },
 	v2: { semanticState: "holding", processState: "exited", pendingQuestions: [] },
+	v3: { semanticState: "working", processState: "alive", pendingQuestions: [] },
 };
 const sent: Array<[string, string]> = [];
-const row = (id: string) => ({
+const row = (id: string, overrides: Record<string, unknown> = {}) => ({
 	meta: { id, name: id, cwd: "/", sessionFile: `/s/${id}.jsonl` },
 	state: stateById[id],
 	alive: false, hostAlive: false, hostActive: false, hostReady: false, host: null,
+	...overrides,
 });
 const service = {
-	rows: () => [row("v1"), row("v2")],
+	rows: () => [row("v1"), row("v2"), row("v3", { alive: true })],
 	holdView: async (id: string) => { sent.push(["mark_holding", id]); stateById[id].semanticState = "holding"; return { ok: true }; },
 	clearHoldView: async (id: string) => { sent.push(["clear_holding", id]); stateById[id].semanticState = "idle"; return { ok: true }; },
 	reconcile: async () => 0,
@@ -32,5 +34,8 @@ dash.peekId = "v2"; dash.mode = "peek";
 dash.handleInput("h");            // peek mode -> (v2 was reset to idle by the previous press) mark_holding
 dash.mode = "session";
 dash.handleInput("h");            // session mode -> clear_holding
+dash.mode = "list";
+dash.selectedId = "v3";
+dash.handleInput("h");            // list mode, busy row -> busy pre-check blocks, sent must not grow
 dash.dispose();
 console.log(JSON.stringify(sent));

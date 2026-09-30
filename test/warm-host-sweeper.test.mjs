@@ -106,6 +106,9 @@ test("isAgentBusy 语义保持", () => {
 	assert.equal(isAgentBusy(idleRow("x")), false);
 	assert.equal(isAgentBusy(idleRow("x", { alive: true, state: { semanticState: "working", processState: "alive", pendingQuestions: [] } })), true);
 	assert.equal(isAgentBusy(idleRow("x", { alive: true, state: { semanticState: "idle", processState: "alive", pendingQuestions: ["q"] } })), true);
+	// A8 first clause: holding is never busy — it is a user verdict, not work in
+	// flight, so the resume/done keys stay available on an on-hold row.
+	assert.equal(isAgentBusy({ alive: true, state: { semanticState: "holding", processState: "alive", pendingQuestions: [] } }), false);
 });
 
 test("canAutoDrain is an allow-list that excludes holding (issue #145)", () => {
@@ -121,8 +124,6 @@ test("canAutoDrain is an allow-list that excludes holding (issue #145)", () => {
 	assert.equal(canAutoDrain(row("needs_input")), false);
 	assert.equal(canAutoDrain(row("working", true)), false);
 });
-
-
 
 const sleepMs = (ms) => new Promise((r) => setTimeout(r, ms));
 
