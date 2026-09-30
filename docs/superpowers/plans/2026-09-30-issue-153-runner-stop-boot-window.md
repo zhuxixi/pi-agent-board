@@ -469,7 +469,117 @@ git commit -m "test: boot-window stop latch coverage and dead-run convergence (i
 
 ---
 
-### Task 4: Full gate + load-repeat acceptance (A4)
+### Task 4 (addendum 2026-09-30, controller-ruled after Task 3's A10 blocking finding): Dead-runner row convergence
+
+**Files:**
+- Modify: `src/core/store.mjs:393-404` (loadRow alive computation)
+- Test: `test/store.test.mjs` (append unit tests) and the A10 integration test below
+
+**Interfaces:**
+- Consumes: `readPid(root, viewId, runId)` → `number|null` (null = no record or pid:null record; `src/core/store.mjs:337-339`).
+- Produces: `loadRow().alive` semantics — "a recorded dead runner pid wins over the `processState: "alive"` mirror; the mirror applies only when no pid record exists". Downstream consumers (`isAgentBusy`, `archiveView`, `service.reconcile`) change behavior through `row.alive`.
+
+- [ ] **Step 1: Write the failing unit tests** — append to `test/store.test.mjs` (reuse its existing fixture helpers for meta/state): `deadPid()` must `await` the child's `exit` event before use so it is genuinely reaped:
+
+```js
+/** A pid that is definitely dead (spawned, exited, reaped). */
+async function deadPid() {
+	const child = spawn(process.execPath, ["-e", "process.exit(0)"], { stdio: "ignore" });
+	await new Promise((resolveExit) => child.on("exit", resolveExit));
+	return child.pid;
+}
+
+test("loadRow: a recorded dead runner pid wins over the alive mirror (issue #153)", async () => {
+	const root = mkdtempSync(join(tmpdir(), "agentview-store-alive-"));
+	try {
+		createView(root, { id: "v", name: "t", cwd: root });
+		const st = readState(root, "v");
+		st.currentRunId = "run_1";
+		st.processState = "alive";
+		writeState(root, st);
+		const pid = await deadPid();
+		writeFileSync(P.pidPath(root, "v", "run_1"), JSON.stringify({ pid, at: Date.now() }));
+		const row = loadRow(root, "v");
+		assert.equal(row.alive, false, "recorded dead pid ⇒ not alive, mirror must not resurrect it");
+	} finally {
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("loadRow: the alive mirror still applies when no pid record exists (foreground path)", async () => {
+	const root = mkdtempSync(join(tmpdir(), "agentview-store-alive-"));
+	try {
+		createView(root, { id: "v", name: "t", cwd: root });
+		const st = readState(root, "v");
+		st.currentRunId = "run_fg";
+		st.processState = "alive";
+		writeState(root, st);
+		// no pid.json for run_fg — the foreground follow-up shape
+		const row = loadRow(root, "v");
+		assert.equal(row.alive, true, "no pid record ⇒ mirror decides (foreground preserved)");
+	} finally {
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("loadRow: a recorded live pid keeps the row alive regardless of the mirror", async () => {
+	const root = mkdtempSync(join(tmpdir(), "agentview-store-alive-"));
+	try {
+		createView(root, { id: "v", name: "t", cwd: root });
+		const st = readState(root, "v");
+		st.currentRunId = "run_1";
+		st.processState = "alive";
+		writeState(root, st);
+		writeFileSync(P.pidPath(root, "v", "run_1"), JSON.stringify({ pid: process.pid, at: Date.now() }));
+		const row = loadRow(root, "v");
+		assert.equal(row.alive, true);
+	} finally {
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+```
+
+(Imports the file already needs: `spawn` from `node:child_process`, `writeFileSync` from `node:fs` — add if missing.)
+
+- [ ] **Step 2: Re-add the A10 integration test as this task's RED** — create `test/runner-stop-window.integration.test.mjs` is Task 3's file; instead append to it a new `test(...)` block using the SAME helpers already defined there (copy the A10 block from this plan's Task 3 brief verbatim — fixture, SIGKILL, `testService(root).reconcile()`, assertions `failed` / `exited` / `Failed (runner exited)`, orphan-worker cleanup in finally).
+
+- [ ] **Step 3: Run to verify RED** — `node --test test/store.test.mjs test/runner-stop-window.integration.test.mjs`: expect the new unit test "recorded dead pid wins" FAIL (`alive === true`), the two mirror/live unit tests PASS, and the A10 integration test FAIL (`actual 'working' expected 'failed'`). This red is Task 3's documented blocking finding — same fingerprint.
+
+- [ ] **Step 4: Implement the loadRow seam** — in `src/core/store.mjs`, replace the alive computation:
+
+```js
+	let alive = false;
+	// True when a detached runner pid record exists for the current run. The
+	// processState mirror below exists for the foreground path, which has no
+	// runner pid to poll — it must never override a RECORDED pid: an
+	// un-finalized dead runner is the row's truth, and trusting the mirror
+	// here makes reconcile() skip the row forever (issue #153, A10).
+	let runnerPidRecorded = false;
+	if (enrichedState?.currentRunId) {
+		const pid = readPid(root, viewId, enrichedState.currentRunId);
+		runnerPidRecorded = pid != null;
+		alive = isAlive(pid);
+	}
+	// A managed session can also be active in the foreground after the user attaches
+	// and types a follow-up. In that path there is no detached runner pid for us to
+	// poll, but foreground extension events mirror processState into state.json.
+	if (!alive && !runnerPidRecorded && enrichedState?.processState === "alive") alive = true;
+```
+
+- [ ] **Step 5: Run to verify GREEN** — same command as Step 3: all pass, plus `node --test test/runner.integration.test.mjs test/service.test.mjs test/host-concurrency.integration.test.mjs` (row.alive consumers) and `npm test` once.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/core/store.mjs test/store.test.mjs test/runner-stop-window.integration.test.mjs
+git commit -m "fix: loadRow trusts a recorded dead runner pid over the alive mirror (issue #153)"
+```
+
+**Review focus for this task:** foreground case preserved (unit test 2); live pid unaffected (unit test 3); consumers of `row.alive` (`isAgentBusy`, `archiveView`, `canAutoDrain`, warm-host sweeper) reviewed against the new semantics — the reviewer runs `rg -n "row.alive|\\.alive\\b" src/` as a named-risk check; a `pid.json` holding `pid:null` counts as no record (mirror applies) — documented semantics, `readPid` returns null.
+
+---
+
+### Task 5: Full gate + load-repeat acceptance (A4)
 
 **Files:**
 - No new files. (A4 is a one-time acceptance procedure, not a recurring CI test.)
