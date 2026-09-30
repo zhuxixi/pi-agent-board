@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 import { appendLine, readJson } from "../src/core/atomic.mjs";
 import { createRunStatus, finalizeRun, reduceEvent } from "../src/core/events.mjs";
 import { encodePromptForCliArg } from "../src/core/prompt-transport.mjs";
+import { createStopLatch } from "../src/core/stop-latch.mjs";
 import { applyAutoStateToStatus, autoStateEnabled, autoStateFromModelOrHeuristic, autoStateModel, buildAutoStatePrompt, heuristicAutoState, isManualVerdict } from "../src/core/auto-state.mjs";
 import { appendDiagnostic } from "../src/core/diagnostics.mjs";
 import { emptyEvidenceSnapshot, finalizeEvidence, reduceEvidence, summarizeEvidence, writeEvidence, writeRunEvidence } from "../src/core/evidence.mjs";
@@ -34,6 +35,17 @@ import { legacyFollowupBootstrap, legacyPersistState, legacyPlanReadyStateWrite,
 import { buildApprovePlanPrompt, buildPlanChangesPrompt, buildPlanRequestPrompt } from "../src/core/steering-prompts.mjs";
 
 const WRITE_THROTTLE_MS = 250;
+
+// Stop-intent latch (issue #153): a stop signal that arrives before the real
+// stop path exists (config read → run_started → worker spawn → handler
+// wiring) must not kill this process via Node's default action — the run
+// would never reach a terminal state. The latch records it; bootstrapRun
+// replays it into stop() once the handlers are wired. A signal during module
+// import (before these handlers exist) still exits by default, but nothing
+// has been published at that point, so no observable state is lost.
+const stopLatch = createStopLatch();
+process.on("SIGTERM", () => stopLatch.note("SIGTERM"));
+process.on("SIGINT", () => stopLatch.note("SIGINT"));
 
 /** @param {string[]} args */
 function redactWorkerArgs(args) {
@@ -72,6 +84,11 @@ function main() {
 	// queued frame flickering through run_started's first materialization.
 	status.semanticState = "working";
 	let evidence = emptyEvidenceSnapshot({ viewId, runId, source: "json-runner" });
+	// First observable write of the run (issue #153, A3): the stop latch was
+	// armed at module scope — before this diagnostic, nothing about the run is
+	// observable. Pinned by the stop-window integration test asserting this is
+	// diagnostics.jsonl's first entry.
+	appendDiagnostic(root, viewId, { source: "runner", runId, code: "stop_latch_armed", message: "Stop latch armed before any observable state", details: { signals: ["SIGTERM", "SIGINT"] } });
 	appendDiagnostic(root, viewId, { source: "runner", runId, code: "runner_start", message: "Runner started", details: { kind: config.kind, cwd: config.cwd, model: config.model } });
 	writeRunEvidence(root, evidence);
 	writeEvidence(root, evidence);
@@ -107,6 +124,12 @@ async function bootstrapRun({ root, viewId, runId, config, status, meta, evidenc
 			appendDiagnostic(root, viewId, { source: "runner", runId, ...commandRejectDiagnostic("run_started", "Run bootstrap", started.reason, "otherwise dashboard reconcile will converge the row"), details: { reason: started.reason } });
 		}
 	}
+
+	// Test-only boot-window knob (issue #153): deterministically widen the gap
+	// between the observable run_started and the handler wiring so a stop can
+	// be delivered inside the window without timing luck. Inert when unset.
+	const bootWindowMs = Number(process.env.AGENT_BOARD_TEST_BOOT_WINDOW_MS || 0);
+	if (bootWindowMs > 0) await new Promise((resolveDelay) => setTimeout(resolveDelay, bootWindowMs));
 
 	/**
 	 * One transient progress beat: ship the full in-memory status as a sparse
@@ -369,6 +392,11 @@ async function bootstrapRun({ root, viewId, runId, config, status, meta, evidenc
 	};
 	process.on("SIGTERM", stop);
 	process.on("SIGINT", stop);
+
+	// Replay a stop observed before the real handlers existed (issue #153).
+	// take() clears, so this fires at most once and cannot double-fire with a
+	// later real signal; stop() itself is worker.killed-guarded.
+	if (stopLatch.take() != null) stop();
 
 	worker.on("error", async (err) => {
 		// Cancel any in-flight throttled flush before finalizing: if the timer
