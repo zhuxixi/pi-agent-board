@@ -6,7 +6,7 @@
  *     injects the window deterministically via AGENT_BOARD_TEST_BOOT_WINDOW_MS;
  *     leg 2 repeats the flow with the knob unset (inert-when-unset proof).
  * A3: the run's first diagnostics.jsonl entry is stop_latch_armed — nothing
- *     is published before the process can handle a stop.
+ *     is published by the runner before the process can handle a stop.
  * A10: a runner hard-killed before finalizing (the pre-#153 failure shape)
  *      is converged by service.reconcile() — defense in depth behind the latch.
  */
@@ -138,6 +138,14 @@ async function stopWindowLeg({ injected }) {
 		assert.ok(status, "run finalized after the early stop");
 		assert.equal(status.semanticState, "stopped", "early stop still produces the stopped verdict");
 		assertFirstDiagnosticIsLatchArmed(root);
+		// The latch path must be distinguishable from a post-wiring stop: only the
+		// injected leg has the stop replayed into stop().
+		const replayed = readDiagnostics(root, "view_1").some((d) => d.code === "stop_latch_replayed");
+		if (injected) {
+			assert.ok(replayed, "the early stop was latched and replayed, not handled post-wiring");
+		} else {
+			assert.equal(replayed, false, "knob unset: the stop landed post-wiring, no replay diagnostic");
+		}
 	} finally {
 		delete process.env.AGENT_BOARD_TEST_BOOT_WINDOW_MS;
 		await killDetached(runnerPid);

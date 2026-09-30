@@ -84,10 +84,11 @@ function main() {
 	// queued frame flickering through run_started's first materialization.
 	status.semanticState = "working";
 	let evidence = emptyEvidenceSnapshot({ viewId, runId, source: "json-runner" });
-	// First observable write of the run (issue #153, A3): the stop latch was
-	// armed at module scope — before this diagnostic, nothing about the run is
-	// observable. Pinned by the stop-window integration test asserting this is
-	// diagnostics.jsonl's first entry.
+	// First observable write BY THE RUNNER (issue #153, A3): the stop latch was
+	// armed at module scope, before the runner publishes anything of its own.
+	// (The parent's mark_queued/pid.json predate the child; that pre-module shape
+	// is converged by service.reconcile() — A10.) Pinned by the stop-window
+	// integration test asserting this is diagnostics.jsonl's first entry.
 	appendDiagnostic(root, viewId, { source: "runner", runId, code: "stop_latch_armed", message: "Stop latch armed before any observable state", details: { signals: ["SIGTERM", "SIGINT"] } });
 	appendDiagnostic(root, viewId, { source: "runner", runId, code: "runner_start", message: "Runner started", details: { kind: config.kind, cwd: config.cwd, model: config.model } });
 	writeRunEvidence(root, evidence);
@@ -395,8 +396,12 @@ async function bootstrapRun({ root, viewId, runId, config, status, meta, evidenc
 
 	// Replay a stop observed before the real handlers existed (issue #153).
 	// take() clears, so this fires at most once and cannot double-fire with a
-	// later real signal; stop() itself is worker.killed-guarded.
-	if (stopLatch.take() != null) stop();
+	// later real signal; stop() itself is worker.killed-guarded. The diagnostic
+	// is emitted first so the latch path stays observable even if stop() no-ops.
+	if (stopLatch.take() != null) {
+		appendDiagnostic(root, viewId, { source: "runner", runId, code: "stop_latch_replayed", message: "Replaying a stop observed before the handlers were wired", details: {} });
+		stop();
+	}
 
 	worker.on("error", async (err) => {
 		// Cancel any in-flight throttled flush before finalizing: if the timer

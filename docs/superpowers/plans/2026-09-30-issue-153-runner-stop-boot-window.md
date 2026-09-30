@@ -232,6 +232,8 @@ git commit -m "feat: module-scope stop latch replays early stops in job-runner (
 
 ### Task 3: Boot-window integration tests (A1 + A3 + A10)
 
+> Addendum: A10 originally lived in this task; Task 3's review found it red against unfixed reconcile (blocking finding) and it moved to Task 4 with the loadRow seam — see the Task 4 addendum below.
+
 **Files:**
 - Create: `test/runner-stop-window.integration.test.mjs`
 

@@ -43,9 +43,10 @@ latch note (harmless bookkeeping) and `stop()`; `take()` fires at most once, and
 itself is guarded by `worker.killed`, so no double-fire.
 
 Residual window (documented, harmless): a signal during module *import* — before the latch
-handlers exist — still exits by default, but at that point nothing has been published, so no
-observable state is lost. A3 pins "nothing observable before the latch" via the
-first-diagnostic ordering.
+handlers exist — still exits by default, but at that point nothing has been published by the
+runner, so no runner-written state is lost. (The parent's `mark_queued`/`pid.json` predate the
+child; that pre-module shape is converged by `service.reconcile()` — A10.) A3 pins "nothing
+published by the runner before the latch" via the first-diagnostic ordering.
 
 Windows platform scope: Node on Windows ignores the signal name and hard-kills, so no handler
 can run — this fix is Unix-only and Windows behaviour is unchanged (Non-goal; the durable
@@ -57,7 +58,7 @@ stop-intent alternative is parked in #95 spec §7).
 |---|---|---|---|---|
 | A1 | A stop inside the boot window still finalizes | integration (deterministic) | `test/runner-stop-window.integration.test.mjs`: leg 1 sets `AGENT_BOARD_TEST_BOOT_WINDOW_MS=800`, SIGTERMs as soon as `working` is observable; leg 2 runs the same flow without the knob | both legs: `status.json.endedAt != null` and `semanticState === "stopped"`; leg 2 also proves the knob is inert when unset |
 | A2 | Stop-latch state machine | unit | `test/stop-latch.test.mjs` | note/take/repeat/collapse/empty/independent-instance paths; no double-fire |
-| A3 | Nothing observable before the latch | integration | assert the run's first `diagnostics.jsonl` entry is `stop_latch_armed` (single-file observable, ahead of `runner_start`) | any other first entry fails |
+| A3 | Nothing published by the runner before the latch | integration | assert the run's first `diagnostics.jsonl` entry is `stop_latch_armed` (single-file observable, ahead of `runner_start`) | any other first entry fails |
 | A4 | The regression case survives load | integration (repeat, **one-time procedure — not a recurring CI test**) | 20 consecutive local runs of `test/runner.integration.test.mjs` while the full suite runs in parallel | 20/20 green (pre-fix baseline: failures within the first 2–3 runs under load) |
 | A10 | A dead-runner row converges | integration (deterministic) | SIGKILL the runner after `run_started`, then call `service.reconcile()` | `state.json` converges to `semanticState: "failed"`, `processState: "exited"`, summary `Failed (runner exited)` within the same pass (path exists: `service.mjs:2118` reconcile → `reconcile_finalize`) |
 
