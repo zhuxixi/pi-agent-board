@@ -223,7 +223,7 @@ test("A10: SIGKILLed runner is recovered by the attach resolver without double c
 		// is sized for the slowest runners; typical completion is ~20s.
 		// issue #95: 90s proved insufficient on slower CI — widened to 150s.
 		const service = testService(root);
-		const resolved = await service.resolveAttachTarget("v1", { timeoutMs: 150_000 }); // budget: app deadline 150s, runtime-compressed by the F4 knob; node-default test timeout accepted
+		const resolved = await service.resolveAttachTarget("v1", { timeoutMs: 150_000 }); // budget: explicit 150s resolve budget, slow-machine headroom; node-default test timeout accepted
 		assert.equal(resolved.kind, "pty", `resolver produced a pty target: ${JSON.stringify(resolved)}`);
 		assert.notEqual(resolved.instanceId, original.instanceId, "replacement is a new instance");
 
@@ -282,10 +282,13 @@ test("A7: ladder knobs compress the A10 recovery chain without weakening it", { 
 		process.kill(original.runnerPid, "SIGKILL");
 		await waitFor(() => !isAlive(original.runnerPid), 10_000, capture);
 
-		// The compressed chain must converge well inside the 30s resolve budget — the chain
-		// A10 budgets 150s of headroom for.
+		// No explicit timeoutMs: the resolve budget is AGENT_BOARD_TEST_ATTACH_RESOLVE_TIMEOUT_MS
+		// alone, so the knob is this test's sole budget source (the 1ms sibling below pins
+		// the inversion if the reader is ever unwired). The compressed chain must converge
+		// well inside the 30s it allows — A10 budgets 150s of slow-machine headroom for the
+		// same walk.
 		const service = testService(root);
-		const resolved = await service.resolveAttachTarget("v1", { timeoutMs: 30_000 }); // budget: app deadline 30s = headroom over a ~2s walk; node-default test timeout accepted
+		const resolved = await service.resolveAttachTarget("v1");
 		assert.equal(resolved.kind, "pty", `resolver produced a pty target: ${JSON.stringify(resolved)}`);
 		assert.notEqual(resolved.instanceId, original.instanceId, "replacement is a new instance");
 		assert.equal(isAlive(original.childPid), false, "old child is dead once the resolver returns");
@@ -298,6 +301,45 @@ test("A7: ladder knobs compress the A10 recovery chain without weakening it", { 
 		delete process.env.AGENT_BOARD_TEST_HOST_START_GRACE_MS;
 		delete process.env.AGENT_BOARD_TEST_HOST_RECOVERY_GRACE_MS;
 		delete process.env.AGENT_BOARD_TEST_HOST_RECOVERY_POLL_MS;
+		delete process.env.AGENT_BOARD_TEST_ATTACH_RESOLVE_TIMEOUT_MS;
+	}
+});
+
+test("A7 (red world): a 1ms resolve knob budget starves the resolver", { skip: !hasNodePty }, async () => {
+	// issue #95 F2: only the resolve budget is knobbed. The start/recovery graces
+	// keep their production defaults, so this orphaned host WOULD converge to a pty
+	// under the 120s default — the 1ms budget expires first and the starve outcome is
+	// the observable. Unwiring the reader restores 120s, the chain converges to pty,
+	// and this test fails: the inversion is the anti-rot proof.
+	process.env.AGENT_BOARD_TEST_ATTACH_RESOLVE_TIMEOUT_MS = "1";
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "starve", cwd: process.cwd() });
+		ensureSessionFile(root, "v1");
+
+		const capture = () => formatPostmortem(capturePostmortem(root, "v1", null));
+
+		const first = await runHelper(root, "v1");
+		assert.equal(first.result?.started, true, `first helper started: ${JSON.stringify(first)}`);
+		const original = await waitFor(() => {
+			const h = readHost(root, "v1");
+			return h?.state === "alive" && h.readyAt != null && h.childPid && isAlive(h.runnerPid) ? h : false;
+		}, 30_000, capture);
+
+		// Same hard orphan as A10/A7: SIGKILL the runner, leaving a live orphaned child.
+		process.kill(original.runnerPid, "SIGKILL");
+		await waitFor(() => !isAlive(original.runnerPid), 10_000, capture);
+
+		const service = testService(root);
+		const resolved = await service.resolveAttachTarget("v1");
+		assert.equal(resolved.kind, "pending", `1ms budget starves before recovery converges: ${JSON.stringify(resolved)}`);
+		assert.match(resolved.reason, /timed out/);
+
+		await teardownHost(root, "v1", service);
+	} catch (err) {
+		await teardownHost(root, "v1", testService(root)).catch(() => {});
+		throw err;
+	} finally {
 		delete process.env.AGENT_BOARD_TEST_ATTACH_RESOLVE_TIMEOUT_MS;
 	}
 });

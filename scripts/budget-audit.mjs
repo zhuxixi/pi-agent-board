@@ -33,6 +33,46 @@ function callArgs(text, fromIndex) {
 	return null;
 }
 
+/** Top-level (depth-0) comma-separated arguments of a call's argument text. @param {string} args @returns {string[]} */
+function splitTopLevelArgs(args) {
+	const parts = [];
+	let depth = 0;
+	let current = "";
+	for (const ch of args) {
+		if (ch === "(" || ch === "[" || ch === "{") depth += 1;
+		else if (ch === ")" || ch === "]" || ch === "}") depth -= 1;
+		if (ch === "," && depth === 0) {
+			parts.push(current);
+			current = "";
+		} else current += ch;
+	}
+	parts.push(current);
+	return parts;
+}
+
+/**
+ * Distinct numeric budget literals a `waitFor(...)` call declares: the trailing
+ * numeric argument (`waitFor(pred, 30_000)` / `waitFor(pred, 30_000, 50)`) plus
+ * the first top-level numeric argument, which covers
+ * `waitFor(pred, 30_000, capture)` shapes where the trailing regex only ever
+ * sees the capture thunk — and the `(pred, timeout, interval)` shape, whose
+ * trailing number is the interval, not the budget. Empty when the call omits
+ * the budget and inherits the file default.
+ * @param {string} args @returns {number[]}
+ */
+function waitLiteralsIn(args) {
+	const out = [];
+	const add = (raw) => {
+		const value = Number(raw.replace(/_/g, ""));
+		if (!out.includes(value)) out.push(value);
+	};
+	const trailing = /,\s*([0-9_]+)\s*,?\s*$/.exec(args.trim());
+	if (trailing) add(trailing[1]);
+	const first = splitTopLevelArgs(args).map((a) => a.trim()).find((a) => /^[0-9_]+$/.test(a));
+	if (first) add(first);
+	return out;
+}
+
 /**
  * @param {string} source
  * @returns {{ fileDefaultWaitMs: number | null, tests: Array<{ name: string, declaredTimeoutMs: number | null, waitLiterals: number[], hasDefaultWaitCall: boolean, deadlineLiterals: number[] }> }}
@@ -47,15 +87,15 @@ export function parseTestBudgets(source) {
 	for (let i = 0; i < starts.length; i++) {
 		const chunk = clean.slice(starts[i], starts[i + 1] ?? clean.length);
 		const nameM = /^(?:export )?test\("([^"]+)"/.exec(chunk);
-		const toM = /timeout:\s*([0-9_]+)/.exec(chunk.slice(0, 240));
+		const toM = /timeout:\s*([0-9_]+)/.exec(chunk.slice(0, 400));
 		const waitLiterals = [];
 		let hasDefaultWaitCall = false;
 		const waitRe = /waitFor\(/g;
 		for (let w = waitRe.exec(chunk); w; w = waitRe.exec(chunk)) {
 			const args = callArgs(chunk, w.index + "waitFor".length);
 			if (args == null) continue;
-			const trailing = /,\s*([0-9_]+)\s*,?\s*$/.exec(args.trim());
-			if (trailing) waitLiterals.push(Number(trailing[1].replace(/_/g, "")));
+			const literals = waitLiteralsIn(args);
+			if (literals.length > 0) waitLiterals.push(...literals);
 			else hasDefaultWaitCall = true;
 		}
 		const deadlineLiterals = [];

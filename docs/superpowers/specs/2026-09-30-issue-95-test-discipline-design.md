@@ -89,8 +89,12 @@ Known tension, stated openly: derived budgets are still wall-clock numbers. The 
 *accountability* — no unsatisfiable nesting, every number carries a recorded reason — not
 immunity to slow machines; that part is F1/F3/F4's job.
 
-Fixes the two known inversions (`test/runner.integration.test.mjs:282`, `host-concurrency A10`)
-and prevents new ones. Wired as `test/budget-audit.test.mjs` so `npm test` enforces it, plus
+Amends the two inversions the spec predicted rather than fixing them as written:
+`test/runner.integration.test.mjs:282` already satisfies rule (a) under max+margin
+(20000 ≥ 15000 + 5000) and needed no change; the delivered fixes are the two rule-derived
+widenings (`test/pty-attach-cold-start-e2e.test.mjs`'s slow-boot test 30000 → 35000 and
+`test/runner.integration.test.mjs:489` 30000 → 35000) plus `host-concurrency A10`'s explicit
+`// budget:` escape. Wired as `test/budget-audit.test.mjs` so `npm test` enforces it, plus
 unit fixtures that must fail.
 
 ### F3 — Failure self-diagnosis (the next red names its own blocked step)

@@ -1821,6 +1821,122 @@ test("reconcile finalizes stale starting/alive host snapshots", async () => {
 	}
 });
 
+test("reconcile skips a starting host claim only while the start-grace knob allows", async () => {
+	const root = freshRoot();
+	const { coord, restore } = await startTrackedCoordinator(root);
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const st = readState(root, "v1");
+		st.semanticState = "queued";
+		st.processState = "alive";
+		st.currentRunId = null;
+		writeState(root, st);
+		// A fresh claim with no runner pid yet: a normal cold start, not an orphan.
+		writeHost(root, {
+			version: 1,
+			viewId: "v1",
+			mode: "pty",
+			runnerPid: null,
+			childPid: null,
+			socketPath: P.controlSocketPath(root, "v1"),
+			state: "starting",
+			claimAt: Date.now(),
+			startedAt: Date.now(),
+			lastSeenAt: Date.now(),
+			endedAt: null,
+			exitCode: null,
+			error: null,
+			cols: 80,
+			rows: 24,
+			attachedClients: 0,
+		});
+		// Inside the production grace the claim is a cold start: skipped, not failed.
+		assert.equal(await service(root).reconcile(), 0);
+		assert.equal(readState(root, "v1").semanticState, "queued", "claim inside the grace is not finalized");
+		// The reader is dynamic, so the knob set after import flips the very same claim.
+		process.env.AGENT_BOARD_TEST_HOST_START_GRACE_MS = "0";
+		try {
+			assert.equal(await service(root).reconcile(), 1);
+			const failed = await waitFor(() => {
+				const s = readState(root, "v1");
+				return s?.semanticState === "failed" ? s : null;
+			});
+			assert.ok(failed, "grace=0 flips the claim to a failed verdict");
+		} finally {
+			delete process.env.AGENT_BOARD_TEST_HOST_START_GRACE_MS;
+		}
+	} finally {
+		await coord.kill();
+		restore();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("resolveAttachTarget honors AGENT_BOARD_TEST_HOST_RECOVERY_GRACE_MS for stale stops", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		// A `stopping` record whose revoke is 30s old and whose processes are provably
+		// gone: stale under the production 5s recovery grace, ineligible under a huge one.
+		writeHost(root, {
+			version: 1,
+			viewId: "v1",
+			mode: "pty",
+			instanceId: "i1",
+			runnerPid: 999999,
+			runnerIdentity: { pid: 999999, startToken: "tok" },
+			runnerSpawnedAt: 1,
+			childPid: null,
+			socketPath: P.controlSocketPath(root, "v1"),
+			state: "stopping",
+			claimAt: 1_000_000 - 30_000,
+			stopRequestedAt: 1_000_000 - 30_000,
+			revokeToken: "rev-2",
+			stopReason: "user",
+			readyAt: 12_345,
+			startedAt: 1_000_000 - 60_000,
+			lastSeenAt: 1_000_000 - 30_000,
+			endedAt: null,
+			exitCode: null,
+			error: null,
+			cols: 80,
+			rows: 24,
+			attachedClients: 0,
+		});
+		let clock = 1_000_000;
+		let spawns = 0;
+		let probes = 0;
+		const svc = service(root, {
+			now: () => clock,
+			sleepFn: async () => {
+				clock += 100;
+			},
+			probeHostFn: async () => {
+				probes += 1;
+				return { classification: "ready", connected: true, protocolValid: true, ready: true, viewId: "v1", instanceId: "i1", state: "alive", errorCode: null };
+			},
+			observeProcess: () => "dead",
+			launchHost: (_root, config) => {
+				spawns += 1;
+				return { pid: process.pid, configPath: config.configPath };
+			},
+		});
+		process.env.AGENT_BOARD_TEST_HOST_RECOVERY_GRACE_MS = "600000";
+		try {
+			const result = await svc.resolveAttachTarget("v1", { timeoutMs: 500 });
+			assert.equal(result.kind, "pending", `huge recovery grace keeps the stale stop ineligible: ${JSON.stringify(result)}`);
+			assert.match(result.reason, /timed out/);
+			assert.equal(spawns, 0, "no recovery while the grace window is still open");
+			assert.equal(probes, 0, "an ineligible stop is never probed");
+			assert.equal(readHost(root, "v1")?.instanceId, "i1", "record untouched");
+		} finally {
+			delete process.env.AGENT_BOARD_TEST_HOST_RECOVERY_GRACE_MS;
+		}
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("createService schedules screen log GC with the prefs retention", async () => {
 	const root = freshRoot();
 	try {
