@@ -18,7 +18,7 @@
 - 表达式必须经 `env:` 中转，不得把 `${{ }}` 直接写进 `run` 脚本（避免表达式拼接进 shell）。
 - tag 派生表达式逐字使用：`${{ github.event.release.tag_name || inputs.tag }}`；去 `v` 前缀方式保持 `${RELEASE_TAG#v}`。
 - 测试文件遵循既有约定：`node:test` + `assert/strict`、**Tab 缩进**、文件名 `test/*.test.mjs`、仓库根用 `fileURLToPath(new URL("..", import.meta.url))`。
-- 静态测试只断言「否定式不变量 + 正向表达式存在」，不断言 YAML 结构 / 步骤名（避免重构假红）。
+- 静态测试只断言「否定式不变量（剥整行注释后不得出现 `GITHUB_REF_NAME`）+ 正向表达式计数 ≥2」，不断言 YAML 结构 / 步骤名（避免重构假红）。
 - TDD：Task 1 的测试必须在当前未修复文件上先红，Task 2 修完再绿。
 - 提交按文件 `git add <file>`，不用 `git add -A`；commit message 用英文 conventional 格式。
 - push / 开 PR 前必须获得用户明确许可（用户 AGENTS.md 硬规则）。
