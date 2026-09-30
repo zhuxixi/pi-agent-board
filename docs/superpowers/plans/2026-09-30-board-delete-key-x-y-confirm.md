@@ -107,6 +107,13 @@ function makeEnv(): {
 	const realRows = service.rows.bind(service);
 	let rowPatch: ((r: Row) => Row) | null = null;
 	service.rows = (() => realRows().map((r) => (rowPatch ? rowPatch(r as unknown as Row) : r))) as typeof service.rows;
+	// selectedBatchRows() reads service.row(id), not service.rows() — patch
+	// both so fixtures (busy/completed rows) stay consistent everywhere.
+	const realRow = service.row.bind(service);
+	service.row = ((id: string) => {
+		const r = realRow(id);
+		return r && rowPatch ? rowPatch(r as unknown as Row) : r;
+	}) as typeof service.row;
 	return { service, root, archiveCalls, archiveManyCalls, setRowPatch: (fn) => { rowPatch = fn; } };
 }
 

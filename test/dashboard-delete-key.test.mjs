@@ -55,3 +55,24 @@ test("A5: x is literal text in insert mode", () => {
 	assert.match(report.insertMode.input, /x/);
 	assert.deepEqual(report.insertMode.archived, []);
 });
+test("A4: legacy ctrl+x double-press still deletes without a confirm step", () => {
+	assert.equal(report.legacyDoublePress.mode, "list", "no confirm mode involved");
+	assert.equal(report.legacyDoublePress.prompt, null);
+	assert.deepEqual(report.legacyDoublePress.archived, ["v1"]);
+});
+
+test("A4b: ctrl+x outside the 500ms window only re-arms", () => {
+	assert.deepEqual(report.legacySlow.archived, []);
+	assert.equal(report.legacySlow.mode, "list");
+});
+
+test("A6: multi-select keeps ctrl+x and ignores plain x", () => {
+	assert.equal(report.selectMode.afterX.mode, "select", "plain x is a no-op in select mode");
+	assert.equal(report.selectMode.afterX.prompt, null);
+	assert.equal(report.selectMode.ctrlX.mode, "confirm");
+	assert.match(report.selectMode.ctrlX.prompt, /^Delete 1 done session\? Session files are preserved\. \(y\/N\)$/);
+	assert.equal(report.selectMode.ctrlX.returnMode, "select");
+	assert.deepEqual(report.selectMode.archived, [], "the batch path never routes through single-row archive");
+	assert.deepEqual(report.selectMode.confirmed.archiveManyCalls, [[report.selectMode.target]], "y routes the batch through archiveMany");
+	assert.ok(!report.selectMode.confirmed.orderedIds.includes(report.selectMode.target), "deleted row leaves the list");
+});
