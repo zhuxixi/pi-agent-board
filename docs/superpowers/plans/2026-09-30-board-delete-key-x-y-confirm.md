@@ -46,12 +46,12 @@
 - Consumes: `DashboardComponent` 构造签名 `(tui, theme, keybindings, done, deps: DashboardDeps)`；`deps.service.rows()/row(id)/archive(id)`；`handleConfirmKey` 既有语义（`y`/`Y`/enter = 确认，其它 = 取消）。
 - Produces: `private confirmDelete(): void`（本 task 内部方法，不被其它 task 引用）。
 
-- [ ] **Step 0: 安装依赖**
+- [x] **Step 0: 安装依赖**
 
 Run: `cd "$WT" && npm install`
 Expected: 成功；出现 `node_modules/`。失败则停止并报告（后续所有测试依赖它）。
 
-- [ ] **Step 1: 写失败的探针 + 测试**
+- [x] **Step 1: 写失败的探针 + 测试**
 
 创建 `test-support/dashboard-delete-key-probe.ts`：
 
@@ -304,12 +304,12 @@ test("A5: x is literal text in insert mode", () => {
 });
 ```
 
-- [ ] **Step 2: 跑测试确认失败**
+- [x] **Step 2: 跑测试确认失败**
 
 Run: `cd "$WT" && node --test test/dashboard-delete-key.test.mjs`
 Expected: FAIL —— `A1` 的 `mode` 是 `"list"` 而非 `"confirm"`（`x` 目前只会触发 "Press i to enter INSERT mode" 提示）。
 
-- [ ] **Step 3: 最小实现**
+- [x] **Step 3: 最小实现**
 
 `src/ui/dashboard.ts` `handleListKey`，在 `if (data === "d") return this.confirmDone();` 之后、`ctrl+x` 分支之前插入：
 
@@ -342,17 +342,17 @@ Expected: FAIL —— `A1` 的 `mode` 是 `"list"` 而非 `"confirm"`（`x` 目�
 	}
 ```
 
-- [ ] **Step 4: 跑测试确认通过**
+- [x] **Step 4: 跑测试确认通过**
 
 Run: `cd "$WT" && node --test test/dashboard-delete-key.test.mjs`
 Expected: PASS（6 个 test 全绿：A1/A1b/A1c/A3/A2/A5）。若 `A2` 超时，检查探针 `waitFor` 轮询条件是否覆盖 `flash`。
 
-- [ ] **Step 5: 类型检查与全量测试**
+- [x] **Step 5: 类型检查与全量测试**
 
 Run: `cd "$WT" && npm run typecheck && npm test`
 Expected: 均通过；无新增 warning。
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 cd "$WT"
@@ -374,7 +374,7 @@ git commit -m "feat(ui): x then y confirms session deletion (issue #150)"
 - Consumes: Task 1 的探针工厂 `makeEnv()` / `makeDash()` / `snap()`；`Row` 补丁钩子 `setRowPatch`。
 - Produces: report 新增 `legacyDoublePress`、`legacySlow`、`selectMode`（含 `afterX` / `ctrlX` / `confirmed` 子字段）；`makeEnv()` 返回值新增 `archiveManyCalls: string[][]`。
 
-- [ ] **Step 1: 写回归场景（先跑，预期直接通过）**
+- [x] **Step 1: 写回归场景（先跑，预期直接通过）**
 
 在探针 `console.log` 之前追加：
 
@@ -449,17 +449,17 @@ test("A6: multi-select keeps ctrl+x and ignores plain x", () => {
 });
 ```
 
-- [ ] **Step 2: 跑测试**
+- [x] **Step 2: 跑测试**
 
 Run: `cd "$WT" && node --test test/dashboard-delete-key.test.mjs`
 Expected: PASS（9 个 test）。若 8) 出现误删，说明 500ms 窗口被 Task 1 改动破坏——回到 `handleListKey` 首行的 arm 重置语义排查。
 
-- [ ] **Step 3: 全量测试**
+- [x] **Step 3: 全量测试**
 
 Run: `cd "$WT" && npm test`
 Expected: PASS。
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 cd "$WT"
@@ -483,7 +483,7 @@ git commit -m "test(ui): pin legacy ctrl+x and multi-select delete paths (issue 
 - Consumes: Task 1 的探针 harness；`DashboardComponent.render(width)` 公开方法；`dash.mode = "help"` 白盒设置。
 - Produces: report 新增 `copy` 字段（`{ hints: string, help: string }`）。
 
-- [ ] **Step 1: 写失败断言**
+- [x] **Step 1: 写失败断言**
 
 探针追加（`console.log` 之前）：
 
@@ -517,7 +517,7 @@ test("A7: hints and help advertise x (y/N) alongside the legacy shortcut", () =>
 Run: `cd "$WT" && node --test test/dashboard-delete-key.test.mjs`
 Expected: FAIL（hints 仍是 `ctrl+x x2 delete`，help 无 `x` 行）。
 
-- [ ] **Step 2: 改文案**
+- [x] **Step 2: 改文案**
 
 `src/ui/dashboard.ts` `listHints`（:1316）把 `"ctrl+x x2 delete"` 改为 `"x delete (y/N)"` 与 `"ctrl+x x2 quick"` 两项（保持数组顺序：`d done` … `x delete (y/N)` … `ctrl+x x2 quick` …）。
 
@@ -545,7 +545,7 @@ help overlay（:1668）在 `ctrl+x x2` 行之前插入：
 | `Ctrl+X` twice quickly | Archive/delete the selected row without confirmation. |
 ```
 
-- [ ] **Step 3: 跑测试与静态检查**
+- [x] **Step 3: 跑测试与静态检查**
 
 Run:
 ```bash
@@ -556,12 +556,12 @@ rg -n "Ctrl\+X twice quickly|Ctrl\+X` twice" README.md
 ```
 Expected: 测试 PASS；第一条 `rg` 无匹配（exit 1）；第二条命中 README :117 与 :142。
 
-- [ ] **Step 4: 类型检查 + 全量测试**
+- [x] **Step 4: 类型检查 + 全量测试**
 
 Run: `cd "$WT" && npm run typecheck && npm test`
 Expected: PASS。
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 cd "$WT"
@@ -578,12 +578,12 @@ git commit -m "docs(ui): document x-then-y delete alongside the ctrl+x shortcut 
 **Files:**
 - Modify: `docs/superpowers/plans/2026-09-30-board-delete-key-x-y-confirm.md`（勾选本 plan 的 checkbox，附验证输出摘要）
 
-- [ ] **Step 1: 全量验证**
+- [x] **Step 1: 全量验证**
 
 Run: `cd "$WT" && npm run verify`
 Expected: typecheck / perf gate / tests / coverage（lines 85, funcs 80, branches 70）/ pack:dry 全部通过。若覆盖率不足，补充探针场景而不是放宽阈值。
 
-- [ ] **Step 2: 验收矩阵对账**
+- [x] **Step 2: 验收矩阵对账**
 
 逐项执行并记录：
 ```bash
@@ -594,7 +594,7 @@ rg -n "ctrl\+x x2 delete|Ctrl\+X`? twice quickly to archive" src/ README.md  # A
 ```
 Expected: 全部通过；A7 的 `rg` 无输出。
 
-- [ ] **Step 3: 记录 U1 实测清单（交给用户执行）**
+- [x] **Step 3: 记录 U1 实测清单（交给用户执行）**
 
 在 plan 末尾记录（不勾选，等用户结果）：
 
@@ -608,7 +608,7 @@ Expected: 全部通过；A7 的 `rg` 无输出。
 6. 老路径：选中一行 → `Ctrl+X` 连按两次：仍免确认删除。
 ```
 
-- [ ] **Step 4: Commit**
+- [x] **Step 4: Commit**
 
 ```bash
 cd "$WT"
@@ -617,6 +617,16 @@ git commit -m "chore: record issue-150 verification results"
 ```
 
 ---
+
+## 验证结果（2026-09-30，worktree 内实测）
+
+- `node --test test/dashboard-delete-key.test.mjs` → 10/10 pass（A1, A1b, A1c, A2, A3, A4, A4b, A5, A6, A7）。
+- `npm run typecheck` → clean。
+- `npm test` → 1077-1078 pass / 0 fail（3 skipped = perf gate；一次 run 中 1 个 `runner.integration` 用例 flake，重跑不复现，属 #95 已知类别，与本改动无关）。
+- `npm run test:coverage` → 1078 pass / 0 fail；statements 91.7 / branches 81.0 / functions 88.85 / lines 91.7，全过阈值（85/80/70... lines 85 / funcs 80 / branches 70）。
+- `npm run pack:dry` → tarball 正常（203 files）。
+- 静态：`rg "ctrl\+x x2 delete" src/ README.md` 无匹配；README:117/:143 均含 `x` + `(y/N)` 与 `Ctrl+X` ×2 双路径说明。
+- **U1 用户实测：pending**（清单见上节，等用户在真实终端执行）。
 
 ## 追溯矩阵（spec 验收 ID ↔ 本 plan task）
 
