@@ -486,7 +486,8 @@ test("runner extracts github issue/pr refs end-to-end into github.json and the r
 	}
 });
 
-test("runner does not clobber a manual completion made during post-exit model passes", { timeout: 30000 }, async () => {
+// issue #95 F2: the 25s waitFor inside needs 25000 + margin (8333) = 33333.
+test("runner does not clobber a manual completion made during post-exit model passes", { timeout: 35000 }, async () => {
 	const root = mkdtempSync(join(tmpdir(), "agentview-run-manual-"));
 	process.env.FAKE_PI_MODE = "completed";
 	process.env.FAKE_PI_SUMMARY_DELAY_MS = "2000";

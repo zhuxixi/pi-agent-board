@@ -223,7 +223,7 @@ test("A10: SIGKILLed runner is recovered by the attach resolver without double c
 		// is sized for the slowest runners; typical completion is ~20s.
 		// issue #95: 90s proved insufficient on slower CI — widened to 150s.
 		const service = testService(root);
-		const resolved = await service.resolveAttachTarget("v1", { timeoutMs: 150_000 });
+		const resolved = await service.resolveAttachTarget("v1", { timeoutMs: 150_000 }); // budget: app deadline 150s, runtime-compressed by the F4 knob; node-default test timeout accepted
 		assert.equal(resolved.kind, "pty", `resolver produced a pty target: ${JSON.stringify(resolved)}`);
 		assert.notEqual(resolved.instanceId, original.instanceId, "replacement is a new instance");
 

@@ -242,7 +242,8 @@ test(
 // that the initial hold design would have lost for boots >6s.
 test(
 	"slow boot >6s: first frame re-arms hold after G1, heals in <=3s, ends at original size",
-	{ skip: !hasNodePty && "node-pty unavailable", timeout: 30000 },
+	// issue #95 F2: the 25s waitFor inside needs 25000 + margin (8333) = 33333.
+	{ skip: !hasNodePty && "node-pty unavailable", timeout: 35000 },
 	async () => {
 		const root = mkdtempSync(join(tmpdir(), "agentview-holdslow-"));
 		let runner;
