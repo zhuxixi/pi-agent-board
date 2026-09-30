@@ -393,14 +393,21 @@ export function loadRow(root, viewId) {
 	const summaries = readViewArtifactSummaries(root, viewId);
 	const enrichedState = state ? { ...state, ...summaries } : state;
 	let alive = false;
+	// True when a detached runner pid record exists for the current run. The
+	// processState mirror below exists for the foreground path, which has no
+	// runner pid to poll — it must never override a RECORDED pid: an
+	// un-finalized dead runner is the row's truth, and trusting the mirror
+	// here makes reconcile() skip the row forever (issue #153, A10).
+	let runnerPidRecorded = false;
 	if (enrichedState?.currentRunId) {
 		const pid = readPid(root, viewId, enrichedState.currentRunId);
+		runnerPidRecorded = pid != null;
 		alive = isAlive(pid);
 	}
 	// A managed session can also be active in the foreground after the user attaches
 	// and types a follow-up. In that path there is no detached runner pid for us to
 	// poll, but foreground extension events mirror processState into state.json.
-	if (!alive && enrichedState?.processState === "alive") alive = true;
+	if (!alive && !runnerPidRecorded && enrichedState?.processState === "alive") alive = true;
 	const host = readHost(root, viewId);
 	// New-protocol records carry an explicit runnerPid (null until spawn
 	// confirms); only legacy records without the property fall back to the

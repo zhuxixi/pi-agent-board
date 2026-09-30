@@ -7,6 +7,8 @@
  *     leg 2 repeats the flow with the knob unset (inert-when-unset proof).
  * A3: the run's first diagnostics.jsonl entry is stop_latch_armed — nothing
  *     is published before the process can handle a stop.
+ * A10: a runner hard-killed before finalizing (the pre-#153 failure shape)
+ *      is converged by service.reconcile() — defense in depth behind the latch.
  */
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
@@ -16,7 +18,9 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { readDiagnostics } from "../src/core/diagnostics.mjs";
 import { launchRun } from "../src/core/launch.mjs";
-import { createView, readPid, readStatus } from "../src/core/store.mjs";
+import { isAlive } from "../src/core/pid.mjs";
+import { createService } from "../src/runtime/service.mjs";
+import { createView, readPid, readState, readStatus } from "../src/core/store.mjs";
 import { startCoordinator } from "../test-support/ensure-coordinator-helper.mjs";
 
 const ROOT_DIR = fileURLToPath(new URL("../", import.meta.url));
@@ -74,6 +78,17 @@ function makeConfig(root, viewId, runId, sessionFile, cwd, prompt) {
 		model: null,
 		tools: null,
 	};
+}
+
+function testService(root) {
+	return createService({
+		root,
+		runnerScript: RUNNER,
+		ptyRunnerScript: join(ROOT_DIR, "runner", "pty-runner.mjs"),
+		piCommand: process.execPath,
+		piArgsPrefix: [FAKE_PI],
+		defaultCwd: process.cwd(),
+	});
 }
 
 /** Shared fixture: launch a hanging run and wait until working is observable. */
@@ -139,4 +154,46 @@ test("A1 (injected window): SIGTERM inside the boot window still finalizes as st
 
 test("A1 (knob unset): the same flow passes with the knob inert", { timeout: 20000 }, async () => {
 	await stopWindowLeg({ injected: false });
+});
+
+test("A10: reconcile converges a runner hard-killed before finalizing", { timeout: 20000 }, async () => {
+	const root = mkdtempSync(join(tmpdir(), "agentview-stop-window-"));
+	process.env.FAKE_PI_MODE = "hang";
+	process.env.AGENT_BOARD_SUMMARY_MODEL = "off";
+	let runnerPid = null;
+	const coord = await startCoordinator(root);
+	try {
+		const started = await startWorkingRun(root);
+		runnerPid = started.runnerPid;
+
+		// Simulate the pre-#153 failure shape: a hard kill nothing can intercept,
+		// leaving working/alive with no endedAt.
+		process.kill(runnerPid, "SIGKILL");
+		await waitFor(() => (isAlive(runnerPid) ? null : true), 10000);
+		const frozen = readStatus(root, "view_1", "run_1");
+		assert.ok(frozen, "status exists");
+		assert.equal(frozen.endedAt, null, "no terminal state after the hard kill");
+		assertFirstDiagnosticIsLatchArmed(root);
+
+		await testService(root).reconcile();
+
+		const state = readState(root, "view_1");
+		assert.equal(state.semanticState, "failed", "reconcile converged the dead run");
+		assert.equal(state.processState, "exited");
+		assert.equal(state.summary, "Failed (runner exited)");
+	} finally {
+		await killDetached(runnerPid);
+		const orphanWorker = (() => {
+			try {
+				return readStatus(root, "view_1", "run_1")?.pid ?? null;
+			} catch {
+				return null;
+			}
+		})();
+		await killDetached(orphanWorker);
+		await coord.kill();
+		delete process.env.FAKE_PI_MODE;
+		delete process.env.AGENT_BOARD_SUMMARY_MODEL;
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
 });

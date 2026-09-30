@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -243,6 +244,64 @@ test("readViewArtifactSummaries includes codeRefs and loadRow exposes it", () =>
 		assert.deepEqual(readCodeRefs(root, "v1").allRefs, [ref]);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+/** A pid that is definitely dead (spawned, exited, reaped). */
+async function deadPid() {
+	const child = spawn(process.execPath, ["-e", "process.exit(0)"], { stdio: "ignore" });
+	await new Promise((resolveExit) => child.on("exit", resolveExit));
+	return child.pid;
+}
+
+test("loadRow: a recorded dead runner pid wins over the alive mirror (issue #153)", async () => {
+	const root = mkdtempSync(join(tmpdir(), "agentview-store-alive-"));
+	try {
+		createView(root, { id: "v", name: "t", cwd: root });
+		const st = readState(root, "v");
+		st.currentRunId = "run_1";
+		st.processState = "alive";
+		writeState(root, st);
+		const pid = await deadPid();
+		mkdirSync(P.runDir(root, "v", "run_1"), { recursive: true });
+		writeFileSync(P.pidPath(root, "v", "run_1"), JSON.stringify({ pid, at: Date.now() }));
+		const row = loadRow(root, "v");
+		assert.equal(row.alive, false, "recorded dead pid ⇒ not alive, mirror must not resurrect it");
+	} finally {
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("loadRow: the alive mirror still applies when no pid record exists (foreground path)", async () => {
+	const root = mkdtempSync(join(tmpdir(), "agentview-store-alive-"));
+	try {
+		createView(root, { id: "v", name: "t", cwd: root });
+		const st = readState(root, "v");
+		st.currentRunId = "run_fg";
+		st.processState = "alive";
+		writeState(root, st);
+		// no pid.json for run_fg — the foreground follow-up shape
+		const row = loadRow(root, "v");
+		assert.equal(row.alive, true, "no pid record ⇒ mirror decides (foreground preserved)");
+	} finally {
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("loadRow: a recorded live pid keeps the row alive regardless of the mirror", async () => {
+	const root = mkdtempSync(join(tmpdir(), "agentview-store-alive-"));
+	try {
+		createView(root, { id: "v", name: "t", cwd: root });
+		const st = readState(root, "v");
+		st.currentRunId = "run_1";
+		st.processState = "alive";
+		writeState(root, st);
+		mkdirSync(P.runDir(root, "v", "run_1"), { recursive: true });
+		writeFileSync(P.pidPath(root, "v", "run_1"), JSON.stringify({ pid: process.pid, at: Date.now() }));
+		const row = loadRow(root, "v");
+		assert.equal(row.alive, true);
+	} finally {
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
 });
 
