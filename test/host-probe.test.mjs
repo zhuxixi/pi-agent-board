@@ -139,6 +139,7 @@ test("AGENT_BOARD_TEST_HOST_PROBE_TIMEOUT_MS shortens the probe timeout", async 
 		assert.equal(fallback.errorCode, "TIMEOUT");
 		assert.ok(defaultElapsed >= 200, `unset knob keeps the 250ms default (${defaultElapsed}ms)`);
 		assert.ok(knobbedElapsed < defaultElapsed, `knob=1 (${knobbedElapsed}ms) resolves before the default (${defaultElapsed}ms)`);
+		assert.ok(knobbedElapsed < 100, `knob=1 shortened the probe (${knobbedElapsed}ms)`);
 	} finally {
 		if (original === undefined) delete process.env.AGENT_BOARD_TEST_HOST_PROBE_TIMEOUT_MS;
 		else process.env.AGENT_BOARD_TEST_HOST_PROBE_TIMEOUT_MS = original;

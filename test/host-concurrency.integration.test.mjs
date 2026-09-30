@@ -282,10 +282,10 @@ test("A7: ladder knobs compress the A10 recovery chain without weakening it", { 
 		process.kill(original.runnerPid, "SIGKILL");
 		await waitFor(() => !isAlive(original.runnerPid), 10_000, capture);
 
-		// The compressed chain must converge well inside the 30s resolve budget —
-		// the same budget the production default would need 150s of headroom for.
+		// The compressed chain must converge well inside the 30s resolve budget — the chain
+		// A10 budgets 150s of headroom for.
 		const service = testService(root);
-		const resolved = await service.resolveAttachTarget("v1", { timeoutMs: 30_000 }); // budget: app deadline 30s, F4-knob-compressed chain converges in ~2s; node-default test timeout accepted
+		const resolved = await service.resolveAttachTarget("v1", { timeoutMs: 30_000 }); // budget: app deadline 30s = headroom over a ~2s walk; node-default test timeout accepted
 		assert.equal(resolved.kind, "pty", `resolver produced a pty target: ${JSON.stringify(resolved)}`);
 		assert.notEqual(resolved.instanceId, original.instanceId, "replacement is a new instance");
 		assert.equal(isAlive(original.childPid), false, "old child is dead once the resolver returns");
