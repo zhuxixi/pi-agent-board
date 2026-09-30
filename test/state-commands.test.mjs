@@ -21,6 +21,12 @@ test("auto_state_classified rejected when manual fence active", () => {
 	assert.deepEqual(d, { action: "reject", reason: "manual_fence" });
 });
 
+test("non-user commands stay fenced on a holding row (issue #145, spec A5)", () => {
+	const holding = { ...manualCompletedState, semanticState: "holding" };
+	const d = decideStateTransition(baseCmd, holding, null);
+	assert.deepEqual(d, { action: "reject", reason: "manual_fence" });
+});
+
 test("auto_state_classified rejected for stale runId", () => {
 	const d = decideStateTransition(baseCmd, { ...manualCompletedState, currentRunId: "r2", semanticState: "idle", autoState: {} }, null);
 	assert.equal(d.action, "reject");
@@ -42,6 +48,52 @@ test("mark_completed applies and clears autoState (fence signal)", () => {
 	assert.equal(d.mutate.state.autoState, null);
 });
 
+// -- mark_holding / clear_holding (issue #145) --
+
+test("mark_holding applies a manual-verdict patch mirroring mark_completed", () => {
+	const cmd = { ...baseCmd, source: "dashboard-user", kind: "mark_holding", payload: {} };
+	const idle = { ...manualCompletedState, semanticState: "idle", autoState: { kind: "in_progress" } };
+	const d = decideStateTransition(cmd, idle, null, 20);
+	assert.equal(d.action, "apply");
+	assert.deepEqual(d.mutate.state, {
+		semanticState: "holding",
+		processState: "exited",
+		needsInput: false,
+		hasError: false,
+		question: null,
+		pendingQuestions: [],
+		error: null,
+		autoState: null,
+	});
+	assert.deepEqual(d.mutate.status, { autoState: null });
+});
+
+test("mark_holding rejects busy rows and non-user sources independently of the fence", () => {
+	const alive = { ...manualCompletedState, semanticState: "idle", processState: "alive", autoState: {} };
+	assert.deepEqual(
+		decideStateTransition({ ...baseCmd, source: "dashboard-user", kind: "mark_holding" }, alive, null),
+		{ action: "reject", reason: "busy" },
+	);
+	// Unfenced row: proves the source guard is its own rule, not the fence.
+	assert.deepEqual(
+		decideStateTransition({ ...baseCmd, source: "job-runner", kind: "mark_holding" }, { ...manualCompletedState, semanticState: "idle", autoState: {} }, null),
+		{ action: "reject", reason: "source_not_allowed" },
+	);
+	assert.ok(DECIDED_REJECT_REASONS.has("source_not_allowed"));
+});
+
+test("clear_holding resumes to idle; non-holding rows are no_change", () => {
+	const holding = { ...manualCompletedState, semanticState: "holding" };
+	const d = decideStateTransition({ ...baseCmd, source: "dashboard-user", kind: "clear_holding" }, holding, null, 20);
+	assert.equal(d.action, "apply");
+	assert.equal(d.mutate.state.semanticState, "idle");
+	assert.equal(d.mutate.state.autoState, null);
+	assert.deepEqual(
+		decideStateTransition({ ...baseCmd, source: "dashboard-user", kind: "clear_holding" }, { ...manualCompletedState }, null),
+		{ action: "reject", reason: "no_change" },
+	);
+});
+
 test("revision_conflict when expectedRevision mismatches", () => {
 	const cmd = { ...baseCmd, expectedRevision: 5 };
 	const d = decideStateTransition(cmd, { ...manualCompletedState, materializedRevision: 7 }, null);
@@ -51,7 +103,7 @@ test("revision_conflict when expectedRevision mismatches", () => {
 test("validateCommand accepts a well-formed command and exposes frozen vocabularies", () => {
 	assert.equal(validateCommand(baseCmd).ok, true);
 	assert.deepEqual([...STATE_COMMAND_KINDS], [
-		"mark_completed", "auto_state_classified", "run_finalized",
+		"mark_completed", "mark_holding", "clear_holding", "auto_state_classified", "run_finalized",
 		"mark_queued", "run_started", "run_progress", "reconcile_finalize",
 		"host_run_failed", "archive_view", "adopt_session", "sync_foreground",
 		"plan_ready", "followup_started", "patch_fields",
@@ -485,6 +537,18 @@ test("sync_foreground applies the caller projection but forces currentRunId null
 	assert.equal(d.mutate.state.currentRunId, null); // forced: projection carried a runId
 	assert.equal(d.mutate.state.semanticState, "idle");
 	assert.equal(d.mutate.state.processState, "exited");
+});
+
+// -- F-lift (issue #145): interactive input lifts the manual fence --
+
+test("sync_foreground as dashboard-user passes the fence; as service it stays fenced", () => {
+	const holding = { ...manualCompletedState, semanticState: "holding" };
+	const payload = { projection: { semanticState: "working", processState: "alive" } };
+	const fenced = decideStateTransition({ ...baseCmd, source: "service", kind: "sync_foreground", payload }, holding, null);
+	assert.equal(fenced.action, "reject");
+	assert.equal(fenced.reason, "manual_fence");
+	const lifted = decideStateTransition({ ...baseCmd, source: "dashboard-user", kind: "sync_foreground", payload }, holding, null);
+	assert.equal(lifted.action, "apply");
 });
 
 // -- plan_ready --

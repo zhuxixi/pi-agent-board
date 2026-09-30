@@ -8,5 +8,7 @@
  * (SIGTERM via the coordinator lease pid, then respawn) instead of feeding
  * it commands it cannot understand (`sync_foreground rejected (unknown_kind)`
  * used to strand every foreground state write on extension updates).
+ *
+ * Version 3 adds mark_holding / clear_holding (issue #145).
  */
-export const COORDINATOR_PROTOCOL_VERSION = 2;
+export const COORDINATOR_PROTOCOL_VERSION = 3;

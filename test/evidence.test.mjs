@@ -51,3 +51,10 @@ test("view evidence persists", () => {
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("finalizeEvidence maps holding to its own outcome and keeps ready true (issue #145)", () => {
+	const snap = emptyEvidenceSnapshot({ viewId: "v", source: "hosted" });
+	finalizeEvidence(snap, { viewId: "v", semanticState: "holding" }, 5);
+	assert.equal(snap.outcome, "holding");
+	assert.equal(snap.ready, true);
+});

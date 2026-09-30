@@ -371,6 +371,12 @@ test("coordinator pong carries the current protocol version", async (t) => {
 	assert.equal(pong.protocolVersion, COORDINATOR_PROTOCOL_VERSION);
 });
 
+test("protocol version gates the holding command kinds (issue #145)", () => {
+	// A live v2 coordinator answers unknown_kind for mark_holding/clear_holding
+	// (issue #108 class); version 3 is the floor that ships them.
+	assert.ok(COORDINATOR_PROTOCOL_VERSION >= 3, `expected >= 3, got ${COORDINATOR_PROTOCOL_VERSION}`);
+});
+
 test("ensureCoordinator replaces a stale pre-protocol coordinator via its lease pid", async (t) => {
 	const root = freshRoot();
 	t.after(async () => {

@@ -4,7 +4,7 @@
  * Only reachable via `AGENT_BOARD_COORDINATOR=off` — the documented escape
  * hatch. The normal path routes `host_run_failed` through the View State
  * Coordinator (`runner/state-coordinator.mjs`), whose manual_fence / stale_run
- * guards own the decision; this direct write has NO manual-completion fence,
+ * guards own the decision; this direct write has NO manual-verdict fence,
  * which is exactly why it must stay unreachable in the default configuration.
  *
  * Lives in its own module so `runner/pty-runner.mjs` itself never imports the

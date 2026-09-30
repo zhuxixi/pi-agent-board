@@ -578,6 +578,37 @@ test("second coordinator instance exits immediately (lease held)", async (t) => 
 	assert.equal(readState(root, "v1").autoState, null);
 });
 
+test("interactive-input mirror lifts the fence; service-source mirrors stay fenced (issue #145, spec A14/A15)", async (t) => {
+	const root = freshRoot();
+	let child = null;
+	t.after(async () => {
+		if (child && isAlive(child.pid)) {
+			child.kill("SIGTERM");
+			await waitForExit(child);
+		}
+		rmSync(root, { recursive: true, force: true });
+	});
+	createView(root, { id: "v1", name: "hold", cwd: root });
+	const st = legacyRowState("v1");
+	st.semanticState = "holding";
+	st.autoState = null; // manual-verdict signal
+	writeState(root, st);
+	child = startCoordinator(root);
+	const { client } = await readyClient(root);
+	const payload = { projection: { ...legacyRowState("v1"), semanticState: "working", processState: "alive", autoState: null } };
+	// 1. Automated mirror (rpc/extension injection keeps source "service"): fenced.
+	client.send({ type: "state_command", commandId: "f-lift-svc-1", viewId: "v1", runId: null, source: "service", kind: "sync_foreground", expectedRevision: null, payload });
+	const fenced = await client.next();
+	assert.equal(fenced.status, "rejected");
+	assert.equal(fenced.reason, "manual_fence");
+	assert.equal(readState(root, "v1").semanticState, "holding", "row keeps the verdict");
+	// 2. User mirror (pi reported InputEvent.source === "interactive"): lifts.
+	client.send({ type: "state_command", commandId: "f-lift-user-1", viewId: "v1", runId: null, source: "dashboard-user", kind: "sync_foreground", expectedRevision: null, payload });
+	const lifted = await client.next();
+	assert.equal(lifted.status, "applied");
+	assert.equal(readState(root, "v1").semanticState, "working", "user speaking resumes the row");
+});
+
 test("state-runner routes classification through the coordinator (journal record, no direct semantic write)", async (t) => {
 	const root = freshRoot();
 	let child = null;

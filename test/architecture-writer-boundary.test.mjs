@@ -32,7 +32,8 @@ const PACKAGE_ROOT = fileURLToPath(new URL("..", import.meta.url));
 const WRITE_STATE_ALLOWLIST = new Map([
 	// coordinator_disabled escape hatch (AGENT_BOARD_COORDINATOR=off, designed
 	// exception): the *Direct helpers (markQueuedDirect / markVisitedDirect /
-	// adoptStateDirect / completeViewDirect / archiveStateDirect) plus the
+	// adoptStateDirect / completeViewDirect / archiveStateDirect /
+	// holdViewDirect / clearHoldViewDirect) plus the
 	// disabled fallbacks inside syncRowEvent and syncForeground. Unreachable on
 	// the default path — the normal routes all submit coordinator commands.
 	["src/runtime/service.mjs", "coordinator_disabled 逃生门，设计内豁免（debug/降级）：*Direct helper、syncRowEvent/syncForeground 的 disabled 回退分支，以及 reconcile() 的三处 coordinator_disabled 直写回退（host 探测终态 / project 模式 / runner-exited）；默认路径不可达，见各 Direct 函数与 reconcile 的 gating 分支"],

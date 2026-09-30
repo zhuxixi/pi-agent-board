@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
-import type { Component, KeybindingsManager, TUI } from "@earendil-works/pi-tui";
+import type { Component, KeybindingsManager, RgbColor, TUI, TerminalColorScheme } from "@earendil-works/pi-tui";
 import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
 import { createAttachOutputRenderScheduler, detectCursorDesync, isPtyCursorHidden, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
@@ -11,7 +11,7 @@ import { evaluateAttachReconnect, shouldEscapeAttach } from "../core/pty-attach-
 import { installImeCursorCoalesce } from "../core/ime-cursor-coalesce.mjs";
 import { createJiggleRetryController } from "../core/pty-attach-jiggle-controller.mjs";
 import { createTerminalAttachClient } from "../core/terminal-attach-client.mjs";
-import { extractOscQuerySequences, toColorSchemeReport } from "../core/terminal-query-sequences.mjs";
+import { colorSchemeForBackgroundRgb, extractOscQuerySequences, toColorSchemeReport } from "../core/terminal-query-sequences.mjs";
 import { clampInt, parseMouseInputChunk, resolveWheelLines, scrollViewportTop, selectionDragScrollLines } from "../core/pty-scroll.mjs";
 
 export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null };
@@ -59,6 +59,14 @@ const DESYNC_QUIET_MS = 1500;
 const DESYNC_PROBE_INTERVAL_MS = 2000;
 /** Minimum spacing between two runtime heals (issue #11). */
 const HEAL_RATELIMIT_MS = 10000;
+/** Issue #148: probe budget for asking the REAL terminal for its background
+ * color. Deliberately ONE probe: every timed-out probe leaves a settled entry in
+ * the LOCAL pi-tui's pending-query queue (its timeout path neither dequeues nor
+ * decrements) and that stale entry eats the next reply, so a retry loop cannot
+ * converge — it would only add another stale entry per attempt and degrade the
+ * host's own background detection. One probe keeps the clean-queue case working
+ * and the leaked case degrading silently. */
+const REAL_TERMINAL_SCHEME_PROBE_TIMEOUT_MS = 500;
 /** How many tail bytes of the screen log to replay on attach. Read from the file tail
  * (not the whole file) so multi-MB logs don't block startup; ~60KB covers the last
  * handful of screens, which is all a fresh attach needs. */
@@ -587,9 +595,10 @@ export class PtyAttachComponent implements Component {
 		this.scheduleRender(true);
 		this.startDesyncProbe();
 		// Issue #128: the settle transition is the single point where `attaching`
-		// flips false (never re-armed), so both hooks run at most once per attach.
+		// flips false (never re-armed), so these hooks run at most once per attach.
 		this.attachColorSchemeBridge();
 		this.replayBackgroundQuery();
+		this.reportRealTerminalColorScheme();
 	}
 
 	/** Issue #128 D2: the local pi-tui consumes the child's color-scheme
@@ -636,6 +645,40 @@ export class PtyAttachComponent implements Component {
 		} catch {
 			/* best-effort: enhancement, never critical */
 		}
+	}
+
+	/** Issue #148: #128's replay only helps while the child still has a PENDING
+	 * OSC 11 query. That precondition does not hold here: the child's probe fires
+	 * at spawn (long before attach), and Pi's leaked pending state — a timeout
+	 * settles the query but leaves it queued and keeps the reply counter up —
+	 * makes the next arriving reply get consumed by that stale entry and
+	 * discarded, resolving nothing. So the client stops relying on the child's
+	 * probe entirely: it asks the REAL terminal itself (pi-tui's public query API)
+	 * and hands the child a 997 color-scheme report, which Pi consumes
+	 * unconditionally (no pending-query precondition — see
+	 * consumeTerminalColorSchemeReport). Same kill switch as #128 D1-D3.
+	 *
+	 * One probe only (CR round-1 advisory): the local pi-tui has the same leak, so
+	 * when a stale entry sits in ITS queue the reply is swallowed before this
+	 * promise can see it, and retrying would append another stale entry per
+	 * attempt — failing identically while poisoning the host's own detection. The
+	 * degraded case stays the documented pre-#148 silence. */
+	private reportRealTerminalColorScheme(): void {
+		if (process.env.AGENT_BOARD_FORWARD_TERMINAL_QUERIES === "0") return;
+		void this.probeAndReportRealTerminalColorScheme();
+	}
+
+	private async probeAndReportRealTerminalColorScheme(): Promise<void> {
+		let rgb: RgbColor | undefined;
+		try {
+			rgb = await this.tui.queryTerminalBackgroundColor({ timeoutMs: REAL_TERMINAL_SCHEME_PROBE_TIMEOUT_MS });
+		} catch {
+			/* best-effort: a failed probe keeps the pre-#148 behavior */
+		}
+		const scheme: TerminalColorScheme | undefined = colorSchemeForBackgroundRgb(rgb) ?? undefined;
+		if (!scheme || this.closed) return;
+		const data = toColorSchemeReport(scheme);
+		if (data) this.send({ type: "input", data });
 	}
 
 	private startDesyncProbe(): void {

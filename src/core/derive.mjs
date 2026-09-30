@@ -18,6 +18,7 @@ const GENERIC_STATUS_TEXT = {
 	working: new Set(["Working", "Working…", "Running", "Running…"]),
 	needs_input: new Set(["Needs input", "Needs answer"]),
 	idle: new Set(["Idle", "In Progress", "Needs instructions"]),
+	holding: new Set(["On hold"]),
 	completed: new Set(["Completed", "Done"]),
 	failed: new Set(["Failed"]),
 	stopped: new Set(["Stopped"]),
@@ -53,6 +54,8 @@ export function fallbackStatusText(state) {
 			return "Needs answer";
 		case "idle":
 			return "Needs instructions";
+		case "holding":
+			return "On hold";
 		case "completed":
 			return "Done";
 		case "failed":

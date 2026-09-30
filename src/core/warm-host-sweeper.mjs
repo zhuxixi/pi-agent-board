@@ -26,6 +26,19 @@ export function isAgentBusy(row) {
 }
 
 /**
+ * Whether queued follow-ups may auto-drain for this row (issue #145).
+ * Deliberately an allow-list: a manual verdict state outside {idle, completed}
+ * (today: holding) must never be woken by the follow-up queue — only the user
+ * resumes it. Pure row predicate; co-located with isAgentBusy, which it
+ * composes, so both share this unit-test home.
+ * @param {import("./store.mjs").Row} row
+ */
+export function canAutoDrain(row) {
+	const st = row.state?.semanticState;
+	return !isAgentBusy(row) && (st === "idle" || st === "completed");
+}
+
+/**
  * Pure eviction decision for warm PTY hosts. No IO, no env: every threshold is
  * passed in so the logic is directly unit-testable.
  *

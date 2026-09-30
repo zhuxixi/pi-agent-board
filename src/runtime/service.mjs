@@ -9,7 +9,7 @@ import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { createConnection } from "node:net";
 import { resolve } from "node:path";
-import { applyAutoStateToStatus, autoStateEnabled, heuristicAutoState, isManualCompletion } from "../core/auto-state.mjs";
+import { applyAutoStateToStatus, autoStateEnabled, heuristicAutoState, isManualVerdict } from "../core/auto-state.mjs";
 import { appendLine, atomicWriteJson, removeFile } from "../core/atomic.mjs";
 import { finalizeRun, projectViewState, reduceEvent } from "../core/events.mjs";
 import { clearDiagnostics, appendDiagnostic, tailDiagnostics } from "../core/diagnostics.mjs";
@@ -53,7 +53,7 @@ import {
 } from "../core/store.mjs";
 import { diagnoseNodePtyFailure, ensureNodePtySpawnHelperExecutable, nodePtyFallbackMessage, probeNodePtyEnvironment } from "../core/pty-support.mjs";
 import { normalizeScreenLogMaxBytes, pruneScreenLogs } from "../core/screen-log-gc.mjs";
-import { hasPendingQuestions, isAgentBusy, selectIdleHostsToEvict } from "../core/warm-host-sweeper.mjs";
+import { canAutoDrain, hasPendingQuestions, isAgentBusy, selectIdleHostsToEvict } from "../core/warm-host-sweeper.mjs";
 
 /** @typedef {import("../core/types.mjs").RunKind} RunKind */
 
@@ -481,8 +481,8 @@ export function createService(opts) {
 		// mark_queued must lift the fence for the rest of the new run (otherwise a
 		// reply on a done row would execute invisibly while the row stays
 		// completed). Automated re-launch stays guarded upstream: the job-runner's
-		// post-exit follow-up claim refuses manually-completed rows
-		// (drainQueuedFollowUp: `if (isManualCompletion(readState(...))) return;`),
+		// post-exit follow-up claim refuses rows carrying a manual verdict
+		// (drainQueuedFollowUp: `if (isManualVerdict(readState(...))) return;`),
 		// and the service-side drain path delivers already-queued user follow-ups
 		// with no fence by design (prompt-not-lost, issue #70 — its live-host input
 		// path never fenced either).
@@ -579,7 +579,7 @@ export function createService(opts) {
 		state.lastActivityAt = Date.now();
 		state.updatedAt = Date.now();
 		// Also clear autoState in the run status so in-flight model passes
-		// (job-runner / state-runner) see the manual completion and skip refinement.
+		// (job-runner / state-runner) see the manual verdict and skip refinement.
 		if (state.currentRunId) {
 			const status = readStatus(root, state.viewId, state.currentRunId);
 			if (status) {
@@ -590,10 +590,40 @@ export function createService(opts) {
 		writeState(root, state);
 	}
 
+	/** Direct write for holdView — coordinator_disabled escape hatch only. */
+	function holdViewDirect(state) {
+		state.semanticState = "holding";
+		state.processState = "exited";
+		state.needsInput = false;
+		state.hasError = false;
+		state.question = null;
+		state.pendingQuestions = [];
+		state.error = null;
+		state.autoState = null;
+		state.lastActivityAt = Date.now();
+		state.updatedAt = Date.now();
+		writeState(root, state);
+	}
+
+	/** Direct write for clearHoldView — coordinator_disabled escape hatch only. */
+	function clearHoldViewDirect(state) {
+		state.semanticState = "idle";
+		state.processState = "exited";
+		state.needsInput = false;
+		state.hasError = false;
+		state.question = null;
+		state.pendingQuestions = [];
+		state.error = null;
+		state.autoState = null;
+		state.lastActivityAt = Date.now();
+		state.updatedAt = Date.now();
+		writeState(root, state);
+	}
+
 	/**
 	 * Explicitly mark an inactive session as done via the View State Coordinator
 	 * (issue #91): the command is journaled and materialized by the single owner,
-	 * which also rejects stale-run and fenced manual-completion overwrites.
+	 * which also rejects stale-run and fenced manual-verdict overwrites.
 	 * @param {string} viewId
 	 * @returns {Promise<{ ok: boolean, error?: string }>}
 	 */
@@ -622,6 +652,53 @@ export function createService(opts) {
 		// Ambiguous outcomes (timeout / connection_reset: the command MAY already be
 		// journaled) and real rejections surface verbatim — never fall back to a
 		// direct write here, it would bypass the single-writer fence.
+		return { ok: false, error: result.reason ?? "state_command_failed" };
+	}
+
+	/** Place an inactive session on hold (issue #145; template: completeView). */
+	async function holdView(viewId) {
+		const row = loadRow(root, viewId);
+		if (!row) return { ok: false, error: "Unknown session" };
+		if (isAgentBusy(row)) return { ok: false, error: "Wait for the active run to finish before placing on hold" };
+		const state = readState(root, viewId) ?? row.state ?? blankState(viewId);
+		const result = await sendStateCommandImpl(root, {
+			type: "state_command",
+			viewId,
+			runId: state.currentRunId ?? null,
+			source: "dashboard-user",
+			kind: "mark_holding",
+			expectedRevision: null,
+			payload: {},
+		});
+		if (result.status === "applied") return { ok: true };
+		if (result.reason === "busy") return { ok: false, error: "Wait for the active run to finish before placing on hold" };
+		if (result.reason === "coordinator_disabled") {
+			holdViewDirect(state);
+			return { ok: true };
+		}
+		return { ok: false, error: result.reason ?? "state_command_failed" };
+	}
+
+	/** Resume an on-hold session back to Needs-instructions (issue #145). */
+	async function clearHoldView(viewId) {
+		const row = loadRow(root, viewId);
+		if (!row) return { ok: false, error: "Unknown session" };
+		const state = readState(root, viewId) ?? row.state ?? blankState(viewId);
+		const result = await sendStateCommandImpl(root, {
+			type: "state_command",
+			viewId,
+			runId: state.currentRunId ?? null,
+			source: "dashboard-user",
+			kind: "clear_holding",
+			expectedRevision: null,
+			payload: {},
+		});
+		if (result.status === "applied") return { ok: true };
+		if (result.reason === "no_change") return { ok: true };
+		if (result.reason === "coordinator_disabled") {
+			clearHoldViewDirect(state);
+			return { ok: true };
+		}
 		return { ok: false, error: result.reason ?? "state_command_failed" };
 	}
 
@@ -742,9 +819,12 @@ export function createService(opts) {
 	/**
 	 * @param {import("../core/store.mjs").Row} row
 	 * @param {import("../core/types.mjs").RunStatus} status
+	 * @param {{ source?: string }} [opts] F-lift (issue #145): pass "dashboard-user"
+	 *   when the mirror was triggered by a human submitting input — the manual
+	 *   fence must not outlive the user speaking to the row.
 	 * @returns {Promise<void>}
 	 */
-	async function writeForegroundState(row, status) {
+	async function writeForegroundState(row, status, opts = {}) {
 		const projected = projectViewState(status, Date.now(), readState(root, row.meta.id) ?? row.state ?? null);
 		// Foreground turns are driven by the interactive Pi process, not a detached
 		// runner, so keep currentRunId null. This prevents reconcile()/stop() from
@@ -764,7 +844,7 @@ export function createService(opts) {
 			type: "state_command",
 			viewId: row.meta.id,
 			runId: null,
-			source: "service",
+			source: opts.source ?? "service",
 			kind: "sync_foreground",
 			expectedRevision: null,
 			payload: { projection: projected },
@@ -1450,20 +1530,30 @@ export function createService(opts) {
 			status.error = null;
 			status.summary = "Running…";
 			status.lastActivityAt = now;
+			// F-lift (issue #145): pi's InputEvent carries source; "interactive"
+			// means a human submitted this text (attach keystrokes, a dashboard
+			// reply injected into a live host, or an auto-drained follow-up — all
+			// arrive as PTY bytes, which pi classifies as interactive). A manual
+			// verdict must not outlive the user speaking to the row, so this one
+			// mirror travels as dashboard-user and passes the manual_fence guard.
+			// Safe by construction: stale_run cannot fire (runId stays null) and
+			// the coordinator shell never reads source — manual_fence is the only
+			// guard this crosses. rpc/extension injections keep source "service".
+			const userSpoke = event.type === "input" && event.source === "interactive";
 			// Throughput path: periodic self-healing mirror, fire-and-forget.
-			void writeForegroundState(row, status);
+			void writeForegroundState(row, status, userSpoke ? { source: "dashboard-user" } : {});
 			return true;
 		}
 
 		if (event.type === "agent_end") {
-			// #46-class fence (issue #91): a manual completion is a user verdict that
+			// #46-class fence (issue #91): a manual verdict is a user judgment that
 			// outlives the turn. A late/duplicate agent_end after markCompleted must
 			// not resurrect the row via finalizeRun + projection — skip all semantic
 			// writes (baseline, steering, classification) and keep evidence only.
 			// The fence read is repeated after the classification await below; the
 			// window between the two reads is covered by the coordinator's own
 			// manual_fence rejection plus the guarded tail write.
-			if (isManualCompletion(readState(root, row.meta.id))) {
+			if (isManualVerdict(readState(root, row.meta.id))) {
 				status.evidenceSummary = summarizeEvidence(evidence);
 				writeEvidence(root, evidence);
 				return false;
@@ -1494,11 +1584,11 @@ export function createService(opts) {
 			status.evidenceSummary = summarizeEvidence(evidence);
 			writeEvidence(root, evidence);
 			updateCodeRefsFromEvidence(root, row.meta.id, evidence, row.meta);
-			// Re-read the fence after the classification await: a completion landing
+			// Re-read the fence after the classification await: a manual verdict landing
 			// between the baseline write and the coordinator's decision read gets
 			// manual_fence back (classificationQueued=false), and writing the stale
 			// in-memory projection here would clobber it (#46 class).
-			if (!isManualCompletion(readState(root, row.meta.id)) && !(classificationQueued && !coordinatorDisabled())) await writeForegroundState(row, status);
+			if (!isManualVerdict(readState(root, row.meta.id)) && !(classificationQueued && !coordinatorDisabled())) await writeForegroundState(row, status);
 			pruneWarmHosts({ keepViewId: row.meta.id });
 			// Async delivery (ack-gated, issue #70 A13): fire-and-forget here — the
 			// queue item's own state records the outcome, ordering is preserved by
@@ -1861,6 +1951,16 @@ export function createService(opts) {
 		 */
 		markCompleted(viewId) {
 			return completeView(viewId);
+		},
+
+		/** @param {string} viewId @returns {Promise<{ ok: boolean, error?: string }>} */
+		holdView(viewId) {
+			return holdView(viewId);
+		},
+
+		/** @param {string} viewId @returns {Promise<{ ok: boolean, error?: string }>} */
+		clearHoldView(viewId) {
+			return clearHoldView(viewId);
 		},
 
 		/**
@@ -2272,12 +2372,6 @@ function isExternalSession(meta) {
 /** @param {import("../core/types.mjs").EvidenceSnapshot} evidence */
 function latestEvidenceText(evidence) {
 	return evidence.assistantEvidence?.[evidence.assistantEvidence.length - 1]?.text ?? "";
-}
-
-/** @param {import("../core/store.mjs").Row} row */
-function canAutoDrain(row) {
-	const st = row.state?.semanticState;
-	return !isAgentBusy(row) && (st === "idle" || st === "completed");
 }
 
 /** @param {import("../core/types.mjs").ViewState} state */

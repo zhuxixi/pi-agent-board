@@ -78,6 +78,8 @@ export function stateGlyph(state, alive, hostAlive = false, unread = false) {
 			return unread ? "✖" : "✗";
 		case "idle":
 			return unread ? "●" : "·";
+		case "holding":
+			return unread ? "◒" : "◑";
 		case "stopped":
 			return unread ? "■" : "▪";
 		default:
@@ -104,6 +106,8 @@ export function stateColor(state) {
 			return "error";
 		case "idle":
 			return "dim";
+		case "holding":
+			return "warning";
 		case "stopped":
 			return "muted";
 		default:

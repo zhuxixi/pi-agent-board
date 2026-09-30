@@ -114,6 +114,7 @@ Launch preferences are persisted and reused for later sessions. **Start & attach
 Session actions are deliberately confirmation-aware:
 
 - `d` confirms moving an inactive session to **Done**. Manual completion is the default.
+- `h` toggles the on-hold state (manual verdict — automated writers are fenced).
 - Press `x`, then `y` to confirm deleting the selected row. `Ctrl+X` twice quickly still deletes without confirmation. Archiving removes the row from the board but preserves its underlying Pi session file.
 - `X` archives inactive rows in the selected state; live work is skipped.
 - `m` enters multi-select mode. Use `Space` to toggle rows, `a` to select all visible rows, `u` to clear the selection, `d` to mark inactive rows Done, or `Ctrl+X` to delete selected Done rows.
@@ -139,6 +140,7 @@ Shortcuts are scoped to the view where they are available:
 | `Ctrl+T` | Pin or unpin the selected session. |
 | `Ctrl+S` | Stop the selected active session. |
 | `d` | Confirm marking the selected inactive session Done. |
+| `h` | Hold or unhold the selected inactive session. |
 | `x`, then `y` | Archive/delete the selected row (confirmation prompt). |
 | `Ctrl+X` twice quickly | Archive/delete the selected row without confirmation. |
 | `X` | Delete inactive rows in the selected state. |
@@ -157,6 +159,8 @@ Peek shows the selected session's summary, blocker or question, latest output, a
 | `a`, `Right`, or `>` | Attach to the session. |
 | `v` | Open the read-only transcript. |
 | `e` | Open Evidence / Diagnostics. |
+| `d` | Confirm marking the inactive session Done. |
+| `h` | Hold or unhold the session. |
 | `Up` / `Down` | Move to the previous or next session. |
 | `Esc` | Return to the main list. |
 
@@ -175,6 +179,7 @@ The `v` view is a read-only projection of the durable Pi session JSONL. It does 
 | `Enter` or `a` | Attach to the session. |
 | `e` | Open Evidence / Diagnostics. |
 | `d` | Confirm marking the inactive session Done. |
+| `h` | Hold or unhold the session. |
 | `Left` / `Esc` / `<` | Return to the main list. |
 
 ### Evidence / Diagnostics
@@ -209,6 +214,7 @@ Agent Board separates a session's semantic task state from whether a worker proc
 | **Running** | The session is actively processing. |
 | **Needs answer** | The session is waiting for user input or an answer to a question. |
 | **Needs instructions** | The run ended without being marked complete and needs the next directive. |
+| **On hold** | The user parked this session intentionally (manual verdict, `h` to toggle). Automated writers can't push it to Done; queued follow-ups do not wake it. |
 | **Done** | The user marked the inactive session complete; this is the default completion path. |
 | **Failed** | The worker or host ended with an error. |
 | **Stopped** | The user stopped the active work. |
@@ -219,6 +225,7 @@ Press `/` to enter filter mode. Filter tokens are case-insensitive and can be co
 
 ```text
 s:running
+s:hold
 review:ready
 diag:stalled
 evidence:error

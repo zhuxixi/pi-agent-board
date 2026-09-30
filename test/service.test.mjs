@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { once } from "node:events";
 import { test, beforeEach } from "node:test";
 import { createService, shouldProbePtySupport } from "../src/runtime/service.mjs";
+import { isManualVerdict } from "../src/core/auto-state.mjs";
 import { foregroundPreviewCache } from "../src/core/foreground-preview-cache.mjs";
 import { readCodeRefs } from "../src/core/code-refs-store.mjs";
 import { diagnoseNodePtyFailure } from "../src/core/pty-support.mjs";
@@ -962,6 +963,66 @@ test("syncHostedEvent persists interactive questions and resets them on new inpu
 	}
 });
 
+test("syncRowEvent routes interactive input as dashboard-user; rpc/extension stay service (issue #145)", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const sent = [];
+		const svc = service(root, { sendStateCommand: async (_root, cmd) => { sent.push(cmd); return { status: "applied" }; } });
+		await svc.syncHostedEvent("v1", { type: "input", source: "interactive", text: "go" });
+		await svc.syncHostedEvent("v1", { type: "input", source: "rpc", text: "auto" });
+		await svc.syncHostedEvent("v1", { type: "agent_start" });
+		// The working-state mirror is a fire-and-forget sync_foreground beat
+		// (syncForegroundEvent precedent above) — poll instead of asserting immediately.
+		const beats = await waitFor(() => {
+			const found = sent.filter((c) => c.kind === "sync_foreground");
+			return found.length >= 3 ? found : null;
+		});
+		assert.ok(beats, "three sync_foreground beats were sent");
+		assert.equal(beats[0].source, "dashboard-user");
+		assert.equal(beats[1].source, "service");
+		assert.equal(beats[2].source, "service");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("interactive input on a manual completed row lifts the fence and resumes the row (issue #145, spec A16)", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const st = readState(root, "v1");
+		st.semanticState = "completed";
+		st.processState = "exited";
+		st.autoState = null; // manual-verdict signal
+		writeState(root, st);
+		// Mini coordinator: the real manual_fence guard plus a disk-applying
+		// sync_foreground — exactly the behavior the fix depends on end to end.
+		const svc = service(root, {
+			sendStateCommand: async (_root, cmd) => {
+				if (cmd.source !== "dashboard-user" && isManualVerdict(readState(root, cmd.viewId))) {
+					return { status: "rejected", reason: "manual_fence" };
+				}
+				if (cmd.kind === "sync_foreground") {
+					const state = readState(root, cmd.viewId);
+					writeState(root, { ...state, ...cmd.payload.projection });
+					return { status: "applied" };
+				}
+				return { status: "applied" };
+			},
+		});
+		assert.equal(await svc.syncHostedEvent("v1", { type: "input", source: "interactive", text: "go" }), true);
+		const next = await waitFor(() => {
+			const s = readState(root, "v1");
+			return s?.semanticState === "working" ? s : null;
+		});
+		assert.ok(next, "the interactive mirror lifted the manual fence and resumed the completed row");
+		assert.equal(next.processState, "alive");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("syncHostedEvent persists code refs (github.json) from bash gh commands", { skip: !gitAvailable() }, async () => {
 	const root = freshRoot();
 	const repo = freshRoot();
@@ -1342,6 +1403,71 @@ test("completeView does not fall back to a direct write on ambiguous coordinator
 		});
 		assert.deepEqual(await svcUnavailable.markCompleted("v1"), { ok: false, error: "coordinator_unavailable" });
 		assert.equal(readFileSync(P.statePath(root, "v1"), "utf8"), before, "state.json must stay byte-identical when the coordinator is unavailable");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("holdView and clearHoldView submit user-sourced commands (issue #145)", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const sent = [];
+		const svc = service(root, { sendStateCommand: async (_root, cmd) => { sent.push(cmd); return { status: "applied" }; } });
+		assert.equal((await svc.holdView("v1")).ok, true);
+		assert.equal(sent[0].kind, "mark_holding");
+		assert.equal(sent[0].source, "dashboard-user");
+		assert.equal((await svc.clearHoldView("v1")).ok, true);
+		assert.equal(sent[1].kind, "clear_holding");
+		assert.equal(sent[1].source, "dashboard-user");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("holdView refuses busy rows with the same wording as markCompleted (issue #145)", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const svc = service(root, { sendStateCommand: async () => ({ status: "rejected", reason: "busy" }) });
+		const res = await svc.holdView("v1");
+		assert.equal(res.ok, false);
+		assert.equal(res.error, "Wait for the active run to finish before placing on hold");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("markCompletedMany completes holding rows — d-key semantics need zero UI change (spec D4)", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const s = readState(root, "v1");
+		s.semanticState = "holding";
+		s.processState = "exited";
+		writeState(root, s);
+		const svc = service(root, { sendStateCommand: async (_root, cmd) => (cmd.kind === "mark_completed" ? { status: "applied" } : { status: "rejected", reason: "busy" }) });
+		const res = await svc.markCompletedMany(["v1"]);
+		assert.equal(res.completed, 1);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("reconcile leaves holding rows untouched even with a terminal host record (issue #145)", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		// Seed a holding row whose host record is exited: reconcile must not
+		// finalize it (looksActive allow-list skips exited/holding rows).
+		const st = readState(root, "v1");
+		st.semanticState = "holding";
+		st.processState = "exited";
+		writeState(root, st);
+		writeHost(root, { viewId: "v1", state: "exited", runnerPid: null, childPid: null, instanceId: "i1", socketPath: "/no/s.sock" });
+		const svc = service(root, { sendStateCommand: async () => ({ status: "rejected", reason: "manual_fence" }) });
+		await svc.reconcile();
+		assert.equal(readState(root, "v1").semanticState, "holding");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

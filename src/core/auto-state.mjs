@@ -191,14 +191,16 @@ export function autoStateFromModelOrHeuristic(modelOutput, latestAssistantText, 
 }
 
 /**
- * Whether a row/status shows a manual completion. completeView clears autoState on
- * both state.json and status.json when the user marks done, so `autoState == null`
- * combined with `completed` is the manual-completion signal. Auto-classified
- * completed rows keep autoState and stay refinable by a later model pass.
+ * Whether a row/status carries a manual verdict (issue #145): the user placed a
+ * terminal judgment ("completed" or "holding") that no automated writer may
+ * overwrite. mark_completed and mark_holding both clear autoState on
+ * state.json and status.json, so `autoState == null` combined with a verdict
+ * state is the persisted signal. Wide on purpose (spec D15): no call site
+ * needs a completed-only predicate.
  * @param {{ semanticState?: string, autoState?: unknown|null }|null|undefined} state
  */
-export function isManualCompletion(state) {
-	return Boolean(state && state.semanticState === "completed" && state.autoState == null);
+export function isManualVerdict(state) {
+	return Boolean(state && (state.semanticState === "completed" || state.semanticState === "holding") && state.autoState == null);
 }
 
 /**
@@ -210,8 +212,8 @@ export function isManualCompletion(state) {
 export function applyAutoStateToStatus(status, classification, now = Date.now()) {
 	if (!classification || status.processState === "alive") return false;
 	if (status.semanticState === "failed" || status.semanticState === "stopped") return false;
-	// Manual completions are user verdicts and must never be overwritten.
-	if (isManualCompletion(status)) return false;
+	// Manual verdicts are user judgments and must never be overwritten.
+	if (isManualVerdict(status)) return false;
 	const nextState = semanticStateForAutoKind(classification.kind);
 	const before = `${status.semanticState}|${status.question ?? ""}|${status.summary ?? ""}|${status.autoState?.source ?? ""}|${status.autoState?.textHash ?? ""}`;
 	status.semanticState = nextState;
@@ -235,8 +237,8 @@ export function applyAutoStateToStatus(status, classification, now = Date.now())
 export function applyAutoStateToViewState(state, classification, now = Date.now()) {
 	if (!classification || state.processState === "alive") return false;
 	if (state.semanticState === "failed" || state.semanticState === "stopped") return false;
-	// Manual completions are user verdicts and must never be overwritten.
-	if (isManualCompletion(state)) return false;
+	// Manual verdicts are user judgments and must never be overwritten.
+	if (isManualVerdict(state)) return false;
 	const nextState = semanticStateForAutoKind(classification.kind);
 	const before = `${state.semanticState}|${state.question ?? ""}|${state.summary ?? ""}|${state.autoState?.source ?? ""}|${state.autoState?.textHash ?? ""}`;
 	state.semanticState = nextState;

@@ -9,7 +9,7 @@
 import { spawn } from "node:child_process";
 import { readJson } from "../src/core/atomic.mjs";
 import { appendDiagnostic } from "../src/core/diagnostics.mjs";
-import { applyAutoStateToStatus, applyAutoStateToViewState, autoStateEnabled, autoStateFromModelOrHeuristic, autoStateModel, buildAutoStatePrompt, heuristicAutoState, isManualCompletion } from "../src/core/auto-state.mjs";
+import { applyAutoStateToStatus, applyAutoStateToViewState, autoStateEnabled, autoStateFromModelOrHeuristic, autoStateModel, buildAutoStatePrompt, heuristicAutoState, isManualVerdict } from "../src/core/auto-state.mjs";
 import { finalizeEvidence, readEvidence, summarizeEvidence, writeEvidence } from "../src/core/evidence.mjs";
 import { updateCodeRefsFromEvidence } from "../src/core/code-refs-store.mjs";
 import { readState, readStatus, readMeta, writeState, writeStatus } from "../src/core/store.mjs";
@@ -31,7 +31,7 @@ async function main() {
 	// Cheap pre-check (optimization only): skip a pointless command when the
 	// manual verdict is already materialized. The coordinator's manual_fence
 	// stays the authoritative guard for races after this read.
-	if (isManualCompletion(state)) process.exit(0);
+	if (isManualVerdict(state)) process.exit(0);
 
 	const evidence = readEvidence(config.root, config.viewId);
 	const latest = latestEvidenceText(evidence) || state.latestAssistantPreview || state.summary || "";

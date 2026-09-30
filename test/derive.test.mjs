@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { deriveSummary, fallbackStatusText, finalizeSemanticState, normalizeGenericStatusText } from "../src/core/derive.mjs";
+import { deriveSummary, fallbackStatusText, finalizeSemanticState, isGenericStatusText, normalizeGenericStatusText } from "../src/core/derive.mjs";
 
 test("finalizeSemanticState matrix", () => {
 	assert.equal(
@@ -95,6 +95,11 @@ test("fallbackStatusText", () => {
 	assert.equal(fallbackStatusText("working"), "Running…");
 	assert.equal(fallbackStatusText("needs_input"), "Needs answer");
 	assert.equal(fallbackStatusText("idle"), "Needs instructions");
+});
+
+test("fallbackStatusText maps holding and recognizes it as generic (issue #145)", () => {
+	assert.equal(fallbackStatusText("holding"), "On hold");
+	assert.equal(isGenericStatusText("On hold"), true);
 });
 
 test("normalizeGenericStatusText maps legacy labels to current ones", () => {

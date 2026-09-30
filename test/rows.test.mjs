@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { filterRows, groupRows, groupRowsByFolder, parseFilter, rowState, rowView, stateGlyph } from "../src/core/rows.mjs";
+import { filterRows, groupRows, groupRowsByFolder, parseFilter, rowState, rowView, stateColor, stateGlyph } from "../src/core/rows.mjs";
+import { GROUP_LABELS, GROUP_ORDER } from "../src/core/types.mjs";
 
 /** @returns {import("../src/core/store.mjs").Row} */
 function row(id, semanticState, extra = {}) {
@@ -208,6 +209,20 @@ test("stateGlyph uses stronger variants for unread rows", () => {
 	assert.equal(stateGlyph("needs_input", false, false, true), "◆");
 	assert.equal(stateGlyph("completed", false, false, true), "✔");
 	assert.equal(stateGlyph("idle", false, false, true), "●");
+});
+
+test("holding renders with dedicated glyph/color and filters unambiguously (issue #145)", () => {
+	assert.notEqual(stateGlyph("holding", false), "?", "stateGlyph must not fall through to default");
+	assert.notEqual(stateColor("holding"), "text", "stateColor must not fall through to default");
+	for (const q of ["s:hold", "s:onhold", "s:on", "s:holding"]) {
+		assert.deepEqual(parseFilter(q).states, ["holding"], `${q} must match only holding`);
+	}
+});
+
+test("GROUP_ORDER places holding between idle and completed (issue #145)", () => {
+	assert.equal(GROUP_ORDER.indexOf("idle") + 1, GROUP_ORDER.indexOf("holding"));
+	assert.equal(GROUP_ORDER.indexOf("holding") + 1, GROUP_ORDER.indexOf("completed"));
+	assert.equal(GROUP_LABELS.holding, "On hold");
 });
 
 test("rowView marks staleHost when host.json says alive but the process is gone and the heartbeat is stale", () => {
