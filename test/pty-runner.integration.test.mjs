@@ -13,6 +13,7 @@ import * as P from "../src/core/paths.mjs";
 import { claimHost, createView, readHost, readMeta, readState, updateOwnedHost, writeHost, writeState } from "../src/core/store.mjs";
 import { readJournal } from "../src/core/coordinator-journal.mjs";
 import { startCoordinator } from "../test-support/ensure-coordinator-helper.mjs";
+import { capturePostmortem, formatPostmortem, waitForWithPostmortem } from "../test-support/flake-postmortem.mjs";
 import { tryAcquireOwnedViewLock } from "../src/core/locks.mjs";
 
 function freshRoot() {
@@ -27,14 +28,8 @@ function freshRoot() {
 // 15s ceiling: spawn+first-output under parallel suite load measured past 10s
 // on dev hardware (phase 4 added test files; phase 3 residual note anticipated
 // this). Still a hard failure on real breakage — only failure latency grows.
-async function waitFor(predicate, timeoutMs = 15000) {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
-		const value = predicate();
-		if (value) return value;
-		await new Promise((r) => setTimeout(r, 25));
-	}
-	throw new Error("timed out waiting");
+async function waitFor(predicate, timeoutMs = 15000, capture = null) {
+	return waitForWithPostmortem(predicate, { timeoutMs, intervalMs: 25, capture });
 }
 
 /** Host is usable once the runner reports the socket bound and the child pid is recorded.
@@ -1782,6 +1777,9 @@ test("host spawn failure marks a non-fenced row failed through host_run_failed",
 test("subscribe_terminal: snapshot + live continuity alongside legacy clients", async () => {
 	const root = freshRoot();
 	let runner;
+	// issue #95: this test's waits have historically flaked, so a timeout now
+	// carries a snapshot of the durable state at the moment of failure.
+	const capture = () => formatPostmortem(capturePostmortem(root, "v1", null));
 	try {
 		const meta = createView(root, { id: "v1", name: "term", cwd: process.cwd() });
 		const configPath = P.hostConfigPath(root, "v1");
@@ -1800,7 +1798,7 @@ test("subscribe_terminal: snapshot + live continuity alongside legacy clients", 
 			rows: 24,
 		});
 		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
-		await waitFor(() => hostReady(root, "v1"));
+		await waitFor(() => hostReady(root, "v1"), 15000, capture);
 
 		/** @type {(socket: import("node:net").Socket) => { messages: any[] }} */
 		const listen = (socket) => {
@@ -1824,7 +1822,7 @@ test("subscribe_terminal: snapshot + live continuity alongside legacy clients", 
 		// Wait for the first child output on the legacy socket: it proves the
 		// runner has fed its canonical model, so the subscribe below cannot hit
 		// the "host starting" empty-baseline race.
-		await waitFor(() => legacyMessages.find((m) => m.type === "output" && String(m.data).includes("fake pi ready")));
+		await waitFor(() => legacyMessages.find((m) => m.type === "output" && String(m.data).includes("fake pi ready")), 15000, capture);
 
 		// Snapshot subscriber on a second socket.
 		const sub = createConnection(P.controlSocketPath(root, "v1"));
@@ -1832,7 +1830,7 @@ test("subscribe_terminal: snapshot + live continuity alongside legacy clients", 
 		const subMessages = listen(sub).messages;
 		send(sub, { type: "subscribe_terminal" });
 
-		await waitFor(() => subMessages.find((m) => m.type === "snapshot_end"));
+		await waitFor(() => subMessages.find((m) => m.type === "snapshot_end"), 15000, capture);
 		const begin = subMessages.find((m) => m.type === "snapshot_begin");
 		const frame = subMessages.find((m) => m.type === "snapshot_frame");
 		const end = subMessages.find((m) => m.type === "snapshot_end");
@@ -1844,7 +1842,7 @@ test("subscribe_terminal: snapshot + live continuity alongside legacy clients", 
 
 		// New output: both clients receive it; the subscriber gets gap-free seq.
 		send(legacy, { type: "input", data: "ping\r" });
-		await waitFor(() => legacyMessages.find((m) => m.type === "output" && String(m.data).includes("echo:ping")));
+		await waitFor(() => legacyMessages.find((m) => m.type === "output" && String(m.data).includes("echo:ping")), 15000, capture);
 		const subOutputs = subMessages.filter((m) => m.type === "output");
 		assert.ok(subOutputs.length >= 1, "subscriber receives the live chunk");
 		const subSeqs = subOutputs.map((m) => m.seq);
@@ -1863,7 +1861,7 @@ test("subscribe_terminal: snapshot + live continuity alongside legacy clients", 
 		await once(sub2, "connect");
 		const sub2Messages = listen(sub2).messages;
 		send(sub2, { type: "subscribe_terminal", frameVersion: 99 });
-		await waitFor(() => sub2Messages.find((m) => m.type === "error"));
+		await waitFor(() => sub2Messages.find((m) => m.type === "error"), 15000, capture);
 		assert.equal(sub2Messages.find((m) => m.type === "error").code, "frame_version_mismatch");
 
 		legacy.end();

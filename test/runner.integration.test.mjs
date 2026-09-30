@@ -12,6 +12,7 @@ import * as P from "../src/core/paths.mjs";
 import { rowView } from "../src/core/rows.mjs";
 import { createView, loadRow, readPid, readState, readStatus } from "../src/core/store.mjs";
 import { startCoordinator } from "../test-support/ensure-coordinator-helper.mjs";
+import { capturePostmortem, formatPostmortem, waitForWithPostmortem } from "../test-support/flake-postmortem.mjs";
 
 const ROOT_DIR = fileURLToPath(new URL("../", import.meta.url));
 const RUNNER = join(ROOT_DIR, "runner", "job-runner.mjs");
@@ -61,15 +62,13 @@ async function killDetached(pid) {
 	}
 }
 
-/** Poll `fn()` until it returns truthy or timeout. */
-async function waitFor(fn, timeoutMs = 15000, intervalMs = 50) {
-	const start = Date.now();
-	for (;;) {
-		const v = await fn();
-		if (v) return v;
-		if (Date.now() - start > timeoutMs) return null;
-		await sleep(intervalMs);
-	}
+/**
+ * Poll `fn()` until it returns truthy or timeout. On timeout the shared
+ * wrapper throws (with the optional flake postmortem); callers assert.ok the
+ * result, so a throw fails the test with a richer message (issue #95).
+ */
+async function waitFor(fn, timeoutMs = 15000, intervalMs = 50, capture = null) {
+	return waitForWithPostmortem(fn, { timeoutMs, intervalMs, capture });
 }
 
 function makeConfig(root, viewId, runId, sessionFile, cwd, prompt) {
@@ -293,21 +292,35 @@ test("stopping the runner finalizes the run as stopped", { timeout: 20000 }, asy
 		const config = makeConfig(root, "v", "r", meta.sessionFile, root, "do it");
 		runnerPid = launchRun(root, config, { runnerScript: RUNNER }).pid;
 
+		// issue #95: this wait has historically flaked, so a timeout now carries a
+		// snapshot of the durable state at the moment of failure.
+		const capture = () => formatPostmortem(capturePostmortem(root, "v", "r"));
+
 		// Wait until the worker is actively running.
-		const working = await waitFor(() => {
-			const s = readStatus(root, "v", "r");
-			return s && s.semanticState === "working" ? s : null;
-		});
+		const working = await waitFor(
+			() => {
+				const s = readStatus(root, "v", "r");
+				return s && s.semanticState === "working" ? s : null;
+			},
+			15000,
+			50,
+			capture,
+		);
 		assert.ok(working, "run reached working");
 
 		const pid = readPid(root, "v", "r");
 		assert.ok(pid, "have runner pid");
 		process.kill(pid, "SIGTERM");
 
-		const status = await waitFor(() => {
-			const s = readStatus(root, "v", "r");
-			return s && s.endedAt ? s : null;
-		});
+		const status = await waitFor(
+			() => {
+				const s = readStatus(root, "v", "r");
+				return s && s.endedAt ? s : null;
+			},
+			15000,
+			50,
+			capture,
+		);
 		assert.ok(status, "run finalized after stop");
 		assert.equal(status.semanticState, "stopped");
 	} finally {

@@ -24,6 +24,7 @@ import { readDiagnostics } from "../src/core/diagnostics.mjs";
 import * as P from "../src/core/paths.mjs";
 import { createView, readHost, updateOwnedHost, writeHost } from "../src/core/store.mjs";
 import { createService } from "../src/runtime/service.mjs";
+import { capturePostmortem, formatPostmortem, waitForWithPostmortem } from "../test-support/flake-postmortem.mjs";
 
 const HELPER = resolve("test-support/ensure-host-helper.mjs");
 
@@ -31,14 +32,8 @@ function freshRoot() {
 	return mkdtempSync(join(tmpdir(), "agentview-conc-"));
 }
 
-async function waitFor(predicate, timeoutMs = 15_000) {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
-		const value = predicate();
-		if (value) return value;
-		await new Promise((r) => setTimeout(r, 25));
-	}
-	throw new Error("timed out waiting");
+async function waitFor(predicate, timeoutMs = 15_000, capture = null) {
+	return waitForWithPostmortem(predicate, { timeoutMs, intervalMs: 25, capture });
 }
 
 function isAlive(pid) {
@@ -205,18 +200,22 @@ test("A10: SIGKILLed runner is recovered by the attach resolver without double c
 		createView(root, { id: "v1", name: "recover", cwd: process.cwd() });
 		ensureSessionFile(root, "v1");
 
+		// issue #95: A10's waits have historically flaked, so a timeout now carries
+		// a snapshot of the durable state at the moment of failure.
+		const capture = () => formatPostmortem(capturePostmortem(root, "v1", null));
+
 		const first = await runHelper(root, "v1");
 		assert.equal(first.result?.started, true, `first helper started: ${JSON.stringify(first)}`);
 		const original = await waitFor(() => {
 			const h = readHost(root, "v1");
 			return h?.state === "alive" && h.readyAt != null && h.childPid && isAlive(h.runnerPid) ? h : false;
-		}, 30_000);
+		}, 30_000, capture);
 		assert.equal(isAlive(original.childPid), true, "original child alive before the kill");
 
 		// Orphan the host the hard way: runner SIGKILL leaves a stale endpoint file,
 		// host.json claiming alive, and a live orphaned child — the classic #70 state.
 		process.kill(original.runnerPid, "SIGKILL");
-		await waitFor(() => !isAlive(original.runnerPid), 10_000);
+		await waitFor(() => !isAlive(original.runnerPid), 10_000, capture);
 
 		// CR round-7 (blocking): on slow CI runners the full chain — stale detection,
 		// recovery + child-kill ladder, adopt, cold runner boot, ready probe — can
@@ -234,7 +233,7 @@ test("A10: SIGKILLed runner is recovered by the attach resolver without double c
 		const replacement = await waitFor(() => {
 			const h = readHost(root, "v1");
 			return h?.state === "alive" && h.readyAt != null && h.runnerPid && isAlive(h.runnerPid) && h.childPid ? h : false;
-		}, 30_000);
+		}, 30_000, capture);
 		assert.notEqual(replacement.childPid, original.childPid);
 		assert.notEqual(replacement.instanceId, original.instanceId);
 		assert.equal(isAlive(replacement.runnerPid), true);

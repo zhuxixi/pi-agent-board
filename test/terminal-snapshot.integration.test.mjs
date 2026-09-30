@@ -12,6 +12,7 @@ import { atomicWriteJson } from "../src/core/atomic.mjs";
 import * as P from "../src/core/paths.mjs";
 import { createView, readHost } from "../src/core/store.mjs";
 import { createTerminalAttachClient } from "../src/core/terminal-attach-client.mjs";
+import { capturePostmortem, formatPostmortem, waitForWithPostmortem } from "../test-support/flake-postmortem.mjs";
 
 // Spec acceptance coverage (issue #91 phase 4):
 //   A5  — snapshot/subscribe 无 gap、无重复（real runner, real socket, real client module）
@@ -26,14 +27,8 @@ function freshRoot() {
 // Same rationale as pty-runner.integration.test.mjs: every waitFor is an
 // "eventually happens" predicate, never a timing bound; the generous ceiling
 // only buys spawn+first-output latency under full-suite parallel load.
-async function waitFor(predicate, timeoutMs = 15000) {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
-		const value = predicate();
-		if (value) return value;
-		await new Promise((r) => setTimeout(r, 25));
-	}
-	throw new Error("timed out waiting");
+async function waitFor(predicate, timeoutMs = 15000, capture = null) {
+	return waitForWithPostmortem(predicate, { timeoutMs, intervalMs: 25, capture });
 }
 
 function isAlive(pid) {
@@ -271,9 +266,12 @@ test("A5: burst through the snapshot window — frame→flush→end interleaving
 	const viewId = "a5flush";
 	let runner;
 	const sockets = [];
+	// issue #95: A5's 30s waits have historically flaked, so a timeout now
+	// carries a snapshot of the durable state at the moment of failure.
+	const capture = () => formatPostmortem(capturePostmortem(root, viewId, null));
 	try {
 		({ runner } = spawnRunner(root, viewId, { env: { FAKE_PTY_BURST_LINES: "400" } }));
-		await waitFor(() => hostReady(root, viewId), 30000);
+		await waitFor(() => hostReady(root, viewId), 30000, capture);
 
 		const driver = createConnection(P.controlSocketPath(root, viewId));
 		await once(driver, "connect");
@@ -290,7 +288,7 @@ test("A5: burst through the snapshot window — frame→flush→end interleaving
 			send(driver, { type: "input", data: `boot-probe-${probeN}\r` });
 		}, 300);
 		try {
-			await waitFor(() => driverMessages.find((m) => m.type === "output" && /boot-probe-\d/.test(String(m.data))), 30000);
+			await waitFor(() => driverMessages.find((m) => m.type === "output" && /boot-probe-\d/.test(String(m.data))), 30000, capture);
 		} finally {
 			clearInterval(probeTimer);
 		}
@@ -316,7 +314,7 @@ test("A5: burst through the snapshot window — frame→flush→end interleaving
 		await waitFor(() => {
 			const end = messagesC.find((m) => m.type === "snapshot_end");
 			return end && eventsB.snapshotReady.length > 0;
-		}, 30000);
+		}, 30000, capture);
 
 		// Wire pin (subscriber C): outputs between snapshot_frame and
 		// snapshot_end ARE the catch-up flush window; they must be contiguous
@@ -349,7 +347,7 @@ test("A5: burst through the snapshot window — frame→flush→end interleaving
 		await waitFor(() => {
 			for (const data of eventsB.output) collect(data);
 			return seen.size >= 400;
-		}, 30000);
+		}, 30000, capture);
 		assert.equal(seen.size, 400, "every burst line delivered exactly once across frame+flush+live");
 	} finally {
 		await cleanup(root, viewId, sockets, [runner]);
