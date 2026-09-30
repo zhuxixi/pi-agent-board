@@ -52,9 +52,11 @@ jobs:
           fi
 
       - name: Check the tag matches package.json
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
           PKG_VERSION=$(node -p "require('./package.json').version")
-          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          TAG_VERSION="${RELEASE_TAG#v}"
           echo "package.json: ${PKG_VERSION}, tag: ${TAG_VERSION}"
           [ "${PKG_VERSION}" = "${TAG_VERSION}" ]
 
