@@ -115,6 +115,36 @@ test("probeHost returns unknown/TIMEOUT when connect never completes", async () 
 	assert.equal(res.errorCode, "TIMEOUT");
 });
 
+test("AGENT_BOARD_TEST_HOST_PROBE_TIMEOUT_MS shortens the probe timeout", async () => {
+	/** A socket-like emitter that never connects and ignores writes. */
+	const deadSocket = () => {
+		const fake = new EventEmitter();
+		fake.destroy = () => {};
+		return fake;
+	};
+	const original = process.env.AGENT_BOARD_TEST_HOST_PROBE_TIMEOUT_MS;
+	try {
+		process.env.AGENT_BOARD_TEST_HOST_PROBE_TIMEOUT_MS = "1";
+		const knobbedStart = Date.now();
+		const knobbed = await probeHost("ignored", { connect: deadSocket });
+		const knobbedElapsed = Date.now() - knobbedStart;
+		assert.equal(knobbed.errorCode, "TIMEOUT");
+
+		// Unset, the same probe waits out the production default (250ms) — so the
+		// knob, not the connect injection, is what shortened the budget above.
+		delete process.env.AGENT_BOARD_TEST_HOST_PROBE_TIMEOUT_MS;
+		const defaultStart = Date.now();
+		const fallback = await probeHost("ignored", { connect: deadSocket });
+		const defaultElapsed = Date.now() - defaultStart;
+		assert.equal(fallback.errorCode, "TIMEOUT");
+		assert.ok(defaultElapsed >= 200, `unset knob keeps the 250ms default (${defaultElapsed}ms)`);
+		assert.ok(knobbedElapsed < defaultElapsed, `knob=1 (${knobbedElapsed}ms) resolves before the default (${defaultElapsed}ms)`);
+	} finally {
+		if (original === undefined) delete process.env.AGENT_BOARD_TEST_HOST_PROBE_TIMEOUT_MS;
+		else process.env.AGENT_BOARD_TEST_HOST_PROBE_TIMEOUT_MS = original;
+	}
+});
+
 test("probeHost always destroys the probe socket (error path)", async () => {
 	let destroyed = false;
 	const fake = new EventEmitter();
