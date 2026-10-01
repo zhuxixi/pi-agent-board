@@ -58,6 +58,8 @@ function makeAttach(options: { backgroundReplies?: Array<{ r: number; g: number;
 		queryTerminalBackgroundColor: async (probeOptions: { timeoutMs: number }) => {
 			const index = backgroundProbeCalls.length;
 			backgroundProbeCalls.push(probeOptions);
+			// Like the real public API, this owns the reply before writing the query.
+			terminalWrites.push("\x1b]11;?\x07");
 			const replies = options.backgroundReplies;
 			if (!replies || replies.length === 0) return undefined;
 			return replies[Math.min(index, replies.length - 1)];
@@ -503,15 +505,15 @@ const out: Record<string, boolean> = {};
 	attach.dispose();
 }
 
-// P10. Issue #128 A5: settle writes the background probe to the real
-// terminal exactly once (double-settle is a no-op: `attaching` never re-arms);
-// the kill switch silences forwarding, replay, AND the bridge.
+// P10. Settle uses only the tracked public API probe, not an additional raw
+// query whose unowned reply could be echoed by a cold child's PTY. Double-settle
+// remains a no-op; the kill switch silences forwarding, the probe, and the bridge.
 {
-	const { attach, terminalWrites } = makeAttach();
+	const { attach, terminalWrites, backgroundProbeCalls } = makeAttach();
 	const settle = (attach as unknown as { finishAttachTransition: () => void });
 	settle.finishAttachTransition();
 	settle.finishAttachTransition();
-	out.replayProbeWrittenOnceOnSettle = countWrites(terminalWrites, "\x1b]11;?\x07") === 1;
+	out.settleUsesOnlyTrackedProbe = backgroundProbeCalls.length === 1 && countWrites(terminalWrites, "\x1b]11;?\x07") === 1;
 	attach.dispose();
 
 	process.env.AGENT_BOARD_FORWARD_TERMINAL_QUERIES = "0";
@@ -520,7 +522,7 @@ const out: Record<string, boolean> = {};
 		const killPush = (killed.attach as unknown as { pushOutput: (d: string, o?: { forwardProtocols?: boolean }) => void });
 		killPush.pushOutput("\x1b]11;?\x07", { forwardProtocols: true });
 		(killed.attach as unknown as { finishAttachTransition: () => void }).finishAttachTransition();
-		out.killSwitchSilencesQueriesAndReplay = !killed.terminalWrites.some((w) => w.includes("\x1b]11;?\x07"));
+		out.killSwitchSilencesQueriesAndProbe = !killed.terminalWrites.some((w) => w.includes("\x1b]11;?\x07"));
 		out.killSwitchSkipsBridge = killed.scopedTui.listenerCount() === 0;
 		killed.attach.dispose();
 	} finally {
