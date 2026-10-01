@@ -5,7 +5,7 @@ import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { probeHost } from "../src/core/host-probe.mjs";
+import { HOST_PROBE_TIMEOUT_MS, probeHost } from "../src/core/host-probe.mjs";
 
 function freshDir() {
 	return mkdtempSync(join(tmpdir(), "agentview-host-probe-"));
@@ -139,7 +139,12 @@ test("AGENT_BOARD_TEST_HOST_PROBE_TIMEOUT_MS shortens the probe timeout", async 
 		assert.equal(fallback.errorCode, "TIMEOUT");
 		assert.ok(defaultElapsed >= 200, `unset knob keeps the 250ms default (${defaultElapsed}ms)`);
 		assert.ok(knobbedElapsed < defaultElapsed, `knob=1 (${knobbedElapsed}ms) resolves before the default (${defaultElapsed}ms)`);
-		assert.ok(knobbedElapsed < 100, `knob=1 shortened the probe (${knobbedElapsed}ms)`);
+		// Anti-rot floor, not a jitter-prone absolute bound (CR advisory on #157): an
+		// unwired reader makes the knobbed run wait out the FULL production default
+		// (setTimeout semantics guarantee >= HOST_PROBE_TIMEOUT_MS), so this fails
+		// deterministically when the knob rots — while a wired run (~1-30ms) only
+		// false-fails on a >249ms stall, which this process-free unit test cannot see.
+		assert.ok(knobbedElapsed < HOST_PROBE_TIMEOUT_MS, `knob=1 resolved before the ${HOST_PROBE_TIMEOUT_MS}ms production-default floor (${knobbedElapsed}ms)`);
 	} finally {
 		if (original === undefined) delete process.env.AGENT_BOARD_TEST_HOST_PROBE_TIMEOUT_MS;
 		else process.env.AGENT_BOARD_TEST_HOST_PROBE_TIMEOUT_MS = original;
