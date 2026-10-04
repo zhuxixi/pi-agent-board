@@ -598,7 +598,10 @@ export class PtyAttachComponent implements Component {
 		// Issue #128: the settle transition is the single point where `attaching`
 		// flips false (never re-armed), so these hooks run at most once per attach.
 		this.attachColorSchemeBridge();
-		this.replayBackgroundQuery();
+		// Use only the tracked TUI probe. An extra terminal.write(OSC 11) has
+		// no local query owner, so its reply falls through handleInput into the
+		// child PTY. Settle can precede the child's raw-mode startup, making
+		// the line discipline echo that reply as visible ^[]11;rgb:... text.
 		this.reportRealTerminalColorScheme();
 	}
 
@@ -634,22 +637,8 @@ export class PtyAttachComponent implements Component {
 		}
 	}
 
-	/** Issue #128 D3: the child probed OSC 11 at spawn, before any attach
-	 * client existed, so its background-color answer was lost. Re-ask the REAL
-	 * terminal once now; the reply travels back through the existing input
-	 * passthrough (handleInput fallback) to the child. Silent on failure — a
-	 * missing answer keeps the pre-#128 fallback theme. */
-	private replayBackgroundQuery(): void {
-		if (process.env.AGENT_BOARD_FORWARD_TERMINAL_QUERIES === "0") return;
-		try {
-			this.tui.terminal.write("\x1b]11;?\x07");
-		} catch {
-			/* best-effort: enhancement, never critical */
-		}
-	}
-
-	/** Issue #148: #128's replay only helps while the child still has a PENDING
-	 * OSC 11 query. That precondition does not hold here: the child's probe fires
+	/** Issue #148: a raw OSC 11 replay only helps while the child still has a
+	 * PENDING OSC 11 query. That precondition does not hold here: the child's probe fires
 	 * at spawn (long before attach), and Pi's leaked pending state — a timeout
 	 * settles the query but leaves it queued and keeps the reply counter up —
 	 * makes the next arriving reply get consumed by that stale entry and
