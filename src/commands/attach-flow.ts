@@ -13,6 +13,7 @@ import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { createService } from "../runtime/service.mjs";
 import { planAttachPrelude, planAttachResolved } from "./attach-decision.mjs";
 import { screenLogPath } from "../core/paths.mjs";
+import { appendDiagnostic } from "../core/diagnostics.mjs";
 import { PtyAttachComponent, type PtyAttachResult } from "../ui/pty-attach.js";
 import type { DashboardResult } from "../ui/dashboard.js";
 
@@ -39,6 +40,16 @@ export async function openPtyAttach(
 					socketPath,
 					screenLogPath: root ? screenLogPath(root, viewId) : undefined,
 					title: name,
+					onDiagnostic: root
+						? (event) => {
+								// Best effort, like every other diagnostics writer.
+								try {
+									appendDiagnostic(root, viewId, event as never);
+								} catch {
+									/* diagnostics must never break attach */
+								}
+							}
+						: undefined,
 				}),
 			{
 				overlay: true,
