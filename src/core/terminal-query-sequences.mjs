@@ -209,7 +209,7 @@ function hasAnyColor(colors) {
 	return Array.isArray(colors.palette) && colors.palette.some((c) => c !== undefined);
 }
 
-const SETTLE_SCHEME_WARN_OUTCOMES = new Set(["timeout", "error", "no_background", "no_probe_api"]);
+const SETTLE_SCHEME_WARN_OUTCOMES = new Set(["timeout", "error", "no_background", "no_probe_api", "dropped_disconnected"]);
 
 /**
  * Issue #161: build the DiagnosticEvent-compatible patch for the settle scheme
@@ -217,7 +217,7 @@ const SETTLE_SCHEME_WARN_OUTCOMES = new Set(["timeout", "error", "no_background"
  * (level/code/runId/source/message/details) — anything else is silently
  * dropped. Warn only when delivery was expected but failed; routine outcomes
  * (dedup, quick detach, kill switch) stay info so warningCount stays meaningful.
- * @param {{ probeApi?: "colors"|"background"|"none", outcome: "reported"|"timeout"|"error"|"no_background"|"no_probe_api"|"dropped_closed"|"duplicate_skipped"|"suppressed", report?: string, late?: boolean }} details
+ * @param {{ probeApi?: "colors"|"background"|"none", outcome: "reported"|"timeout"|"error"|"no_background"|"no_probe_api"|"dropped_closed"|"dropped_disconnected"|"duplicate_skipped"|"suppressed", report?: string, late?: boolean }} details
  * @returns {{ source: string, level: "info"|"warn", code: string, message: string, details: { probeApi?: string, outcome: string, report?: string, late?: boolean } }}
  */
 export function buildSettleSchemePatch(details) {

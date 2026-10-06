@@ -35,8 +35,12 @@ async function runSettle(tui: Record<string, unknown>, opts: { env?: Record<stri
 			title: "settle-scheme",
 			onDiagnostic: (event) => captures.diagnostics.push(event),
 		});
-		const internals = attach as unknown as { send: (m: { type: string; data?: string }) => void; finishAttachTransition: () => void };
+		const internals = attach as unknown as { send: (m: { type: string; data?: string }) => void; finishAttachTransition: () => void; connected: boolean };
 		internals.send = (m) => { if (m?.type === "input" && m.data) captures.sent.push(m.data); };
+		// Production settle runs after the control socket connected; the smoke
+		// never connects (fake socket), so reflect the real delivery state here.
+		// The disconnected corner has its own scenario below.
+		internals.connected = true;
 		internals.finishAttachTransition();
 		await new Promise((r) => setImmediate(r));
 		return captures;
@@ -74,8 +78,10 @@ async function runLateScenario(kind: "same" | "different" | "afterTimeout" | "cl
 			title: "settle-scheme-late",
 			onDiagnostic: (event) => captures.diagnostics.push(event),
 		});
-		const internals = attach as unknown as { send: (m: { type: string; data?: string }) => void; finishAttachTransition: () => void };
+		const internals = attach as unknown as { send: (m: { type: string; data?: string }) => void; finishAttachTransition: () => void; connected: boolean };
 		internals.send = (m) => { if (m?.type === "input" && m.data) captures.sent.push(m.data); };
+		// Same as runSettle: late scenarios deliver over a connected socket.
+		internals.connected = true;
 		internals.finishAttachTransition();
 		await new Promise((r) => setImmediate(r));
 		// "closed" drops the late reply (already-delivered 997;2 stays).
@@ -117,5 +123,40 @@ out.lateSame = dump(await runLateScenario("same"));
 out.lateDifferent = dump(await runLateScenario("different"));
 out.lateAfterTimeout = dump(await runLateScenario("afterTimeout"));
 out.lateClosed = dump(await runLateScenario("closed"));
+
+// CR round-1 advisory: a disconnected control socket (hard-timeout settle
+// before the host finished connecting) must not claim "reported", and the
+// dedup baseline must stay unset so a later same-scheme late reply is not
+// swallowed as duplicate_skipped.
+{
+	const captures: Captures = { sent: [], diagnostics: [], writes: [] };
+	let late: ((colors: unknown) => void) | undefined;
+	const tui = makeTui({
+		terminal: { rows: 24, cols: 80, columns: 80, write: (d: string) => { if (d.includes(RAW_OSC11_QUERY)) captures.writes.push(d); } },
+		queryTerminalColors: async (opts: { onLateReply?: (c: unknown) => void }) => {
+			late = opts.onLateReply;
+			return { background: LIGHT };
+		},
+	});
+	const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
+	let attach: PtyAttachComponent | undefined;
+	try {
+		attach = new PtyAttachComponent(tui as never, theme as never, {} as never, () => {}, {
+			socketPath: "/nonexistent/settle-scheme-disc.sock",
+			title: "settle-scheme-disc",
+			onDiagnostic: (event) => captures.diagnostics.push(event),
+		});
+		const internals = attach as unknown as { send: (m: { type: string; data?: string }) => void; finishAttachTransition: () => void };
+		internals.send = (m) => { if (m?.type === "input" && m.data) captures.sent.push(m.data); };
+		// connected stays false — the corner under test.
+		internals.finishAttachTransition();
+		await new Promise((r) => setImmediate(r));
+		late?.({ background: LIGHT });
+		await new Promise((r) => setImmediate(r));
+	} finally {
+		attach?.dispose();
+	}
+	out.disconnected = dump(captures);
+}
 
 console.log(JSON.stringify(out));

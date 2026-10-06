@@ -717,6 +717,15 @@ export class PtyAttachComponent implements Component {
 		if (!scheme || this.closed) return;
 		const data = toColorSchemeReport(scheme);
 		if (!data) return;
+		// CR round-1 advisory: send() silently no-ops while the control socket is
+		// disconnected (hard-timeout settle before the host finished connecting).
+		// Claiming "reported" there would be a lie the dedup then acts on, so
+		// record the drop and leave sentScheme unset — a later same-scheme late
+		// reply re-attempts instead of being swallowed as duplicate_skipped.
+		if (!this.connected) {
+			this.opts.onDiagnostic?.(buildSettleSchemePatch({ probeApi: api, outcome: "dropped_disconnected" }));
+			return;
+		}
 		this.sentScheme = scheme;
 		this.send({ type: "input", data });
 		const details: { probeApi: "colors" | "background" | "none"; outcome: "reported"; report: string; late?: boolean } = {

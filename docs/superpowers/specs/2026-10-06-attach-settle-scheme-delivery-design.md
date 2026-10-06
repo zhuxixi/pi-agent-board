@@ -99,14 +99,14 @@ onLateReply(colors) →
     `host_crash_owner_changed` 等现有 code 命名）
   - `source: "attach"`
   - `level`: **「预期交付但失败」才 `"warn"`**——`timeout` / `error` / `no_background` /
-    `no_probe_api`；正常/预期操作用 `"info"`——`reported` / `duplicate_skipped` /
+    `no_probe_api` / `dropped_disconnected`；正常/预期操作用 `"info"`——`reported` / `duplicate_skipped` /
     `dropped_closed` / `suppressed`（后三者是慢链路正常去重、用户快速 detach、用户主动
     kill switch；标 warn 会污染 `summarizeDiagnostics` 的 warningCount——diagnostics.mjs:60
     计数、store.mjs:425 并入行摘要被 dashboard 消费）
   - `message`: 人类可读摘要（如 `attach settle scheme reported via queryTerminalColors (light)`）
   - `details: { probeApi: "colors"|"background"|"none", outcome:
     "reported"|"timeout"|"error"|"no_background"|"no_probe_api"|"dropped_closed"|
-    "duplicate_skipped"|"suppressed", report?: "997;1"|"997;2", late?: true }`
+    "dropped_disconnected"|"duplicate_skipped"|"suppressed", report?: "997;1"|"997;2", late?: true }`
     （camelCase，对齐既有 details 键风格如 `ownerChanged`；`report` 仅在发送 997 时携带；
     kill switch 的 suppressed 事件不填 `probeApi`）
   - 组件的 `onDiagnostic` 即以上述 patch 形状发出，wiring 层直接透传给
@@ -132,6 +132,9 @@ onLateReply(colors) →
   即「超时 → 迟到补发」主路径）→ 补发一次 997，诊断 `outcome=reported`、`late:true`。
 - kill switch（`AGENT_BOARD_FORWARD_TERMINAL_QUERIES=0`）→ 全链路跳过，诊断
   `outcome=suppressed`（level `"info"`，不填 `probeApi`），行为回到修复前。
+- 控制.socket 未连接时 settle 交付命中 send() 静默 no-op（硬超时落定、宿主连接慢的角落）→
+  不没 sentScheme、不发 997，诊断 `outcome=dropped_disconnected`（level `"warn"`）——同 scheme
+  的迟到应答之后重试而非被去重吞掉。（CR round-1 advisory 采纳）
 - 以上降级均不抛错、不影响 attach 主流程。
 
 ### 2.5 非目标

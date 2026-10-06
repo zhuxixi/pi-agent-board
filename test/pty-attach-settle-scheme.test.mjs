@@ -61,4 +61,13 @@ test("attach settle scheme probe: new/old/none APIs, failures, kill switch", () 
 	assert.deepEqual(out.lateClosed.sent, ["\x1b[?997;2n"], "closed late reply sends nothing beyond the initial delivery");
 	assert.equal(out.lateClosed.diagnostics.at(-1).details.outcome, "dropped_closed");
 	assert.equal(out.lateClosed.diagnostics.at(-1).level, "info");
+
+	// CR round-1 advisory: a disconnected control socket never claims "reported".
+	assert.deepEqual(out.disconnected.sent, [], "disconnected settle sends nothing");
+	assert.equal(out.disconnected.diagnostics[0].details.outcome, "dropped_disconnected");
+	assert.equal(out.disconnected.diagnostics[0].level, "warn");
+	assert.equal(out.disconnected.diagnostics.at(-1).details.outcome, "dropped_disconnected",
+		"same-scheme late reply re-attempts delivery (no duplicate_skipped lie)");
+	assert.equal(out.disconnected.diagnostics.some((d) => d.details.outcome === "duplicate_skipped"), false,
+		"dedup baseline must stay unset while disconnected");
 });

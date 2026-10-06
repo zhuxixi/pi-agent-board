@@ -552,7 +552,13 @@ const out: Record<string, boolean> = {};
 // report, so a child stuck on Pi's leaked pending-query state (a timed-out
 // probe swallows the next arriving reply) still resolves the right theme.
 {
-	const settle = (attach: PtyAttachComponent) => (attach as unknown as { finishAttachTransition: () => void }).finishAttachTransition();
+	const settle = (attach: PtyAttachComponent) => {
+		// Production settle delivers over a connected control socket; the fake
+		// socket never connects, so mirror the connected state here (makeAttach
+		// leaves it false for the socket-down escape scenarios).
+		(attach as unknown as { connected: boolean }).connected = true;
+		(attach as unknown as { finishAttachTransition: () => void }).finishAttachTransition();
+	};
 
 	// Light reply (Catppuccin Latte background) must become a 997;2 report.
 	const light = makeAttach({ backgroundReplies: [{ r: 239, g: 241, b: 245 }] });
@@ -597,6 +603,8 @@ const out: Record<string, boolean> = {};
 // exactly one 997;2 report.
 {
 	const newApi = makeAttach({ queryVia: "colors", backgroundReplies: [{ r: 239, g: 241, b: 245 }] });
+	// Same as P12's settle helper: deliver over a connected control socket.
+	(newApi.attach as unknown as { connected: boolean }).connected = true;
 	(newApi.attach as unknown as { finishAttachTransition: () => void }).finishAttachTransition();
 	const reported = await waitFor(() => newApi.sent.length === 1, 1000);
 	out.settleProbeNewApiReportsRealTerminalScheme = reported && newApi.sent[0].type === "input" && newApi.sent[0].data === "\x1b[?997;2n";
