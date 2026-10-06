@@ -156,3 +156,83 @@ function toLinearChannel(channel) {
 	const value = channel / 255;
 	return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
 }
+
+// --- Attach settle scheme probe (issue #161) -------------------------------
+// pi-tui >= 0.99 renamed queryTerminalBackgroundColor -> queryTerminalColors.
+// This repo compiles against pi-tui 0.79.8 but the extension runs against the
+// host pi's pi-tui (peerDependencies "*"), so the probe feature-detects at
+// runtime. Local structural typedefs only — TerminalColors does not exist on
+// the 0.79.8 compile face and must not be imported.
+
+/** @typedef {{ r: number, g: number, b: number }} SettleRgb */
+/** @typedef {{ background?: SettleRgb, foreground?: SettleRgb, palette?: SettleRgb[] }} TerminalColorsLike */
+/** @typedef {{ queryTerminalColors?: (opts: { timeoutMs: number, onLateReply?: (colors: TerminalColorsLike) => void }) => Promise<TerminalColorsLike>, queryTerminalBackgroundColor?: (opts: { timeoutMs: number }) => Promise<SettleRgb|undefined> }} SettleProbeSurface */
+/** @typedef {{ rgb?: SettleRgb, anyColors: boolean }} SettleProbeResult */
+
+/**
+ * Issue #161: detect which terminal color query API a TUI surface exposes.
+ * Detection is pure; the returned adapter only calls the passed-in surface.
+ * @param {SettleProbeSurface} tuiLike
+ * @returns {{ api: "colors"|"background"|"none", invoke: (tui: SettleProbeSurface, timeoutMs: number, onLateReply?: (colors: TerminalColorsLike) => void) => Promise<SettleProbeResult> }}
+ */
+export function resolveProbeApi(tuiLike) {
+	if (tuiLike && typeof tuiLike.queryTerminalColors === "function") {
+		return {
+			api: "colors",
+			invoke: async (tui, timeoutMs, onLateReply) => {
+				const colors = await tui.queryTerminalColors({ timeoutMs, onLateReply });
+				return { rgb: backgroundRgbFromTerminalColors(colors), anyColors: hasAnyColor(colors) };
+			},
+		};
+	}
+	if (tuiLike && typeof tuiLike.queryTerminalBackgroundColor === "function") {
+		return {
+			api: "background",
+			invoke: async (tui, timeoutMs) => {
+				const rgb = await tui.queryTerminalBackgroundColor({ timeoutMs });
+				return { rgb, anyColors: rgb !== undefined };
+			},
+		};
+	}
+	return { api: "none", invoke: async () => ({ rgb: undefined, anyColors: false }) };
+}
+
+/** @param {TerminalColorsLike} colors @returns {SettleRgb|undefined} */
+export function backgroundRgbFromTerminalColors(colors) {
+	return colors && typeof colors === "object" ? colors.background : undefined;
+}
+
+/** @param {TerminalColorsLike} colors @returns {boolean} */
+function hasAnyColor(colors) {
+	if (!colors || typeof colors !== "object") return false;
+	if (colors.background !== undefined || colors.foreground !== undefined) return true;
+	return Array.isArray(colors.palette) && colors.palette.some((c) => c !== undefined);
+}
+
+const SETTLE_SCHEME_WARN_OUTCOMES = new Set(["timeout", "error", "no_background", "no_probe_api"]);
+
+/**
+ * Issue #161: build the DiagnosticEvent-compatible patch for the settle scheme
+ * flow. Field names MUST stay inside normalizeDiagnostic's whitelist
+ * (level/code/runId/source/message/details) — anything else is silently
+ * dropped. Warn only when delivery was expected but failed; routine outcomes
+ * (dedup, quick detach, kill switch) stay info so warningCount stays meaningful.
+ * @param {{ probeApi?: "colors"|"background"|"none", outcome: "reported"|"timeout"|"error"|"no_background"|"no_probe_api"|"dropped_closed"|"duplicate_skipped"|"suppressed", report?: string, late?: boolean }} details
+ */
+export function buildSettleSchemePatch(details) {
+	const parts = [details.outcome];
+	if (details.probeApi) parts.push(`via ${details.probeApi}`);
+	if (details.report) parts.push(details.report);
+	if (details.late) parts.push("late");
+	const patch = {
+		source: "attach",
+		level: SETTLE_SCHEME_WARN_OUTCOMES.has(details.outcome) ? "warn" : "info",
+		code: "attach_settle_scheme",
+		message: `attach settle scheme: ${parts.join(" ")}`,
+		details: { outcome: details.outcome },
+	};
+	if (details.probeApi !== undefined) patch.details.probeApi = details.probeApi;
+	if (details.report !== undefined) patch.details.report = details.report;
+	if (details.late !== undefined) patch.details.late = details.late;
+	return patch;
+}

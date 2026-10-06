@@ -1,9 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { extractOscQuerySequences, toColorSchemeReport, colorSchemeForBackgroundRgb, OSC_QUERY_CARRY_MAX_BYTES } from "../src/core/terminal-query-sequences.mjs";
+import { extractOscQuerySequences, toColorSchemeReport, colorSchemeForBackgroundRgb, OSC_QUERY_CARRY_MAX_BYTES, backgroundRgbFromTerminalColors, buildSettleSchemePatch, resolveProbeApi } from "../src/core/terminal-query-sequences.mjs";
 // Test-only import: round-trips our produced report through pi-tui's real
 // parser. Production code must NOT import pi-tui (see module docblock).
 import { parseOsc11BackgroundColor, parseTerminalColorSchemeReport } from "@earendil-works/pi-tui/dist/terminal-colors.js";
+import { normalizeDiagnostic } from "../src/core/diagnostics.mjs";
 
 const Q_BEL = "\x1b]11;?\x07";
 const Q_ST = "\x1b]11;?\x1b\\";
@@ -160,4 +161,69 @@ test("nearest terminator wins when both BEL and ST are present", () => {
 test("valid query after a rejected junk-form OSC is still forwarded", () => {
 	const { sequences } = extractOscQuerySequences("\x1b]11;?junk\x07\x1b]11;?\x07");
 	assert.deepEqual(sequences, ["\x1b]11;?\x07"]);
+});
+
+// Issue #161: the attach settle-scheme probe feature-detects the host pi-tui
+// color query API at runtime (0.99 renamed queryTerminalBackgroundColor ->
+// queryTerminalColors; this repo compiles against 0.79.8).
+test("resolveProbeApi detects colors-only / background-only / neither surfaces", async () => {
+	const light = { r: 0.94, g: 0.94, b: 0.94 };
+	const colorsOnly = { queryTerminalColors: async () => ({ background: light }) };
+	const backgroundOnly = { queryTerminalBackgroundColor: async () => light };
+	const neither = {};
+
+	const a = resolveProbeApi(colorsOnly);
+	assert.equal(a.api, "colors");
+	assert.deepEqual(await a.invoke(colorsOnly, 500), { rgb: light, anyColors: true });
+
+	const b = resolveProbeApi(backgroundOnly);
+	assert.equal(b.api, "background");
+	assert.deepEqual(await b.invoke(backgroundOnly, 500), { rgb: light, anyColors: true });
+
+	const c = resolveProbeApi(neither);
+	assert.equal(c.api, "none");
+	assert.deepEqual(await c.invoke(neither, 500), { rgb: undefined, anyColors: false });
+});
+
+test("resolveProbeApi colors adapter distinguishes empty from answered-but-no-background", async () => {
+	const empty = { queryTerminalColors: async () => ({}) };
+	const answered = { queryTerminalColors: async () => ({ foreground: { r: 0.1, g: 0.1, b: 0.1 } }) };
+	const probe = resolveProbeApi(empty);
+	assert.deepEqual(await probe.invoke(empty, 500), { rgb: undefined, anyColors: false });
+	const probe2 = resolveProbeApi(answered);
+	assert.deepEqual(await probe2.invoke(answered, 500), { rgb: undefined, anyColors: true });
+});
+
+test("resolveProbeApi forwards onLateReply through the colors adapter", async () => {
+	let captured;
+	const tui = { queryTerminalColors: async (opts) => { captured = opts; return {}; } };
+	const probe = resolveProbeApi(tui);
+	const onLate = () => {};
+	await probe.invoke(tui, 500, onLate);
+	assert.equal(captured.onLateReply, onLate);
+});
+
+test("backgroundRgbFromTerminalColors maps defensively", () => {
+	assert.equal(backgroundRgbFromTerminalColors(undefined), undefined);
+	assert.equal(backgroundRgbFromTerminalColors({}), undefined);
+	assert.deepEqual(backgroundRgbFromTerminalColors({ background: { r: 1, g: 2, b: 3 } }), { r: 1, g: 2, b: 3 });
+});
+
+test("buildSettleSchemePatch maps levels and survives normalizeDiagnostic", () => {
+	const failure = buildSettleSchemePatch({ probeApi: "colors", outcome: "timeout" });
+	assert.equal(failure.level, "warn");
+	const routine = buildSettleSchemePatch({ probeApi: "colors", outcome: "duplicate_skipped" });
+	assert.equal(routine.level, "info");
+	const reported = buildSettleSchemePatch({ probeApi: "colors", outcome: "reported", report: "997;2", late: true });
+	assert.equal(reported.level, "info");
+	const suppressed = buildSettleSchemePatch({ outcome: "suppressed" });
+	assert.equal(suppressed.details.probeApi, undefined);
+
+	for (const patch of [failure, routine, reported, suppressed]) {
+		const normalized = normalizeDiagnostic("view-test", patch);
+		assert.equal(normalized.code, "attach_settle_scheme");
+		assert.equal(normalized.source, "attach");
+		assert.equal(normalized.details.outcome, patch.details.outcome);
+		assert.deepEqual(normalized.details, patch.details);
+	}
 });
