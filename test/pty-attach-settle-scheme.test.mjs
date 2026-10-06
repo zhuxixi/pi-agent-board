@@ -42,4 +42,23 @@ test("attach settle scheme probe: new/old/none APIs, failures, kill switch", () 
 	assert.equal(out.killSwitch.diagnostics[0].details.outcome, "suppressed");
 	assert.equal(out.killSwitch.diagnostics[0].details.probeApi, undefined);
 	assert.equal(out.killSwitch.diagnostics[0].level, "info");
+
+	// A5 — late replies: dedup, closed guard, timeout-then-late delivery.
+	assert.deepEqual(out.lateSame.sent, ["\x1b[?997;2n"], "same-scheme late reply is deduped");
+	assert.equal(out.lateSame.diagnostics.at(-1).details.outcome, "duplicate_skipped");
+	assert.equal(out.lateSame.diagnostics.at(-1).level, "info");
+
+	assert.deepEqual(out.lateDifferent.sent, ["\x1b[?997;2n", "\x1b[?997;1n"], "different-scheme late reply delivers");
+	const lateDiff = out.lateDifferent.diagnostics.at(-1);
+	assert.equal(lateDiff.details.outcome, "reported");
+	assert.equal(lateDiff.details.late, true);
+	assert.equal(lateDiff.details.report, "997;1");
+
+	assert.deepEqual(out.lateAfterTimeout.sent, ["\x1b[?997;1n"], "timeout-then-late still delivers (sentScheme null)");
+	assert.equal(out.lateAfterTimeout.diagnostics[0].details.outcome, "timeout");
+	assert.equal(out.lateAfterTimeout.diagnostics.at(-1).details.outcome, "reported");
+
+	assert.deepEqual(out.lateClosed.sent, ["\x1b[?997;2n"], "closed late reply sends nothing beyond the initial delivery");
+	assert.equal(out.lateClosed.diagnostics.at(-1).details.outcome, "dropped_closed");
+	assert.equal(out.lateClosed.diagnostics.at(-1).level, "info");
 });
