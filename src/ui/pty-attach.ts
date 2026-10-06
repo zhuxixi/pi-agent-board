@@ -11,7 +11,7 @@ import { evaluateAttachReconnect, shouldEscapeAttach } from "../core/pty-attach-
 import { installImeCursorCoalesce } from "../core/ime-cursor-coalesce.mjs";
 import { createJiggleRetryController } from "../core/pty-attach-jiggle-controller.mjs";
 import { createTerminalAttachClient } from "../core/terminal-attach-client.mjs";
-import { colorSchemeForBackgroundRgb, extractOscQuerySequences, toColorSchemeReport } from "../core/terminal-query-sequences.mjs";
+import { backgroundRgbFromTerminalColors, buildSettleSchemePatch, colorSchemeForBackgroundRgb, extractOscQuerySequences, resolveProbeApi, toColorSchemeReport } from "../core/terminal-query-sequences.mjs";
 import { clampInt, parseMouseInputChunk, resolveWheelLines, scrollViewportTop, selectionDragScrollLines } from "../core/pty-scroll.mjs";
 
 export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null };
@@ -21,10 +21,21 @@ type ThemeLike = {
 	bold(text: string): string;
 };
 
+/** Diagnostic patch emitted at attach settle (DiagnosticEvent-compatible; built by buildSettleSchemePatch). */
+export interface AttachSettleDiagnosticPatch {
+	source: string;
+	level: "info" | "warn";
+	code: string;
+	message: string;
+	details: { probeApi?: string; outcome: string; report?: string; late?: boolean };
+}
+
 export interface PtyAttachOptions {
 	socketPath: string;
 	screenLogPath?: string;
 	title: string;
+	/** Issue #161: receives settle-scheme diagnostic patches. Default: no-op. */
+	onDiagnostic?: (event: AttachSettleDiagnosticPatch) => void;
 }
 
 const require = createRequire(import.meta.url);
@@ -225,6 +236,10 @@ export class PtyAttachComponent implements Component {
 	private attaching = true;
 	private attachSettleTimer: ReturnType<typeof setTimeout> | null = null;
 	private attachHardTimeout: ReturnType<typeof setTimeout> | null = null;
+	// Last scheme delivered to the child at settle (issue #161). Starts null:
+	// null never matches the duplicate check, so a timeout-then-late sequence
+	// still delivers. Single-shot per attach — settle runs at most once.
+	private sentScheme: TerminalColorScheme | null = null;
 	// Issue #128 D2: unsubscriber for the color-scheme bridge registered at
 	// attach settle; nulled on every terminal path so the TUI never keeps a
 	// listener pointing at a dead attach surface.
@@ -637,38 +652,80 @@ export class PtyAttachComponent implements Component {
 		}
 	}
 
-	/** Issue #148: a raw OSC 11 replay only helps while the child still has a
-	 * PENDING OSC 11 query. That precondition does not hold here: the child's probe fires
-	 * at spawn (long before attach), and Pi's leaked pending state — a timeout
-	 * settles the query but leaves it queued and keeps the reply counter up —
-	 * makes the next arriving reply get consumed by that stale entry and
-	 * discarded, resolving nothing. So the client stops relying on the child's
-	 * probe entirely: it asks the REAL terminal itself (pi-tui's public query API)
-	 * and hands the child a 997 color-scheme report, which Pi consumes
-	 * unconditionally (no pending-query precondition — see
-	 * consumeTerminalColorSchemeReport). Same kill switch as #128 D1-D3.
-	 *
-	 * One probe only (CR round-1 advisory): the local pi-tui has the same leak, so
-	 * when a stale entry sits in ITS queue the reply is swallowed before this
-	 * promise can see it, and retrying would append another stale entry per
-	 * attempt — failing identically while poisoning the host's own detection. The
-	 * degraded case stays the documented pre-#148 silence. */
+	/** Issue #148/#161: at settle, ask the REAL terminal itself (feature-detected
+	 * public query API — pi-tui >= 0.99 renamed it to queryTerminalColors) and
+	 * hand the child an unconditional 997 color-scheme report. One probe per
+	 * attach; the pre-#148 silence on failure is now observable via
+	 * onDiagnostic. Same kill switch as #128 D1-D3. */
 	private reportRealTerminalColorScheme(): void {
-		if (process.env.AGENT_BOARD_FORWARD_TERMINAL_QUERIES === "0") return;
+		if (process.env.AGENT_BOARD_FORWARD_TERMINAL_QUERIES === "0") {
+			this.opts.onDiagnostic?.(buildSettleSchemePatch({ outcome: "suppressed" }));
+			return;
+		}
 		void this.probeAndReportRealTerminalColorScheme();
 	}
 
 	private async probeAndReportRealTerminalColorScheme(): Promise<void> {
-		let rgb: RgbColor | undefined;
-		try {
-			rgb = await this.tui.queryTerminalBackgroundColor({ timeoutMs: REAL_TERMINAL_SCHEME_PROBE_TIMEOUT_MS });
-		} catch {
-			/* best-effort: a failed probe keeps the pre-#148 behavior */
+		const probe = resolveProbeApi(this.tui as never);
+		if (probe.api === "none") {
+			this.opts.onDiagnostic?.(buildSettleSchemePatch({ probeApi: "none", outcome: "no_probe_api" }));
+			return;
 		}
-		const scheme: TerminalColorScheme | undefined = colorSchemeForBackgroundRgb(rgb) ?? undefined;
+		let result: { rgb?: RgbColor; anyColors: boolean };
+		try {
+			result = await probe.invoke(
+				this.tui as never,
+				REAL_TERMINAL_SCHEME_PROBE_TIMEOUT_MS,
+				(colors) => this.handleLateSettleColors(probe.api, colors),
+			);
+		} catch {
+			/* best-effort: a failed probe keeps the pre-#148 behavior, but recorded */
+			this.opts.onDiagnostic?.(buildSettleSchemePatch({ probeApi: probe.api, outcome: "error" }));
+			return;
+		}
+		const rgb = result?.rgb;
+		if (!rgb) {
+			// Outcome rule (spec §2.3): any color answered but no background =>
+			// no_background; nothing answered at all => timeout. The old API only
+			// queries OSC 11, so its undefined is always a timeout.
+			const outcome = result && result.anyColors ? "no_background" : "timeout";
+			this.opts.onDiagnostic?.(buildSettleSchemePatch({ probeApi: probe.api, outcome }));
+			return;
+		}
+		this.deliverSettleScheme(colorSchemeForBackgroundRgb(rgb) ?? undefined, probe.api, false);
+	}
+
+	/** pi-tui >= 0.99 late replies: deliver only when the scheme differs from
+	 * what was already sent (sentScheme starts null and never matches, so the
+	 * timeout-then-late path delivers). Closed => dropped, but recorded. */
+	private handleLateSettleColors(api: "colors" | "background" | "none", colors: unknown): void {
+		if (this.closed) {
+			this.opts.onDiagnostic?.(buildSettleSchemePatch({ probeApi: api, outcome: "dropped_closed" }));
+			return;
+		}
+		const rgb = backgroundRgbFromTerminalColors(colors as never);
+		const scheme = rgb ? colorSchemeForBackgroundRgb(rgb) ?? undefined : undefined;
+		if (!scheme) return;
+		if (this.sentScheme === scheme) {
+			this.opts.onDiagnostic?.(buildSettleSchemePatch({ probeApi: api, outcome: "duplicate_skipped" }));
+			return;
+		}
+		this.deliverSettleScheme(scheme, api, true);
+	}
+
+	private deliverSettleScheme(scheme: TerminalColorScheme | undefined, api: "colors" | "background" | "none", late: boolean): void {
 		if (!scheme || this.closed) return;
 		const data = toColorSchemeReport(scheme);
-		if (data) this.send({ type: "input", data });
+		if (!data) return;
+		this.sentScheme = scheme;
+		this.send({ type: "input", data });
+		const details: { probeApi: "colors" | "background" | "none"; outcome: "reported"; report: string; late?: boolean } = {
+			probeApi: api,
+			outcome: "reported",
+			report: scheme === "light" ? "997;2" : "997;1",
+		};
+		if (late) details.late = true;
+		this.opts.onDiagnostic?.(buildSettleSchemePatch(details));
 	}
 
 	private startDesyncProbe(): void {
