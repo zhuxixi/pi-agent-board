@@ -21,6 +21,8 @@
 //       and dark replies map to their 997 forms, exactly one probe runs (a
 //       swallowed reply cannot be retried into success, CR round-1 advisory),
 //       and the kill switch silences it.
+//   P13. Issue #161 A7: the same settle delivery over the new-API-only tui
+//       (queryTerminalColors, pi-tui >= 0.99) — one 997;2 for a light reply.
 // Run via `node --experimental-transform-types` (TS parameter properties).
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
@@ -39,7 +41,7 @@ const plainTui = {
 	onTerminalColorSchemeChange: (_listener: (scheme: string) => void) => () => {},
 };
 
-function makeAttach(options: { backgroundReplies?: Array<{ r: number; g: number; b: number } | undefined> } = {}) {
+function makeAttach(options: { backgroundReplies?: Array<{ r: number; g: number; b: number } | undefined>; queryVia?: "background" | "colors" } = {}) {
 	let result: unknown = null;
 	// Issue #128: per-attach fake TUI with terminal-write capture and a
 	// color-scheme listener registry (the bridge under test registers here).
@@ -48,6 +50,15 @@ function makeAttach(options: { backgroundReplies?: Array<{ r: number; g: number;
 	// Issue #148: the settle probe asks the REAL terminal through pi-tui's
 	// public query API; the reply queue drives it (undefined = swallowed).
 	const backgroundProbeCalls: Array<{ timeoutMs: number }> = [];
+	const probeBackground = async (probeOptions: { timeoutMs: number }) => {
+		const index = backgroundProbeCalls.length;
+		backgroundProbeCalls.push(probeOptions);
+		// Like the real public API, this owns the reply before writing the query.
+		terminalWrites.push("\x1b]11;?\x07");
+		const replies = options.backgroundReplies;
+		if (!replies || replies.length === 0) return undefined;
+		return replies[Math.min(index, replies.length - 1)];
+	};
 	const scopedTui = {
 		terminal: { rows: 24, cols: 80, columns: 80, write: (s: string) => { terminalWrites.push(s); } },
 		requestRender: () => {},
@@ -55,15 +66,11 @@ function makeAttach(options: { backgroundReplies?: Array<{ r: number; g: number;
 			colorSchemeListeners.add(listener);
 			return () => { colorSchemeListeners.delete(listener); };
 		},
-		queryTerminalBackgroundColor: async (probeOptions: { timeoutMs: number }) => {
-			const index = backgroundProbeCalls.length;
-			backgroundProbeCalls.push(probeOptions);
-			// Like the real public API, this owns the reply before writing the query.
-			terminalWrites.push("\x1b]11;?\x07");
-			const replies = options.backgroundReplies;
-			if (!replies || replies.length === 0) return undefined;
-			return replies[Math.min(index, replies.length - 1)];
-		},
+		// Issue #161: pi-tui >= 0.99 renamed the query API; each fake exposes
+		// exactly ONE spelling so a scenario pins the detection branch.
+		...(options.queryVia === "colors"
+			? { queryTerminalColors: async (probeOptions: { timeoutMs: number }) => ({ background: await probeBackground(probeOptions) }) }
+			: { queryTerminalBackgroundColor: probeBackground }),
 		fireColorScheme: (scheme: string) => {
 			for (const listener of [...colorSchemeListeners]) listener(scheme);
 		},
@@ -581,6 +588,19 @@ const out: Record<string, boolean> = {};
 	} finally {
 		delete process.env.AGENT_BOARD_FORWARD_TERMINAL_QUERIES;
 	}
+}
+
+// P13. Issue #161 A7: the same delivery through the only other real-world
+// surface — a tui exposing JUST the new query API (queryTerminalColors, pi-tui
+// >= 0.99) and no legacy method. A light background (0-255 channels, the
+// Catppuccin Latte value P12 already uses) still reaches the child pty as
+// exactly one 997;2 report.
+{
+	const newApi = makeAttach({ queryVia: "colors", backgroundReplies: [{ r: 239, g: 241, b: 245 }] });
+	(newApi.attach as unknown as { finishAttachTransition: () => void }).finishAttachTransition();
+	const reported = await waitFor(() => newApi.sent.length === 1, 1000);
+	out.settleProbeNewApiReportsRealTerminalScheme = reported && newApi.sent[0].type === "input" && newApi.sent[0].data === "\x1b[?997;2n";
+	newApi.attach.dispose();
 }
 
 // E2. A terminal at the minimum supported size must not emit a shrink that the

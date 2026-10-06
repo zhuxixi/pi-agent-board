@@ -71,6 +71,9 @@ test("attach detach gate: ctrl+] passes through, ← reads only editor_state", (
 	// relying on the child's probe being resolved (Pi's leaked pending state
 	// swallows the first late reply), so attach recovers the right theme.
 	assert.equal(parsed.settleProbeReportsRealTerminalScheme, true, "settle must ask the real terminal and report a light scheme as 997;2 (issue #148)");
+	// Issue #161 A7: a tui exposing ONLY the new query API must deliver the same
+	// single 997;2 report to the child pty.
+	assert.equal(parsed.settleProbeNewApiReportsRealTerminalScheme, true, "A7: new-API tui delivers a 997;2 to the real child PTY exactly once");
 	assert.equal(parsed.settleProbeReportsDarkScheme, true, "a dark terminal must map to 997;1 (issue #148)");
 	assert.equal(parsed.settleProbeIsSingleShotWithoutAnswer, true, "exactly one probe must run — a swallowed reply cannot be retried into success, and each timed-out retry would poison the local queue (issue #148, CR round-1 advisory)");
 	assert.equal(parsed.killSwitchSkipsSchemeProbe, true, "AGENT_BOARD_FORWARD_TERMINAL_QUERIES=0 must also skip the scheme probe (issue #148)");
