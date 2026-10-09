@@ -11,7 +11,7 @@ Repo state baseline: main @ `fee345c` (post-#171)
 In fullscreen mode (pi ≥1.0 default) `TuiAltScreen` owns outer-terminal mouse reporting:
 it writes the enable set `?1000h?1002h?1003h?1004h?1006h` exactly once in
 `beforeTerminalStart` (pi-tui 1.1.0 `tui-alt-screen.js:194`) and disables it only at
-`afterTerminalStop` (:206); there is no re-assert path. `PtyAttachComponent` nonetheless
+`beforeTerminalStop` (:196-206); there is no re-assert path. `PtyAttachComponent` nonetheless
 manages the outer terminal's mouse mode itself — ctor writes
 `MOUSE_DISABLE`+`MOUSE_ENABLE` (downgrading `?1003h`/`?1004h`), and `close()` writes
 `MOUSE_DISABLE` unconditionally (src/ui/pty-attach.ts:278-280, :1524 via
@@ -84,6 +84,7 @@ private ownsOuterMouseMode(): boolean {
 | fullscreen | any | none | none | mouse alive (BUG FIXED) |
 | regular / undefined (old runtime) | on (default) | today's pairing | MOUSE_DISABLE | n/a (unchanged) |
 | regular / undefined | off | none | none | n/a (also fixes unguarded-disable defect) |
+| fullscreen (host built with TuiAltScreenOptions.mouse: false) | n/a | none | none | consistent: host explicitly disabled mouse; nothing owns it — attach-view mouse features inert by host choice |
 
 ## Acceptance matrix
 

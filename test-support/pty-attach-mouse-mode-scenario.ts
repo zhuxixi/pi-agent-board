@@ -80,10 +80,10 @@ const result = {
 };
 
 try {
-	result.fullscreen = await runCase("fullscreen", undefined);
-	result.regular = await runCase("regular", undefined);
+	result.fullscreen = await runCase("fullscreen", { AGENT_BOARD_ATTACH_MOUSE: "1" });
+	result.regular = await runCase("regular", { AGENT_BOARD_ATTACH_MOUSE: "1" });
 	result.off = await runCase("regular", { AGENT_BOARD_ATTACH_MOUSE: "0" });
-	result.legacy = await runCase(undefined, undefined);
+	result.legacy = await runCase(undefined, { AGENT_BOARD_ATTACH_MOUSE: "1" });
 } catch (err) {
 	result.error = err instanceof Error ? err.message : String(err);
 }
