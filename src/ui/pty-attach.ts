@@ -3,7 +3,7 @@ import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
-import type { Component, KeybindingsManager, RgbColor, TUI, TerminalColorScheme } from "@earendil-works/pi-tui";
+import type { Component, KeybindingsManager, RgbColor, TUI, TerminalColorScheme, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
 import { createAttachOutputRenderScheduler, detectCursorDesync, isPtyCursorHidden, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
@@ -12,7 +12,7 @@ import { installImeCursorCoalesce } from "../core/ime-cursor-coalesce.mjs";
 import { createJiggleRetryController } from "../core/pty-attach-jiggle-controller.mjs";
 import { createTerminalAttachClient } from "../core/terminal-attach-client.mjs";
 import { backgroundRgbFromTerminalColors, buildSettleSchemePatch, colorSchemeForBackgroundRgb, extractOscQuerySequences, resolveProbeApi, toColorSchemeReport } from "../core/terminal-query-sequences.mjs";
-import { clampInt, parseMouseInputChunk, resolveWheelLines, scrollViewportTop, selectionDragScrollLines } from "../core/pty-scroll.mjs";
+import { clampInt, parseMouseInputChunk, resolveAttachMouseAction, resolveWheelLines, scrollViewportTop, selectionDragScrollLines } from "../core/pty-scroll.mjs";
 
 export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null };
 
@@ -366,6 +366,22 @@ export class PtyAttachComponent implements Component {
 		this.clearSelection();
 		this.scrollToBottom();
 		this.send({ type: "input", data });
+	}
+
+	/** Issue #167: fullscreen TUI (pi ≥1.0) consumes raw SGR mouse sequences in
+	 * TuiAltScreen and delivers normalized events to overlays here instead — the
+	 * legacy handleInput mouse path never runs in that mode. Only the
+	 * middle-click paste is ours; every other event returns undefined so pi's
+	 * own fullscreen selection and the wheel defer path keep working. */
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		const action = resolveAttachMouseAction(event, {
+			nativePasteEnabled: process.env.AGENT_BOARD_ATTACH_NATIVE_PASTE !== "0",
+		});
+		if (action !== "paste-primary") return undefined;
+		this.clearPendingClick();
+		this.clearSelection();
+		this.pastePrimarySelection();
+		return { handled: true, render: false };
 	}
 
 	render(width: number): string[] {
