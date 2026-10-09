@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { extractOscQuerySequences, toColorSchemeReport, colorSchemeForBackgroundRgb, OSC_QUERY_CARRY_MAX_BYTES, backgroundRgbFromTerminalColors, buildSettleSchemePatch, resolveProbeApi } from "../src/core/terminal-query-sequences.mjs";
 // Test-only import: round-trips our produced report through pi-tui's real
 // parser. Production code must NOT import pi-tui (see module docblock).
-import { parseOsc11BackgroundColor, parseTerminalColorSchemeReport } from "@earendil-works/pi-tui/dist/terminal-colors.js";
+import { parseOscColorResponse, parseTerminalColorSchemeReport } from "@earendil-works/pi-tui/dist/terminal-colors.js";
 import { normalizeDiagnostic } from "../src/core/diagnostics.mjs";
 
 const Q_BEL = "\x1b]11;?\x07";
@@ -116,8 +116,8 @@ test("A2: unknown/invalid scheme maps to empty string", () => {
 // Issue #148 A3: the client answers the scheme question itself from a real OSC 11
 // reply. The threshold mirrors Pi's own detection (relative luminance >= 0.5).
 test("A3: parsed OSC 11 replies map to the scheme Pi would have derived", () => {
-	assert.equal(colorSchemeForBackgroundRgb(parseOsc11BackgroundColor(SET_BEL)), "light");
-	assert.equal(colorSchemeForBackgroundRgb(parseOsc11BackgroundColor("\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\")), "dark");
+	assert.equal(colorSchemeForBackgroundRgb(parseOscColorResponse(SET_BEL)?.rgb), "light");
+	assert.equal(colorSchemeForBackgroundRgb(parseOscColorResponse("\x1b]11;rgb:1e1e/1e1e/2e2e\x1b\\")?.rgb), "dark");
 });
 
 test("A3: luminance threshold sits between gray 187 (dark) and 188 (light)", () => {
@@ -165,7 +165,7 @@ test("valid query after a rejected junk-form OSC is still forwarded", () => {
 
 // Issue #161: the attach settle-scheme probe feature-detects the host pi-tui
 // color query API at runtime (0.99 renamed queryTerminalBackgroundColor ->
-// queryTerminalColors; this repo compiles against 0.79.8).
+// queryTerminalColors; this repo compiles against 1.1.0).
 test("resolveProbeApi detects colors-only / background-only / neither surfaces", async () => {
 	const light = { r: 0.94, g: 0.94, b: 0.94 };
 	const colorsOnly = { queryTerminalColors: async () => ({ background: light }) };
