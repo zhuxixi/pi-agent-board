@@ -20,7 +20,7 @@ test("attach mouse: middle-press handleMouse pastes PRIMARY; legacy path intact;
 	const parsed = JSON.parse(out.trim().split("\n").filter(Boolean).pop());
 	assert.equal(parsed.error, null, `scenario error: ${parsed.error}`);
 	assert.equal(parsed.sawContent, true, "session content must render before mouse dispatch");
-	assert.equal(parsed.fullscreenHandled, true, "handleMouse(middle press) must return {handled:true}");
+	assert.equal(parsed.fullscreenHandled, true, "handleMouse(middle press) must return {handled:true, render:false}");
 	assert.equal(parsed.fullscreenInput, "primary-paste-fixture", "PRIMARY fixture must reach the attach socket as input");
 	assert.equal(parsed.offUndefined, true, "kill switch: handleMouse must return undefined");
 	assert.equal(parsed.offNoInput, true, "kill switch: no input may be forwarded");

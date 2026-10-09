@@ -2,7 +2,8 @@
 // PtyAttachComponent against a REAL runner socket (fake pty child in
 // steady-stream mode) with a fake TUI and a PATH-stubbed xclip that prints a
 // fixture string. Verifies:
-//   1. fullscreen path: handleMouse(press middle) → {handled:true} and the
+//   1. fullscreen path: handleMouse(press middle) → {handled:true, render:false}
+//      and the
 //      X11 PRIMARY fixture reaches the attach socket as {type:"input"};
 //   2. kill switch: AGENT_BOARD_ATTACH_NATIVE_PASTE=0 → handleMouse returns
 //      undefined and forwards nothing;
@@ -151,7 +152,7 @@ try {
 	};
 	const before = pastedInputs().length;
 	const mouseResult = (component as any).handleMouse(middlePress);
-	result.fullscreenHandled = !!mouseResult && mouseResult.handled === true;
+	result.fullscreenHandled = !!mouseResult && mouseResult.handled === true && mouseResult.render === false;
 	if (await waitFor(() => pastedInputs().length > before, 3000)) {
 		result.fullscreenInput = pastedInputs().at(-1) ?? null;
 	}
