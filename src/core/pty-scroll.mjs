@@ -108,6 +108,18 @@ export function resolveAttachMouseAction(event, { nativePasteEnabled }) {
 }
 
 /**
+ * Issue #169: whether the attach surface should manage the OUTER terminal's
+ * mouse mode. Only in regular TUI mode — in fullscreen, TuiAltScreen owns
+ * mouse reporting (asserted once at startup, never re-asserted), so any write
+ * from the attach surface can only downgrade or kill it. Old runtimes without
+ * tui.mode behave as regular. Pure: both arguments are resolved at the call
+ * site (mode from the TUI, the flag from the env-derived helper).
+ */
+export function shouldOwnOuterMouseMode(mode, mouseEnabled) {
+	return mode !== "fullscreen" && !!mouseEnabled;
+}
+
+/**
  * Return +1 for wheel-up (scroll back), -1 for wheel-down, 0 for non-wheel input.
  * Supports standard/passive SGR and X10/normal mouse encodings.
  */
