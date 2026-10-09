@@ -5,6 +5,7 @@ import {
 	parseMouseEvent,
 	parseMouseInputChunk,
 	resizeJiggleSize,
+	resolveAttachMouseAction,
 	resolveWheelLines,
 	scrollViewportTop,
 	selectionDragScrollLines,
@@ -120,4 +121,31 @@ test("resolveWheelLines honors a valid override and clamps to [1, 50]", () => {
 	assert.equal(resolveWheelLines({ AGENT_BOARD_WHEEL_LINES: "0" }), 1);
 	assert.equal(resolveWheelLines({ AGENT_BOARD_WHEEL_LINES: "-4" }), 1);
 	assert.equal(resolveWheelLines({ AGENT_BOARD_WHEEL_LINES: "999" }), 50);
+});
+
+const ev = (type, button) => ({ type, button });
+
+test("resolveAttachMouseAction: enabled middle press is the only paste trigger", () => {
+	assert.equal(resolveAttachMouseAction(ev("press", "middle"), { nativePasteEnabled: true }), "paste-primary");
+});
+
+test("resolveAttachMouseAction: native paste kill switch disables the trigger", () => {
+	assert.equal(resolveAttachMouseAction(ev("press", "middle"), { nativePasteEnabled: false }), null);
+});
+
+test("resolveAttachMouseAction: every other event falls through untouched", () => {
+	const cases = [
+		["press", "left"],
+		["press", "right"],
+		["press", "none"],
+		["release", "middle"],
+		["click", "middle"],
+		["move", "middle"],
+		["drag", "middle"],
+		["wheel", "left"],
+		["wheel", "middle"],
+	];
+	for (const [type, button] of cases) {
+		assert.equal(resolveAttachMouseAction(ev(type, button), { nativePasteEnabled: true }), null, `${type}/${button}`);
+	}
 });

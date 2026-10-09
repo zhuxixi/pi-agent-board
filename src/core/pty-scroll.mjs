@@ -95,6 +95,19 @@ export function parseMouseInputChunk(data) {
 }
 
 /**
+ * Issue #167: map a normalized pi-tui mouse event on the attach surface to an
+ * action. "paste-primary" = middle-click paste (read X11 PRIMARY, forward as
+ * input); null = not ours, the event falls through untouched (pi's fullscreen
+ * selection, the wheel defer path, and everything else keep working). Pure by
+ * contract: the env flag is resolved at the call site, never read here.
+ */
+export function resolveAttachMouseAction(event, { nativePasteEnabled }) {
+	if (!nativePasteEnabled) return null;
+	if (event.type === "press" && event.button === "middle") return "paste-primary";
+	return null;
+}
+
+/**
  * Return +1 for wheel-up (scroll back), -1 for wheel-down, 0 for non-wheel input.
  * Supports standard/passive SGR and X10/normal mouse encodings.
  */
