@@ -12,7 +12,7 @@ import { installImeCursorCoalesce } from "../core/ime-cursor-coalesce.mjs";
 import { createJiggleRetryController } from "../core/pty-attach-jiggle-controller.mjs";
 import { createTerminalAttachClient } from "../core/terminal-attach-client.mjs";
 import { backgroundRgbFromTerminalColors, buildSettleSchemePatch, colorSchemeForBackgroundRgb, extractOscQuerySequences, resolveProbeApi, toColorSchemeReport } from "../core/terminal-query-sequences.mjs";
-import { clampInt, parseMouseInputChunk, resolveAttachMouseAction, resolveWheelLines, scrollViewportTop, selectionDragScrollLines } from "../core/pty-scroll.mjs";
+import { clampInt, parseMouseInputChunk, resolveAttachMouseAction, resolveWheelLines, scrollViewportTop, selectionDragScrollLines, shouldOwnOuterMouseMode } from "../core/pty-scroll.mjs";
 
 export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null };
 
@@ -850,13 +850,22 @@ export class PtyAttachComponent implements Component {
 	}
 
 	private enableMouseScroll(): void {
-		if (!this.mouseScrollEnabled()) return;
+		if (!this.ownsOuterMouseMode()) return;
 		try {
 			this.tui.terminal.write(XTSHIFTESCAPE_SELECT);
 			this.tui.terminal.write(MOUSE_ENABLE);
 		} catch {
 			/* best-effort: some terminals reject these sequences; mouse reporting is optional */
 		}
+	}
+
+	/** Issue #169: in fullscreen mode TuiAltScreen owns outer-terminal mouse
+	 * reporting (asserted once at startup, never re-asserted) — writing any
+	 * mouse-mode sequence from here can only downgrade or kill it. tui.mode is
+	 * typed non-optional but old pi runtimes lack it; the strict inequality
+	 * then keeps today's (regular) behavior. */
+	private ownsOuterMouseMode(): boolean {
+		return shouldOwnOuterMouseMode(this.tui.mode, this.mouseScrollEnabled());
 	}
 
 	private mouseScrollEnabled(): boolean {
@@ -880,6 +889,7 @@ export class PtyAttachComponent implements Component {
 	}
 
 	private disableMouseScroll(): void {
+		if (!this.ownsOuterMouseMode()) return;
 		try {
 			this.tui.terminal.write(MOUSE_DISABLE);
 		} catch {

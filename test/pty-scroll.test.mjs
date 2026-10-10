@@ -9,6 +9,7 @@ import {
 	resolveWheelLines,
 	scrollViewportTop,
 	selectionDragScrollLines,
+	shouldOwnOuterMouseMode,
 } from "../src/core/pty-scroll.mjs";
 
 test("mouseWheelDirection decodes standard/passive SGR and X10 wheel events", () => {
@@ -148,4 +149,14 @@ test("resolveAttachMouseAction: every other event falls through untouched", () =
 	for (const [type, button] of cases) {
 		assert.equal(resolveAttachMouseAction(ev(type, button), { nativePasteEnabled: true }), null, `${type}/${button}`);
 	}
+});
+
+test("shouldOwnOuterMouseMode: fullscreen never owns; regular/undefined follow the switch", () => {
+	assert.equal(shouldOwnOuterMouseMode("fullscreen", true), false);
+	assert.equal(shouldOwnOuterMouseMode("fullscreen", false), false);
+	assert.equal(shouldOwnOuterMouseMode("regular", true), true);
+	assert.equal(shouldOwnOuterMouseMode("regular", false), false);
+	// Old pi runtimes have no tui.mode — must behave like regular.
+	assert.equal(shouldOwnOuterMouseMode(undefined, true), true);
+	assert.equal(shouldOwnOuterMouseMode(undefined, false), false);
 });
