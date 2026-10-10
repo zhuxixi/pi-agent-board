@@ -5,6 +5,17 @@ conventional commits by `scripts/release_helper.mjs`. Entries are
 forward-only: they begin with the first release after this file landed —
 for earlier history, see the git log and the pull-request list.
 
+## [0.10.2] - 2026-10-10
+
+### Fixes
+
+- **attach**: stop writing outer-terminal mouse mode in fullscreen TUI (#173)
+- **attach**: middle-click paste via handleMouse under pi >=1.0 fullscreen TUI (#171)
+- **attach**: deliver terminal color scheme at settle via feature-detected probe API (#166)
+- **attach**: prevent startup background replies from echoing in the PTY (#165) (#165)
+
+[0.10.2]: https://github.com/zhuxixi/pi-agent-board/compare/v0.10.1...v0.10.2
+
 ## [0.10.1] - 2026-10-01
 
 ### Fixes
