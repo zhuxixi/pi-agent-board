@@ -1124,10 +1124,11 @@ export class PtyAttachComponent implements Component {
 	}
 
 	/**
-	 * Middle-click paste. Reads the X11 PRIMARY selection via xclip and forwards it to
-	 * the hosted session as input, mimicking the terminal-native middle-click paste that
-	 * mouse reporting (kept on for wheel scrolling) would otherwise swallow. Silent no-op
-	 * when xclip is absent or AGENT_BOARD_ATTACH_NATIVE_PASTE=0.
+	 * Middle-click paste. Reads the X11 selection (PRIMARY by default, or CLIPBOARD via
+	 * AGENT_BOARD_ATTACH_PASTE_SOURCE=clipboard) via xclip and forwards it to the hosted
+	 * session as input, mimicking the terminal-native middle-click paste that mouse
+	 * reporting (kept on for wheel scrolling) would otherwise swallow. Silent no-op when
+	 * xclip is absent or AGENT_BOARD_ATTACH_NATIVE_PASTE=0.
 	 */
 	private pastePrimarySelection(): void {
 		if (process.env.AGENT_BOARD_ATTACH_NATIVE_PASTE === "0") return;
