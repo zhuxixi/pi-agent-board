@@ -136,8 +136,9 @@ private mirrorFullscreenSelectionToPrimary(): void {
   before selection state is final; `copySelectionToClipboard` is async but only writes
   CLIPBOARD — irrelevant to our read). If a future pi-tui defers selection state, the
   mirror lags one gesture — acceptable degradation, not corruption.
-- `getActiveSelectionText` typing: structural cast in the component (public method on
-  `TuiAltScreen`; absent on regular TUIs and old runtimes → optional access → no-op).
+- `getActiveSelectionText` typing: structural cast in the component (declared private in
+  pi-tui 1.1.0's `tui-alt-screen.d.ts` but runtime-reachable, hence the cast; absent on
+  regular TUIs and old runtimes → optional access → no-op).
 - Double-click word / triple-click line selections: press path sets the full range
   immediately; release/click mirror picks up the same text — covered by the same code
   path, no special casing.

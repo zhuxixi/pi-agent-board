@@ -96,6 +96,7 @@ const result = {
 	releaseResultUndefined: false,
 	mirrorWrites: -1,
 	mirrorText: null as string | null,
+	mirrorWriteArgs: null as string | null,
 	clickResultUndefined: false,
 	clickMirrorWrites: -1,
 	emptyWrites: -1,
@@ -115,7 +116,9 @@ try {
 		await sleep(80); // nextTick + xclip spawn
 		const ws = writes();
 		result.mirrorWrites = ws.length - before;
-		result.mirrorText = ws.length > before ? ws[ws.length - 1].replace(/^write .*?text=/, "") : null;
+		const line = ws.length > before ? ws[ws.length - 1] : null;
+		result.mirrorText = line ? line.replace(/^write .*?text=/, "") : null;
+		result.mirrorWriteArgs = line ? line.slice(0, line.indexOf("text=")) : null;
 	});
 
 	// 2. Click ending (non-empty selection) mirrors too, unconsumed.

@@ -22,6 +22,7 @@ test("attach selection mirror: left release/click mirrors pi's selection into PR
 	assert.equal(parsed.releaseResultUndefined, true, "release(left) must return undefined (observe only)");
 	assert.equal(parsed.mirrorWrites, 1, "exactly one PRIMARY write for the drag-style release");
 	assert.equal(parsed.mirrorText, "mirror-fixture-text", "the mirrored text is getActiveSelectionText()'s value");
+	assert.equal(parsed.mirrorWriteArgs, "write -selection primary ", "the mirror write targets the X11 PRIMARY selection");
 	assert.equal(parsed.clickResultUndefined, true, "click(left) must return undefined");
 	assert.equal(parsed.clickMirrorWrites, 1, "the click case also mirrors (selection non-empty)");
 	assert.equal(parsed.emptyWrites, 0, "empty selection must not write");
