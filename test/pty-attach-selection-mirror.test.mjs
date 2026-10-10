@@ -27,4 +27,7 @@ test("attach selection mirror: left release/click mirrors pi's selection into PR
 	assert.equal(parsed.emptyWrites, 0, "empty selection must not write");
 	assert.equal(parsed.killSwitchWrites, 0, "NATIVE_PASTE=0 must disable the mirror");
 	assert.equal(parsed.nonEndingWrites, 0, "press/move must not trigger the mirror");
+	assert.equal(parsed.middleHandled, true, "middle press still pastes (handled)");
+	assert.equal(parsed.clipboardReads, 1, "PASTE_SOURCE=clipboard: exactly one clipboard read");
+	assert.equal(parsed.clipboardReadSource, "read -o -selection clipboard", "the read targets the clipboard selection");
 });

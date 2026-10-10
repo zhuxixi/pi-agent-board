@@ -41,6 +41,11 @@ const writes = () =>
 		.split("\n")
 		.filter((l) => l.startsWith("write "));
 
+const reads = () =>
+	readFileSync(logPath, "utf8")
+		.split("\n")
+		.filter((l) => l.startsWith("read "));
+
 const leftEvent = (type: "release" | "click" | "press" | "move") => ({
 	type,
 	button: "left",
@@ -96,6 +101,9 @@ const result = {
 	emptyWrites: -1,
 	killSwitchWrites: -1,
 	nonEndingWrites: -1,
+	middleHandled: false,
+	clipboardReads: -1,
+	clipboardReadSource: null as string | null,
 };
 
 try {
@@ -145,6 +153,17 @@ try {
 		(c as any).handleMouse(leftEvent("move"));
 		await sleep(80);
 		result.nonEndingWrites = writes().length - before;
+	});
+
+	// 6. Paste source override: middle paste reads CLIPBOARD when configured.
+	await withComponent({ AGENT_BOARD_ATTACH_PASTE_SOURCE: "clipboard" }, async (c) => {
+		const before = reads().length;
+		const r = (c as any).handleMouse({ type: "press", button: "middle", x: 3, y: 3, screenX: 3, screenY: 3, width: 80, height: 22, shift: false });
+		result.middleHandled = r?.handled === true;
+		await sleep(200); // xclip spawn + close
+		const rs = reads();
+		result.clipboardReads = rs.length - before;
+		result.clipboardReadSource = rs.length > before ? rs[rs.length - 1] : null;
 	});
 } catch (err) {
 	result.error = err instanceof Error ? err.message : String(err);

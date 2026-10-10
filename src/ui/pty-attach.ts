@@ -12,7 +12,7 @@ import { installImeCursorCoalesce } from "../core/ime-cursor-coalesce.mjs";
 import { createJiggleRetryController } from "../core/pty-attach-jiggle-controller.mjs";
 import { createTerminalAttachClient } from "../core/terminal-attach-client.mjs";
 import { backgroundRgbFromTerminalColors, buildSettleSchemePatch, colorSchemeForBackgroundRgb, extractOscQuerySequences, resolveProbeApi, toColorSchemeReport } from "../core/terminal-query-sequences.mjs";
-import { clampInt, parseMouseInputChunk, resolveAttachMouseAction, resolveWheelLines, scrollViewportTop, selectionDragScrollLines, shouldMirrorSelectionToPrimary, shouldOwnOuterMouseMode } from "../core/pty-scroll.mjs";
+import { clampInt, parseMouseInputChunk, resolveAttachMouseAction, resolvePasteSelectionSource, resolveWheelLines, scrollViewportTop, selectionDragScrollLines, shouldMirrorSelectionToPrimary, shouldOwnOuterMouseMode } from "../core/pty-scroll.mjs";
 
 export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null };
 
@@ -1132,7 +1132,7 @@ export class PtyAttachComponent implements Component {
 	private pastePrimarySelection(): void {
 		if (process.env.AGENT_BOARD_ATTACH_NATIVE_PASTE === "0") return;
 		try {
-			const child = spawn("xclip", ["-o", "-selection", "primary"], { stdio: ["ignore", "pipe", "ignore"] });
+			const child = spawn("xclip", ["-o", "-selection", resolvePasteSelectionSource(process.env.AGENT_BOARD_ATTACH_PASTE_SOURCE)], { stdio: ["ignore", "pipe", "ignore"] });
 			let out = "";
 			const timer = setTimeout(() => {
 				try {
