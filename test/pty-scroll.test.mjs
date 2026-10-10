@@ -6,9 +6,11 @@ import {
 	parseMouseInputChunk,
 	resizeJiggleSize,
 	resolveAttachMouseAction,
+	resolvePasteSelectionSource,
 	resolveWheelLines,
 	scrollViewportTop,
 	selectionDragScrollLines,
+	shouldMirrorSelectionToPrimary,
 	shouldOwnOuterMouseMode,
 } from "../src/core/pty-scroll.mjs";
 
@@ -159,4 +161,34 @@ test("shouldOwnOuterMouseMode: fullscreen never owns; regular/undefined follow t
 	// Old pi runtimes have no tui.mode — must behave like regular.
 	assert.equal(shouldOwnOuterMouseMode(undefined, true), true);
 	assert.equal(shouldOwnOuterMouseMode(undefined, false), false);
+});
+
+test("resolvePasteSelectionSource: clipboard opt-in, everything else primary", () => {
+	assert.equal(resolvePasteSelectionSource(undefined), "primary");
+	assert.equal(resolvePasteSelectionSource(""), "primary");
+	assert.equal(resolvePasteSelectionSource("primary"), "primary");
+	assert.equal(resolvePasteSelectionSource("clipboard"), "clipboard");
+	assert.equal(resolvePasteSelectionSource(" CLIPBOARD "), "clipboard");
+	assert.equal(resolvePasteSelectionSource("garbage"), "primary");
+});
+
+test("shouldMirrorSelectionToPrimary: only selection endings of the left button with paste enabled", () => {
+	assert.equal(shouldMirrorSelectionToPrimary(ev("release", "left"), { nativePasteEnabled: true }), "mirror-primary");
+	assert.equal(shouldMirrorSelectionToPrimary(ev("click", "left"), { nativePasteEnabled: true }), "mirror-primary");
+	assert.equal(shouldMirrorSelectionToPrimary(ev("release", "left"), { nativePasteEnabled: false }), null);
+	assert.equal(shouldMirrorSelectionToPrimary(ev("click", "left"), { nativePasteEnabled: false }), null);
+	const cases = [
+		["press", "left"],
+		["move", "left"],
+		["drag", "left"],
+		["wheel", "left"],
+		["release", "middle"],
+		["release", "right"],
+		["release", "none"],
+		["click", "middle"],
+		["click", "none"],
+	];
+	for (const [type, button] of cases) {
+		assert.equal(shouldMirrorSelectionToPrimary(ev(type, button), { nativePasteEnabled: true }), null, `${type}/${button}`);
+	}
 });

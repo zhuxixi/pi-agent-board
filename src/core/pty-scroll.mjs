@@ -108,6 +108,29 @@ export function resolveAttachMouseAction(event, { nativePasteEnabled }) {
 }
 
 /**
+ * Issue #174 (C): which X11 selection buffer middle-click paste reads.
+ * "primary" = classic X11 middle-click semantics (default); "clipboard" =
+ * escape hatch for environments where PRIMARY never updates (e.g. WSLg).
+ * Unknown or unset values fall back to "primary". Pure: the raw env value is
+ * read at the call site.
+ */
+export function resolvePasteSelectionSource(value) {
+	return typeof value === "string" && value.trim().toLowerCase() === "clipboard" ? "clipboard" : "primary";
+}
+
+/**
+ * Issue #174 (B2): whether a normalized mouse event ends a selection gesture
+ * we should mirror into the X11 PRIMARY selection. Only release/click of the
+ * left button with native paste enabled (pi's fullscreen selection owns the
+ * gesture; we observe without consuming). Pure by contract.
+ */
+export function shouldMirrorSelectionToPrimary(event, { nativePasteEnabled }) {
+	if (!nativePasteEnabled) return null;
+	if ((event.type === "release" || event.type === "click") && event.button === "left") return "mirror-primary";
+	return null;
+}
+
+/**
  * Issue #169: whether the attach surface should manage the OUTER terminal's
  * mouse mode. Only in regular TUI mode — in fullscreen, TuiAltScreen owns
  * mouse reporting (asserted once at startup, never re-asserted), so any write
