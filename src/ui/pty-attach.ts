@@ -386,11 +386,12 @@ export class PtyAttachComponent implements Component {
 		// ScrollView components, while the attach viewport paints its own xterm
 		// scrollback — so a wheel event returned unconsumed scrolls nothing and the
 		// fullscreen wheel goes dead (regular mode is unaffected: it arrives as a raw
-		// SGR sequence through handleInput instead). Consume it locally, and fall
-		// through only when the viewport cannot actually move.
+		// SGR sequence through handleInput instead). Consume it locally, honoring the
+		// same kill switches as the legacy path, and fall through when scrolling is
+		// disabled or the viewport cannot actually move.
 		const wheelLinesUp = wheelScrollLinesUp(event);
 		if (wheelLinesUp !== 0) {
-			if (this.tryScrollBy(wheelLinesUp)) return { handled: true, render: false };
+			if (this.mouseScrollEnabled() && this.tryScrollBy(wheelLinesUp)) return { handled: true, render: false };
 			return undefined;
 		}
 		const nativePasteEnabled = process.env.AGENT_BOARD_ATTACH_NATIVE_PASTE !== "0";

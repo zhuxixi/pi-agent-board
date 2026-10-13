@@ -55,6 +55,11 @@ const result = {
 	atBottomFallsThrough: false,
 	missingDeltaFallsThrough: false,
 	nonWheelFallsThrough: false,
+	attachMouseOffFallsThrough: false,
+	attachMouseOffNoMove: false,
+	scrollSwitchOffFallsThrough: false,
+	scrollSwitchOffNoMove: false,
+	restoredAfterKillSwitch: false,
 };
 
 let component: any = null;
@@ -91,6 +96,21 @@ try {
 	process.env.AGENT_BOARD_ATTACH_NATIVE_PASTE = "0";
 	result.missingDeltaFallsThrough = component.handleMouse(wheelEvent()) === undefined;
 	result.nonWheelFallsThrough = component.handleMouse({ ...mouseBase, type: "press", button: "middle" }) === undefined;
+
+	// 4. The documented kill switches must disable the fullscreen wheel too. The
+	// regular path gets that for free by never enabling mouse reporting; in
+	// fullscreen TuiAltScreen owns reporting, so this handler has to gate itself.
+	const parkedTop = component.viewportTop;
+	process.env.AGENT_BOARD_ATTACH_MOUSE = "0";
+	result.attachMouseOffFallsThrough = component.handleMouse(wheelEvent(-3)) === undefined;
+	result.attachMouseOffNoMove = component.viewportTop === parkedTop;
+	delete process.env.AGENT_BOARD_ATTACH_MOUSE;
+	process.env.AGENT_BOARD_ENABLE_MOUSE_SCROLL = "0";
+	result.scrollSwitchOffFallsThrough = component.handleMouse(wheelEvent(-3)) === undefined;
+	result.scrollSwitchOffNoMove = component.viewportTop === parkedTop;
+	delete process.env.AGENT_BOARD_ENABLE_MOUSE_SCROLL;
+	// Both switches cleared ⇒ local scrolling is back.
+	result.restoredAfterKillSwitch = !!component.handleMouse(wheelEvent(-3));
 } catch (err) {
 	result.error = err instanceof Error ? err.message : String(err);
 } finally {

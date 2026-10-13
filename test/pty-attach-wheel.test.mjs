@@ -29,4 +29,9 @@ test("attach fullscreen wheel: scrolls the local viewport, falls through when it
 	assert.equal(parsed.atBottomFallsThrough, true, "wheel at follow-bottom must fall through to pi (undefined)");
 	assert.equal(parsed.missingDeltaFallsThrough, true, "a wheel report with no delta must fall through");
 	assert.equal(parsed.nonWheelFallsThrough, true, "a non-wheel press must keep falling through");
+	assert.equal(parsed.attachMouseOffFallsThrough, true, "AGENT_BOARD_ATTACH_MOUSE=0 must fall through in fullscreen too");
+	assert.equal(parsed.attachMouseOffNoMove, true, "AGENT_BOARD_ATTACH_MOUSE=0 must not move the viewport");
+	assert.equal(parsed.scrollSwitchOffFallsThrough, true, "AGENT_BOARD_ENABLE_MOUSE_SCROLL=0 must fall through in fullscreen too");
+	assert.equal(parsed.scrollSwitchOffNoMove, true, "AGENT_BOARD_ENABLE_MOUSE_SCROLL=0 must not move the viewport");
+	assert.equal(parsed.restoredAfterKillSwitch, true, "clearing the kill switches must restore local wheel scrolling");
 });
