@@ -12,7 +12,7 @@ import { installImeCursorCoalesce } from "../core/ime-cursor-coalesce.mjs";
 import { createJiggleRetryController } from "../core/pty-attach-jiggle-controller.mjs";
 import { createTerminalAttachClient } from "../core/terminal-attach-client.mjs";
 import { backgroundRgbFromTerminalColors, buildSettleSchemePatch, colorSchemeForBackgroundRgb, extractOscQuerySequences, resolveProbeApi, toColorSchemeReport } from "../core/terminal-query-sequences.mjs";
-import { clampInt, parseMouseInputChunk, resolveAttachMouseAction, resolvePasteSelectionSource, resolveWheelLines, scrollViewportTop, selectionDragScrollLines, shouldMirrorSelectionToPrimary, shouldOwnOuterMouseMode } from "../core/pty-scroll.mjs";
+import { clampInt, parseMouseInputChunk, resolveAttachMouseAction, resolvePasteSelectionSource, resolveWheelLines, scrollViewportTop, selectionDragScrollLines, shouldMirrorSelectionToPrimary, shouldOwnOuterMouseMode, wheelScrollLinesUp } from "../core/pty-scroll.mjs";
 
 export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null };
 
@@ -200,7 +200,9 @@ export class PtyAttachComponent implements Component {
 	// Timestamp of the first disconnect that started the current reconnect
 	// cycle; reset on every successful (re)connect.
 	private disconnectedAt: number | null = null;
-	// Lines scrolled per mouse-wheel event; configurable via $AGENT_BOARD_WHEEL_LINES.
+	// Lines scrolled per mouse-wheel notch on the legacy (regular-mode) raw-SGR path,
+	// configurable via $AGENT_BOARD_WHEEL_LINES. The fullscreen handleMouse path uses
+	// the TUI's wheelDelta instead, which is already accelerated and line-quantified.
 	private readonly mouseWheelLines = resolveWheelLines();
 	private readonly term: XtermLike;
 	private cols = 120;
@@ -376,10 +378,21 @@ export class PtyAttachComponent implements Component {
 
 	/** Issue #167: fullscreen TUI (pi ≥1.0) consumes raw SGR mouse sequences in
 	 * TuiAltScreen and delivers normalized events to overlays here instead — the
-	 * legacy handleInput mouse path never runs in that mode. Only the
-	 * middle-click paste is ours; every other event returns undefined so pi's
-	 * own fullscreen selection and the wheel defer path keep working. */
+	 * legacy handleInput mouse path never runs in that mode. This handler owns the
+	 * wheel and the middle-click paste; every other event returns undefined so pi's
+	 * own fullscreen selection keeps working. */
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		// Issue #173 follow-up: the renderer's routeWheel() fallback only scrolls real
+		// ScrollView components, while the attach viewport paints its own xterm
+		// scrollback — so a wheel event returned unconsumed scrolls nothing and the
+		// fullscreen wheel goes dead (regular mode is unaffected: it arrives as a raw
+		// SGR sequence through handleInput instead). Consume it locally, and fall
+		// through only when the viewport cannot actually move.
+		const wheelLinesUp = wheelScrollLinesUp(event);
+		if (wheelLinesUp !== 0) {
+			if (this.tryScrollBy(wheelLinesUp)) return { handled: true, render: false };
+			return undefined;
+		}
 		const nativePasteEnabled = process.env.AGENT_BOARD_ATTACH_NATIVE_PASTE !== "0";
 		if (shouldMirrorSelectionToPrimary(event, { nativePasteEnabled })) {
 			// Observe only — pi's fullscreen selection keeps the event. Mirroring must

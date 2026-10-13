@@ -317,7 +317,7 @@ Set these variables before starting Pi. Model-backed features fall back graceful
 | `AGENT_BOARD_FORCE_PTY` | unset; `1` forces the PTY path | Force the PTY availability path when diagnosing or controlling fallback behavior. |
 | `AGENT_BOARD_ATTACH_MOUSE` | enabled; `0`, `off`, or `false` disables | Disable attach-view mouse handling and use terminal-native selection instead. |
 | `AGENT_BOARD_ENABLE_MOUSE_SCROLL` | enabled; `0` disables | Compatibility switch to disable attach-view mouse scrolling. |
-| `AGENT_BOARD_WHEEL_LINES` | `1`, clamped to `1..50` | Lines scrolled per mouse-wheel event in attach view. |
+| `AGENT_BOARD_WHEEL_LINES` | `1`, clamped to `1..50` | Lines scrolled per mouse-wheel notch in the attach view (regular TUI mode; in fullscreen the TUI's own wheel accelerator decides the line count). |
 | `AGENT_BOARD_MAX_WARM_HOSTS` | `4`, clamped to `0..50` | Maximum number of idle PTY hosts retained for faster attach. |
 | `AGENT_BOARD_WARM_HOST_TTL_MS` | `600000` (10 minutes); `0` disables TTL eviction | How long an idle warm host may remain before it is evicted. |
 | `AGENT_BOARD_ATTACH_NATIVE_PASTE` | enabled; `0` disables | Disable X11 PRIMARY selection copy and middle-click paste integration. |
