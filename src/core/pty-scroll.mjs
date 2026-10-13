@@ -156,6 +156,30 @@ export function mouseWheelDirection(data) {
 }
 
 /**
+ * Issue #173 follow-up: translate a normalized pi-tui wheel event into the attach
+ * viewport's line convention.
+ *
+ * pi-tui reports `wheelDelta` as logical lines where *negative scrolls up* (the SGR
+ * wheel-up button decodes to direction -1), while `scrollViewportTop`/`tryScrollBy`
+ * take a positive `linesUp`. The renderer's `routeWheel` fallback only moves real
+ * `ScrollView` components, and the attach viewport paints its own xterm scrollback
+ * instead — so a wheel event we hand back unconsumed scrolls nothing at all and the
+ * fullscreen wheel goes dead.
+ *
+ * Returns 0 for non-wheel events and for a missing, non-finite, or zero delta, so
+ * callers can fall through to pi's own handling.
+ *
+ * @param {{type?: string, wheelDelta?: number}|null|undefined} event
+ * @returns {number}
+ */
+export function wheelScrollLinesUp(event) {
+	if (!event || event.type !== "wheel") return 0;
+	const delta = Number(event.wheelDelta);
+	if (!Number.isFinite(delta) || delta === 0) return 0;
+	return -delta;
+}
+
+/**
  * Compute the next local PTY viewport after a scroll gesture.
  *
  * `viewportTop === null` means follow bottom. `changed` reports whether the gesture
