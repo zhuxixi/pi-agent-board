@@ -71,8 +71,10 @@ runner.stderr.resume();
 
 const result = {
 	error: null as string | null,
+	sawAltText: false,
 	sawAltContent: false,
 	bufferType: null as string | null,
+	framePreview: null as string | null,
 	upHandled: false,
 	upRenderFalse: false,
 	forwardedUp: null as string | null,
@@ -93,7 +95,7 @@ try {
 	const ready = await waitFor(() => {
 		const host = readHost(root, viewId);
 		return !!host && host.state === "alive" && !!host.socketPath && !!host.childPid && isAlive(host.runnerPid) && isAlive(host.childPid);
-	}, 10_000);
+	}, 15_000);
 	if (!ready) throw new Error("host never became ready");
 
 	// Intercept component→runner messages to observe forwarded {type:"input"}.
@@ -137,17 +139,22 @@ try {
 		} as never,
 	);
 
-	// Wait for alternate-buffer content: the child's frames must render and the
-	// attach's xterm must actually be in the alternate buffer.
-	const deadline = Date.now() + 8000;
-	while (Date.now() < deadline && !result.sawAltContent) {
+	// Wait for alternate-buffer content. CI runners are slow (the Node 22 job
+	// shares the box with Node 24), so the budget is generous and the two
+	// conditions are recorded separately: a content timeout and a buffer-type
+	// mismatch are different failures and must not look alike in the log.
+	const deadline = Date.now() + 25_000;
+	while (Date.now() < deadline && !result.sawAltText) {
 		const lines = component.render(80) ?? [];
-		const buf = (component as any).term.buffer.active;
-		if (lines.join("\n").includes("alt-frame-") && buf.type === "alternate") result.sawAltContent = true;
+		const text = lines.join("\n");
+		result.framePreview = text.slice(0, 400);
+		if (text.includes("alt-frame-")) result.sawAltText = true;
 		else await sleep(40);
 	}
-	if (!result.sawAltContent) throw new Error("alternate-buffer session content never rendered");
 	result.bufferType = (component as any).term.buffer.active.type;
+	result.sawAltContent = result.sawAltText && result.bufferType === "alternate";
+	if (!result.sawAltText) throw new Error(`alternate-buffer session content never rendered (bufferType=${result.bufferType}, frame=${JSON.stringify(result.framePreview)})`);
+	if (result.bufferType !== "alternate") throw new Error(`the attach's xterm is in the "${result.bufferType}" buffer, not the alternate one — the scenario cannot exercise the #185 branch`);
 
 	const mouseBase = { x: 3, y: 3, screenX: 3, screenY: 3, width: 80, height: 22, shift: false, alt: false, ctrl: false };
 	const wheelEvent = (wheelDelta?: number) => ({

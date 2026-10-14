@@ -20,6 +20,7 @@ test("attach alt wheel: forwards one SGR report per event, falls through on swit
 	});
 	const parsed = JSON.parse(out.trim().split("\n").filter(Boolean).pop());
 	assert.equal(parsed.error, null, `scenario error: ${parsed.error}`);
+	assert.equal(parsed.sawAltText, true, "alternate-screen frame text must render before wheel dispatch");
 	assert.equal(parsed.sawAltContent, true, "alternate-buffer session content must render before wheel dispatch");
 	assert.equal(parsed.bufferType, "alternate", "the attach's xterm must be in the alternate buffer for this scenario");
 	assert.equal(parsed.upHandled, true, "wheel up must return {handled:true}");
