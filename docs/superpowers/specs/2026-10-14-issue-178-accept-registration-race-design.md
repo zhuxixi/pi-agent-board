@@ -63,6 +63,10 @@ A5 迁移后首探针提前约 300ms 属预期。若不写开，实现者会在�
 **断言不变性（硬约束）**：假 pi 程序顺序保证「先写 banner 再 echo」，`feedOutput` 无条件喂模型
 → 收到 echo ⟹ banner 已在 canonical model → 后续 snapshot 断言（`frame.data.includes("fake pi ready")`、
 `begin.snapshotSeq >= 1`）原样保留、原样通过。不许删除或弱化这些断言。
+【勘误：第 1 轮 CR 阻塞发现】此段原表述不完整——「先写 banner 再 echo」只对假 pi 的**应用层回显**（stdin
+处理器写出的 `echo:` 前缀行）成立；子进程调用 `setRawMode` 之前，PTY 线路规程仍处 canonical + ECHO，
+内核同样会回显探针行且可能早于 banner 广播，裸正则 `/boot-probe-\d/` 会提前收敛（Node 22 合并阻塞
+flake 的根因）。因此所有探针等待一律匹配应用层回显 `/echo:boot-probe-\d/`，上文不变量②据此修正。
 
 ### D2：editor_state 补注册证明
 

@@ -286,7 +286,7 @@ test("A5: burst through the snapshot window — frame→flush→end interleaving
 		const probe = createEchoProbe({ send: (line) => send(driver, { type: "input", data: line }) });
 		probe.start();
 		try {
-			await waitFor(() => driverMessages.find((m) => m.type === "output" && /boot-probe-\d/.test(String(m.data))), 30000, capture);
+			await waitFor(() => driverMessages.find((m) => m.type === "output" && /echo:boot-probe-\d/.test(String(m.data))), 30000, capture);
 		} finally {
 			probe.stop();
 		}

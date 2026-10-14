@@ -1834,14 +1834,20 @@ test("subscribe_terminal: snapshot + live continuity alongside legacy clients", 
 		// accept-registration race (issue #178): the one-shot boot banner is
 		// broadcast when the child starts, which can be *before* this socket is
 		// accepted — and legacy output has no replay, so waiting for it can burn
-		// the whole budget. Probe with an echo instead: the fake pty echoes every
-		// input, and the banner precedes any echo by construction, so an echo also
-		// proves the runner has fed its canonical model (which is what keeps the
-		// subscribe below off the "host starting" empty-baseline race).
+		// the whole budget. Probe with an echo instead — but match only the fake
+		// pty's APPLICATION echo (the "echo:" prefix). Until the child calls
+		// setRawMode the PTY line discipline is still in canonical mode with ECHO
+		// on, so the kernel echoes each probe line too, and the runner broadcasts
+		// that kernel echo before the child has written its banner — converging on
+		// it was the Node 22 merge-blocking flake. Only the application echo
+		// proves the banner was already written (the fake pty registers its stdin
+		// echo handler after the module-top banner write), and so that the runner
+		// has fed its canonical model — which is what keeps the subscribe below
+		// off the "host starting" empty-baseline race.
 		const probe = createEchoProbe({ send: (line) => send(legacy, { type: "input", data: line }) });
 		probe.start();
 		try {
-			await waitFor(() => legacyMessages.find((m) => m.type === "output" && /boot-probe-\d/.test(String(m.data))), 15000, capture);
+			await waitFor(() => legacyMessages.find((m) => m.type === "output" && /echo:boot-probe-\d/.test(String(m.data))), 15000, capture);
 		} finally {
 			probe.stop();
 		}
@@ -1961,12 +1967,15 @@ test("accept-registration race: a legacy client that connects late never receive
 		send(late, { type: "hello" });
 
 		// Leg 3: probe until the echo arrives — proof the connection is live and
-		// output is flowing right now. The probe stops on convergence, so it adds
+		// output is flowing right now. Match the application echo ("echo:"
+		// prefix): until the child calls setRawMode the PTY kernel also echoes
+		// probe lines in canonical mode, and that early echo proves nothing about
+		// the banner. The probe stops on convergence, so it adds
 		// no load for the rest of the case.
 		const probe = createEchoProbe({ send: (line) => send(late, { type: "input", data: line }) });
 		probe.start();
 		try {
-			await waitFor(() => lateMessages.find((m) => m.type === "output" && /boot-probe-\d/.test(String(m.data))), 15000, capture);
+			await waitFor(() => lateMessages.find((m) => m.type === "output" && /echo:boot-probe-\d/.test(String(m.data))), 15000, capture);
 		} finally {
 			probe.stop();
 		}
@@ -1974,7 +1983,7 @@ test("accept-registration race: a legacy client that connects late never receive
 		// Leg 4: both halves of the race are pinned. The echo proves output flows
 		// to this socket; the missing banner proves there is no replay.
 		assert.ok(
-			lateMessages.some((m) => m.type === "output" && /boot-probe-\d/.test(String(m.data))),
+			lateMessages.some((m) => m.type === "output" && /echo:boot-probe-\d/.test(String(m.data))),
 			"the echo-probe converged: output reaches this connection",
 		);
 		assert.ok(
