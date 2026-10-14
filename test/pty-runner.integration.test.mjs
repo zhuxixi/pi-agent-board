@@ -1895,3 +1895,93 @@ test("subscribe_terminal: snapshot + live continuity alongside legacy clients", 
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
 });
+
+// issue #178 spec D4: the reproduction case for the accept-registration race.
+// Load-independent by construction — every leg is event-driven, never a wall
+// clock: poll screen.log until the banner has been broadcast, connect only
+// then, and prove liveness with an echo before asserting the banner never
+// arrived. This pins the design fact "legacy output has no replay"; do not
+// "fix" it by waiting for the banner again.
+test("accept-registration race: a legacy client that connects late never receives the already-broadcast banner", async () => {
+	const root = freshRoot();
+	let runner;
+	try {
+		const meta = createView(root, { id: "v1", name: "late-join", cwd: process.cwd() });
+		const configPath = P.hostConfigPath(root, "v1");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "v1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" },
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+
+		// Leg 0: the runner spawns the child before it binds the control socket
+		// (runner/pty-runner.mjs:312 vs :407), so gate on hostReady first —
+		// host.state becomes "alive" in the listen callback, i.e. the socket is
+		// bound. Connecting earlier would fail with ENOENT.
+		await waitFor(() => hostReady(root, "v1"), 15000);
+
+		// Leg 1: the banner is already out. screen.log is written from the same
+		// onData path that feeds the canonical model (runner/pty-runner.mjs:333),
+		// so once it contains the banner the broadcast has happened — with no
+		// subscriber and no client attached.
+		await waitFor(() => {
+			try {
+				return readFileSync(P.screenLogPath(root, "v1"), "utf8").includes("fake pi ready");
+			} catch {
+				return false;
+			}
+		}, 15000);
+
+		// Leg 2: only now connect a legacy client. No reply carries the banner.
+		const late = createConnection(P.controlSocketPath(root, "v1"));
+		await once(late, "connect");
+		let buf = "";
+		/** @type {any[]} */
+		const lateMessages = [];
+		late.on("data", (chunk) => {
+			buf += chunk.toString();
+			const lines = buf.split("\n");
+			buf = lines.pop() ?? "";
+			for (const line of lines) if (line.trim()) lateMessages.push(JSON.parse(line));
+		});
+		send(late, { type: "hello" });
+
+		// Leg 3: probe until the echo arrives — proof the connection is live and
+		// output is flowing right now. The probe stops on convergence, so it adds
+		// no load for the rest of the case.
+		const probe = createEchoProbe({ send: (line) => send(late, { type: "input", data: line }) });
+		probe.start();
+		try {
+			await waitFor(() => lateMessages.find((m) => m.type === "output" && /boot-probe-\d/.test(String(m.data))), 15000);
+		} finally {
+			probe.stop();
+		}
+
+		// Leg 4: both halves of the race are pinned. The echo proves output flows
+		// to this socket; the missing banner proves there is no replay.
+		assert.ok(
+			lateMessages.some((m) => m.type === "output" && /boot-probe-\d/.test(String(m.data))),
+			"the echo-probe converged: output reaches this connection",
+		);
+		assert.ok(
+			!lateMessages.some((m) => m.type === "output" && String(m.data).includes("fake pi ready")),
+			"legacy clients get no replay: the banner broadcast before accept never arrives",
+		);
+
+		late.end();
+	} finally {
+		try { runner?.kill("SIGTERM"); } catch {}
+		await waitForExit(runner, 5000);
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
