@@ -512,6 +512,11 @@ test("pty-runner survives persistent host.json persist failures (EPERM-class)", 
 test("pty-runner routes editor_state between clients, seeds hello, resets on exit", async () => {
 	const root = freshRoot();
 	let runner;
+	// issue #178 (cross-review R1-G1): this is one of the issue's two target
+	// signatures, so its waits carry the same flake postmortem as
+	// subscribe_terminal's — a red must arrive with a scene, not just
+	// "timed out waiting".
+	const capture = () => formatPostmortem(capturePostmortem(root, "v1", null));
 	try {
 		const meta = createView(root, { id: "v1", name: "editor-state", cwd: process.cwd() });
 		const configPath = P.hostConfigPath(root, "v1");
@@ -530,7 +535,7 @@ test("pty-runner routes editor_state between clients, seeds hello, resets on exi
 			rows: 24,
 		});
 		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
-		await waitFor(() => hostReady(root, "v1"));
+		await waitFor(() => hostReady(root, "v1"), 15000, capture);
 
 		const readMessages = (socket) => {
 			let buf = "";
@@ -548,14 +553,20 @@ test("pty-runner routes editor_state between clients, seeds hello, resets on exi
 		await once(client1, "connect");
 		const messages1 = readMessages(client1);
 		send(client1, { type: "hello" });
-		await waitFor(() => messages1.find((m) => m.type === "hello"));
+		await waitFor(() => messages1.find((m) => m.type === "hello"), 15000, capture);
 
 		// A second client must receive the pushed state as a broadcast.
 		const client2 = createConnection(P.controlSocketPath(root, "v1"));
 		await once(client2, "connect");
 		const messages2 = readMessages(client2);
+		// Registration proof (issue #178): `connect` only proves the TCP handshake.
+		// The runner registers the socket and writes this unsolicited hello inside
+		// the accept callback (runner/pty-runner.mjs:375/:380), so receiving it
+		// means client2 is already in the broadcast set. Without this wait the push
+		// below can be broadcast before registration and is never replayed.
+		await waitFor(() => messages2.find((m) => m.type === "hello"), 15000, capture);
 		send(client1, { type: "editor_state", empty: false });
-		await waitFor(() => messages2.find((m) => m.type === "editor_state"));
+		await waitFor(() => messages2.find((m) => m.type === "editor_state"), 15000, capture);
 		assert.equal(messages2.find((m) => m.type === "editor_state").empty, false);
 
 		// A client connecting afterwards gets the current state seeded in hello.
@@ -566,13 +577,13 @@ test("pty-runner routes editor_state between clients, seeds hello, resets on exi
 		// The runner also sends an unsolicited hello on connect (now with the
 		// current editorEmpty seeded too); both it and the explicit-hello reply
 		// carry the seeded value, so the finder matches either.
-		await waitFor(() => messages3.find((m) => m.type === "hello" && "editorEmpty" in m));
+		await waitFor(() => messages3.find((m) => m.type === "hello" && "editorEmpty" in m), 15000, capture);
 		assert.equal(messages3.find((m) => m.type === "hello" && "editorEmpty" in m).editorEmpty, false);
 
 		// Child exit resets the state to null and broadcasts it.
 		send(client1, { type: "input", data: "exit\r" });
-		await waitFor(() => messages2.find((m) => m.type === "editor_state" && m.empty === null));
-		await waitFor(() => readHost(root, "v1")?.endedAt);
+		await waitFor(() => messages2.find((m) => m.type === "editor_state" && m.empty === null), 15000, capture);
+		await waitFor(() => readHost(root, "v1")?.endedAt, 15000, capture);
 
 		client1.destroy();
 		client2.destroy();
