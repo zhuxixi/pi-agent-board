@@ -10,8 +10,11 @@ import {
 	resolveAttachWheelRoute,
 	resolvePasteSelectionSource,
 	resolveWheelLines,
+	sameMousePoint,
+	sameScreenCell,
 	scrollViewportTop,
 	selectionDragScrollLines,
+	selectionReleaseIsDrag,
 	shouldMirrorSelectionToPrimary,
 	shouldOwnOuterMouseMode,
 	splitAttachInput,
@@ -237,6 +240,7 @@ test("shouldMirrorSelectionToPrimary: only selection endings of the left button 
 	}
 });
 
+
 test("splitAttachInput decodes ordered mouse / report / key segments (issue #189)", () => {
 	const kinds = (input) => splitAttachInput(input).map((segment) => segment.kind);
 	const data = (input) => splitAttachInput(input).flatMap((segment) => (segment.kind === "mouse" ? segment.events.map((entry) => entry.raw) : segment.data));
@@ -302,4 +306,36 @@ test("splitAttachInput classifies grounded terminal reports and keeps keys as ke
 	for (const sequence of keys) {
 		assert.deepEqual(splitAttachInput(sequence), [{ kind: "key", data: sequence }], `key: ${JSON.stringify(sequence)}`);
 	}
+});
+test("sameMousePoint: same buffer line within the 1-cell slack", () => {
+	assert.equal(sameMousePoint({ line: 4, col: 10 }, { line: 4, col: 10 }), true);
+	assert.equal(sameMousePoint({ line: 4, col: 10 }, { line: 4, col: 11 }), true);
+	assert.equal(sameMousePoint({ line: 4, col: 10 }, { line: 4, col: 12 }), false);
+	assert.equal(sameMousePoint({ line: 4, col: 10 }, { line: 5, col: 10 }), false);
+});
+
+test("sameScreenCell: same screen row within the 1-cell slack", () => {
+	assert.equal(sameScreenCell({ row: 2, col: 1 }, { row: 2, col: 1 }), true);
+	assert.equal(sameScreenCell({ row: 2, col: 1 }, { row: 2, col: 2 }), true);
+	assert.equal(sameScreenCell({ row: 2, col: 1 }, { row: 2, col: 3 }), false);
+	assert.equal(sameScreenCell({ row: 2, col: 1 }, { row: 3, col: 1 }), false);
+});
+
+test("selectionReleaseIsDrag: geometry decides in screen cells; missing geometry degrades to a click", () => {
+	const press = { row: 2, col: 1 };
+	// a motion event always wins
+	assert.equal(selectionReleaseIsDrag({ dragging: true, pressScreen: press, releaseScreen: press }), true);
+	assert.equal(selectionReleaseIsDrag({ dragging: true, pressScreen: null, releaseScreen: null }), true);
+	// a stationary gesture is a click, including the 1-cell report slack
+	assert.equal(selectionReleaseIsDrag({ dragging: false, pressScreen: press, releaseScreen: { row: 2, col: 1 } }), false);
+	assert.equal(selectionReleaseIsDrag({ dragging: false, pressScreen: press, releaseScreen: { row: 2, col: 2 } }), false);
+	// motion-less drags: horizontally past the slack, or any vertical movement
+	assert.equal(selectionReleaseIsDrag({ dragging: false, pressScreen: press, releaseScreen: { row: 2, col: 16 } }), true);
+	assert.equal(selectionReleaseIsDrag({ dragging: false, pressScreen: press, releaseScreen: { row: 3, col: 1 } }), true);
+	// an out-of-body release compares RAW reported cells, never the clamped buffer point
+	assert.equal(selectionReleaseIsDrag({ dragging: false, pressScreen: press, releaseScreen: { row: 30, col: 16 } }), true);
+	// missing geometry degrades to the pre-fix answer
+	assert.equal(selectionReleaseIsDrag({ dragging: false, pressScreen: null, releaseScreen: press }), false);
+	assert.equal(selectionReleaseIsDrag({ dragging: false, pressScreen: press, releaseScreen: null }), false);
+
 });

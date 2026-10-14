@@ -13,7 +13,7 @@ import { createJiggleRetryController } from "../core/pty-attach-jiggle-controlle
 import { createTerminalAttachClient } from "../core/terminal-attach-client.mjs";
 import { backgroundRgbFromTerminalColors, buildSettleSchemePatch, colorSchemeForBackgroundRgb, extractOscQuerySequences, resolveProbeApi, toColorSchemeReport } from "../core/terminal-query-sequences.mjs";
 import { REPLY_GUARD_WINDOW_MS, createReplyGuard, isReplyGuardEnabled } from "../core/terminal-reply-guard.mjs";
-import { clampInt, encodeWheelReport, resolveAttachMouseAction, resolveAttachWheelRoute, resolvePasteSelectionSource, resolveWheelLines, scrollViewportTop, selectionDragScrollLines, shouldMirrorSelectionToPrimary, shouldOwnOuterMouseMode, splitAttachInput, wheelScrollLinesUp } from "../core/pty-scroll.mjs";
+import { clampInt, encodeWheelReport, resolveAttachMouseAction, resolveAttachWheelRoute, resolvePasteSelectionSource, resolveWheelLines, sameMousePoint, scrollViewportTop, selectionDragScrollLines, shouldMirrorSelectionToPrimary, shouldOwnOuterMouseMode, splitAttachInput, wheelScrollLinesUp } from "../core/pty-scroll.mjs";
 
 export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null };
 
@@ -1776,10 +1776,6 @@ export class PtyAttachComponent implements Component {
 		}, GRACEFUL_SOCKET_CLOSE_MS);
 		this.gracefulSocketCloseTimer.unref?.();
 	}
-}
-
-function sameMousePoint(a: MousePoint, b: MousePoint): boolean {
-	return a.line === b.line && Math.abs(a.col - b.col) <= 1;
 }
 
 function asciiCellsForBufferLine(line: BufferLineLike, reusable: BufferCellLike): string[] {

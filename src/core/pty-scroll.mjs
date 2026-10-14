@@ -388,3 +388,36 @@ export function resizeJiggleSize(cols, rows) {
 	if (c > 21) return { cols: c - 1, rows: r };
 	return null;
 }
+
+/**
+ * Issue #187: two mouse points are "the same" within the 1-cell coordinate slack
+ * terminals report. Buffer-space comparison ({line, col}) — shared by double-click
+ * detection. Moved here from pty-attach.ts so both comparisons have one definition.
+ * Pure by contract.
+ */
+export function sameMousePoint(a, b) {
+	return a.line === b.line && Math.abs(a.col - b.col) <= 1;
+}
+
+/**
+ * Issue #187: two SCREEN cells are "the same" within the same 1-cell slack. Screen
+ * space ({row, col}) is what the pointer actually did; buffer space drifts while a
+ * session streams (the viewport base moves), which is why the drag/click decision must
+ * not compare buffer points captured at two different moments. Pure by contract.
+ */
+export function sameScreenCell(a, b) {
+	return a.row === b.row && Math.abs(a.col - b.col) <= 1;
+}
+
+/**
+ * Issue #187: whether a mouse release ends a real selection drag. Terminals such as
+ * Warp deliver a fast drag as press + release with zero motion events, so the move flag
+ * alone is not sufficient — the gesture geometry decides. Both points are SCREEN cells
+ * as reported by the terminal (never the clamped buffer point). Missing geometry (no
+ * screen anchor recorded) degrades to the pre-fix answer: not a drag. Pure by contract.
+ */
+export function selectionReleaseIsDrag({ dragging, pressScreen, releaseScreen }) {
+	if (dragging) return true;
+	if (!pressScreen || !releaseScreen) return false;
+	return !sameScreenCell(pressScreen, releaseScreen);
+}
