@@ -12,6 +12,7 @@ import { installImeCursorCoalesce } from "../core/ime-cursor-coalesce.mjs";
 import { createJiggleRetryController } from "../core/pty-attach-jiggle-controller.mjs";
 import { createTerminalAttachClient } from "../core/terminal-attach-client.mjs";
 import { backgroundRgbFromTerminalColors, buildSettleSchemePatch, colorSchemeForBackgroundRgb, extractOscQuerySequences, resolveProbeApi, toColorSchemeReport } from "../core/terminal-query-sequences.mjs";
+import { REPLY_GUARD_WINDOW_MS, createReplyGuard, isReplyGuardEnabled } from "../core/terminal-reply-guard.mjs";
 import { clampInt, parseMouseInputChunk, resolveAttachMouseAction, resolvePasteSelectionSource, resolveWheelLines, scrollViewportTop, selectionDragScrollLines, shouldMirrorSelectionToPrimary, shouldOwnOuterMouseMode, wheelScrollLinesUp } from "../core/pty-scroll.mjs";
 
 export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null };
@@ -192,6 +193,12 @@ export class PtyAttachComponent implements Component {
 	private osc52Carry = "";
 	private passthroughCarry = "";
 	private oscQueryCarry = "";
+	// Issue #170: inbound reply fragments (device attributes, kitty flags, cell
+	// size, DCS) are swallowed, and color replies are forwarded as one whole
+	// sequence instead of leaking into the child as garbage. Null when
+	// AGENT_BOARD_REPLY_GUARD=0 — the pre-#170 passthrough is the escape hatch.
+	private readonly replyGuard: ReturnType<typeof createReplyGuard> | null;
+	private replyGuardTimer: ReturnType<typeof setTimeout> | null = null;
 	private readonly connectStartedAt = Date.now();
 	// Set once the first socket connect succeeds; drives the reconnect give-up
 	// policy (short window after a live session dies, long window during cold
@@ -287,6 +294,7 @@ export class PtyAttachComponent implements Component {
 		this.enableMouseScroll();
 		this.refreshMouseScrollMode();
 		this.replayScreenLog();
+		this.replyGuard = isReplyGuardEnabled(process.env.AGENT_BOARD_REPLY_GUARD) ? createReplyGuard() : null;
 		this.connect();
 		this.startLoadingTicker();
 		// Paint immediately (forced once) so the loading banner replaces the previous
@@ -295,6 +303,17 @@ export class PtyAttachComponent implements Component {
 	}
 
 	handleInput(data: string): void {
+		const guard = this.replyGuard;
+		if (guard) {
+			const decision = guard.feed(data, this.nowFn());
+			if (guard.pendingSince() !== null) this.armReplyGuardTimer();
+			if (decision.action === "forward") {
+				// Color replies only work for the child's parsers as one sequence.
+				this.send({ type: "input", data: decision.data });
+				return;
+			}
+			if (decision.action === "swallow") return;
+		}
 		const mouseInput = parseMouseInputChunk(data);
 		if (mouseInput && this.handleMouseInputChunk(mouseInput)) return;
 		if (matchesKey(data, Key.pageUp)) {
@@ -905,6 +924,26 @@ export class PtyAttachComponent implements Component {
 		this.gracefulSocketCloseTimer = null;
 	}
 
+	/** Issue #170: an open reply window arms exactly one timer. Fragments do not
+	 * re-arm it (the window is anchored at the head); a timer that fires while
+	 * the window is still open — a newer head moved `since` forward — re-arms
+	 * instead of dropping the still-open sequence. */
+	private armReplyGuardTimer(): void {
+		if (this.replyGuardTimer) return;
+		this.replyGuardTimer = setTimeout(() => {
+			this.replyGuardTimer = null;
+			this.replyGuard?.expire(this.nowFn());
+			if (this.replyGuard?.pendingSince() !== null) this.armReplyGuardTimer();
+		}, REPLY_GUARD_WINDOW_MS);
+		this.replyGuardTimer.unref?.();
+	}
+
+	private clearReplyGuardTimer(): void {
+		if (!this.replyGuardTimer) return;
+		clearTimeout(this.replyGuardTimer);
+		this.replyGuardTimer = null;
+	}
+
 	private enableMouseScroll(): void {
 		if (!this.ownsOuterMouseMode()) return;
 		try {
@@ -1384,6 +1423,8 @@ export class PtyAttachComponent implements Component {
 					// drop the #128 bridge now so A7 symmetry doesn't depend on
 					// the host honoring dispose().
 					this.detachColorSchemeBridge();
+					this.clearReplyGuardTimer();
+					this.replyGuard?.reset();
 					this.done({ action: "closed", exitCode: msg.exitCode ?? null });
 				} else if (msg.type === "error") this.status = `error: ${msg.message ?? "host error"}`;
 				if (shouldScheduleAttachRenderForMessage(msg.type)) needsRender = true;
@@ -1616,6 +1657,8 @@ export class PtyAttachComponent implements Component {
 		this.closed = true;
 		this.imeCoalesceUninstall?.();
 		this.detachColorSchemeBridge();
+		this.clearReplyGuardTimer();
+		this.replyGuard?.reset();
 		this.attachClient.close();
 		this.jiggleRetry.restoreAndStop();
 		this.disableMouseScroll();

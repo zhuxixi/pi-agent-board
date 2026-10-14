@@ -325,6 +325,7 @@ Set these variables before starting Pi. Model-backed features fall back graceful
 | `AGENT_BOARD_FORWARD_IMAGES` | enabled; `0` disables | Disable terminal image/file passthrough forwarding from an attached session. |
 | `AGENT_BOARD_IME_FIX` | enabled; `0` disables | Disable the attach-view IME cursor coalescer if your terminal has compatibility problems. |
 | `AGENT_BOARD_TERMINAL_SNAPSHOT` | enabled; `0` forces legacy | Force the pre-phase-4 attach path (screen.log replay + jiggle); escape hatch / rollback switch for the snapshot+subscribe attach protocol. |
+| `AGENT_BOARD_REPLY_GUARD` | enabled; `0`, `off`, or `false` disables | Discard terminal reply fragments (device attributes, kitty flags, cell size, DCS) that pi-tui delivers as input, and forward color replies whole. While a reply head is open, up to 64 bytes / 250ms of following input is absorbed. |
 
 `AGENT_BOARD_TERMINAL_SNAPSHOT=0` routes attach onto the legacy fallback family: the screen.log replay tail plus the shrink-and-hold jiggle redraw. These paths exist only for pre-protocol runners and as a rollback hatch — they are not part of the snapshot+subscribe protocol path (issue #91 phase 4). They will be retired once the installed runner fleet is on the snapshot protocol baseline (detectable on the wire via hello protocol fields).
 
