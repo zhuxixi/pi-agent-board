@@ -53,7 +53,7 @@ export function formatPostmortem(snapshot) {
 		show("host", snapshot.host),
 		`diagnosticsTail: ${snapshot.diagnosticsTail.length ? JSON.stringify(snapshot.diagnosticsTail) : "<empty>"}`,
 		`journalTail: ${snapshot.journalTail.length ? snapshot.journalTail.join(" | ") : "<empty>"}`,
-		`screenLogTail: ${snapshot.screenLogTail == null ? "<absent>" : JSON.stringify(snapshot.screenLogTail)}`,
+		show("screenLogTail", snapshot.screenLogTail),
 	];
 	return lines.join("\n");
 }

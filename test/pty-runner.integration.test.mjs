@@ -1905,6 +1905,10 @@ test("subscribe_terminal: snapshot + live continuity alongside legacy clients", 
 test("accept-registration race: a legacy client that connects late never receives the already-broadcast banner", async () => {
 	const root = freshRoot();
 	let runner;
+	// Same postmortem wiring as the file's other issue-178 case: a red must
+	// arrive with a scene, not just "timed out waiting" — screenLogTail answers
+	// whether the banner was ever written to disk.
+	const capture = () => formatPostmortem(capturePostmortem(root, "v1", null));
 	try {
 		const meta = createView(root, { id: "v1", name: "late-join", cwd: process.cwd() });
 		const configPath = P.hostConfigPath(root, "v1");
@@ -1928,7 +1932,7 @@ test("accept-registration race: a legacy client that connects late never receive
 		// (runner/pty-runner.mjs:312 vs :407), so gate on hostReady first —
 		// host.state becomes "alive" in the listen callback, i.e. the socket is
 		// bound. Connecting earlier would fail with ENOENT.
-		await waitFor(() => hostReady(root, "v1"), 15000);
+		await waitFor(() => hostReady(root, "v1"), 15000, capture);
 
 		// Leg 1: the banner is already out. screen.log is written from the same
 		// onData path that feeds the canonical model (runner/pty-runner.mjs:333),
@@ -1940,7 +1944,7 @@ test("accept-registration race: a legacy client that connects late never receive
 			} catch {
 				return false;
 			}
-		}, 15000);
+		}, 15000, capture);
 
 		// Leg 2: only now connect a legacy client. No reply carries the banner.
 		const late = createConnection(P.controlSocketPath(root, "v1"));
@@ -1962,7 +1966,7 @@ test("accept-registration race: a legacy client that connects late never receive
 		const probe = createEchoProbe({ send: (line) => send(late, { type: "input", data: line }) });
 		probe.start();
 		try {
-			await waitFor(() => lateMessages.find((m) => m.type === "output" && /boot-probe-\d/.test(String(m.data))), 15000);
+			await waitFor(() => lateMessages.find((m) => m.type === "output" && /boot-probe-\d/.test(String(m.data))), 15000, capture);
 		} finally {
 			probe.stop();
 		}
