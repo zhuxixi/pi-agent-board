@@ -394,6 +394,88 @@ test("A5: burst through the snapshot window — frame→flush→end interleaving
 	}
 });
 
+/** Spawn a runner, drain a full burst on an ALREADY-SUBSCRIBED legacy driver, then
+ *  subscribe a fresh wire client — the worst-case capture timing for the frame
+ *  window contract (issue #184). Returns only the client-side observations. */
+async function measureLateSubscribe(totalLines) {
+	const root = freshRoot();
+	const viewId = `a5w-${totalLines}`;
+	const sockets = [];
+	let runner;
+	try {
+		({ runner } = spawnRunner(root, viewId, { env: { FAKE_PTY_BURST_LINES: String(totalLines) } }));
+		await waitFor(() => hostReady(root, viewId), 30000);
+
+		const driver = createConnection(P.controlSocketPath(root, viewId));
+		await once(driver, "connect");
+		sockets.push(driver);
+		const driverMessages = listen(driver).messages;
+		send(driver, { type: "hello" });
+		let probeN = 0;
+		const probeTimer = setInterval(() => {
+			probeN += 1;
+			send(driver, { type: "input", data: `boot-probe-${probeN}\r` });
+		}, 300);
+		try {
+			await waitFor(() => driverMessages.find((m) => m.type === "output" && /boot-probe-\d/.test(String(m.data))), 30000);
+		} finally {
+			clearInterval(probeTimer);
+		}
+
+		// Drain the whole burst BEFORE subscribing: the capture is then guaranteed to
+		// land after every row exists, which is what makes both legs deterministic.
+		send(driver, { type: "input", data: "burst\r" });
+		await waitFor(() => collectBurstIds(outputText(driverMessages)).length >= totalLines, 30000);
+
+		const socketB = createConnection(P.controlSocketPath(root, viewId));
+		await once(socketB, "connect");
+		sockets.push(socketB);
+		const { client: clientB, events } = wireClient(socketB);
+		clientB.start();
+		await waitFor(() => events.snapshotReady.length > 0, 30000);
+		// Let a catch-up flush / any trailing live output land before reading the union.
+		await new Promise((r) => setTimeout(r, 500));
+
+		const union = new Set([
+			...collectBurstIds(events.snapshotReady[0]?.frame ?? ""),
+			...collectBurstIds(events.output.map((data) => (typeof data === "string" ? data : (data?.data ?? ""))).join("\n")),
+		]);
+		return { union, protocolError: events.protocolError, resubscribing: events.resubscribing };
+	} finally {
+		await cleanup(root, viewId, sockets, [runner]);
+	}
+}
+
+test("A5w: window contract — a late subscriber gets the frame-window tail, and content inside the window arrives complete", async () => {
+	const window = RUNNER_ROWS + DEFAULT_SCROLLBACK_SNAPSHOT_CAP;
+
+	// leg 1: burst larger than the window — the head is unrecoverable by design.
+	const overTotal = window + 120;
+	const leg1 = await measureLateSubscribe(overTotal);
+	assert.ok(leg1.union.size < overTotal, `expected truncation: union ${leg1.union.size} of ${overTotal}`);
+	assert.ok(leg1.union.size <= window, `union ${leg1.union.size} must not exceed the window ${window}`);
+	assert.ok(
+		leg1.union.size >= window - MISC_TOLERANCE,
+		`union ${leg1.union.size} must fill the window (tolerance ${MISC_TOLERANCE})`,
+	);
+	const leg1Ids = [...leg1.union].sort((a, b) => a - b);
+	assert.ok(leg1Ids[0] > 1, "the window truncates the head of the burst");
+	assert.equal(
+		leg1Ids[leg1Ids.length - 1] - leg1Ids[0] + 1,
+		leg1Ids.length,
+		"the union is a contiguous tail, never a stitched subset",
+	);
+	assert.deepEqual(leg1.protocolError, []);
+	assert.deepEqual(leg1.resubscribing, []);
+
+	// leg 2: burst that fits the window — complete coverage even at the worst capture
+	// timing. This is the deterministic proof behind the A5 burst coverage assertion.
+	const leg2 = await measureLateSubscribe(BURST_LINES);
+	assert.equal(leg2.union.size, BURST_LINES, "content inside the window must arrive complete");
+	assert.deepEqual(leg2.protocolError, []);
+	assert.deepEqual(leg2.resubscribing, []);
+});
+
 test("A5c: runner restart — reconnect gets a fresh/empty baseline from the new child, never the old screen", async () => {
 	const root = freshRoot();
 	const viewId = "a5c";
