@@ -30,19 +30,17 @@ import { createTerminalAttachClient } from "../src/core/terminal-attach-client.m
 import * as P from "../src/core/paths.mjs";
 import { claimHost, createView, readHost, readState, writeHost, writeState } from "../src/core/store.mjs";
 import { createService } from "../src/runtime/service.mjs";
+import { capturePostmortem, formatPostmortem, waitForWithPostmortem } from "../test-support/flake-postmortem.mjs";
 
 function freshRoot() {
 	return mkdtempSync(join(tmpdir(), "agentview-reconcile-"));
 }
 
-async function waitFor(predicate, timeoutMs = 15000) {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
-		const value = predicate();
-		if (value) return value;
-		await new Promise((r) => setTimeout(r, 25));
-	}
-	throw new Error("timed out waiting");
+// issue #178 (spec D7): this file's waits carried no scene on a red. Delegate
+// to the shared implementation, mirroring pty-runner.integration.test.mjs's
+// three-argument shape — the wait condition and the budget are unchanged.
+async function waitFor(predicate, timeoutMs = 15000, capture = null) {
+	return waitForWithPostmortem(predicate, { timeoutMs, intervalMs: 25, capture });
 }
 
 function isAlive(pid) {
@@ -337,11 +335,14 @@ test("A2: reconnect wires hello → reconcile → subscribe in order; baseline m
 	let runner;
 	let socket2 = null;
 	let socket3 = null;
+	// issue #178 spec D7: this adjacent signature has flaked (10-11, 15.7s) with
+	// no scene at all; wire the postmortem in so the next red explains itself.
+	const capture = () => formatPostmortem(capturePostmortem(root, "v1", null));
 	try {
 		const spawned = spawnOwnedRunner(root, "v1");
 		runner = spawned.runner;
 		const { instanceId, socketPath } = spawned;
-		await waitFor(() => hostReady(root, "v1"));
+		await waitFor(() => hostReady(root, "v1"), 15000, capture);
 
 		let deferSecondSubscribe = false;
 		const socket1 = await connectControl(socketPath);
@@ -349,20 +350,20 @@ test("A2: reconnect wires hello → reconcile → subscribe in order; baseline m
 			deferWrite: (msg) => (deferSecondSubscribe && msg.type === "subscribe_terminal" ? 150 : 0),
 		});
 		h.hello();
-		await waitFor(() => h.messages.some((m) => m.type === "hello" && m.generation));
+		await waitFor(() => h.messages.some((m) => m.type === "hello" && m.generation), 15000, capture);
 		const gen1 = h.client.getIdentity().generation;
 		assert.equal(typeof gen1, "string");
 		h.client.start();
-		const ready = await waitFor(() => h.eventsOf("snapshotReady")[0]);
+		const ready = await waitFor(() => h.eventsOf("snapshotReady")[0], 15000, capture);
 		assert.equal(typeof ready.nextSeq, "number");
-		await waitFor(() => h.client.getLastSeq() >= ready.nextSeq + 2, 10000);
+		await waitFor(() => h.client.getLastSeq() >= ready.nextSeq + 2, 10000, capture);
 
 		// Retryable durable command BEFORE the drop; it resumes after reconnect.
 		// seq 1: the FIRST enveloped message on this connection (the watermark is
 		// per-connection monotonic — start() probes are not enveloped).
 		send(socket1, durableInput({ clientId: "svc-sim", seq: 1, instanceId, commandId: "follow-1", data: "resume-probe\r" }));
-		await waitFor(() => h.messages.some((m) => m.type === "cmd_ack" && m.commandId === "follow-1" && m.stage === "applied"));
-		await waitFor(() => h.echoCount("echo:resume-probe") >= 1);
+		await waitFor(() => h.messages.some((m) => m.type === "cmd_ack" && m.commandId === "follow-1" && m.stage === "applied"), 15000, capture);
+		await waitFor(() => h.echoCount("echo:resume-probe") >= 1, 15000, capture);
 		const disconnectSeq = h.client.getLastSeq();
 
 		// Drop. Reconnect on a fresh socket with the SAME client instance.
@@ -373,7 +374,7 @@ test("A2: reconnect wires hello → reconcile → subscribe in order; baseline m
 		h.hello();
 		h.client.reconnect(disconnectSeq);
 
-		const reconciled = await waitFor(() => h.eventsOf("reconciled")[0]);
+		const reconciled = await waitFor(() => h.eventsOf("reconciled")[0], 15000, capture);
 		// Wire order (spec D4): hello → reconcile → snapshot/subscribe.
 		assert.deepEqual(
 			h.sent.slice(wireStart).map((m) => m.type),
@@ -409,12 +410,12 @@ test("A2: reconnect wires hello → reconcile → subscribe in order; baseline m
 		// ring replay re-sends it and seq-checked consumption dedups. The
 		// invariant is "no gap over the distinct seqs"; a UI-level duplicate is
 		// the marker guard's job below.
-		await waitFor(() => coversRange(h.outputSeqs(), disconnectSeq, 3));
+		await waitFor(() => coversRange(h.outputSeqs(), disconnectSeq, 3), 15000, capture);
 		assert.ok(
 			coversRange(h.outputSeqs(), disconnectSeq, 3),
 			`no gap after reconnect: distinct seqs past the cursor were ${JSON.stringify(distinctSeqsFrom(h.outputSeqs(), disconnectSeq).slice(0, 8))}`,
 		);
-		await waitFor(() => h.client.getLastSeq() >= disconnectSeq + 3, 10000);
+		await waitFor(() => h.client.getLastSeq() >= disconnectSeq + 3, 10000, capture);
 		// Task-5 review P0 regression guard: every wire-delivered seq past the
 		// cursor must reach the UI exactly once (gate strays are EMITTED, replay
 		// covers the rest). Compare steady markers: wire vs emitted events.
@@ -437,7 +438,7 @@ test("A2: reconnect wires hello → reconcile → subscribe in order; baseline m
 		// child sees the prompt exactly once across the reconnect. (seq 2: the
 		// client's reconnect reconcile already consumed seq 1 on this socket.)
 		send(socket2, durableInput({ clientId: "svc-sim", seq: 2, instanceId, commandId: "follow-1", data: "resume-probe\r" }));
-		await waitFor(() => h.messages.filter((m) => m.type === "cmd_ack" && m.commandId === "follow-1" && m.stage === "applied").length >= 2);
+		await waitFor(() => h.messages.filter((m) => m.type === "cmd_ack" && m.commandId === "follow-1" && m.stage === "applied").length >= 2, 15000, capture);
 		assert.equal(h.echoCount("echo:resume-probe"), 1, "commandId dedup: the retry never re-writes the child");
 
 		// --- #140 signature A: deterministic overlap interleaving (A4) --------
@@ -457,13 +458,13 @@ test("A2: reconnect wires hello → reconcile → subscribe in order; baseline m
 
 		// Non-vacuity: the overlap must actually appear (in-flight strays the
 		// client could not fold in, re-sent by the ring replay).
-		await waitFor(() => hasWireOverlap(h.outputSeqs().filter((s) => s > drop2)), 5000);
-		await waitFor(() => coversRange(h.outputSeqs(), drop2, 3));
+		await waitFor(() => hasWireOverlap(h.outputSeqs().filter((s) => s > drop2)), 5000, capture);
+		await waitFor(() => coversRange(h.outputSeqs(), drop2, 3), 15000, capture);
 		assert.ok(
 			coversRange(h.outputSeqs(), drop2, 3),
 			`no gap under the wire overlap: distinct seqs were ${JSON.stringify(distinctSeqsFrom(h.outputSeqs(), drop2).slice(0, 8))}`,
 		);
-		await waitFor(() => h.client.getLastSeq() >= drop2 + 3, 10000);
+		await waitFor(() => h.client.getLastSeq() >= drop2 + 3, 10000, capture);
 		// UI exactly-once still holds under the overlap (marker guard, phase 2).
 		{
 			const wireMarkers2 = h.messagesSince(phase2)
