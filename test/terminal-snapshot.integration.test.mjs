@@ -14,6 +14,7 @@ import { createView, readHost } from "../src/core/store.mjs";
 import { createTerminalAttachClient } from "../src/core/terminal-attach-client.mjs";
 import { capturePostmortem, formatPostmortem, waitForWithPostmortem } from "../test-support/flake-postmortem.mjs";
 import { DEFAULT_SCROLLBACK_SNAPSHOT_CAP } from "../src/core/terminal-snapshot.mjs";
+import { collectBurstIds, formatBurstDiagnostics } from "../test-support/burst-diagnostics.mjs";
 
 // Spec acceptance coverage (issue #91 phase 4):
 //   A5  — snapshot/subscribe 无 gap、无重复（real runner, real socket, real client module）
@@ -36,6 +37,11 @@ const MISC_TOLERANCE = 8;
 
 function freshRoot() {
 	return mkdtempSync(join(tmpdir(), "agentview-snap-"));
+}
+
+/** Concatenate the text of every `output` message (wire chunks may hold many lines). */
+function outputText(messages) {
+	return messages.filter((m) => m.type === "output").map((m) => String(m.data)).join("\n");
 }
 
 // Same rationale as pty-runner.integration.test.mjs: every waitFor is an
@@ -289,7 +295,18 @@ test("A5: burst through the snapshot window — frame→flush→end interleaving
 	);
 	// issue #95: A5's 30s waits have historically flaked, so a timeout now
 	// carries a snapshot of the durable state at the moment of failure.
-	const capture = () => formatPostmortem(capturePostmortem(root, viewId, null));
+	// issue #184: the failure must name its mechanism (child side vs frame side),
+	// so the postmortem carries test-side counters next to the durable state.
+	const observed = { driver: [], b: null };
+	const capture = () =>
+		formatPostmortem(capturePostmortem(root, viewId, null))
+		+ "\n"
+		+ formatBurstDiagnostics({
+			expectedRows: BURST_LINES,
+			driverTexts: outputText(observed.driver),
+			frameText: observed.b?.snapshotReady?.[0]?.frame ?? "",
+			liveTexts: (observed.b?.output ?? []).map((data) => (typeof data === "string" ? data : (data?.data ?? ""))),
+		});
 	try {
 		({ runner } = spawnRunner(root, viewId, { env: { FAKE_PTY_BURST_LINES: String(BURST_LINES) } }));
 		await waitFor(() => hostReady(root, viewId), 30000, capture);
@@ -297,7 +314,7 @@ test("A5: burst through the snapshot window — frame→flush→end interleaving
 		const driver = createConnection(P.controlSocketPath(root, viewId));
 		await once(driver, "connect");
 		sockets.push(driver);
-		const driverMessages = listen(driver).messages;
+		const driverMessages = (observed.driver = listen(driver).messages);
 		send(driver, { type: "hello" });
 		// One-shot boot banner is racy against socket accept (banner can be
 		// broadcast before this connection is accepted, and legacy output has no
@@ -318,7 +335,9 @@ test("A5: burst through the snapshot window — frame→flush→end interleaving
 		const socketB = createConnection(P.controlSocketPath(root, viewId));
 		await once(socketB, "connect");
 		sockets.push(socketB);
-		const { client: clientB, events: eventsB } = wireClient(socketB);
+		const wiredB = wireClient(socketB);
+		const { client: clientB, events: eventsB } = wiredB;
+		observed.b = eventsB;
 		clientB.start();
 
 		// Raw subscriber C: wire observation of the frame→flush→end window.
