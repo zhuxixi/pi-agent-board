@@ -433,8 +433,10 @@ async function measureLateSubscribe(totalLines) {
 		const { client: clientB, events } = wireClient(socketB);
 		clientB.start();
 		await waitFor(() => events.snapshotReady.length > 0, 30000);
-		// Let a catch-up flush / any trailing live output land before reading the union.
-		await new Promise((r) => setTimeout(r, 500));
+		// No settle delay: the runner sends the catch-up flush chunks BEFORE snapshot_end
+		// (src/core/terminal-attach-protocol.mjs:138-150), and the client emits the flush
+		// while handling snapshot_end — so observing snapshotReady means the whole window
+		// is already in `events` (CR round 1, advisory).
 
 		const union = new Set([
 			...collectBurstIds(events.snapshotReady[0]?.frame ?? ""),

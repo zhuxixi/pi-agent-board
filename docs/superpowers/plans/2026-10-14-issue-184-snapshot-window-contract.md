@@ -483,8 +483,10 @@ async function measureLateSubscribe(totalLines) {
 		const { client: clientB, events } = wireClient(socketB);
 		clientB.start();
 		await waitFor(() => events.snapshotReady.length > 0, 30000);
-		// Let a catch-up flush / any trailing live output land before reading the union.
-		await new Promise((r) => setTimeout(r, 500));
+		// No settle delay: the runner sends the catch-up flush chunks BEFORE snapshot_end
+		// (src/core/terminal-attach-protocol.mjs:138-150), and the client emits the flush
+		// while handling snapshot_end — so observing snapshotReady means the whole window
+		// is already in `events` (CR round 1, advisory).
 
 		const union = new Set([
 			...collectBurstIds(events.snapshotReady[0]?.frame ?? ""),
@@ -646,3 +648,10 @@ Expected: 退出码 0（typecheck + perf gate + tests + coverage + pack:dry）�
 - **占位符扫描**：无 `TBD`/`TODO`/「适当处理」类描述；每个代码步骤都给了可直接落盘的完整代码。
 - **类型/命名一致性**：`collectBurstIds` / `formatBurstDiagnostics` / `outputText` / `measureLateSubscribe` / `RUNNER_ROWS` / `BURST_LINES` / `MAX_BURST_MISC_ROWS` / `MISC_TOLERANCE` 在各 task 间命名一致；`formatBurstDiagnostics` 的入参键名（`driverTexts`/`frameText`/`liveTexts`）与 Task 2 静态断言 ② 锚定的键名一致。
 - **执行顺序与依赖**：Task 1 → 2 → 3 → 4 → 5 → 6；每个 task 只消费前序 task 已产出的接口（Task 2 产出窗口常量；Task 3 消费它们并产出 `outputText`；Task 4 消费两者）。无跨 task 的前向引用。
+
+## Amendments（实现后修订；两份都是 plan 自身的缺陷，非实现者失误）
+
+1. **Task 3 的 `caseBody` 切片边界（acceptance sweep 发现，commit `987f96d`）**：原片段只切到下一个 `\ntest(`，而 Task 4 按本 plan 的要求把 `measureLateSubscribe` 插在两个用例之间，切片因此包含了 helper 的 4 个无 capture 的等待（静态断言 `4 !== 8`，全量套件下 3/3 红、单跑绿）。现改为切到「下一个顶层声明」（`\ntest(` / `\nfunction ` / `\nasync function `）。
+2. **Task 4 的 500ms settle delay 删除（CR round 1 advisory）**：协议保证 catch-up flush chunk 先于 `snapshot_end` 发出（`src/core/terminal-attach-protocol.mjs:138-150`），客户端在处理 `snapshot_end` 时同步 emit flush，因此观察到 `snapshotReady` 即意味着整个窗口已在 `events` 里；固定睡眠是多余的时序运气。代码与本文档的 Task 4 片段已同步为不睡眠 + 注明该不变量。
+
+**commit subject 约定备注（CR round 1 blocking finding 的核实结论）**：本 plan 的 `git commit` 命令给提交主语加 `(issue #<N>)` —— 这是本仓 plan 文档的历史惯例（`docs/superpowers/plans/` 里 `(issue #145)` 等出现 50+ 次），因为**写 plan 时只知道 issue 号、不知道 PR 号**。最终进 changelog 的是 squash 主语，其 `(#<PR>)` 由 GitHub 在 squash 时按 PR 标题自动追加（实证：PR #183 标题无 `(#183)`，而 main 上 `f81949d` 的主语有）；`scripts/release_helper.mjs` 读取的是 main 上「上一个 tag..HEAD」的主语（`commitSubjects()`），分支内主语不参与生成，因此不影响 changelog 与 release verify。PR 开出后新增的 commit 可以用 `(#<PR>)`（此时号码已知）。
