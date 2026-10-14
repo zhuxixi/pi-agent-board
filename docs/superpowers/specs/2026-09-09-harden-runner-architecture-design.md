@@ -257,6 +257,12 @@ PTY lifecycle / host.json
 | U2 | 显式逃生键稳定可用 | 用户实测 | 分别在 `editorEmpty=true/false/null`、socket 断开时按 `←` 和 `Ctrl+Left` | `Ctrl+Left` 10/10 次离开 attach；`←` 按协议处理，不依赖 ↑↓ 治愈 |
 | U3 | 断线恢复画面 | 用户实测 | attach 后制造 runner reconnect 或网络断开，再恢复连接 | 画面恢复，无明显缺行、重复或半帧乱码 |
 
+> **2026-10-14 补注（issue #184）**：上表 A5 的「客户端永不静默丢失或重复输出」适用域为**快照窗口内**——
+> frame 的容量上限为 `viewport rows + DEFAULT_SCROLLBACK_SNAPSHOT_CAP`（当前 24 + 256 = 280 行）。窗口外的
+> 更早历史不在本协议保证范围内，协议帧不承载该段内容，客户端也不会收到截断信号（是否显式化另立项）；
+> legacy 降级路径只有 screen.log 尾部回放，且是有界、best-effort 的历史来源，不是正确性来源。
+> 机制、复现与依据见 issue #184。
+
 可测性拆分设计见第 9 节。
 
 ## 8. 迁移顺序（按架构不变量分阶段）
