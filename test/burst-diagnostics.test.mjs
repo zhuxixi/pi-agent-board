@@ -59,8 +59,14 @@ const snapshotSource = readFileSync(new URL("./terminal-snapshot.integration.tes
 function caseBody(source, name) {
 	const start = source.indexOf(`test(${JSON.stringify(name)}`);
 	assert.notEqual(start, -1, `case not found: ${name}`);
-	const next = source.indexOf("\ntest(", start + 1);
-	return source.slice(start, next === -1 ? source.length : next);
+	// Stop at the next top-level declaration: a module-level helper may sit between
+	// two cases (e.g. measureLateSubscribe before A5w), and its waits are not the
+	// case's waits (issue #184 acceptance sweep finding).
+	const boundaries = ["\ntest(", "\nfunction ", "\nasync function "]
+		.map((needle) => source.indexOf(needle, start + 1))
+		.filter((index) => index !== -1);
+	const next = boundaries.length === 0 ? source.length : Math.min(...boundaries);
+	return source.slice(start, next);
 }
 
 const A5_BURST_CASE = "A5: burst through the snapshot window — frame→flush→end interleaving pinned on the wire, client converges in order";
