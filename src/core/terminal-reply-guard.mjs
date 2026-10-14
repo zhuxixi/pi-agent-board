@@ -19,6 +19,11 @@
  *
  * Pure only: no I/O, no timers, no `process.env`, no pi-tui import. Time is
  * injected by the caller (see `armReplyGuardTimer` in src/ui/pty-attach.ts).
+ *
+ * Known boundary: a FRAGMENTED DA3 reply (`\x1b[=...c`) is not armed — this
+ * module's head list deliberately omits `\x1b[=` because the attach client
+ * never queries DA3 — so such a fragment passes through as it did before this
+ * guard. The complete DA3 form is still dropped (it is a DROP_SHAPES entry).
  */
 
 /** How long an open reply window stays open for trailing fragments (spec §3.3). */
@@ -96,7 +101,7 @@ const PASS = Object.freeze({ action: "pass" });
  * disable the guard; unset or anything else keeps it enabled.
  */
 export function isReplyGuardEnabled(value) {
-	if (value === undefined) return true;
+	if (typeof value !== "string") return true;
 	return !["0", "off", "false"].includes(value.trim().toLowerCase());
 }
 
@@ -160,6 +165,7 @@ export function createReplyGuard({
 				return decisionFor(event, data);
 			}
 			const joined = buffer + data;
+			// Bound in UTF-16 code units — byte-exact for the ASCII reply corpus.
 			if (joined.length > maxAbsorbBytes) {
 				reset();
 				return SWALLOW;

@@ -3,6 +3,10 @@
 // the child. Shape follows test-support/attach-scheme-readiness-smoke.ts (#180).
 import { PtyAttachComponent } from "../src/ui/pty-attach.ts";
 
+// Keep the smoke hermetic: an exported escape hatch in the developer's shell
+// must not flip the guard off and fail A6 spuriously.
+delete process.env.AGENT_BOARD_REPLY_GUARD;
+
 // Real bytes from upstream #10657: a DA1 reply delivered as four reads.
 const DA1_CHUNKS = ["\x1b[?61;6;", "7;22;23;", "24;28;32", ";42c"];
 const OSC11_REPLY = "\x1b]11;rgb:2887/2a18/353c\x1b\\";

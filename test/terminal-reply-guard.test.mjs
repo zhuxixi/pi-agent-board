@@ -141,6 +141,8 @@ test("A3: a complete reply inside an open window is handled alone, never joined"
 	dropped.feed("\x1b[?61;6;", 1000);
 	assert.deepEqual(dropped.feed("\x1b[?1u", 1010), { action: "swallow" }, "a stale buffer plus a fresh kitty reply still drops");
 	assert.equal(dropped.pendingSince(), null);
+	assert.deepEqual(createReplyGuard().feed(OSC11_REPLY, 1000), { action: "forward", data: OSC11_REPLY }, "idle + complete forwards the whole event");
+	assert.deepEqual(createReplyGuard().feed("\x1b[?1u", 1000), { action: "swallow" }, "idle + complete drop swallows");
 });
 
 test("A3: the spec's window and cap are pinned", () => {
