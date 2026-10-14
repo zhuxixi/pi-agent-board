@@ -13,12 +13,26 @@ import * as P from "../src/core/paths.mjs";
 import { createView, readHost } from "../src/core/store.mjs";
 import { createTerminalAttachClient } from "../src/core/terminal-attach-client.mjs";
 import { capturePostmortem, formatPostmortem, waitForWithPostmortem } from "../test-support/flake-postmortem.mjs";
+import { DEFAULT_SCROLLBACK_SNAPSHOT_CAP } from "../src/core/terminal-snapshot.mjs";
 
 // Spec acceptance coverage (issue #91 phase 4):
 //   A5  — snapshot/subscribe 无 gap、无重复（real runner, real socket, real client module）
 //   A5c — runner 重启后的 attach 基线（new child, no old-screen restoration）
 // plus the phase-3 final-review pre-flight: firehose stress + parser containment
 // (those live in the second half of this file).
+
+// Snapshot frame capacity (issue #184): the frame carries the viewport rows plus
+// the scrollback cap, so a late subscriber can only recover the TAIL of that
+// window. RUNNER_ROWS is shared with spawnRunner's default — never mirror it, or
+// the window guard below drifts away from the real viewport.
+const RUNNER_ROWS = 24;
+// The burst must FIT the window, otherwise "frame ∪ flush ∪ live covers every
+// row" becomes a capture-timing race instead of a property (issue #184).
+const BURST_LINES = 200;
+const MAX_BURST_MISC_ROWS = 8;
+// Non-burst rows (boot banner, probe echo, cursor line) can eat a few window
+// slots in the overflow leg; the boundary assertion tolerates this much drift.
+const MISC_TOLERANCE = 8;
 
 function freshRoot() {
 	return mkdtempSync(join(tmpdir(), "agentview-snap-"));
@@ -98,7 +112,7 @@ function reapChild(root, viewId) {
 
 /** Create a view + host config + spawn a runner. Mirrors the pty-runner
  *  integration fixture (same helper child, same isolation shape). */
-function spawnRunner(root, viewId, { env = {}, cols = 80, rows = 24 } = {}) {
+function spawnRunner(root, viewId, { env = {}, cols = 80, rows = RUNNER_ROWS } = {}) {
 	const meta = createView(root, { id: viewId, name: viewId, cwd: process.cwd() });
 	const configPath = P.hostConfigPath(root, viewId);
 	atomicWriteJson(configPath, {
@@ -258,7 +272,7 @@ test("A5: mid-stream subscribe via the real client module — no gap, no dup, al
 });
 
 // Wait ceilings here are 30s (vs the 15s file default): the burst scenario is
-// spawn-heavy (runner + 400-line child burst) and is the ledgered load-flake
+// spawn-heavy (runner + BURST_LINES-line child burst) and is the ledgered load-flake
 // hotspot — it has tripped its ceiling even at moderate parallel load. Loud
 // failure semantics preserved; only failure latency grows.
 test("A5: burst through the snapshot window — frame→flush→end interleaving pinned on the wire, client converges in order", async () => {
@@ -266,11 +280,18 @@ test("A5: burst through the snapshot window — frame→flush→end interleaving
 	const viewId = "a5flush";
 	let runner;
 	const sockets = [];
+	// issue #184: the coverage assertion in this case is valid only while the whole
+	// burst fits the snapshot frame window (viewport rows + scrollback cap). Keep
+	// this guard so a future BURST_LINES bump fails loudly instead of flaking.
+	assert.ok(
+		BURST_LINES + MAX_BURST_MISC_ROWS <= RUNNER_ROWS + DEFAULT_SCROLLBACK_SNAPSHOT_CAP,
+		`burst must fit the snapshot frame window: ${BURST_LINES} + ${MAX_BURST_MISC_ROWS} > ${RUNNER_ROWS} + ${DEFAULT_SCROLLBACK_SNAPSHOT_CAP}`,
+	);
 	// issue #95: A5's 30s waits have historically flaked, so a timeout now
 	// carries a snapshot of the durable state at the moment of failure.
 	const capture = () => formatPostmortem(capturePostmortem(root, viewId, null));
 	try {
-		({ runner } = spawnRunner(root, viewId, { env: { FAKE_PTY_BURST_LINES: "400" } }));
+		({ runner } = spawnRunner(root, viewId, { env: { FAKE_PTY_BURST_LINES: String(BURST_LINES) } }));
 		await waitFor(() => hostReady(root, viewId), 30000, capture);
 
 		const driver = createConnection(P.controlSocketPath(root, viewId));
@@ -333,7 +354,7 @@ test("A5: burst through the snapshot window — frame→flush→end interleaving
 
 		// Client B: converged with zero recovery, then the full burst content is
 		// delivered exactly once across frame ∪ outputs. NOTE: outputSeq counts
-		// CHUNKS, not lines — the PTY coalesces the 400-line burst into a
+		// CHUNKS, not lines — the PTY coalesces the BURST_LINES-line burst into a
 		// handful of multi-KB reads, so completeness is asserted over content
 		// (line coverage), never over seq magnitude.
 		assert.deepEqual(eventsB.protocolError, []);
@@ -346,9 +367,9 @@ test("A5: burst through the snapshot window — frame→flush→end interleaving
 		collect(frameB);
 		await waitFor(() => {
 			for (const data of eventsB.output) collect(data);
-			return seen.size >= 400;
+			return seen.size >= BURST_LINES;
 		}, 30000, capture);
-		assert.equal(seen.size, 400, "every burst line delivered exactly once across frame+flush+live");
+		assert.equal(seen.size, BURST_LINES, "every burst line delivered exactly once across frame+flush+live");
 	} finally {
 		await cleanup(root, viewId, sockets, [runner]);
 	}
