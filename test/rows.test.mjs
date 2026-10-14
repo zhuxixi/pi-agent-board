@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
-import { filterRows, groupRows, groupRowsByFolder, parseFilter, rowState, rowView, stateColor, stateGlyph } from "../src/core/rows.mjs";
+import { filterRows, groupRows, groupRowsByFolder, nextVisibleIdAfterRemoval, parseFilter, rowState, rowView, stateColor, stateGlyph } from "../src/core/rows.mjs";
+import { createView, listRows } from "../src/core/store.mjs";
 import { GROUP_LABELS, GROUP_ORDER } from "../src/core/types.mjs";
 
 /** @returns {import("../src/core/store.mjs").Row} */
@@ -242,4 +246,26 @@ test("rowView does not mark staleHost for fresh heartbeats, terminal states, or 
 	assert.equal(rowView({ ...base, host: exited, hostAlive: false }, now).staleHost, false);
 	assert.equal(rowView({ ...base, host: fresh, hostAlive: true }, now).staleHost, false);
 	assert.equal(rowView({ ...base, host: null, hostAlive: false }, now).staleHost, false);
+});
+
+test("nextVisibleIdAfterRemoval: neighbor semantics (issue #147 A2)", () => {
+	const root = mkdtempSync(join(tmpdir(), "agentview-neighbor-"));
+	try {
+		for (const id of ["v1", "v2", "v3"]) createView(root, { id, name: id, cwd: root });
+		const now = Date.now();
+		const rows = listRows(root);
+		assert.equal(nextVisibleIdAfterRemoval(rows, "v2", now), "v3", "middle row -> next visible row");
+		assert.equal(nextVisibleIdAfterRemoval(rows, "v3", now), "v2", "last row -> previous row");
+		const single = mkdtempSync(join(tmpdir(), "agentview-neighbor-single-"));
+		try {
+			createView(single, { id: "only", name: "only", cwd: single });
+			assert.equal(nextVisibleIdAfterRemoval(listRows(single), "only", Date.now()), null, "single row -> null (board falls back to orderedIds[0])");
+			assert.equal(nextVisibleIdAfterRemoval([], "only", Date.now()), null, "empty list -> null");
+			assert.equal(nextVisibleIdAfterRemoval(rows, "nope", now), null, "unknown id -> null");
+		} finally {
+			rmSync(single, { recursive: true, force: true });
+		}
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });
