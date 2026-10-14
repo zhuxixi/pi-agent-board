@@ -14,6 +14,7 @@ import { claimHost, createView, readHost, readMeta, readState, updateOwnedHost, 
 import { readJournal } from "../src/core/coordinator-journal.mjs";
 import { startCoordinator } from "../test-support/ensure-coordinator-helper.mjs";
 import { capturePostmortem, formatPostmortem, waitForWithPostmortem } from "../test-support/flake-postmortem.mjs";
+import { createEchoProbe } from "../test-support/echo-probe.mjs";
 import { tryAcquireOwnedViewLock } from "../src/core/locks.mjs";
 
 function freshRoot() {
@@ -1819,10 +1820,20 @@ test("subscribe_terminal: snapshot + live continuity alongside legacy clients", 
 		await once(legacy, "connect");
 		const legacyMessages = listen(legacy).messages;
 		send(legacy, { type: "hello" });
-		// Wait for the first child output on the legacy socket: it proves the
-		// runner has fed its canonical model, so the subscribe below cannot hit
-		// the "host starting" empty-baseline race.
-		await waitFor(() => legacyMessages.find((m) => m.type === "output" && String(m.data).includes("fake pi ready")), 15000, capture);
+		// accept-registration race (issue #178): the one-shot boot banner is
+		// broadcast when the child starts, which can be *before* this socket is
+		// accepted — and legacy output has no replay, so waiting for it can burn
+		// the whole budget. Probe with an echo instead: the fake pty echoes every
+		// input, and the banner precedes any echo by construction, so an echo also
+		// proves the runner has fed its canonical model (which is what keeps the
+		// subscribe below off the "host starting" empty-baseline race).
+		const probe = createEchoProbe({ send: (line) => send(legacy, { type: "input", data: line }) });
+		probe.start();
+		try {
+			await waitFor(() => legacyMessages.find((m) => m.type === "output" && /boot-probe-\d/.test(String(m.data))), 15000, capture);
+		} finally {
+			probe.stop();
+		}
 
 		// Snapshot subscriber on a second socket.
 		const sub = createConnection(P.controlSocketPath(root, "v1"));
