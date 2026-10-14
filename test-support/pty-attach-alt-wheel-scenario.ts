@@ -85,6 +85,8 @@ const result = {
 	missingDeltaFallsThrough: false,
 	missingDeltaNoForward: false,
 	restoredAfterKillSwitch: false,
+	disconnectedFallsThrough: false,
+	disconnectedNoForward: false,
 };
 
 try {
@@ -198,6 +200,15 @@ try {
 	before = forwardedInputs().length;
 	(component as any).handleMouse(wheelEvent(-3));
 	result.restoredAfterKillSwitch = await waitFor(() => forwardedInputs().length > before, 3000);
+
+	// 7. Disconnected: send() would silently drop the report, so the wheel falls
+	// through instead of being consumed without effect (consume-only-on-effect).
+	before = forwardedInputs().length;
+	(component as any).connected = false;
+	result.disconnectedFallsThrough = (component as any).handleMouse(wheelEvent(-3)) === undefined;
+	await sleep(300);
+	result.disconnectedNoForward = forwardedInputs().length === before;
+	(component as any).connected = true;
 
 	socketProto.write = origWrite;
 	try {

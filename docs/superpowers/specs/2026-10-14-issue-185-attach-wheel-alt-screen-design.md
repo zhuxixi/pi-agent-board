@@ -5,6 +5,7 @@
 - Repo: `zhuxixi/pi-agent-board` · baseline: `main` @ `f81949d5` (#183) · worktree `issue-185-attach-wheel-alt-screen`
 - Drafted: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-14T00:06:01Z
 - Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-14T00:23:30Z — after round-1 review (mode: degraded same-model, user-confirmed; findings R1-D1..R1-D5 in `research/spec-review-round-1.md`)
+- Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-14T00:52:00Z — after local code-review (workflow `code-review`, run `code-review-mv7dz229-mrt1ay`): the disconnected alternate-buffer wheel now falls through instead of consuming a drop-bound forward (consume-only-on-effect invariant restored); §3.1/§8 updated
 
 ## 1. Problem
 
@@ -49,7 +50,7 @@ The alternate case deliberately skips `tryScrollBy`: letting the local viewport 
 
 Two edge notes on the alternate branch:
 
-- While the attach is disconnected, forwarding is a silent no-op (`send()` returns without a connection, `src/ui/pty-attach.ts:1351-1354`) — the event is still consumed, because there is no local scrollback to move; acceptable, since the attach shows a reconnect surface.
+- While the attach is disconnected, the branch falls through (`undefined`) instead of forwarding — `send()` would silently drop the report (`src/ui/pty-attach.ts`), and the pre-#185 branch likewise consumed the wheel only when it had an effect. The event goes back to pi, whose own handling is equally inert behind the overlay; acceptable, since the attach shows a reconnect surface.
 - `README.md:201`'s sentence ("While attached, `PageUp`, `PageDown`, `Home`, `End`, and the mouse wheel scroll local scrollback") must be updated in the same PR: in the alternate case the wheel scrolls the child's own viewport, same as `PageUp`/`PageDown`.
 
 ### 3.2 Wire format and coordinates
@@ -112,7 +113,7 @@ Seams for the component-level tests: `test-support/pty-attach-mouse-scenario.ts`
 - The forwarded report is synthesized, not a byte replay: coordinates are best-effort (the child uses them for scroll-view hit testing and falls back to its primary scroll view) and modifier bits are not carried; the child applies its own acceleration.
 - In the alternate case there is deliberately no local fallback: if the child ignores mouse reports, the wheel does nothing in that session (the same class of limitation `PageUp` has today if the child ignores paging keys).
 - The attach cannot observe whether the child actually scrolled; parity with `PageUp` is the contract, not a guarantee about the child's own limits.
-- In the disconnected state the alternate-branch forward is a silent no-op (see §3.1): the event is consumed and nothing moves — intentional, because there is no local scrollback to scroll.
+- In the disconnected state the alternate branch falls through rather than consuming the wheel (see §3.1): a forward that `send()` would silently drop is not an effect, so the event is handed back — restoring the pre-#185 consume-only-on-effect invariant.
 
 ## 9. Risks
 

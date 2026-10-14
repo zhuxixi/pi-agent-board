@@ -407,6 +407,10 @@ export class PtyAttachComponent implements Component {
 				mouseEnabled: this.mouseScrollEnabled(),
 			});
 			if (route === "child") {
+				// Consume only on effect, as the pre-#185 branch did: when the runner
+				// socket is down the forward would be a silent no-op (send() drops it),
+				// so hand the event back to pi instead of swallowing it pointlessly.
+				if (!this.socket || !this.connected) return undefined;
 				this.clearPendingClick();
 				this.clearSelection();
 				this.forwardWheelToChild(wheelLinesUp, event);

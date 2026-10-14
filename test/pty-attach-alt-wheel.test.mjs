@@ -34,4 +34,6 @@ test("attach alt wheel: forwards one SGR report per event, falls through on swit
 	assert.equal(parsed.missingDeltaFallsThrough, true, "a wheel report with no delta must fall through");
 	assert.equal(parsed.missingDeltaNoForward, true, "a wheel report with no delta must forward nothing");
 	assert.equal(parsed.restoredAfterKillSwitch, true, "clearing the kill switches must restore forwarding");
+	assert.equal(parsed.disconnectedFallsThrough, true, "a disconnected host must fall through — the forward would be a silent no-op");
+	assert.equal(parsed.disconnectedNoForward, true, "a disconnected host must forward nothing");
 });
