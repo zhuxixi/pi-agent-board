@@ -8,12 +8,13 @@ import { resolve } from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, truncateToWidth } from "@earendil-works/pi-tui";
 import { requestDashboardRender } from "../core/dashboard-render.mjs";
+import { nextVisibleIdAfterRemoval } from "../core/rows.mjs";
 import { createService } from "../runtime/service.mjs";
 import { planAttachPrelude, planAttachResolved } from "./attach-decision.mjs";
 import { screenLogPath } from "../core/paths.mjs";
 import { appendDiagnostic } from "../core/diagnostics.mjs";
-import { DashboardComponent, type DashboardResult } from "../ui/dashboard.js";
-import { PtyAttachComponent, type PtyAttachResult } from "../ui/pty-attach.js";
+import { DashboardComponent, type DashboardResult } from "../ui/dashboard.ts";
+import { PtyAttachComponent, type PtyAttachResult } from "../ui/pty-attach.ts";
 
 const POLL_MS = 700;
 
@@ -75,6 +76,7 @@ export async function openDashboard(
 	service: ReturnType<typeof createService>,
 	options: {
 		initialSelectedId?: string | null;
+		initialNotice?: string;
 		currentThinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	} = {},
 ): Promise<DashboardResult> {
@@ -102,6 +104,7 @@ export async function openDashboard(
 					root: service.getRoot(),
 					defaultCwd: ctx.cwd,
 					initialSelectedId: options.initialSelectedId,
+					initialNotice: options.initialNotice,
 					availableModels,
 					currentModel: ctx.model ?? null,
 					currentThinkingLevel: options.currentThinkingLevel ?? "off",
@@ -134,7 +137,7 @@ export async function openDashboard(
 	}
 }
 
-type AttachOutcome = { action: "detached" | "closed" | "switched" | "none" };
+type AttachOutcome = { action: "detached" | "closed" | "switched" | "none"; afterDelete?: { nextSelectedId: string | null; notice: string } };
 
 export async function dashboardAttachLoop(
 	ctx: ExtensionCommandContext,
@@ -145,6 +148,7 @@ export async function dashboardAttachLoop(
 ): Promise<void> {
 	let selectedId = initialSelectedId;
 	let again = true;
+	let pendingNotice: string | undefined;
 	while (again) {
 		const currentId = currentViewId(ctx, service);
 		if (currentId) void service.markVisited?.(currentId)?.catch(() => {});
@@ -152,10 +156,18 @@ export async function dashboardAttachLoop(
 		const result = await openDashboard(ctx, service, {
 			initialSelectedId: selectedId,
 			currentThinkingLevel: getThinkingLevel?.(),
+			initialNotice: pendingNotice,
 		});
+		pendingNotice = undefined;
 		if (result.action !== "attach") return;
 		selectedId = result.viewId;
 		const outcome = await attach(ctx, service, root, result.viewId, result.stopFirst);
+		if (outcome.afterDelete) {
+			// Issue #147: land on the neighbor (null -> deleted id -> existing
+			// orderedIds[0] clamp) and show the Deleted notice once.
+			selectedId = outcome.afterDelete.nextSelectedId ?? selectedId;
+			pendingNotice = outcome.afterDelete.notice;
+		}
 		again = outcome.action === "detached" || outcome.action === "closed" || outcome.action === "none";
 	}
 }
@@ -189,6 +201,18 @@ async function attach(
 		void service.markVisited?.(viewId)?.catch(() => {});
 		const result = await openPtyAttach(ctx, root, row.meta.id, row.meta.name, plan.socketPath);
 		void service.markVisited?.(viewId)?.catch(() => {});
+		if (result.action === "delete") {
+			// Issue #147: the component already tore down and exited — archive
+			// here so the host's death is never rendered inside the attach view.
+			// Neighbor and name are computed BEFORE archiving (rows change).
+			const latest = service.row(viewId) ?? row;
+			const name = latest.meta.name;
+			const nextSelectedId = nextVisibleIdAfterRemoval(service.rows(), viewId, Date.now());
+			const res = await service.archive(viewId);
+			if (!res.ok) ctx.ui.notify(res.error ?? "Delete failed", "error");
+			else return { action: "detached", afterDelete: { nextSelectedId, notice: `Deleted "${name}"` } };
+			return { action: "detached" };
+		}
 		return { action: result.action === "closed" ? "closed" : "detached" };
 	}
 	if (plan.plan === "session-switch") {

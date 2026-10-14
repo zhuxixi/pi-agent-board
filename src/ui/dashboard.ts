@@ -121,6 +121,7 @@ export interface DashboardDeps {
 	currentModel: LaunchModel | null;
 	currentThinkingLevel: ThinkingLevel;
 	initialSelectedId?: string | null;
+	initialNotice?: string;
 }
 
 export class DashboardComponent implements Component {
@@ -173,6 +174,9 @@ export class DashboardComponent implements Component {
 		};
 		this.editor.onSubmit = (text) => this.submitEditor(text);
 		this.selectedId = deps.initialSelectedId ?? null;
+		// Issue #147: the post-delete reopen carries the Deleted notice here —
+		// the component is new each open, so an inline notice cannot travel.
+		if (deps.initialNotice) this.notice(deps.initialNotice, "info");
 		try {
 			this.lastLaunchPrefs = this.deps.service.getLaunchPrefs?.() ?? null;
 		} catch {
