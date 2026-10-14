@@ -41,7 +41,7 @@ const plainTui = {
 	onTerminalColorSchemeChange: (_listener: (scheme: string) => void) => () => {},
 };
 
-function makeAttach(options: { backgroundReplies?: Array<{ r: number; g: number; b: number } | undefined>; queryVia?: "background" | "colors" } = {}) {
+function makeAttach(options: { backgroundReplies?: Array<{ r: number; g: number; b: number } | undefined>; queryVia?: "background" | "colors"; title?: string } = {}) {
 	let result: unknown = null;
 	// Issue #128: per-attach fake TUI with terminal-write capture and a
 	// color-scheme listener registry (the bridge under test registers here).
@@ -81,7 +81,7 @@ function makeAttach(options: { backgroundReplies?: Array<{ r: number; g: number;
 		theme,
 		keybindings,
 		(r) => { result = r; },
-		{ socketPath: "/no/such/socket", title: "gate" },
+		{ socketPath: "/no/such/socket", title: options.title ?? "gate" },
 	);
 	const sent: Array<Record<string, unknown>> = [];
 	(fixtureInternals<{ send: (msg: Record<string, unknown>) => void }>(attach)).send = (msg) => sent.push(msg);
@@ -92,6 +92,7 @@ function makeAttach(options: { backgroundReplies?: Array<{ r: number; g: number;
 		scopedTui,
 		backgroundProbeCalls,
 		didDetach: () => (result as { action?: string } | null)?.action === "detached",
+		resultAction: () => (result as { action?: string } | null)?.action ?? null,
 	};
 }
 
@@ -620,6 +621,119 @@ const out: Record<string, boolean> = {};
 	const reported = await waitFor(() => newApi.sent.length === 1, 1000);
 	out.settleProbeNewApiReportsRealTerminalScheme = reported && newApi.sent[0].type === "input" && newApi.sent[0].data === "\x1b[?997;2n";
 	newApi.attach.dispose();
+}
+
+// Q1. Issue #147: ctrl+x arms the in-place delete confirm — header row is
+// replaced (same row count), the chord is NOT forwarded, and y confirms by
+// resolving {action:"delete"} with no detach/terminate frame. The default
+// harness socket never connected, so this also pins "works while disconnected".
+{
+	const { attach, sent, resultAction } = makeAttach({ title: "session-a" });
+	attach.handleInput("\x18");
+	const header = attach.render(80)[0];
+	out.deleteArmShowsPrompt = header.includes("y confirms") && header.includes("session-a");
+	out.deleteArmHoldsKey = !sent.some((m) => m.type === "input" && m.data === "\x18");
+	attach.handleInput("y");
+	out.deleteConfirmResolves = resultAction() === "delete";
+	out.deleteConfirmSendsNoControlFrame = !sent.some((m) => m.type === "detach" || m.type === "terminate");
+	attach.dispose();
+}
+
+// Q2. Long names truncate (<=24 cols) so the confirm hint stays visible.
+{
+	const { attach } = makeAttach({ title: "x".repeat(40) });
+	attach.handleInput("\x18");
+	out.deleteLongNameKeepsHint = attach.render(80)[0].includes("y confirms");
+	attach.dispose();
+}
+
+// Q3. Any other key cancels and is forwarded — input is never swallowed.
+{
+	const { attach, sent, resultAction } = makeAttach();
+	attach.handleInput("\x18");
+	attach.handleInput("n");
+	out.deleteCancelForwards = sent.some((m) => m.type === "input" && m.data === "n") && resultAction() === null;
+	attach.dispose();
+}
+
+// Q4. Second ctrl+x is swallowed (cancel-swallow): no byte reaches the child,
+// the prompt clears, and a following y is ordinary input.
+{
+	const { attach, sent, resultAction } = makeAttach();
+	attach.handleInput("\x18");
+	attach.handleInput("\x18");
+	out.deleteSecondSwallowed = !sent.some((m) => m.type === "input" && m.data === "\x18") && !attach.render(80)[0].includes("y confirms");
+	attach.handleInput("y");
+	out.deleteYAfterSwallowForwards = sent.some((m) => m.type === "input" && m.data === "y") && resultAction() === null;
+	attach.dispose();
+}
+
+// Q5. A mouse chunk on the handleInput channel clears the armed state.
+{
+	const { attach, sent, resultAction } = makeAttach();
+	attach.handleInput("\x18");
+	attach.handleInput("\x1b[<64;10;10M");
+	attach.handleInput("y");
+	out.deleteWheelChunkClears = sent.some((m) => m.type === "input" && m.data === "y") && resultAction() === null;
+	attach.dispose();
+}
+
+// Q6. A TuiMouseEvent on the handleMouse channel (fullscreen mode, #167/#169)
+// clears the armed state too — native paste is off so the event returns
+// undefined, exercising the not-consumed path.
+{
+	const { attach, sent, resultAction } = makeAttach();
+	attach.handleInput("\x18");
+	process.env.AGENT_BOARD_ATTACH_NATIVE_PASTE = "0";
+	(attach as unknown as { handleMouse: (e: unknown) => unknown }).handleMouse({
+		type: "press", button: "middle", x: 3, y: 3, screenX: 3, screenY: 3, width: 80, height: 22, shift: false,
+	});
+	delete process.env.AGENT_BOARD_ATTACH_NATIVE_PASTE;
+	attach.handleInput("y");
+	out.deleteHandleMouseClears = sent.some((m) => m.type === "input" && m.data === "y") && resultAction() === null;
+	attach.dispose();
+}
+
+// Q7. Encoding forms arm too (kitty CSI-u, modifyOtherKeys).
+{
+	const kitty = makeAttach();
+	kitty.attach.handleInput("\x1b[120;5u");
+	const mok = makeAttach();
+	mok.attach.handleInput("\x1b[27;5;120~");
+	out.deleteEncodingsArm = kitty.attach.render(80)[0].includes("y confirms") && mok.attach.render(80)[0].includes("y confirms");
+	kitty.attach.dispose();
+	mok.attach.dispose();
+}
+
+// Q8. Confirm teardown mirrors detach()'s G3 ordering minus the control
+// frame: restore the held PTY size, then a graceful socket end — never
+// destroy, never a detach packet (clone of scenario D with \x18 + y).
+{
+	const attach = new PtyAttachComponent(plainTui as never, theme, keybindings, () => {}, { socketPath: "/no/such/socket", title: "wire" });
+	const wire: string[] = [];
+	const socket = {
+		write(data: string) { wire.push(data); return true; },
+		end() { wire.push("END"); },
+		destroy() { wire.push("DESTROY"); },
+		once(_event: string, _listener: () => void) { return this; },
+	};
+	const internals = attach as unknown as {
+		socket: typeof socket | null;
+		connected: boolean;
+		jiggleRetry: { start: (cols: number, rows: number) => void };
+	};
+	internals.socket = socket;
+	internals.connected = true;
+	internals.jiggleRetry.start(80, 22);
+	wire.length = 0;
+	attach.handleInput("\x18");
+	attach.handleInput("y");
+	const packets = wire.filter((entry) => entry !== "END" && entry !== "DESTROY").map((entry) => JSON.parse(entry));
+	out.deleteTeardownRestoresBeforeEnd =
+		packets.length === 1 &&
+		packets[0].type === "resize" && packets[0].cols === 80 && packets[0].rows === 22 &&
+		wire.at(-1) === "END" && !wire.includes("DESTROY");
+	attach.dispose();
 }
 
 // E2. A terminal at the minimum supported size must not emit a shrink that the

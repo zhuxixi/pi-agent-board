@@ -5,6 +5,7 @@ import { closeSync, existsSync, openSync, readSync, statSync } from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import type { Component, KeybindingsManager, RgbColor, TUI, TerminalColorScheme, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { resolveAttachDeleteKey } from "../core/attach-delete.mjs";
 import { findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
 import { createAttachOutputRenderScheduler, detectCursorDesync, isPtyCursorHidden, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
 import { evaluateAttachReconnect, shouldEscapeAttach } from "../core/pty-attach-reconnect.mjs";
@@ -15,7 +16,7 @@ import { backgroundRgbFromTerminalColors, buildSettleSchemePatch, colorSchemeFor
 import { REPLY_GUARD_WINDOW_MS, createReplyGuard, isReplyGuardEnabled } from "../core/terminal-reply-guard.mjs";
 import { clampInt, encodeWheelReport, historyFloorAfterHydrate, resolveAttachMouseAction, resolveAttachWheelRoute, resolvePasteSelectionSource, resolveWheelLines, sameMousePoint, scrollableHistoryLines, scrollViewportTop, selectionDragScrollLines, selectionReleaseIsDrag, shouldMirrorSelectionToPrimary, shouldOwnOuterMouseMode, splitAttachInput, wheelScrollLinesUp } from "../core/pty-scroll.mjs";
 
-export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null };
+export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null } | { action: "delete" };
 
 type ThemeLike = {
 	fg(color: string, text: string): string;
@@ -163,6 +164,8 @@ export class PtyAttachComponent implements Component {
 	private connected = false;
 	private closed = false;
 	private status = "connecting";
+	/** Issue #147: in-place delete confirm is armed (first ctrl+x). */
+	private confirmArmed = false;
 	private parserBuffer = "";
 	private retryTimer: ReturnType<typeof setTimeout> | null = null;
 	private loadingTimer: ReturnType<typeof setInterval> | null = null;
@@ -328,6 +331,9 @@ export class PtyAttachComponent implements Component {
 		// whatever it passes falls through to the kind-based dispatch below.
 		for (const segment of splitAttachInput(data)) {
 			if (segment.kind === "mouse") {
+				// Issue #147: a mouse gesture on either channel cancels the armed
+				// delete confirm — it is real user intent, unlike a terminal report.
+				this.clearConfirmArmed();
 				this.handleMouseInputChunk(segment.events);
 			} else if (!this.consumeByReplyGuard(segment.data)) {
 				if (segment.kind === "report") this.send({ type: "input", data: segment.data });
@@ -359,6 +365,30 @@ export class PtyAttachComponent implements Component {
 	 * by `handleInput` without touching the selection or the viewport, because it carries no user
 	 * intent (focus events, query replies). */
 	private handleKeyInput(data: string): void {
+		// Issue #147: in-place delete gesture. The resolver is pure and never
+		// reads connection state, so the gesture works even while the host is
+		// down. cancel falls through so input is never swallowed.
+		const deleteKey = resolveAttachDeleteKey({ confirmArmed: this.confirmArmed }, data);
+		this.confirmArmed = deleteKey.confirmArmed;
+		if (deleteKey.action === "arm") {
+			this.scheduleRender();
+			return;
+		}
+		if (deleteKey.action === "confirm") {
+			// Teardown first — same shape as detach() minus the control frame:
+			// close(true) restores a held PTY (G3, issue #42) and gracefully
+			// ends the socket; the consumer archives and the host is terminated,
+			// so no detach packet is sent. done() before archive so the host's
+			// death is never rendered here.
+			this.close(true);
+			this.done({ action: "delete" });
+			return;
+		}
+		if (deleteKey.action === "cancel-swallow") {
+			this.scheduleRender();
+			return;
+		}
+		if (deleteKey.action === "cancel") this.scheduleRender();
 		if (matchesKey(data, Key.pageUp)) {
 			this.clearPendingClick();
 			this.clearSelection();
@@ -444,6 +474,11 @@ export class PtyAttachComponent implements Component {
 	 * wheel and the middle-click paste; every other event returns undefined so pi's
 	 * own fullscreen selection keeps working. */
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		// Issue #147: clear the armed delete confirm on the fullscreen mouse
+		// channel BEFORE any routing — wheel consumed locally, wheel forwarded to
+		// the child (#185), selection mirror, and paste all count as "any other
+		// key cancels", whether or not the event ends up consumed.
+		this.clearConfirmArmed();
 		// Issue #173 follow-up: the renderer's routeWheel() fallback only scrolls real
 		// ScrollView components, while the attach viewport paints its own xterm
 		// scrollback — so a wheel event returned unconsumed scrolls nothing and the
@@ -511,9 +546,11 @@ export class PtyAttachComponent implements Component {
 		} else {
 			body = this.renderLoading(bodyHeight, width);
 		}
-		const header =
-			this.theme.fg("accent", this.theme.bold(` ${this.opts.title} `)) +
-			this.theme.fg("muted", `${this.status} · opens links · drag selects+copies · Ctrl+←/Ctrl+\\ detach`);
+		const header = this.confirmArmed
+			? this.theme.fg("accent", this.theme.bold(` Delete "${truncateToWidth(this.opts.title, 24, "")}"? `)) +
+			  this.theme.fg("muted", "y confirms · any other key cancels")
+			: this.theme.fg("accent", this.theme.bold(` ${this.opts.title} `)) +
+			  this.theme.fg("muted", `${this.status} · opens links · drag selects+copies · Ctrl+←/Ctrl+\\ detach`);
 		return [clip(header, width), ...body.map((l) => clipTerminalLine(l, width)), this.theme.fg("dim", "─".repeat(width))];
 	}
 
@@ -545,6 +582,12 @@ export class PtyAttachComponent implements Component {
 
 	dispose(): void {
 		this.close();
+	}
+
+	private clearConfirmArmed(): void {
+		if (!this.confirmArmed) return;
+		this.confirmArmed = false;
+		this.scheduleRender();
 	}
 
 	private detach(): void {
