@@ -44,8 +44,9 @@ const DROP_SHAPES = [
 // Complete reply shapes that are forwarded whole: the child's pi-tui parsers
 // consume them (automatic light/dark theme) and only as one sequence.
 const FORWARD_SHAPES = [
-	// `\x1b[?997;<n>n` color-scheme report. Any single digit is forwarded — value
-	// validation belongs to the child's parser, not to this guard.
+	// `\x1b[?997;<n>n` color-scheme report. Any numeric value (one or more digits)
+	// is forwarded — value validation belongs to the child's parser, not to this
+	// guard.
 	{ family: "color-scheme", pattern: /^\x1b\[\?997;[0-9]+n$/ },
 	// OSC 4 palette / 10 foreground / 11 background / 12 cursor color replies,
 	// BEL- or ST-terminated.
@@ -85,4 +86,100 @@ export function classifyReplyEvent(data) {
 	// text may be a reply tail fragment (those never start with ESC after the
 	// upstream split, see the field evidence in the issue).
 	return data.startsWith("\x1b") ? { kind: "other" } : { kind: "plain" };
+}
+
+const SWALLOW = Object.freeze({ action: "swallow" });
+const PASS = Object.freeze({ action: "pass" });
+
+/**
+ * Issue #170 kill switch: `0`, `off` or `false` (case/space-insensitive)
+ * disable the guard; unset or anything else keeps it enabled.
+ */
+export function isReplyGuardEnabled(value) {
+	if (value === undefined) return true;
+	return !["0", "off", "false"].includes(value.trim().toLowerCase());
+}
+
+/**
+ * Pure reply-fragment state machine (spec §3.3). Two states only — idle and
+ * armed — and no timer of its own: the caller feeds `now` and arms a host
+ * timer from `pendingSince()`.
+ *
+ *   idle  + head            → armed (buffer = event, since = now)  → swallow
+ *   idle  + complete        → idle                                  → drop/forward
+ *   idle  + plain | other   → idle                                  → pass
+ *   armed + plain           → armed, buffer += event                → swallow
+ *   armed + plain over cap  → idle (buffer and event are dropped)   → swallow
+ *   armed + joined complete → idle                                  → drop/forward joined
+ *   armed + head            → armed (stale buffer dropped)          → swallow
+ *   armed + complete        → idle (stale buffer dropped)           → handle event alone
+ *   armed + other           → idle (stale buffer dropped)           → pass
+ *   armed + expire in time  → idle                                  → swallow
+ */
+export function createReplyGuard({
+	windowMs = REPLY_GUARD_WINDOW_MS,
+	maxAbsorbBytes = REPLY_GUARD_MAX_ABSORB_BYTES,
+} = {}) {
+	let armed = false;
+	let buffer = "";
+	let since = null;
+
+	const reset = () => {
+		armed = false;
+		buffer = "";
+		since = null;
+	};
+	const decisionFor = (event, data) => (event.action === "forward" ? { action: "forward", data } : SWALLOW);
+
+	return {
+		feed(data, now) {
+			const event = classifyReplyEvent(data);
+			if (!armed) {
+				if (event.kind === "reply-head") {
+					armed = true;
+					buffer = data;
+					since = now;
+					return SWALLOW;
+				}
+				if (event.kind === "reply-complete") return decisionFor(event, data);
+				return PASS;
+			}
+			if (event.kind === "other") {
+				// Keys, mouse and paste win over absorbing one more fragment.
+				reset();
+				return PASS;
+			}
+			if (event.kind === "reply-head") {
+				// A fresh head means the previous sequence will never complete.
+				buffer = data;
+				since = now;
+				return SWALLOW;
+			}
+			if (event.kind === "reply-complete") {
+				reset();
+				return decisionFor(event, data);
+			}
+			const joined = buffer + data;
+			if (joined.length > maxAbsorbBytes) {
+				reset();
+				return SWALLOW;
+			}
+			const joinedEvent = classifyReplyEvent(joined);
+			if (joinedEvent.kind === "reply-complete") {
+				reset();
+				return decisionFor(joinedEvent, joined);
+			}
+			buffer = joined;
+			return SWALLOW;
+		},
+		expire(now) {
+			if (!armed || now - since < windowMs) return null;
+			reset();
+			return SWALLOW;
+		},
+		pendingSince() {
+			return armed ? since : null;
+		},
+		reset,
+	};
 }
