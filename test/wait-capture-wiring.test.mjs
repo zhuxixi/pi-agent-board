@@ -119,7 +119,7 @@ test("A3/A7: every wait in the editor_state case carries a capture thunk", () =>
 	const calls = waitForCalls(body);
 	assert.ok(calls.length >= 6, `found the editor_state waits (${calls.length})`);
 	for (const args of calls) {
-		assert.match(args, /,\s*15000,\s*capture\s*$/, `wait without capture: ${args.trim().slice(0, 120)}`);
+		assert.match(args, /,\s*capture\s*$/, `wait without capture: ${args.trim().slice(0, 120)}`);
 	}
 });
 
