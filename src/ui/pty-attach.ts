@@ -12,7 +12,7 @@ import { installImeCursorCoalesce } from "../core/ime-cursor-coalesce.mjs";
 import { createJiggleRetryController } from "../core/pty-attach-jiggle-controller.mjs";
 import { createTerminalAttachClient } from "../core/terminal-attach-client.mjs";
 import { backgroundRgbFromTerminalColors, buildSettleSchemePatch, colorSchemeForBackgroundRgb, extractOscQuerySequences, resolveProbeApi, toColorSchemeReport } from "../core/terminal-query-sequences.mjs";
-import { clampInt, parseMouseInputChunk, resolveAttachMouseAction, resolvePasteSelectionSource, resolveWheelLines, scrollViewportTop, selectionDragScrollLines, shouldMirrorSelectionToPrimary, shouldOwnOuterMouseMode } from "../core/pty-scroll.mjs";
+import { clampInt, encodeWheelReport, parseMouseInputChunk, resolveAttachMouseAction, resolveAttachWheelRoute, resolvePasteSelectionSource, resolveWheelLines, scrollViewportTop, selectionDragScrollLines, shouldMirrorSelectionToPrimary, shouldOwnOuterMouseMode, wheelScrollLinesUp } from "../core/pty-scroll.mjs";
 
 export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null };
 
@@ -99,6 +99,10 @@ interface XtermLike {
 	buffer: {
 		active: {
 			baseY: number;
+			// "normal" | "alternate" (@xterm/headless IBuffer.type): an alternate
+			// buffer keeps no scrollback, which is what routes the fullscreen wheel
+			// to the child instead of the attach's own viewport (issue #185).
+			type: string;
 			cursorX?: number;
 			cursorY?: number;
 			length: number;
@@ -200,7 +204,9 @@ export class PtyAttachComponent implements Component {
 	// Timestamp of the first disconnect that started the current reconnect
 	// cycle; reset on every successful (re)connect.
 	private disconnectedAt: number | null = null;
-	// Lines scrolled per mouse-wheel event; configurable via $AGENT_BOARD_WHEEL_LINES.
+	// Lines scrolled per mouse-wheel notch on the legacy (regular-mode) raw-SGR path,
+	// configurable via $AGENT_BOARD_WHEEL_LINES. The fullscreen handleMouse path uses
+	// the TUI's wheelDelta instead, which is already accelerated and line-quantified.
 	private readonly mouseWheelLines = resolveWheelLines();
 	private readonly term: XtermLike;
 	private cols = 120;
@@ -376,10 +382,43 @@ export class PtyAttachComponent implements Component {
 
 	/** Issue #167: fullscreen TUI (pi ≥1.0) consumes raw SGR mouse sequences in
 	 * TuiAltScreen and delivers normalized events to overlays here instead — the
-	 * legacy handleInput mouse path never runs in that mode. Only the
-	 * middle-click paste is ours; every other event returns undefined so pi's
-	 * own fullscreen selection and the wheel defer path keep working. */
+	 * legacy handleInput mouse path never runs in that mode. This handler owns the
+	 * wheel and the middle-click paste; every other event returns undefined so pi's
+	 * own fullscreen selection keeps working. */
 	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		// Issue #173 follow-up: the renderer's routeWheel() fallback only scrolls real
+		// ScrollView components, while the attach viewport paints its own xterm
+		// scrollback — so a wheel event returned unconsumed scrolls nothing and the
+		// fullscreen wheel goes dead (regular mode is unaffected: it arrives as a raw
+		// SGR sequence through handleInput instead). Consume it locally, honoring the
+		// same kill switches as the legacy path, and fall through when scrolling is
+		// disabled or the viewport cannot actually move.
+		//
+		// Issue #185: an alternate-screen child leaves that scrollback inert (an
+		// alternate buffer keeps no history), so "local" routing can never move
+		// there. Forward one synthesized SGR wheel report instead and let the child
+		// scroll its own viewport — the same fallback PageUp/PageDown already use
+		// when the local viewport cannot move.
+		const wheelLinesUp = wheelScrollLinesUp(event);
+		if (wheelLinesUp !== 0) {
+			const route = resolveAttachWheelRoute({
+				bufferType: this.term.buffer.active.type,
+				wheelLinesUp,
+				mouseEnabled: this.mouseScrollEnabled(),
+			});
+			if (route === "child") {
+				// Consume only on effect, as the pre-#185 branch did: when the runner
+				// socket is down the forward would be a silent no-op (send() drops it),
+				// so hand the event back to pi instead of swallowing it pointlessly.
+				if (!this.socket || !this.connected) return undefined;
+				this.clearPendingClick();
+				this.clearSelection();
+				this.forwardWheelToChild(wheelLinesUp, event);
+				return { handled: true, render: false };
+			}
+			if (route === "local" && this.tryScrollBy(wheelLinesUp)) return { handled: true, render: false };
+			return undefined;
+		}
 		const nativePasteEnabled = process.env.AGENT_BOARD_ATTACH_NATIVE_PASTE !== "0";
 		if (shouldMirrorSelectionToPrimary(event, { nativePasteEnabled })) {
 			// Observe only — pi's fullscreen selection keeps the event. Mirroring must
@@ -1283,6 +1322,23 @@ export class PtyAttachComponent implements Component {
 	/** Feed socket output into the jiggle retry controller (clear/frame detection). */
 	private checkClearSequence(data: string): void {
 		this.jiggleRetry.feed(data);
+	}
+
+	/** Issue #185: forward one synthesized SGR wheel report so an alternate-screen
+	 * child scrolls its own viewport (the attach's scrollback is inert there).
+	 * One report per received event — the child applies its own acceleration,
+	 * exactly as it would for a real terminal. Coordinates are child-screen
+	 * cells: the normalized event is zero-based and local to this overlay, the
+	 * body starts at local row 1 (header row 0, footer last row), and SGR is
+	 * one-based. */
+	private forwardWheelToChild(linesUp: number, event: TuiMouseEvent): void {
+		this.send({
+			type: "input",
+			data: encodeWheelReport(linesUp > 0 ? "up" : "down", {
+				col: clampInt(event.x + 1, 1, this.cols),
+				row: clampInt(event.y, 1, Math.max(1, this.bodyHeight())),
+			}),
+		});
 	}
 
 	private tryScrollBy(linesUp: number): boolean {

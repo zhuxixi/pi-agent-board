@@ -1,17 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+	encodeWheelReport,
 	mouseWheelDirection,
 	parseMouseEvent,
 	parseMouseInputChunk,
 	resizeJiggleSize,
 	resolveAttachMouseAction,
+	resolveAttachWheelRoute,
 	resolvePasteSelectionSource,
 	resolveWheelLines,
 	scrollViewportTop,
 	selectionDragScrollLines,
 	shouldMirrorSelectionToPrimary,
 	shouldOwnOuterMouseMode,
+	wheelScrollLinesUp,
 } from "../src/core/pty-scroll.mjs";
 
 test("mouseWheelDirection decodes standard/passive SGR and X10 wheel events", () => {
@@ -23,6 +26,46 @@ test("mouseWheelDirection decodes standard/passive SGR and X10 wheel events", ()
 	assert.equal(mouseWheelDirection("\x1b[M`!!"), 1);
 	assert.equal(mouseWheelDirection("\x1b[Ma!!"), -1);
 	assert.equal(mouseWheelDirection("x"), 0);
+});
+
+test("resolveAttachWheelRoute picks the alternate-buffer branch, else local, else none", () => {
+	// Alternate buffer: the attach's own scrollback is inert there, so the wheel
+	// must be forwarded to the child instead of scrolling locally (issue #185).
+	assert.equal(resolveAttachWheelRoute({ bufferType: "alternate", wheelLinesUp: 3, mouseEnabled: true }), "child");
+	assert.equal(resolveAttachWheelRoute({ bufferType: "alternate", wheelLinesUp: -2, mouseEnabled: true }), "child");
+	// Normal buffer: local scrollback exists; the shell still downgrades to
+	// "none" itself when tryScrollBy cannot move (it owns the live viewport).
+	assert.equal(resolveAttachWheelRoute({ bufferType: "normal", wheelLinesUp: 3, mouseEnabled: true }), "local");
+	// Kill switches or an unusable delta leave the event to pi.
+	assert.equal(resolveAttachWheelRoute({ bufferType: "normal", wheelLinesUp: 3, mouseEnabled: false }), "none");
+	assert.equal(resolveAttachWheelRoute({ bufferType: "alternate", wheelLinesUp: 3, mouseEnabled: false }), "none");
+	assert.equal(resolveAttachWheelRoute({ bufferType: "normal", wheelLinesUp: 0, mouseEnabled: true }), "none");
+	assert.equal(resolveAttachWheelRoute({ bufferType: "alternate", wheelLinesUp: 0, mouseEnabled: true }), "none");
+});
+
+test("encodeWheelReport emits SGR up/down reports with 1-based clamped coordinates", () => {
+	// Button 64 = wheel up, 65 = wheel down (plain SGR report a terminal sends).
+	assert.equal(encodeWheelReport("up", { col: 5, row: 3 }), "\x1b[<64;5;3M");
+	assert.equal(encodeWheelReport("down", { col: 5, row: 3 }), "\x1b[<65;5;3M");
+	// Coordinates are child-screen cells and must never leave the 1-based range.
+	assert.equal(encodeWheelReport("up", { col: 0, row: 0 }), "\x1b[<64;1;1M");
+	assert.equal(encodeWheelReport("up", { col: -7, row: 2.9 }), "\x1b[<64;1;2M");
+	assert.equal(encodeWheelReport("up", { col: Number.NaN, row: undefined }), "\x1b[<64;1;1M");
+});
+
+test("wheelScrollLinesUp flips pi-tui's wheel delta into the viewport's linesUp", () => {
+	// pi-tui scrolls up on a NEGATIVE wheelDelta; tryScrollBy/scrollViewportTop
+	// scroll up on a POSITIVE linesUp. The sign flip is the whole contract.
+	assert.equal(wheelScrollLinesUp({ type: "wheel", wheelDelta: -3 }), 3);
+	assert.equal(wheelScrollLinesUp({ type: "wheel", wheelDelta: 2 }), -2);
+	// Nothing to scroll, or not a wheel event at all ⇒ 0 so the caller falls
+	// through to pi's own handling instead of consuming the event.
+	assert.equal(wheelScrollLinesUp({ type: "wheel", wheelDelta: 0 }), 0);
+	assert.equal(wheelScrollLinesUp({ type: "wheel" }), 0);
+	assert.equal(wheelScrollLinesUp({ type: "wheel", wheelDelta: Number.NaN }), 0);
+	assert.equal(wheelScrollLinesUp({ type: "press", button: "middle", wheelDelta: -3 }), 0);
+	assert.equal(wheelScrollLinesUp(null), 0);
+	assert.equal(wheelScrollLinesUp(undefined), 0);
 });
 
 test("parseMouseEvent decodes press, drag, and release events", () => {

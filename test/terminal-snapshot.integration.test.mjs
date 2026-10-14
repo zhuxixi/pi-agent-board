@@ -13,6 +13,8 @@ import * as P from "../src/core/paths.mjs";
 import { createView, readHost } from "../src/core/store.mjs";
 import { createTerminalAttachClient } from "../src/core/terminal-attach-client.mjs";
 import { capturePostmortem, formatPostmortem, waitForWithPostmortem } from "../test-support/flake-postmortem.mjs";
+import { DEFAULT_SCROLLBACK_SNAPSHOT_CAP } from "../src/core/terminal-snapshot.mjs";
+import { collectBurstIds, formatBurstDiagnostics } from "../test-support/burst-diagnostics.mjs";
 import { createEchoProbe } from "../test-support/echo-probe.mjs";
 
 // Spec acceptance coverage (issue #91 phase 4):
@@ -21,8 +23,26 @@ import { createEchoProbe } from "../test-support/echo-probe.mjs";
 // plus the phase-3 final-review pre-flight: firehose stress + parser containment
 // (those live in the second half of this file).
 
+// Snapshot frame capacity (issue #184): the frame carries the viewport rows plus
+// the scrollback cap, so a late subscriber can only recover the TAIL of that
+// window. RUNNER_ROWS is shared with spawnRunner's default — never mirror it, or
+// the window guard below drifts away from the real viewport.
+const RUNNER_ROWS = 24;
+// The burst must FIT the window, otherwise "frame ∪ flush ∪ live covers every
+// row" becomes a capture-timing race instead of a property (issue #184).
+const BURST_LINES = 200;
+const MAX_BURST_MISC_ROWS = 8;
+// Non-burst rows (boot banner, probe echo, cursor line) can eat a few window
+// slots in the overflow leg; the boundary assertion tolerates this much drift.
+const MISC_TOLERANCE = 8;
+
 function freshRoot() {
 	return mkdtempSync(join(tmpdir(), "agentview-snap-"));
+}
+
+/** Concatenate the text of every `output` message (wire chunks may hold many lines). */
+function outputText(messages) {
+	return messages.filter((m) => m.type === "output").map((m) => String(m.data)).join("\n");
 }
 
 // Same rationale as pty-runner.integration.test.mjs: every waitFor is an
@@ -99,7 +119,7 @@ function reapChild(root, viewId) {
 
 /** Create a view + host config + spawn a runner. Mirrors the pty-runner
  *  integration fixture (same helper child, same isolation shape). */
-function spawnRunner(root, viewId, { env = {}, cols = 80, rows = 24 } = {}) {
+function spawnRunner(root, viewId, { env = {}, cols = 80, rows = RUNNER_ROWS } = {}) {
 	const meta = createView(root, { id: viewId, name: viewId, cwd: process.cwd() });
 	const configPath = P.hostConfigPath(root, viewId);
 	atomicWriteJson(configPath, {
@@ -259,7 +279,7 @@ test("A5: mid-stream subscribe via the real client module — no gap, no dup, al
 });
 
 // Wait ceilings here are 30s (vs the 15s file default): the burst scenario is
-// spawn-heavy (runner + 400-line child burst) and is the ledgered load-flake
+// spawn-heavy (runner + BURST_LINES-line child burst) and is the ledgered load-flake
 // hotspot — it has tripped its ceiling even at moderate parallel load. Loud
 // failure semantics preserved; only failure latency grows.
 test("A5: burst through the snapshot window — frame→flush→end interleaving pinned on the wire, client converges in order", async () => {
@@ -267,17 +287,35 @@ test("A5: burst through the snapshot window — frame→flush→end interleaving
 	const viewId = "a5flush";
 	let runner;
 	const sockets = [];
+	// issue #184: the coverage assertion in this case is valid only while the whole
+	// burst fits the snapshot frame window (viewport rows + scrollback cap). Keep
+	// this guard so a future BURST_LINES bump fails loudly instead of flaking.
+	assert.ok(
+		BURST_LINES + MAX_BURST_MISC_ROWS <= RUNNER_ROWS + DEFAULT_SCROLLBACK_SNAPSHOT_CAP,
+		`burst must fit the snapshot frame window: ${BURST_LINES} + ${MAX_BURST_MISC_ROWS} > ${RUNNER_ROWS} + ${DEFAULT_SCROLLBACK_SNAPSHOT_CAP}`,
+	);
 	// issue #95: A5's 30s waits have historically flaked, so a timeout now
 	// carries a snapshot of the durable state at the moment of failure.
-	const capture = () => formatPostmortem(capturePostmortem(root, viewId, null));
+	// issue #184: the failure must name its mechanism (child side vs frame side),
+	// so the postmortem carries test-side counters next to the durable state.
+	const observed = { driver: [], b: null };
+	const capture = () =>
+		formatPostmortem(capturePostmortem(root, viewId, null))
+		+ "\n"
+		+ formatBurstDiagnostics({
+			expectedRows: BURST_LINES,
+			driverTexts: outputText(observed.driver),
+			frameText: observed.b?.snapshotReady?.[0]?.frame ?? "",
+			liveTexts: (observed.b?.output ?? []).map((data) => (typeof data === "string" ? data : (data?.data ?? ""))),
+		});
 	try {
-		({ runner } = spawnRunner(root, viewId, { env: { FAKE_PTY_BURST_LINES: "400" } }));
+		({ runner } = spawnRunner(root, viewId, { env: { FAKE_PTY_BURST_LINES: String(BURST_LINES) } }));
 		await waitFor(() => hostReady(root, viewId), 30000, capture);
 
 		const driver = createConnection(P.controlSocketPath(root, viewId));
 		await once(driver, "connect");
 		sockets.push(driver);
-		const driverMessages = listen(driver).messages;
+		const driverMessages = (observed.driver = listen(driver).messages);
 		send(driver, { type: "hello" });
 		// One-shot boot banner is racy against socket accept (banner can be
 		// broadcast before this connection is accepted, and legacy output has no
@@ -295,7 +333,9 @@ test("A5: burst through the snapshot window — frame→flush→end interleaving
 		const socketB = createConnection(P.controlSocketPath(root, viewId));
 		await once(socketB, "connect");
 		sockets.push(socketB);
-		const { client: clientB, events: eventsB } = wireClient(socketB);
+		const wiredB = wireClient(socketB);
+		const { client: clientB, events: eventsB } = wiredB;
+		observed.b = eventsB;
 		clientB.start();
 
 		// Raw subscriber C: wire observation of the frame→flush→end window.
@@ -331,7 +371,7 @@ test("A5: burst through the snapshot window — frame→flush→end interleaving
 
 		// Client B: converged with zero recovery, then the full burst content is
 		// delivered exactly once across frame ∪ outputs. NOTE: outputSeq counts
-		// CHUNKS, not lines — the PTY coalesces the 400-line burst into a
+		// CHUNKS, not lines — the PTY coalesces the BURST_LINES-line burst into a
 		// handful of multi-KB reads, so completeness is asserted over content
 		// (line coverage), never over seq magnitude.
 		assert.deepEqual(eventsB.protocolError, []);
@@ -344,12 +384,96 @@ test("A5: burst through the snapshot window — frame→flush→end interleaving
 		collect(frameB);
 		await waitFor(() => {
 			for (const data of eventsB.output) collect(data);
-			return seen.size >= 400;
+			return seen.size >= BURST_LINES;
 		}, 30000, capture);
-		assert.equal(seen.size, 400, "every burst line delivered exactly once across frame+flush+live");
+		assert.equal(seen.size, BURST_LINES, "every burst line delivered exactly once across frame+flush+live");
 	} finally {
 		await cleanup(root, viewId, sockets, [runner]);
 	}
+});
+
+/** Spawn a runner, drain a full burst on an ALREADY-SUBSCRIBED legacy driver, then
+ *  subscribe a fresh wire client — the worst-case capture timing for the frame
+ *  window contract (issue #184). Returns only the client-side observations. */
+async function measureLateSubscribe(totalLines) {
+	const root = freshRoot();
+	const viewId = `a5w-${totalLines}`;
+	const sockets = [];
+	let runner;
+	try {
+		({ runner } = spawnRunner(root, viewId, { env: { FAKE_PTY_BURST_LINES: String(totalLines) } }));
+		await waitFor(() => hostReady(root, viewId), 30000);
+
+		const driver = createConnection(P.controlSocketPath(root, viewId));
+		await once(driver, "connect");
+		sockets.push(driver);
+		const driverMessages = listen(driver).messages;
+		send(driver, { type: "hello" });
+		let probeN = 0;
+		const probeTimer = setInterval(() => {
+			probeN += 1;
+			send(driver, { type: "input", data: `boot-probe-${probeN}\r` });
+		}, 300);
+		try {
+			await waitFor(() => driverMessages.find((m) => m.type === "output" && /boot-probe-\d/.test(String(m.data))), 30000);
+		} finally {
+			clearInterval(probeTimer);
+		}
+
+		// Drain the whole burst BEFORE subscribing: the capture is then guaranteed to
+		// land after every row exists, which is what makes both legs deterministic.
+		send(driver, { type: "input", data: "burst\r" });
+		await waitFor(() => collectBurstIds(outputText(driverMessages)).length >= totalLines, 30000);
+
+		const socketB = createConnection(P.controlSocketPath(root, viewId));
+		await once(socketB, "connect");
+		sockets.push(socketB);
+		const { client: clientB, events } = wireClient(socketB);
+		clientB.start();
+		await waitFor(() => events.snapshotReady.length > 0, 30000);
+		// No settle delay: the runner sends the catch-up flush chunks BEFORE snapshot_end
+		// (src/core/terminal-attach-protocol.mjs:138-150), and the client emits the flush
+		// while handling snapshot_end — so observing snapshotReady means the whole window
+		// is already in `events` (CR round 1, advisory).
+
+		const union = new Set([
+			...collectBurstIds(events.snapshotReady[0]?.frame ?? ""),
+			...collectBurstIds(events.output.map((data) => (typeof data === "string" ? data : (data?.data ?? ""))).join("\n")),
+		]);
+		return { union, protocolError: events.protocolError, resubscribing: events.resubscribing };
+	} finally {
+		await cleanup(root, viewId, sockets, [runner]);
+	}
+}
+
+test("A5w: window contract — a late subscriber gets the frame-window tail, and content inside the window arrives complete", async () => {
+	const window = RUNNER_ROWS + DEFAULT_SCROLLBACK_SNAPSHOT_CAP;
+
+	// leg 1: burst larger than the window — the head is unrecoverable by design.
+	const overTotal = window + 120;
+	const leg1 = await measureLateSubscribe(overTotal);
+	assert.ok(leg1.union.size < overTotal, `expected truncation: union ${leg1.union.size} of ${overTotal}`);
+	assert.ok(leg1.union.size <= window, `union ${leg1.union.size} must not exceed the window ${window}`);
+	assert.ok(
+		leg1.union.size >= window - MISC_TOLERANCE,
+		`union ${leg1.union.size} must fill the window (tolerance ${MISC_TOLERANCE})`,
+	);
+	const leg1Ids = [...leg1.union].sort((a, b) => a - b);
+	assert.ok(leg1Ids[0] > 1, "the window truncates the head of the burst");
+	assert.equal(
+		leg1Ids[leg1Ids.length - 1] - leg1Ids[0] + 1,
+		leg1Ids.length,
+		"the union is a contiguous tail, never a stitched subset",
+	);
+	assert.deepEqual(leg1.protocolError, []);
+	assert.deepEqual(leg1.resubscribing, []);
+
+	// leg 2: burst that fits the window — complete coverage even at the worst capture
+	// timing. This is the deterministic proof behind the A5 burst coverage assertion.
+	const leg2 = await measureLateSubscribe(BURST_LINES);
+	assert.equal(leg2.union.size, BURST_LINES, "content inside the window must arrive complete");
+	assert.deepEqual(leg2.protocolError, []);
+	assert.deepEqual(leg2.resubscribing, []);
 });
 
 test("A5c: runner restart — reconnect gets a fresh/empty baseline from the new child, never the old screen", async () => {
