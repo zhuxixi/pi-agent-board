@@ -18,6 +18,23 @@ if (process.env.FAKE_PTY_STREAM_MODE === "steady") {
 	timer.unref?.();
 }
 
+// "alt": enter the alternate screen and keep repainting one line — the
+// attach's headless xterm lands in the alternate buffer, where no local
+// scrollback exists. This is issue #185's wheel-forwarding topology: a
+// fullscreen child owns the scroll, and the attach's own viewport cannot move.
+// The enable sequence is re-asserted on every tick so the state cannot be lost
+// to a replayed/truncated screen log or a synthesized snapshot frame on a slow
+// CI runner (a real terminal would only send it once).
+if (process.env.FAKE_PTY_STREAM_MODE === "alt") {
+	process.stdout.write("\x1b[?1049h\x1b[H\x1b[2Kalt-frame-0\r\nalt-frame-0b");
+	let n = 0;
+	const timer = setInterval(() => {
+		n += 1;
+		process.stdout.write(`\x1b[?1049h\x1b[H\x1b[2Kalt-frame-${n}\r\nalt-frame-${n}b`);
+	}, 25);
+	timer.unref?.();
+}
+
 // "firehose": ~1.1KB mixed chunks (printable + SGR runs + escape noise) every 1ms
 // for FAKE_PTY_STREAM_MS (default 3000) — sustained multi-MB/s stress, then a
 // done marker so tests know the flood ended.
