@@ -258,6 +258,25 @@ export function groupRowsByFolder(rows, now) {
 }
 
 /**
+ * Issue #147: the row the board should select after `id` is removed — the
+ * next visible row in dashboard order, else the previous one, else null
+ * (caller falls back to the existing orderedIds[0] clamp). Uses the same
+ * groupRowsByFolder ordering as the dashboard's orderedIds.
+ * @param {Row[]} rows
+ * @param {string} id
+ * @param {number} now
+ * @returns {string | null}
+ */
+export function nextVisibleIdAfterRemoval(rows, id, now) {
+	const ordered = groupRowsByFolder(rows, now).flatMap((g) => g.folders.flatMap((f) => f.rows.map((r) => r.id)));
+	const idx = ordered.indexOf(id);
+	if (idx === -1) return null;
+	if (idx + 1 < ordered.length) return ordered[idx + 1];
+	if (idx - 1 >= 0) return ordered[idx - 1];
+	return null;
+}
+
+/**
  * Stable row order: pinned first, then creation order (oldest first), then id.
  * Activity time deliberately does not participate, so rows never reshuffle while
  * sessions are running.
