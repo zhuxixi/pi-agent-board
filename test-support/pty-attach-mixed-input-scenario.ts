@@ -99,6 +99,13 @@ try {
 			.filter((msg) => !!msg && msg.type === "input" && typeof msg.data === "string")
 			.map((msg) => msg.data as string);
 
+	// Exact-frame assertion (round-2 review): `.every()` over a possibly-empty slice passes vacuously,
+	// so report forwarding must be pinned to exactly one frame with the expected payload.
+	const forwardedExactly = (from: number, expected: string): boolean => {
+		const frames = forwardedInput().slice(from);
+		return frames.length === 1 && frames[0] === expected;
+	};
+
 	// Observe terminal writes so OSC 52 copies are visible.
 	const writes: string[] = [];
 	const tui = {
@@ -147,7 +154,7 @@ try {
 	component.handleInput("\x1b[<0;16;2m\x1b[I");
 	await waitFor(() => copies() > mixedCopies, 3000);
 	checks.mixedCopies = copies() === mixedCopies + 1;
-	checks.mixedForwardedOnlyReport = forwardedInput().slice(mixedFrames).every((frame) => frame === "\x1b[I");
+	checks.mixedForwardedOnlyReport = forwardedExactly(mixedFrames, "\x1b[I");
 	// The pending-click window (DOUBLE_CLICK_MS = 260) is what used to wipe the selection: nothing to
 	// await here, so this wait is the assertion's own window.
 	await sleep(400);
@@ -160,7 +167,7 @@ try {
 	component.handleInput("\x1b[I\x1b[<0;16;2m");
 	await waitFor(() => copies() > reportFirstCopies, 3000);
 	checks.reportFirstCopies = copies() === reportFirstCopies + 1;
-	checks.reportFirstForwardedOnlyReport = forwardedInput().slice(reportFirstFrames).every((frame) => frame === "\x1b[I");
+	checks.reportFirstForwardedOnlyReport = forwardedExactly(reportFirstFrames, "\x1b[I");
 
 	// A4: a report alone mid-drag keeps the selection and copies nothing.
 	const reportOnlyCopies = copies();
@@ -170,7 +177,7 @@ try {
 	await sleep(150);
 	checks.reportOnlyKeepsSelection = selectionPresent();
 	checks.reportOnlyNoCopy = copies() === reportOnlyCopies;
-	checks.reportOnlyForwarded = forwardedInput().slice(reportOnlyFrames).every((frame) => frame === "\x1b[I");
+	checks.reportOnlyForwarded = forwardedExactly(reportOnlyFrames, "\x1b[I");
 
 	// A4 variant: an OSC 11 reply (an answer to a forwarded child query) behaves the same.
 	const oscCopies = copies();
@@ -180,19 +187,22 @@ try {
 	await sleep(150);
 	checks.oscReplyKeepsSelection = selectionPresent();
 	checks.oscReplyNoCopy = copies() === oscCopies;
-	checks.oscReplyForwarded = forwardedInput().slice(oscFrames).every((frame) => frame === OSC11_REPLY);
+	checks.oscReplyForwarded = forwardedExactly(oscFrames, OSC11_REPLY);
 
 	// A5: viewport semantics on a scrollable buffer. "burst" makes the fixture emit 200 numbered lines.
 	component.handleInput("burst");
 	await waitFor(() => firstBurstLine() === 200, 10_000);
 	const settle = async (): Promise<number | null> => {
 		let last = firstBurstLine();
-		for (;;) {
+		// Bounded (round-2 review): a never-quiescing buffer must not hang the harness; the A5 checks
+		// fail loudly on null/unchanged values, so returning the last observation is enough.
+		for (let i = 0; i < 30; i++) {
 			await sleep(60);
 			const now = firstBurstLine();
 			if (now === last) return now;
 			last = now;
 		}
+		return last;
 	};
 	const atBottom = await settle();
 	for (let i = 0; i < 3; i++) component.handleInput("\x1b[<64;10;3M");
@@ -206,7 +216,7 @@ try {
 	const beforeWheel = firstBurstLine();
 	component.handleInput("\x1b[<64;10;3M\x1b[I");
 	checks.wheelScrolledInMixedRead = await waitFor(() => firstBurstLine() !== null && firstBurstLine()! < (beforeWheel ?? 0), 3000);
-	checks.wheelMixedForwardedOnlyReport = forwardedInput().slice(wheelFrames).every((frame) => frame === "\x1b[I");
+	checks.wheelMixedForwardedOnlyReport = forwardedExactly(wheelFrames, "\x1b[I");
 
 	// A6: a real key still clears the selection (typing semantics unchanged) …
 	const keyCopies = copies();
@@ -214,6 +224,7 @@ try {
 	component.handleInput("x");
 	await sleep(80);
 	checks.keyStillClears = !selectionPresent() && copies() === keyCopies;
+	checks.keyForwarded = forwardedInput().at(-1) === "x";
 
 	// … and ambiguous escape shapes stay keys (the classifier boundary).
 	drag(1, 16);
@@ -225,13 +236,17 @@ try {
 	await sleep(80);
 	checks.ambiguousEscapesStayKeys = clearedByShiftF3 && !selectionPresent() && copies() === keyCopies;
 
-	// A9 (last: it closes the component): the detach chord matched inside a mixed read must stop the
-	// rest of that read.
-	const detachFrames = forwardedInput().length;
-	component.handleInput("\x1b[1;5D\x1b[I");
+	// A9 (last: it closes the component): a detach chord matched in a mixed read must stop the rest of
+	// that read. The read is THREE segments — detach chord, focus report, trailing KEY — and the report
+	// separator is required: adjacent key runs merge (spec A1), so a bare chord+key read would be one
+	// key blob the chord never matches. The trailing segment is a KEY, not a report: once detach()
+	// closes the socket a trailing report's send() is a silent no-op, so only a key can prove the loop
+	// stopped (it would otherwise clearSelection() and wipe the highlight).
+	drag(1, 16);
+	component.handleInput("\x1b[1;5D" + "\x1b[I" + "x");
 	await sleep(150);
 	checks.detachStopsRead = component.closed === true;
-	checks.detachForwardedNothing = forwardedInput().slice(detachFrames).length === 0;
+	checks.detachTrailingSegmentStopped = selectionPresent();
 
 	try {
 		component.dispose();
@@ -251,5 +266,4 @@ await sleep(50);
 try {
 	rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 30 });
 } catch {}
-process.stdout.write(JSON.stringify(result) + "\n");
-process.exit(0);
+process.stdout.write(JSON.stringify(result) + "\n", () => process.exit(0));

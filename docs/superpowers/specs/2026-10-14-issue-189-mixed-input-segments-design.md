@@ -1,6 +1,7 @@
 Drafted: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-14T12:45:00Z
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-14T13:10:00Z (round-1 findings R1-G1/G2/G3/D1/D2 all accepted)
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-14T13:22:00Z (round-2 finding R2-D1 accepted: report table row 3 relabelled as defensive-only)
+Revised: zai-coding-cn/glm-5.3-flash (selected) · zai-coding-cn/glm-5.3-flash (physical) @ 2026-10-15T00:24:50Z (round-2 review follow-up: A9 pinning strengthened)
 
 # Spec: #189 — attach(legacy): dispatch a mixed input read per segment, and stop treating terminal reports as user intent
 
@@ -245,7 +246,7 @@ outer terminal ── stdin ──▶ pi host TUI ──(focused component)─�
 | A6 | 键盘语义不回归 + 分类边界：真键 `"x"` 仍清选择并跳底；`"\x1b[1;2R"`（shift-F3）、`"\x1b[97;5u"`（kitty ctrl+a）仍按键入处理 | 自动化验证（integration，同场景） | 同场景 case 组 | ① 真键后 selection 为 null 且该键被转发；② 两个歧义序列都走键入路径（清选择） |
 | A7 | 类型 / 构建 / 打包 | 自动化验证（static + build） | `npm run typecheck`；`npm run verify` | exit 0（含 perf gate、coverage 阈值 lines 85 / funcs 80 / branches 70、`pack:dry`） |
 | A8 | 既有行为不回归（#167 鼠标分发、#171 中键粘贴、#174 选中镜像、滚轮、attach e2e） | 自动化验证（integration，既有套件） | `npm run test:coverage`（`test/pty-scroll.test.mjs`、`test/pty-attach-mouse.test.mjs`、`test/pty-attach-wheel.test.mjs`、`test/pty-attach-selection-mirror.test.mjs`、`test/pty-attach-*.test.mjs`） | 既有测试全绿，覆盖率不低于阈值 |
-| A9 | mid-read detach 守卫（§3.2 的 `if (this.closed) return;`，本轮新识别的可达行为） | 自动化验证（integration，同 A3 场景） | 同场景 case：一次读入 `"\x1b[1;5D\x1b[I"`（ctrl+← 与 focus report 同帧） | ① 组件 detach（`closed === true`）；② socket 帧里无 `\x1b[I`（守卫截停了该读入的剩余段）；③ 无 throw、无渲染报错 |
+| A9 | mid-read detach 守卫（§3.2 的 `if (this.closed) return;`，本轮新识别的可达行为） | 自动化验证（integration，同 A3 场景） | 同场景 case：一次读入三段 `"\x1b[1;5D" + "\x1b[I" + "x"`（ctrl+← / focus report / 尾随 key；report 分隔必不可少——相邻键段会合并（A1），无分隔时 chord 与 key 并成一段键文本、chord 永不匹配） | ① `closed === true`；② 该读取的后续段未被处理（用尾随 key 段作探针，断言 selection 仍存在；无守卫时尾随 key 会 `clearSelection()` 而尾随 report 的 `send()` 只是静默 no-op、无法区分）；③ 无 throw、无渲染报错 |
 | U1 | 真机：常规模式下注入本 issue 的确切字节流（两种顺序） | 用户实测（可执行：本机有 tmux + xclip + `DISPLAY=:0`；缺 tmux 时标 `pending`） | **部署前置（必须先做）**：把被测 checkout 装进 pi——合并后首选 `git -C ~/.pi/agent/git/github.com/zhuxixi/pi-agent-board stash`（该 checkout 有本地 `package-lock.json` 改动）→ `git pull` → 重启 `pi --tui-mode regular`；合并前试点则按 README:62-75 开发自发现路径 `ln -s <worktree> ~/.pi/agent/extensions/agent-board`，并临时从 `~/.pi/agent/settings.json` 的 `packages` 移除 `git:github.com/zhuxixi/pi-agent-board`（避免同一扩展双加载），测后恢复。**然后**：① tmux 内跑 `pi --tui-mode regular` → `/agent-board` → attach 到任一 session；② 在**一次** `tmux send-keys -H` 里传入全部字节以合成一次读取：`1b 5b 3c 30 3b 31 3b 32 4d`（press）、`1b 5b 3c 33 32 3b 38 3b 32 4d`（move）、`1b 5b 3c 30 3b 31 36 3b 32 6d 1b 5b 49`（release+focus-in）；③ 观察高亮与剪贴板/PRIMARY（复用 `xclip -o -selection primary` 检查） | 高亮保留到下一次点击（#172 契约），选中文本进入剪贴板/PRIMARY，子 session 不出现鼠标字节回显；若 tmux 把字节拆成多帧（合成失败），如实记录分帧观察结果并把该行标 `pending`，A3 仍是主证据（步骤 ①②③ 中仅 ② 依赖 tmux） |
 | U2 | 真机（可选）：日常使用中混合读取不再清掉选中 | 用户实测（可选，非阻塞） | 常规模式 attach 内拖选，同时触发焦点切换/主题探测 | 选中与阅读位置不再被无意图的 report 打断；失败如实记录 |
 

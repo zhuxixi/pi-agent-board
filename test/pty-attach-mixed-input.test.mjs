@@ -19,6 +19,33 @@ test("attach mixed input: per-segment dispatch keeps copy/selection/viewport; re
 	});
 	const parsed = JSON.parse(out.trim().split("\n").filter(Boolean).pop());
 	assert.equal(parsed.error, null, `scenario error: ${parsed.error}`);
+	// Pin the inventory (round-2 review): a renamed/added/dropped check must fail loudly here instead
+	// of silently escaping the all-true loop below. Keep in sync with the scenario's `checks` writes,
+	// sorted ascending.
+	const EXPECTED_CHECKS = [
+		"ambiguousEscapesStayKeys",
+		"controlCopies",
+		"detachStopsRead",
+		"detachTrailingSegmentStopped",
+		"keyForwarded",
+		"keyStillClears",
+		"mixedCopies",
+		"mixedForwardedOnlyReport",
+		"oscReplyForwarded",
+		"oscReplyKeepsSelection",
+		"oscReplyNoCopy",
+		"reportFirstCopies",
+		"reportFirstForwardedOnlyReport",
+		"reportOnlyForwarded",
+		"reportOnlyKeepsSelection",
+		"reportOnlyNoCopy",
+		"sawContent",
+		"selectionSurvivesMixed",
+		"viewportKeptOnReport",
+		"wheelMixedForwardedOnlyReport",
+		"wheelScrolledInMixedRead",
+	];
+	assert.deepEqual(Object.keys(parsed.checks).sort(), EXPECTED_CHECKS, "check inventory changed");
 	for (const [name, passed] of Object.entries(parsed.checks)) {
 		assert.equal(passed, true, `check failed: ${name}`);
 	}
