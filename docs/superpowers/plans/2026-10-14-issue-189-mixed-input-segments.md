@@ -599,13 +599,17 @@ try {
 	await sleep(80);
 	checks.ambiguousEscapesStayKeys = clearedByShiftF3 && !selectionPresent() && copies() === keyCopies;
 
-	// A9 (last: it closes the component): the detach chord matched inside a mixed read must stop the
-	// rest of that read.
-	const detachFrames = forwardedInput().length;
-	component.handleInput("\x1b[1;5D\x1b[I");
+	// A9 (last: it closes the component): a detach chord matched in a mixed read must stop the rest
+	// of that read. The trailing segment is a KEY, not a report: once detach() closes the socket a
+	// trailing report's send() is a silent no-op, so only a key can prove the loop stopped (it would
+	// otherwise clearSelection() and wipe the highlight). The read is three segments — detach chord /
+	// focus report / trailing key — because adjacent key runs merge: a bare `"\x1b[1;5D" + "x"` is
+	// ONE key segment `"\x1b[1;5Dx"` and the chord would never match.
+	drag(1, 16);
+	component.handleInput("\x1b[1;5D" + "\x1b[I" + "x");
 	await sleep(150);
 	checks.detachStopsRead = component.closed === true;
-	checks.detachForwardedNothing = forwardedInput().slice(detachFrames).length === 0;
+	checks.detachTrailingSegmentStopped = selectionPresent();
 
 	try {
 		component.dispose();
