@@ -272,6 +272,6 @@ test("splitAttachInput classifies grounded terminal reports and keeps keys as ke
 	// deliberately not reports: a keystroke can look like them (spec §3.1(b))
 	const keys = ["a", "\x1b[A", "\x1b[1;2R", "\x1b[97;5u", "\x1b[1;5D", "\x1b[200~paste\x1b[201~", "\x1bP1+r6375;6375\x1b\\"];
 	for (const sequence of keys) {
-		assert.equal(splitAttachInput(sequence)[0].kind, "key", `key: ${JSON.stringify(sequence)}`);
+		assert.deepEqual(splitAttachInput(sequence), [{ kind: "key", data: sequence }], `key: ${JSON.stringify(sequence)}`);
 	}
 });

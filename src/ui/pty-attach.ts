@@ -12,7 +12,7 @@ import { installImeCursorCoalesce } from "../core/ime-cursor-coalesce.mjs";
 import { createJiggleRetryController } from "../core/pty-attach-jiggle-controller.mjs";
 import { createTerminalAttachClient } from "../core/terminal-attach-client.mjs";
 import { backgroundRgbFromTerminalColors, buildSettleSchemePatch, colorSchemeForBackgroundRgb, extractOscQuerySequences, resolveProbeApi, toColorSchemeReport } from "../core/terminal-query-sequences.mjs";
-import { clampInt, parseMouseInputChunk, resolveAttachMouseAction, resolvePasteSelectionSource, resolveWheelLines, scrollViewportTop, selectionDragScrollLines, shouldMirrorSelectionToPrimary, shouldOwnOuterMouseMode, wheelScrollLinesUp } from "../core/pty-scroll.mjs";
+import { clampInt, resolveAttachMouseAction, resolvePasteSelectionSource, resolveWheelLines, scrollViewportTop, selectionDragScrollLines, shouldMirrorSelectionToPrimary, shouldOwnOuterMouseMode, splitAttachInput, wheelScrollLinesUp } from "../core/pty-scroll.mjs";
 
 export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null };
 
@@ -295,8 +295,23 @@ export class PtyAttachComponent implements Component {
 	}
 
 	handleInput(data: string): void {
-		const mouseInput = parseMouseInputChunk(data);
-		if (mouseInput && this.handleMouseInputChunk(mouseInput)) return;
+		// Issue #189: dispatch per segment instead of all-or-nothing. A read that mixes mouse
+		// reports with other bytes used to fall through to the keyboard branch as a whole: the
+		// gesture was dropped, an in-progress selection cleared, the viewport reset, and the raw
+		// mouse bytes forwarded into the hosted session as typed input.
+		for (const segment of splitAttachInput(data)) {
+			if (segment.kind === "mouse") this.handleMouseInputChunk(segment.events);
+			else if (segment.kind === "report") this.send({ type: "input", data: segment.data });
+			else this.handleKeyInput(segment.data);
+			// A detach/close inside a segment must stop the rest of this read.
+			if (this.closed) return;
+		}
+	}
+
+	/** Keyboard branch of `handleInput` (issue #189: one segment of the read at a time). Terminal
+	 * *reports* never arrive here — `handleInput` forwards them without touching the selection or
+	 * the viewport, because they carry no user intent (focus events, query replies). */
+	private handleKeyInput(data: string): void {
 		if (matchesKey(data, Key.pageUp)) {
 			this.clearPendingClick();
 			this.clearSelection();
