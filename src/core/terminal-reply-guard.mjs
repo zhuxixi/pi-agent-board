@@ -24,6 +24,15 @@
  * module's head list deliberately omits `\x1b[=` because the attach client
  * never queries DA3 — so such a fragment passes through as it did before this
  * guard. The complete DA3 form is still dropped (it is a DROP_SHAPES entry).
+ *
+ * Known trade-offs in the head list (raised in review): `\x1bP` is also the
+ * legacy xterm encoding of Alt+Shift+P on terminals without the kitty
+ * protocol, so that chord can arm a window and absorb up to the capped bytes
+ * of plain text typed right after it. It is kept because a fragmented DCS
+ * reply (XTVersion) is otherwise unprotected, and the absorption is bounded
+ * (64 bytes / 250ms) and kill-switchable. `\x1b]1` covers the whole OSC 1xx
+ * range, so a fragmented reply outside the forwarded 4/10/11/12 set is
+ * absorbed rather than leaked — the safe direction for an unrecognized OSC.
  */
 
 /** How long an open reply window stays open for trailing fragments (spec §3.3). */
