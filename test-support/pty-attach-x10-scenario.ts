@@ -77,8 +77,8 @@ const runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), config
 runner.stderr.resume();
 
 // X10 reports used below (ESC [ M Cb Cx Cy, each byte = value + 32; body row 0
-// is terminal row 2): press/motion/release of a full-line drag, a same-point
-// click release, a right-button press, and a wheel notch.
+// is terminal row 2): press/motion/release of a drag across the fixture text,
+// a same-point click release, a right-button press, and a wheel notch.
 const PRESS = "\x1b[M !\"";
 const MOTION = "\x1b[M@(\"";
 const RELEASE = "\x1b[M#4\"";

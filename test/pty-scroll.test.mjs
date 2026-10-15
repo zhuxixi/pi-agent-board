@@ -361,6 +361,8 @@ test("parseMouseEvent classifies X10 button codes (issue #188)", () => {
 	// Cb = 64/65: wheel, and the release rule must not capture it.
 	assert.deepEqual(parseMouseEvent("\x1b[M`!\""), { encoding: "x10", button: 64, col: 1, row: 2, action: "press" });
 	assert.deepEqual(parseMouseEvent("\x1b[Ma!\""), { encoding: "x10", button: 65, col: 1, row: 2, action: "press" });
+	// Cb = 67 (64|3, horizontal wheel): the wheel bit must win over the low bits.
+	assert.deepEqual(parseMouseEvent("\x1b[Mc!\""), { encoding: "x10", button: 67, col: 1, row: 2, action: "press" });
 	assert.equal(mouseWheelDirection("\x1b[M`!\""), 1);
 	assert.equal(mouseWheelDirection("\x1b[Ma!\""), -1);
 });
