@@ -394,6 +394,10 @@ export function resizeJiggleSize(cols, rows) {
  * terminals report. Buffer-space comparison ({line, col}) — shared by double-click
  * detection. Moved here from pty-attach.ts so both comparisons have one definition.
  * Pure by contract.
+ *
+ * @param {{line: number, col: number}} a
+ * @param {{line: number, col: number}} b
+ * @returns {boolean}
  */
 export function sameMousePoint(a, b) {
 	return a.line === b.line && Math.abs(a.col - b.col) <= 1;
@@ -404,6 +408,10 @@ export function sameMousePoint(a, b) {
  * space ({row, col}) is what the pointer actually did; buffer space drifts while a
  * session streams (the viewport base moves), which is why the drag/click decision must
  * not compare buffer points captured at two different moments. Pure by contract.
+ *
+ * @param {{row: number, col: number}} a
+ * @param {{row: number, col: number}} b
+ * @returns {boolean}
  */
 export function sameScreenCell(a, b) {
 	return a.row === b.row && Math.abs(a.col - b.col) <= 1;
@@ -415,6 +423,9 @@ export function sameScreenCell(a, b) {
  * alone is not sufficient — the gesture geometry decides. Both points are SCREEN cells
  * as reported by the terminal (never the clamped buffer point). Missing geometry (no
  * screen anchor recorded) degrades to the pre-fix answer: not a drag. Pure by contract.
+ *
+ * @param {{dragging: boolean, pressScreen: ({row: number, col: number}|undefined|null), releaseScreen: ({row: number, col: number}|undefined|null)}} input
+ * @returns {boolean}
  */
 export function selectionReleaseIsDrag({ dragging, pressScreen, releaseScreen }) {
 	if (dragging) return true;
