@@ -513,3 +513,14 @@ If Steps 1–2 left the tree clean, skip this step — the branch is ready for l
 **2. Placeholder scan:** no TBD/TODO/"handle edge cases" steps; every code step carries the full code, every command carries its expected result.
 
 **3. Type consistency:** `parseMouseEvent`/`parseMouseInputChunk` shapes are used identically in Task 1 and Task 2 (`{ encoding, button, col, row, action }`); the scenario's JSON keys (`osc52`, `forwarded`, `paintedRightAfterRelease`, `paintedAfterWindow`, `cases.drag|click|rightButton|wheel`, `ok`, `sawContent`, `error`) match between the scenario and the driver assertion by assertion.
+
+---
+
+## Errata (post-implementation, 2026-10-15)
+
+Two deviations from the task text above happened during execution; the committed code is authoritative.
+
+1. **Task 2's `selectionPainted()` had to strip SGR sequences before locating the fixture line.** The plan's contiguous `includes("fake pi ready")` cannot match a 1-cell selection at column 0, because the attribute reset splits the text (`\x1b[0;7;39;49mf\x1b[0;39;49make pi ready`), so the probe would have returned `false` for a correctly painted click. The committed probe matches the fixture text on an SGR-stripped copy and still runs the `\x1b[0;7;` paint test on the raw line (`test-support/pty-attach-x10-scenario.ts`). Approved by the controller mid-task; recorded in `task-2-report.md`.
+2. **One unit row was added after the final whole-branch review.** The review found the `!wheel` guard was not load-bearing in any test (wheel `Cb` 64/65 have low bits 0/1); a row for `Cb = 67` (`64|3`, horizontal wheel) → `"press"` now pins it in Task 1's block (`test/pty-scroll.test.mjs`), commit `ae581b7`.
+
+Commit sequence as executed: `5af72cb` (spec), `79cd179` (plan), `e16179f` (parser fix + A1–A3), `be3dade` (A4–A5 component scenario), `ae581b7` (review hardening). Everything else ran as written; A6 (`npm run verify`) is green at `ae581b7` (1175 tests, 1172 pass, 0 fail; coverage 91.97 / 81.47 / 89.23).
