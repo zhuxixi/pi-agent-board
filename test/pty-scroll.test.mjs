@@ -12,6 +12,7 @@ import {
 	selectionDragScrollLines,
 	shouldMirrorSelectionToPrimary,
 	shouldOwnOuterMouseMode,
+	splitAttachInput,
 	wheelScrollLinesUp,
 } from "../src/core/pty-scroll.mjs";
 
@@ -206,5 +207,71 @@ test("shouldMirrorSelectionToPrimary: only selection endings of the left button 
 	];
 	for (const [type, button] of cases) {
 		assert.equal(shouldMirrorSelectionToPrimary(ev(type, button), { nativePasteEnabled: true }), null, `${type}/${button}`);
+	}
+});
+
+test("splitAttachInput decodes ordered mouse / report / key segments (issue #189)", () => {
+	const kinds = (input) => splitAttachInput(input).map((segment) => segment.kind);
+	const data = (input) => splitAttachInput(input).flatMap((segment) => (segment.kind === "mouse" ? segment.events.map((entry) => entry.raw) : segment.data));
+
+	assert.deepEqual(splitAttachInput(""), []);
+	assert.deepEqual(kinds("\x1b[<64;10;20M\x1b[<65;10;20M"), ["mouse"]);
+	assert.equal(splitAttachInput("\x1b[<64;10;20M\x1b[<65;10;20M")[0].events.length, 2);
+
+	// the issue's repro, both orders
+	assert.deepEqual(kinds("\x1b[<0;16;2m\x1b[I"), ["mouse", "report"]);
+	assert.deepEqual(data("\x1b[<0;16;2m\x1b[I"), ["\x1b[<0;16;2m", "\x1b[I"]);
+	assert.deepEqual(kinds("\x1b[I\x1b[<0;16;2m"), ["report", "mouse"]);
+	assert.deepEqual(kinds("\x1b[I\x1b[O\x1b[<0;16;2m"), ["report", "mouse"]);
+	assert.deepEqual(data("\x1b[I\x1b[O\x1b[<0;16;2m"), ["\x1b[I\x1b[O", "\x1b[<0;16;2m"]);
+
+	// mouse/key and report/key adjacency, both orders
+	assert.deepEqual(kinds("\x1b[<0;16;2mx"), ["mouse", "key"]);
+	assert.deepEqual(kinds("x\x1b[<0;16;2m"), ["key", "mouse"]);
+	assert.deepEqual(kinds("\x1b[Ix"), ["report", "key"]);
+	assert.deepEqual(kinds("x\x1b[I"), ["key", "report"]);
+
+	assert.deepEqual(kinds("hello"), ["key"]);
+	assert.deepEqual(data("hello"), ["hello"]);
+
+	// adjacent key runs merge: a key is only recognised when it is the whole read (spec §5)
+	assert.deepEqual(kinds("\x1b[5~\x1b[6~"), ["key"]);
+	assert.deepEqual(data("\x1b[5~\x1b[6~"), ["\x1b[5~\x1b[6~"]);
+
+	// truncated sequences are not recognised and stay keyboard text
+	assert.deepEqual(kinds("\x1b[<0;16"), ["key"]);
+	assert.deepEqual(kinds("\x1b[?997;1"), ["key"]);
+	assert.deepEqual(kinds("\x1b[<0;16\x1b[I"), ["key", "report"]);
+
+	// the pre-existing all-or-nothing contract is untouched
+	assert.equal(parseMouseInputChunk("\x1b[<64;10;20Mx"), null);
+	assert.equal(parseMouseInputChunk("x\x1b[<64;10;20M"), null);
+	assert.equal(parseMouseInputChunk(""), null);
+});
+
+test("splitAttachInput classifies grounded terminal reports and keeps keys as keys (issue #189)", () => {
+	const reports = [
+		"\x1b[I",
+		"\x1b[O",
+		"\x1b[?62;4;6;22c",
+		"\x1b[>0;95;0c",
+		"\x1b[?1u",
+		"\x1b[?997;1n",
+		"\x1b[?997;2n",
+		"\x1b[6;24;80t",
+		"\x1b]11;rgb:0d0d/0d0d/0d0d\x07",
+		"\x1b]11;rgb:0d0d/0d0d/0d0d\x1b\\",
+		"\x1b]10;#ffffff\x07",
+		"\x1b]4;3;rgb:0000/0000/0000\x07",
+		"\x1b]7501;?\x1b\\",
+	];
+	for (const sequence of reports) {
+		assert.deepEqual(splitAttachInput(sequence), [{ kind: "report", data: sequence }], `report: ${JSON.stringify(sequence)}`);
+	}
+
+	// deliberately not reports: a keystroke can look like them (spec §3.1(b))
+	const keys = ["a", "\x1b[A", "\x1b[1;2R", "\x1b[97;5u", "\x1b[1;5D", "\x1b[200~paste\x1b[201~", "\x1bP1+r6375;6375\x1b\\"];
+	for (const sequence of keys) {
+		assert.equal(splitAttachInput(sequence)[0].kind, "key", `key: ${JSON.stringify(sequence)}`);
 	}
 });

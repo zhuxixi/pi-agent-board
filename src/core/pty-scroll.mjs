@@ -77,21 +77,139 @@ export function parseMouseEvent(data) {
 }
 
 /**
+ * Read a maximal run of concatenated mouse reports starting at `offset`. Returns the decoded events
+ * with their exact raw byte sequences plus the consumed length, or null when no complete report
+ * starts there.
+ */
+function parseMouseRun(data, offset = 0) {
+	const events = [];
+	let position = offset;
+	for (;;) {
+		const parsed = parseMouseEventPrefix(data, position);
+		if (!parsed) break;
+		events.push(parsed);
+		position += parsed.length;
+	}
+	return events.length > 0 ? { events, length: position - offset } : null;
+}
+
+/**
  * Parse an input chunk that consists entirely of one or more concatenated mouse reports.
  * Returns each decoded event with its exact raw byte sequence, or null if any non-mouse
- * bytes are present in the chunk.
+ * bytes are present in the chunk (all-or-nothing contract, pinned by unit tests and by the
+ * X10 acceptance of issue #188 — do not relax it).
  */
 export function parseMouseInputChunk(data) {
 	if (!data) return null;
-	const events = [];
+	const run = parseMouseRun(data);
+	return run && run.length === data.length ? run.events : null;
+}
+
+/**
+ * Issue #189: terminal *report* sequences, i.e. bytes the real terminal sends in answer to a query
+ * instead of in answer to the user. Every query this stack forwards to the real terminal (child
+ * OSC 11 probes, the host's colour batch, kitty protocol negotiation) is answered on the same stdin
+ * stream the user types on, so a report is routinely coalesced with keys or mouse reports into one
+ * read. Reports carry no user intent: they must reach the child unchanged, but they must not be
+ * treated as typing (no selection clear, no viewport reset).
+ *
+ * Grounding of each pattern (pi-tui 1.x, the face this extension runs against):
+ *  - focus in/out: DECSET 1004, enabled by pi's fullscreen TUI; reachable in regular mode only
+ *    through leaked terminal state.
+ *  - `CSI ? ... c`: DA1 reply — the host sends `\x1b[c` as the trailing sentinel of its colour
+ *    batch (`pi-tui tui.js:57`).
+ *  - `CSI ? ... u`: kitty keyboard flag reply to `\x1b[?u` (`pi-tui terminal.js:210`).
+ *  - `CSI ? ... n`: mode/status reports, including the colour-scheme report `\x1b[?997;1n` that Pi
+ *    parses (`pi-tui terminal-colors.js:19`).
+ *  - `CSI ... t`: XTWINOPS replies — the host asks for the cell size with `\x1b[16t`
+ *    (`pi-tui tui.js:603`) and consumes `CSI 6;h;wt`.
+ *  - `OSC ... BEL|ST`: colour replies (OSC 10/11/12, OSC 4) and other reply bodies such as the
+ *    program-status reply (OSC 7501); bodies are capped at 4096 bytes like the query carry.
+ *  - `CSI > ... c` (DA2) has **no** source in this stack — kept as a defensive extra only, because
+ *    no keystroke encodes as a `>`-prefixed CSI.
+ *
+ * Deliberately NOT matched, because a keystroke can look like them: `CSI ... R` (cursor-position
+ * report but also modifier-F3), any `u` final without the `?` prefix (kitty key events),
+ * `CSI ... $ y` (DECRPM — nothing in this stack queries modes), and DCS replies (no in-repo DCS
+ * query). Unrecognised bytes keep today's keyboard semantics.
+ */
+const REPORT_PREFIXES = [
+	/^\x1b\[[IO]/,
+	/^\x1b\[\?\d+(?:;\d+)*c/,
+	/^\x1b\[>\d+(?:;\d+)*c/,
+	/^\x1b\[\?\d+(?:;\d+)*u/,
+	/^\x1b\[\?\d+(?:;\d+)*n/,
+	/^\x1b\[\d+(?:;\d+)*t/,
+	/^\x1b\][^\x07\x1b]{0,4096}(?:\x07|\x1b\\)/,
+];
+
+/** Issue #189: the complete report sequence starting at `offset`, or null. */
+function parseReportPrefix(data, offset = 0) {
+	const input = data.slice(offset);
+	for (const pattern of REPORT_PREFIXES) {
+		const match = pattern.exec(input);
+		if (match) return match[0];
+	}
+	return null;
+}
+
+/** Issue #189: the maximal run of concatenated report sequences at `offset`, or null. */
+function parseReportRun(data, offset = 0) {
+	let position = offset;
+	for (;;) {
+		const report = parseReportPrefix(data, position);
+		if (!report) break;
+		position += report.length;
+	}
+	return position > offset ? data.slice(offset, position) : null;
+}
+
+/** Merge a segment into the previous one when it has the same kind, else append it. */
+function pushSegment(segments, segment) {
+	const last = segments[segments.length - 1];
+	if (last && last.kind === segment.kind) {
+		if (last.kind === "mouse") last.events.push(...segment.events);
+		else last.data += segment.data;
+		return;
+	}
+	segments.push(segment);
+}
+
+/**
+ * Issue #189: split one input read into ordered segments so the attach surface can dispatch per
+ * kind instead of all-or-nothing. Mouse reports, terminal reports and everything else are returned
+ * in arrival order, consecutive segments of the same kind merged.
+ *
+ * A partial escape sequence (a sequence split across reads) is not recognised and becomes keyboard
+ * text — the same bytes the all-or-nothing parser used to forward.
+ *
+ * @param {string} data
+ * @returns {Array<{kind: "mouse", events: Array<{length: number, raw: string, mouse: {encoding: string, button: number, col: number, row: number, action: string}}>} | {kind: "report", data: string} | {kind: "key", data: string}>}
+ */
+export function splitAttachInput(data) {
+	if (!data) return [];
+	const segments = [];
 	let offset = 0;
 	while (offset < data.length) {
-		const parsed = parseMouseEventPrefix(data, offset);
-		if (!parsed) return null;
-		events.push(parsed);
-		offset += parsed.length;
+		const mouse = parseMouseRun(data, offset);
+		if (mouse) {
+			pushSegment(segments, { kind: "mouse", events: mouse.events });
+			offset += mouse.length;
+			continue;
+		}
+		const report = parseReportRun(data, offset);
+		if (report) {
+			pushSegment(segments, { kind: "report", data: report });
+			offset += report.length;
+			continue;
+		}
+		// Neither a mouse report nor a terminal report: keyboard text up to the next escape.
+		const next = data.indexOf("\x1b", offset + 1);
+		const end = next === -1 ? data.length : next;
+		pushSegment(segments, { kind: "key", data: data.slice(offset, end) });
+		offset = end;
 	}
-	return events;
+	return segments;
 }
 
 /**
