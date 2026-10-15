@@ -13,7 +13,7 @@ import { createJiggleRetryController } from "../core/pty-attach-jiggle-controlle
 import { createTerminalAttachClient } from "../core/terminal-attach-client.mjs";
 import { backgroundRgbFromTerminalColors, buildSettleSchemePatch, colorSchemeForBackgroundRgb, extractOscQuerySequences, resolveProbeApi, toColorSchemeReport } from "../core/terminal-query-sequences.mjs";
 import { REPLY_GUARD_WINDOW_MS, createReplyGuard, isReplyGuardEnabled } from "../core/terminal-reply-guard.mjs";
-import { clampInt, encodeWheelReport, resolveAttachMouseAction, resolveAttachWheelRoute, resolvePasteSelectionSource, resolveWheelLines, sameMousePoint, scrollViewportTop, selectionDragScrollLines, shouldMirrorSelectionToPrimary, shouldOwnOuterMouseMode, splitAttachInput, wheelScrollLinesUp } from "../core/pty-scroll.mjs";
+import { clampInt, encodeWheelReport, resolveAttachMouseAction, resolveAttachWheelRoute, resolvePasteSelectionSource, resolveWheelLines, sameMousePoint, scrollViewportTop, selectionDragScrollLines, selectionReleaseIsDrag, shouldMirrorSelectionToPrimary, shouldOwnOuterMouseMode, splitAttachInput, wheelScrollLinesUp } from "../core/pty-scroll.mjs";
 
 export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null };
 
@@ -151,7 +151,11 @@ interface BufferCellLike {
 }
 
 type MousePoint = { line: number; col: number };
-type MouseSelection = { anchor: MousePoint; focus: MousePoint };
+type ScreenCell = { row: number; col: number };
+/** Issue #187: `screenAnchor` is the RAW reported cell of the press; the drag/click
+ * decision compares it against the release cell, because buffer coordinates drift
+ * while the session streams. Absent on word selections (they are created on release). */
+type MouseSelection = { anchor: MousePoint; focus: MousePoint; screenAnchor?: ScreenCell };
 type NormalizedSelection = { start: MousePoint; end: MousePoint };
 
 export class PtyAttachComponent implements Component {
@@ -1133,7 +1137,7 @@ export class PtyAttachComponent implements Component {
 				return;
 			}
 			if (this.isDoubleClickCandidate(point)) this.clearPendingClick();
-			this.selection = { anchor: point, focus: point };
+			this.selection = { anchor: point, focus: point, screenAnchor: { row: mouse.row, col: mouse.col } };
 			this.selectionDragging = false;
 			this.scheduleRender();
 			return;
@@ -1153,7 +1157,15 @@ export class PtyAttachComponent implements Component {
 			this.clearSelectionAutoScroll();
 			const point = this.mousePointForEvent(mouse.row, mouse.col, true);
 			if (point) this.selection.focus = point;
-			const shouldCopy = this.selectionDragging;
+			// Issue #187: a Warp fast flick arrives as press + release with no motion
+			// event, so the move flag alone cannot decide. Compare the RAW reported
+			// screen cells (never the clamped buffer points, whose base drifts as the
+			// session streams).
+			const shouldCopy = selectionReleaseIsDrag({
+				dragging: this.selectionDragging,
+				pressScreen: this.selection.screenAnchor,
+				releaseScreen: { row: mouse.row, col: mouse.col },
+			});
 			this.selectionDragging = false;
 			if (shouldCopy) {
 				this.clearPendingClick();
