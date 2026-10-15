@@ -254,6 +254,7 @@ test("splitAttachInput classifies grounded terminal reports and keeps keys as ke
 		"\x1b[I",
 		"\x1b[O",
 		"\x1b[?62;4;6;22c",
+		"\x1b[?1;2c",
 		"\x1b[>0;95;0c",
 		"\x1b[?1u",
 		"\x1b[?997;1n",

@@ -671,9 +671,10 @@ export class PtyAttachComponent implements Component {
 		// flips false (never re-armed), so these hooks run at most once per attach.
 		this.attachColorSchemeBridge();
 		// Use only the tracked TUI probe. An extra terminal.write(OSC 11) has
-		// no local query owner, so its reply falls through handleInput into the
-		// child PTY. Settle can precede the child's raw-mode startup, making
-		// the line discipline echo that reply as visible ^[]11;rgb:... text.
+		// no local query owner, so handleInput's report branch forwards its
+		// reply to the child PTY. Settle can precede the child's raw-mode
+		// startup, making the line discipline echo that reply as visible
+		// ^[]11;rgb:... text.
 		this.reportRealTerminalColorScheme();
 	}
 
