@@ -339,3 +339,39 @@ test("selectionReleaseIsDrag: geometry decides in screen cells; missing geometry
 	assert.equal(selectionReleaseIsDrag({ dragging: false, pressScreen: press, releaseScreen: null }), false);
 
 });
+
+// Issue #188: in the X10/normal encoding (ESC [ M Cb Cx Cy, each byte = value
+// + 32) the low two bits of Cb are the button, except value 3, which is the
+// protocol's release code and carries no button identity; bit 5 is motion and
+// bit 6 is wheel. Classifying 3 as a press made the attach surface clear the
+// drag selection on release instead of copying it.
+test("parseMouseEvent classifies X10 button codes (issue #188)", () => {
+	// Cb = 0/1/2: left/middle/right press. col 1, row 2 (body row 0).
+	assert.deepEqual(parseMouseEvent("\x1b[M !\""), { encoding: "x10", button: 0, col: 1, row: 2, action: "press" });
+	assert.deepEqual(parseMouseEvent("\x1b[M!!\""), { encoding: "x10", button: 1, col: 1, row: 2, action: "press" });
+	assert.deepEqual(parseMouseEvent("\x1b[M\"!\""), { encoding: "x10", button: 2, col: 1, row: 2, action: "press" });
+	// Cb = 32: motion (col 8); Cb = 32|3: motion without a button held.
+	assert.deepEqual(parseMouseEvent("\x1b[M@(\""), { encoding: "x10", button: 32, col: 8, row: 2, action: "move" });
+	assert.deepEqual(parseMouseEvent("\x1b[MC!\""), { encoding: "x10", button: 35, col: 1, row: 2, action: "move" });
+	// Cb = 3: release; 3|4 shift, 3|16 ctrl must stay releases.
+	assert.deepEqual(parseMouseEvent("\x1b[M#!\""), { encoding: "x10", button: 3, col: 1, row: 2, action: "release" });
+	assert.deepEqual(parseMouseEvent("\x1b[M#4\""), { encoding: "x10", button: 3, col: 20, row: 2, action: "release" });
+	assert.deepEqual(parseMouseEvent("\x1b[M'!\""), { encoding: "x10", button: 7, col: 1, row: 2, action: "release" });
+	assert.deepEqual(parseMouseEvent("\x1b[M3!\""), { encoding: "x10", button: 19, col: 1, row: 2, action: "release" });
+	// Cb = 64/65: wheel, and the release rule must not capture it.
+	assert.deepEqual(parseMouseEvent("\x1b[M`!\""), { encoding: "x10", button: 64, col: 1, row: 2, action: "press" });
+	assert.deepEqual(parseMouseEvent("\x1b[Ma!\""), { encoding: "x10", button: 65, col: 1, row: 2, action: "press" });
+	assert.equal(mouseWheelDirection("\x1b[M`!\""), 1);
+	assert.equal(mouseWheelDirection("\x1b[Ma!\""), -1);
+});
+
+test("parseMouseInputChunk decodes a concatenated X10 gesture in order (issue #188)", () => {
+	assert.deepEqual(parseMouseInputChunk("\x1b[M !\"\x1b[M@(\"\x1b[M#4\""), [
+		{ length: 6, raw: "\x1b[M !\"", mouse: { encoding: "x10", button: 0, col: 1, row: 2, action: "press" } },
+		{ length: 6, raw: "\x1b[M@(\"", mouse: { encoding: "x10", button: 32, col: 8, row: 2, action: "move" } },
+		{ length: 6, raw: "\x1b[M#4\"", mouse: { encoding: "x10", button: 3, col: 20, row: 2, action: "release" } },
+	]);
+	// Seven bytes is not an X10 report: the all-or-nothing chunk parser rejects it
+	// (#189), which is why every literal above is exactly six bytes.
+	assert.equal(parseMouseInputChunk("\x1b[M !\"\x1b[M#20\""), null);
+});

@@ -51,7 +51,15 @@ function parseMouseEventPrefix(data, offset = 0) {
 
 	// X10/normal mouse: ESC [ M Cb Cx Cy. Cb is encoded as button + 32.
 	if (input.startsWith("\x1b[M") && input.length >= 6) {
+		// Cb packs the button (bits 0-1), modifiers (2-4), motion (5) and wheel (6),
+		// except bit value 3 in bits 0-1: the protocol's release code, which carries
+		// no button identity. Decoding it as a press made the attach surface clear
+		// the drag selection on release instead of copying it (issue #188). Wheel
+		// reports never carry a release, so bit 6 keeps the press classification.
 		const button = input.charCodeAt(3) - 32;
+		const motion = (button & 32) !== 0;
+		const wheel = (button & 64) !== 0;
+		const release = !motion && !wheel && (button & 3) === 3;
 		return {
 			length: 6,
 			raw: input.slice(0, 6),
@@ -60,7 +68,7 @@ function parseMouseEventPrefix(data, offset = 0) {
 				button,
 				col: input.charCodeAt(4) - 32,
 				row: input.charCodeAt(5) - 32,
-				action: button & 32 ? "move" : "press",
+				action: release ? "release" : motion ? "move" : "press",
 			},
 		};
 	}
