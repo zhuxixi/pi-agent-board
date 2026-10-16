@@ -313,10 +313,11 @@ export class PtyAttachComponent implements Component {
 		// mouse bytes forwarded into the hosted session as typed input.
 		//
 		// Issue #170/#194 composition: the inbound reply guard runs per non-mouse segment, so a
-		// reply head can never absorb keys that arrived in the same read — the coalescing case
-		// #189 exists for. The guard's decision wins for complete protocol replies (dropped) and
-		// colour replies (forwarded as one whole sequence); whatever it passes falls through to
-		// the kind-based dispatch below.
+		// recognized report segment can never absorb keys that arrived in the same read — the
+		// coalescing case #189 exists for (a still-fragmented head keeps the bounded #194
+		// absorption: 64 bytes / 250ms, kill-switchable). The guard's decision wins for complete
+		// protocol replies (dropped) and colour replies (forwarded as one whole sequence);
+		// whatever it passes falls through to the kind-based dispatch below.
 		for (const segment of splitAttachInput(data)) {
 			if (segment.kind === "mouse") {
 				this.handleMouseInputChunk(segment.events);

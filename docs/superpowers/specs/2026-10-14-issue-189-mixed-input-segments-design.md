@@ -187,8 +187,9 @@ never recognised and becomes `key`, i.e. the bytes the all-or-nothing parser use
 `consumeByReplyGuard(data)` (new private method) runs the issue #170/#194 inbound reply guard over one
 non-mouse **segment** and returns true when the guard took it — a complete protocol reply (DA1/DA2,
 kitty flags, cell-size, DCS) is dropped, a colour reply is forwarded as one whole sequence. Feeding
-segments instead of raw reads is what keeps a reply head from absorbing keys that were coalesced into
-the same read (the very case #189 exists for).
+segments instead of raw reads is what keeps a recognized report segment from absorbing keys that
+were coalesced into the same read — the very case #189 exists for. A still-fragmented head keeps
+the bounded #194 absorption (64 bytes / 250 ms, kill-switchable).
 
 - `mouse` → the existing `handleMouseInputChunk` (wheel branch + `handleLocalMouseEvent`), unchanged.
 - `report` → passed through the reply guard first; whatever the guard does not own is forwarded to

@@ -662,7 +662,8 @@ the `detach()` early returns and the final default branch) stays **verbatim** in
 		// mouse bytes forwarded into the hosted session as typed input.
 		//
 		// Issue #170/#194 composition (post-merge with main): the inbound reply guard runs per
-		// non-mouse segment, so a reply head can never absorb keys coalesced into the same read.
+		// non-mouse segment, so a recognized report can never absorb keys coalesced into the same
+		// read (a still-fragmented head keeps the bounded #194 absorption: 64 bytes / 250ms).
 		for (const segment of splitAttachInput(data)) {
 			if (segment.kind === "mouse") {
 				this.handleMouseInputChunk(segment.events);
