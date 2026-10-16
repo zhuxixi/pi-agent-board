@@ -7,7 +7,7 @@
 - Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-14T12:52:00Z — after round-1 review (R1-G1/R1-G2/R1-D1 accepted; findings in `research/spec-review-round-1.md`)
 - Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-14T13:03:00Z — after round-2 review (R2-D1 accepted; 0 real gaps, converged; findings in `research/spec-review-round-2.md`)
 - Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-15T00:00:00Z — rebased onto `main` @ `7cf0853` (#190/#191 merged): line citations moved (+4 from `handleInput`, +25 from `handleMouseInputChunk`, osc52 +42); no design or boundary change, the X10 branch and the legacy handler are byte-identical to `f81949d`
-- Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-16T00:20:00Z — rebased onto `main` @ `2148360` (#192/#194 merged) before the PR. The `file:line` citations in §2/§5/§6/§7 stay anchored to the drafting baselines (`f81949d`, refreshed to `7cf0853`); later merges and this fix itself shift them (at `2148360`: `handleLocalMouseEvent` is `src/ui/pty-attach.ts:1072`, `handleInput` `:309`, `handleMouseInputChunk` `:1020`; after the fix `parseMouseEvent` is `src/core/pty-scroll.mjs:82`). The code blocks and decisions are normative; those line numbers are historical evidence, not navigation. No design or boundary change.
+- Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-16T12:35:00Z — rebased onto `main` @ `074123c`, where the two sibling issues landed (#189 @ `8a5966e`, #187 @ `074123c`). §6.2/§8 updated with the realised interactions: the X10 release now reaches #187's geometry-based drag decision (so a motion-less X10 gesture also copies — #187's acceptance, not asserted here), and #189 kept `parseMouseInputChunk`'s all-or-nothing contract (the 7-byte row still holds; `splitAttachInput` owns mixed reads). One both-added-tests conflict in `test/pty-scroll.test.mjs` was resolved by keeping both sides.
 - Research: `research/01-root-cause-and-reachability.md` (root cause, reachability, fix validation)
 - Route: bug → `systematic-debugging` (Phase 1 root cause + live repro done in `research/`; this document is the design)
 
@@ -170,18 +170,23 @@ Notes on the matrix:
 
 ### 6.2 Interaction with sibling issues (must not be pre-empted)
 
-- **#187 (motion-less drags)** stays separate. With this fix, an X10 gesture *without* motion events
-  still lands in the release branch with `shouldCopy === false` and is cleared by the pending click;
-  #187 owns the geometry rule (`anchor ≠ release point` ⇒ drag). This spec must not add geometry
-  logic, and #188's acceptance does not depend on #187 landing. After #187 lands, the motion-less X10
-  case copies as a side effect — that row is explicitly out of #188's matrix.
+- **#187 (motion-less drags) — landed on `main` @ `074123c` while this PR was in flight.** The
+  release branch now decides "was this a drag?" by screen geometry (`selectionReleaseIsDrag`) instead
+  of the move flag alone. #188 still owns only the decoding of `Cb = 3`; the geometry rule stays
+  #187's. Interaction as landed: an X10 gesture *with* motion copies (A4), a same-point X10 release is
+  still a click (A5), and an X10 gesture *without* motion events now also copies — that last row is
+  #187's acceptance, not #188's, and is deliberately not asserted here. #188's acceptance never
+  depended on #187 landing.
 - **#172 (highlight survives a copy-on-release)** is an open bug asking to *clear* the selection in
-  the very `shouldCopy` branch this issue exercises (`src/ui/pty-attach.ts:1081-1088`). Retention is
-  today's behaviour, not a contract; #188 must not add an assertion that pins it and must not add the
+  the very `shouldCopy` branch this issue exercises. Retention is
+today's behaviour, not a contract; #188 must not add an assertion that pins it and must not add the
   clearing either — that call belongs to #172. A4 therefore asserts the copy effect only. Whichever
   of the two merges second rebases and re-runs A6.
-- **#189 (mixed chunks)** stays separate: `parseMouseInputChunk` keeps its all-or-nothing contract;
-  A3 pins a pure-mouse chunk only. A4's three reports are exactly six bytes each for this reason.
+- **#189 (mixed chunks) — landed on `main` @ `8a5966e` while this PR was in flight.** It kept
+  `parseMouseInputChunk`'s all-or-nothing contract (verified after the rebase: the 7-byte chunk still
+  returns `null`) and added `splitAttachInput` for mixed reads, so A3's assertion is unchanged and the
+  component scenario's pure-mouse reports keep taking the same path. A4's three reports are exactly
+  six bytes each for this reason.
 
 ### 6.3 Guarantee boundary and the manual item U1
 
@@ -241,7 +246,7 @@ Reverting restores today's (broken) X10 release classification and changes nothi
 |---|---|
 | Misclassifying a real press as release | `Cb = 3` is defined as release by xterm; X10 compatibility mode encodes MB3 presses as 2 and sends no releases. A2 pins right-button press. |
 | Wheel regression | The release rule excludes bit 6; A2 pins both wheel directions and `mouseWheelDirection`. |
-| Changing shared file `src/core/pty-scroll.mjs` while #187 is in flight | Both changes are small and in different helpers; whichever merges second rebases and re-runs A6. No shared lines are claimed by both designs. |
+| Changing shared files (`src/core/pty-scroll.mjs`, `test/pty-scroll.test.mjs`) while #187/#189 were in flight | Realised: both landed first (#189 @ `8a5966e`, #187 @ `074123c`). Rebase resolved one both-added-tests conflict in `test/pty-scroll.test.mjs`; the parser change auto-merged cleanly and `parseMouseInputChunk`'s contract survived #189. A6 re-run on the rebased head. |
 | A4's OSC 52 payload depends on the fixture line | The harness waits for the fixture line to render before the gesture (same pattern as the existing mouse scenario) and asserts the exact payload string. |
 | #172 lands and clears the selection in the copy branch | A4 carries no retention clause, so #172 does not invalidate it; only the rebase (same file, `src/ui/pty-attach.ts` release branch region) and a re-run of A6 are needed. |
 | Coverage thresholds (`npm run verify`) | New pure branches are exercised by A1/A2; the scenario adds one integration test. If coverage dips, the parser cases (not the assertions) are extended. |
