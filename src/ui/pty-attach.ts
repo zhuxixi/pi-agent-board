@@ -399,6 +399,13 @@ export class PtyAttachComponent implements Component {
 		// there. Forward one synthesized SGR wheel report instead and let the child
 		// scroll its own viewport — the same fallback PageUp/PageDown already use
 		// when the local viewport cannot move.
+		//
+		// Issue #198: the buffer type alone cannot decide this. A real fullscreen
+		// child sends `\x1b[?1049h` once at startup, so for any session older than
+		// the 100 KB screen-log replay window (and with no alternate-screen state
+		// in the snapshot DTO) this buffer reads `normal` while holding no
+		// scrollback at all. The wheel must therefore forward whenever the local
+		// viewport cannot actually move, not only when the type is known.
 		const wheelLinesUp = wheelScrollLinesUp(event);
 		if (wheelLinesUp !== 0) {
 			const route = resolveAttachWheelRoute({
@@ -406,18 +413,17 @@ export class PtyAttachComponent implements Component {
 				wheelLinesUp,
 				mouseEnabled: this.mouseScrollEnabled(),
 			});
-			if (route === "child") {
-				// Consume only on effect, as the pre-#185 branch did: when the runner
-				// socket is down the forward would be a silent no-op (send() drops it),
-				// so hand the event back to pi instead of swallowing it pointlessly.
-				if (!this.socket || !this.connected) return undefined;
-				this.clearPendingClick();
-				this.clearSelection();
-				this.forwardWheelToChild(wheelLinesUp, event);
-				return { handled: true, render: false };
-			}
+			if (route === "none") return undefined;
 			if (route === "local" && this.tryScrollBy(wheelLinesUp)) return { handled: true, render: false };
-			return undefined;
+			// "child", or "local" with a viewport that cannot move. Consume only on
+			// effect: when the runner socket is down the forward would be a silent
+			// no-op (send() drops it), so hand the event back to pi instead of
+			// swallowing it pointlessly.
+			if (!this.socket || !this.connected) return undefined;
+			this.clearPendingClick();
+			this.clearSelection();
+			this.forwardWheelToChild(wheelLinesUp, event);
+			return { handled: true, render: false };
 		}
 		const nativePasteEnabled = process.env.AGENT_BOARD_ATTACH_NATIVE_PASTE !== "0";
 		if (shouldMirrorSelectionToPrimary(event, { nativePasteEnabled })) {

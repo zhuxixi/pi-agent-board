@@ -14,7 +14,10 @@
 //      viewport travels up by exactly the reported delta;
 //   2. wheel down → consumed while it moves, lands back on follow-bottom (null),
 //      and the NEXT downward wheel falls through (undefined) instead of
-//      swallowing the event;
+//      swallowing the event. This component has no runner socket, so it is
+//      disconnected: issue #198 made a *connected* attach forward the wheel to
+//      the child when the local viewport cannot move, and this case pins the
+//      disconnected half of that rule (a forward would be a silent no-op);
 //   3. a wheel report with no delta, and a non-wheel press, both fall through.
 // Run via `node --experimental-transform-types`.
 import { mkdtempSync, rmSync } from "node:fs";

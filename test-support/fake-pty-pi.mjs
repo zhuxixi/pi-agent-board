@@ -18,20 +18,38 @@ if (process.env.FAKE_PTY_STREAM_MODE === "steady") {
 	timer.unref?.();
 }
 
-// "alt": enter the alternate screen and keep repainting one line — the
-// attach's headless xterm lands in the alternate buffer, where no local
-// scrollback exists. This is issue #185's wheel-forwarding topology: a
-// fullscreen child owns the scroll, and the attach's own viewport cannot move.
-// The enable sequence is re-asserted on every tick so the state cannot be lost
-// to a replayed/truncated screen log or a synthesized snapshot frame on a slow
-// CI runner (a real terminal would only send it once).
+// "alt": enter the alternate screen once (exactly what a real fullscreen TUI
+// does) and keep repainting one line — the attach's headless xterm lands in the
+// alternate buffer as long as the enable still sits inside the 100 KB
+// screen-log replay window (issue #185's topology).
 if (process.env.FAKE_PTY_STREAM_MODE === "alt") {
 	process.stdout.write("\x1b[?1049h\x1b[H\x1b[2Kalt-frame-0\r\nalt-frame-0b");
 	let n = 0;
 	const timer = setInterval(() => {
 		n += 1;
-		process.stdout.write(`\x1b[?1049h\x1b[H\x1b[2Kalt-frame-${n}\r\nalt-frame-${n}b`);
+		process.stdout.write(`\x1b[H\x1b[2Kalt-frame-${n}\r\nalt-frame-${n}b`);
 	}, 25);
+	timer.unref?.();
+}
+
+// "alt-flood": one-shot alternate-screen entry followed by absolute-positioned
+// frame repaints with enough volume to push that enable sequence out of the
+// attach's 100 KB replay window — the production topology of issue #198 (a real
+// session is almost always older than the window). No newline ever leaves the
+// last row, so the attach's buffer gains no scrollback either.
+if (process.env.FAKE_PTY_STREAM_MODE === "alt-flood") {
+	const rows = Number(process.env.FAKE_PTY_ALT_ROWS ?? 22);
+	const frame = (n) => {
+		let s = "\x1b[H";
+		for (let r = 1; r <= rows; r++) s += `\x1b[${r};1H\x1b[2Kalt-flood-${n}-row-${r}-${"x".repeat(40)}`;
+		return s;
+	};
+	process.stdout.write("\x1b[?1049h" + frame(0));
+	let n = 0;
+	const timer = setInterval(() => {
+		n += 1;
+		process.stdout.write(frame(n));
+	}, 5);
 	timer.unref?.();
 }
 

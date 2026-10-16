@@ -26,7 +26,7 @@ test("attach fullscreen wheel: scrolls the local viewport, falls through when it
 	assert.equal(parsed.upMovedByDelta, true, "wheel up must move the viewport up by exactly the reported delta");
 	assert.equal(parsed.downHandled, true, "wheel down must be consumed while it still moves");
 	assert.equal(parsed.downLandedOnBottom, true, "wheel down must land on follow-bottom");
-	assert.equal(parsed.atBottomFallsThrough, true, "wheel at follow-bottom must fall through to pi (undefined)");
+	assert.equal(parsed.atBottomFallsThrough, true, "a disconnected attach must fall through instead of dropping a forward (issue #198)");
 	assert.equal(parsed.missingDeltaFallsThrough, true, "a wheel report with no delta must fall through");
 	assert.equal(parsed.nonWheelFallsThrough, true, "a non-wheel press must keep falling through");
 	assert.equal(parsed.attachMouseOffFallsThrough, true, "AGENT_BOARD_ATTACH_MOUSE=0 must fall through in fullscreen too");

@@ -4,7 +4,14 @@
 // attach's own xterm scrollback is inert (an alternate buffer keeps no
 // history), so a fullscreen wheel event must be FORWARDED to the child as one
 // synthesized SGR report instead of scrolling the local viewport — the same
-// fallback the keyboard path already uses. Verifies:
+// fallback the keyboard path already uses.
+//
+// Premise (issue #198): this branch is reachable only when the attach actually
+// learns about the alternate screen, i.e. through the LEGACY screen-log replay
+// path with the one-shot `\x1b[?1049h` still inside its 100 KB window. The
+// default snapshot path carries no alternate-screen state at all, which is why
+// the production topology (see pty-attach-wheel-fallback-scenario.ts) has to be
+// covered by the cannot-move forwarding rule instead. Verifies:
 //   1. wheel up/down → {handled:true, render:false} and the exact SGR report
 //      reaches the runner socket as {type:"input"} (button 64 up / 65 down,
 //      1-based child-screen coordinates), while viewportTop stays null
@@ -68,6 +75,10 @@ const runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), config
 	stdio: ["ignore", "pipe", "pipe"],
 });
 runner.stderr.resume();
+
+// The snapshot DTO has no alternate-screen state (issue #198), so the alt route
+// can only be exercised through the legacy replay path.
+process.env.AGENT_BOARD_TERMINAL_SNAPSHOT = "0";
 
 const result = {
 	error: null as string | null,
@@ -226,6 +237,7 @@ try {
 } finally {
 	delete process.env.AGENT_BOARD_ATTACH_MOUSE;
 	delete process.env.AGENT_BOARD_ENABLE_MOUSE_SCROLL;
+	delete process.env.AGENT_BOARD_TERMINAL_SNAPSHOT;
 	try {
 		runner.kill();
 	} catch {}
