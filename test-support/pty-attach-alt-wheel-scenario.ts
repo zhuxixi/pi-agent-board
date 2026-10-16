@@ -6,12 +6,14 @@
 // synthesized SGR report instead of scrolling the local viewport — the same
 // fallback the keyboard path already uses.
 //
-// Premise (issue #198): this branch is reachable only when the attach actually
-// learns about the alternate screen, i.e. through the LEGACY screen-log replay
-// path with the one-shot `\x1b[?1049h` still inside its 100 KB window. The
-// default snapshot path carries no alternate-screen state at all, which is why
-// the production topology (see pty-attach-wheel-fallback-scenario.ts) has to be
-// covered by the cannot-move forwarding rule instead. Verifies:
+// Premise (issues #198, #203): this branch is reachable only when the attach actually
+// learns about the alternate screen, i.e. through the LEGACY screen-log replay path with
+// the child's one-shot `\x1b[?1049h` still inside the replayed tail
+// (`ATTACH_REPLAY_BYTES`). The default snapshot path carries no alternate-screen state at
+// all, which is why the production topology (see pty-attach-wheel-fallback-scenario.ts)
+// has to be covered by the cannot-move forwarding rule instead. The replay is read once,
+// at construction, so the scenario waits for the child's first frame to reach the screen
+// log before building the component — see the readiness gate below. Verifies:
 //   1. wheel up/down → {handled:true, render:false} and the exact SGR report
 //      reaches the runner socket as {type:"input"} (button 64 up / 65 down,
 //      1-based child-screen coordinates), while viewportTop stays null
@@ -21,7 +23,7 @@
 //      all fall through (undefined) and forward nothing;
 //   3. clearing the switches restores forwarding.
 // Run via `node --experimental-transform-types`.
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -109,6 +111,25 @@ try {
 	}, 15_000);
 	if (!ready) throw new Error("host never became ready");
 
+	// The legacy path hydrates by replaying the screen-log tail ONCE, in the component
+	// constructor (`replayScreenLog`, ATTACH_REPLAY_BYTES), and the legacy runner never
+	// re-delivers bytes written before the socket connected. So the child's one-shot
+	// `\x1b[?1049h` must already be in the log when the component is built — otherwise
+	// the enable is lost for the whole session and the attach's xterm reads `normal`
+	// forever while the live frames paint the alternate-screen text into it
+	// (issue #203). Wait for the first frame before constructing the component.
+	const logPath = P.screenLogPath(root, viewId);
+	const firstFrameLogged = await waitFor(() => {
+		try {
+			const logged = readFileSync(logPath, "utf8");
+			// The invariant is the enable itself, not the frame text that follows it.
+			return logged.includes("\x1b[?1049h") && logged.includes("alt-frame-");
+		} catch {
+			return false;
+		}
+	}, 10_000);
+	if (!firstFrameLogged) throw new Error("the child's first alternate-buffer frame never reached the screen log");
+
 	// Intercept component→runner messages to observe forwarded {type:"input"}.
 	const sent: string[] = [];
 	const socketProto = Socket.prototype as any;
@@ -150,22 +171,25 @@ try {
 		} as never,
 	);
 
-	// Wait for alternate-buffer content. CI runners are slow (the Node 22 job
-	// shares the box with Node 24), so the budget is generous and the two
-	// conditions are recorded separately: a content timeout and a buffer-type
-	// mismatch are different failures and must not look alike in the log.
+	// Wait for the alternate-buffer topology to be fully established. The legacy replay can
+	// land between frames, so the frame text may be visible while the attach's xterm is not
+	// yet switched; poll content and buffer type together, and keep the failures
+	// distinguishable — a content timeout and a buffer-type timeout are different problems
+	// and must not look alike in the log (issue #203).
 	const deadline = Date.now() + 25_000;
-	while (Date.now() < deadline && !result.sawAltText) {
+	let sawAlternateBuffer = false;
+	while (Date.now() < deadline && !(result.sawAltText && sawAlternateBuffer)) {
 		const lines = component.render(80) ?? [];
 		const text = lines.join("\n");
 		result.framePreview = text.slice(0, 400);
 		if (text.includes("alt-frame-")) result.sawAltText = true;
-		else await sleep(40);
+		result.bufferType = (component as any).term.buffer.active.type;
+		sawAlternateBuffer = result.bufferType === "alternate";
+		if (!(result.sawAltText && sawAlternateBuffer)) await sleep(40);
 	}
-	result.bufferType = (component as any).term.buffer.active.type;
-	result.sawAltContent = result.sawAltText && result.bufferType === "alternate";
+	result.sawAltContent = result.sawAltText && sawAlternateBuffer;
 	if (!result.sawAltText) throw new Error(`alternate-buffer session content never rendered (bufferType=${result.bufferType}, frame=${JSON.stringify(result.framePreview)})`);
-	if (result.bufferType !== "alternate") throw new Error(`the attach's xterm is in the "${result.bufferType}" buffer, not the alternate one — the scenario cannot exercise the #185 branch`);
+	if (!sawAlternateBuffer) throw new Error(`the attach's xterm stayed in the "${result.bufferType}" buffer — the alternate-screen enable never reached it (replayed tail window or construction ordering), so the scenario cannot exercise the #185 branch`);
 
 	const mouseBase = { x: 3, y: 3, screenX: 3, screenY: 3, width: 80, height: 22, shift: false, alt: false, ctrl: false };
 	const wheelEvent = (wheelDelta?: number) => ({
