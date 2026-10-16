@@ -2,11 +2,12 @@
 
 - Issue: https://github.com/zhuxixi/pi-agent-board/issues/188
 - Kind: bug — root-cause report + fix design
-- Repo: `zhuxixi/pi-agent-board` · baseline `main` @ `7cf0853` (drafted and cross-reviewed against `f81949d`; rebase is citation-only) · worktree `issue-188-x10-release`
+- Repo: `zhuxixi/pi-agent-board` · baseline `main` @ `2148360` (drafted and cross-reviewed against `f81949d`; rebases are citation-only) · worktree `issue-188-x10-release`
 - Drafted: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-14T12:34:15Z
 - Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-14T12:52:00Z — after round-1 review (R1-G1/R1-G2/R1-D1 accepted; findings in `research/spec-review-round-1.md`)
 - Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-14T13:03:00Z — after round-2 review (R2-D1 accepted; 0 real gaps, converged; findings in `research/spec-review-round-2.md`)
 - Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-15T00:00:00Z — rebased onto `main` @ `7cf0853` (#190/#191 merged): line citations moved (+4 from `handleInput`, +25 from `handleMouseInputChunk`, osc52 +42); no design or boundary change, the X10 branch and the legacy handler are byte-identical to `f81949d`
+- Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-16T00:20:00Z — rebased onto `main` @ `2148360` (#192/#194 merged) before the PR. The `file:line` citations in §2/§5/§6/§7 stay anchored to the drafting baselines (`f81949d`, refreshed to `7cf0853`); later merges and this fix itself shift them (at `2148360`: `handleLocalMouseEvent` is `src/ui/pty-attach.ts:1072`, `handleInput` `:309`, `handleMouseInputChunk` `:1020`; after the fix `parseMouseEvent` is `src/core/pty-scroll.mjs:82`). The code blocks and decisions are normative; those line numbers are historical evidence, not navigation. No design or boundary change.
 - Research: `research/01-root-cause-and-reachability.md` (root cause, reachability, fix validation)
 - Route: bug → `systematic-debugging` (Phase 1 root cause + live repro done in `research/`; this document is the design)
 
