@@ -10,7 +10,28 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { readDiagnostics } from "../src/core/diagnostics.mjs";
+import { screenLogPath } from "../src/core/paths.mjs";
 import { readHost, readState, readStatus } from "../src/core/store.mjs";
+
+/** Bytes of the screen log tail attached to a postmortem (spec D3: last ~2KB). */
+export const SCREEN_LOG_TAIL_BYTES = 2048;
+
+/**
+ * Keep at most `maxBytes` bytes of the tail of a UTF-8 string without cutting
+ * a multi-byte character in half. Shorter-than-limit text is returned as-is.
+ * @param {string} text
+ * @param {number} maxBytes
+ * @returns {string}
+ */
+export function tailSlice(text, maxBytes) {
+	const buf = Buffer.from(text, "utf8");
+	if (buf.length <= maxBytes) return text;
+	let start = buf.length - maxBytes;
+	// Walk forward past continuation bytes (10xxxxxx) so the slice starts at a
+	// leading byte; the tail itself is intact because we only cut the head.
+	while (start < buf.length && (buf[start] & 0xc0) === 0x80) start += 1;
+	return buf.subarray(start).toString("utf8");
+}
 
 /**
  * @param {{
@@ -19,6 +40,7 @@ import { readHost, readState, readStatus } from "../src/core/store.mjs";
  * 	host: object | null,
  * 	diagnosticsTail: object[],
  * 	journalTail: string[],
+ * 	screenLogTail?: string | null,
  * }} snapshot
  * @returns {string}
  */
@@ -31,13 +53,14 @@ export function formatPostmortem(snapshot) {
 		show("host", snapshot.host),
 		`diagnosticsTail: ${snapshot.diagnosticsTail.length ? JSON.stringify(snapshot.diagnosticsTail) : "<empty>"}`,
 		`journalTail: ${snapshot.journalTail.length ? snapshot.journalTail.join(" | ") : "<empty>"}`,
+		show("screenLogTail", snapshot.screenLogTail),
 	];
 	return lines.join("\n");
 }
 
 /**
  * @param {string} root @param {string} viewId @param {string | null} runId
- * @returns {{ status: object | null, state: object | null, host: object | null, diagnosticsTail: object[], journalTail: string[] }}
+ * @returns {{ status: object | null, state: object | null, host: object | null, diagnosticsTail: object[], journalTail: string[], screenLogTail: string | null }}
  */
 export function capturePostmortem(root, viewId, runId = null) {
 	const safe = (fn) => {
@@ -54,12 +77,19 @@ export function capturePostmortem(root, viewId, runId = null) {
 	} catch {
 		/* absent journal */
 	}
+	let screenLogTail = null;
+	try {
+		screenLogTail = tailSlice(readFileSync(screenLogPath(root, viewId), "utf8"), SCREEN_LOG_TAIL_BYTES);
+	} catch {
+		/* absent or unreadable screen log */
+	}
 	return {
 		status: safe(() => (runId ? readStatus(root, viewId, runId) : null)),
 		state: safe(() => readState(root, viewId)),
 		host: safe(() => readHost(root, viewId)),
 		diagnosticsTail: safe(() => (readDiagnostics(root, viewId) ?? []).slice(-8)) ?? [],
 		journalTail,
+		screenLogTail,
 	};
 }
 

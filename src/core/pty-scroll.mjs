@@ -298,6 +298,50 @@ export function wheelScrollLinesUp(event) {
 }
 
 /**
+ * Issue #185: route a normalized wheel event (fullscreen handleMouse path) to the
+ * surface that should scroll.
+ *
+ * "local" — scroll the attach's own xterm scrollback (normal buffer, where the
+ * scrollback actually holds history). The caller still downgrades to "none"
+ * itself when `tryScrollBy` cannot move: that decision needs the live viewport.
+ * "child" — forward one synthesized SGR wheel report instead (alternate
+ * buffer: xterm's alternate buffer keeps no scrollback, so the hosted child's
+ * own viewport is the only thing that can scroll).
+ * "none"  — leave the event to pi (kill switches, or an unusable delta).
+ *
+ * Pure by contract: `bufferType` is `this.term.buffer.active.type` at the call
+ * site, `wheelLinesUp` comes from `wheelScrollLinesUp()`, and the switch state
+ * is resolved by the caller.
+ *
+ * @param {{bufferType?: string, wheelLinesUp?: number, mouseEnabled?: boolean}|null|undefined} input
+ * @returns {"local"|"child"|"none"}
+ */
+export function resolveAttachWheelRoute({ bufferType, wheelLinesUp, mouseEnabled } = {}) {
+	if (!mouseEnabled || wheelLinesUp === 0) return "none";
+	return bufferType === "alternate" ? "child" : "local";
+}
+
+/**
+ * Issue #185: encode one synthesized SGR wheel report for the hosted child.
+ *
+ * `"up"` maps to button 64 and `"down"` to 65 — the plain report a terminal
+ * sends for a wheel notch. Coordinates are 1-based child-screen cells (the
+ * attach body rendered 1:1), floored and clamped to >= 1 so a malformed
+ * coordinate can never produce an invalid report. One report per received
+ * event: the child applies its own wheel acceleration, exactly as it would for
+ * a real terminal.
+ *
+ * @param {"up"|"down"} direction
+ * @param {{col?: number, row?: number}} coords
+ * @returns {string}
+ */
+export function encodeWheelReport(direction, { col, row } = {}) {
+	const button = direction === "up" ? 64 : 65;
+	const cell = (v) => (Number.isFinite(v) ? Math.max(1, Math.floor(v)) : 1);
+	return `\x1b[<${button};${cell(col)};${cell(row)}M`;
+}
+
+/**
  * Compute the next local PTY viewport after a scroll gesture.
  *
  * `viewportTop === null` means follow bottom. `changed` reports whether the gesture

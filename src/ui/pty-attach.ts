@@ -12,7 +12,7 @@ import { installImeCursorCoalesce } from "../core/ime-cursor-coalesce.mjs";
 import { createJiggleRetryController } from "../core/pty-attach-jiggle-controller.mjs";
 import { createTerminalAttachClient } from "../core/terminal-attach-client.mjs";
 import { backgroundRgbFromTerminalColors, buildSettleSchemePatch, colorSchemeForBackgroundRgb, extractOscQuerySequences, resolveProbeApi, toColorSchemeReport } from "../core/terminal-query-sequences.mjs";
-import { clampInt, resolveAttachMouseAction, resolvePasteSelectionSource, resolveWheelLines, scrollViewportTop, selectionDragScrollLines, shouldMirrorSelectionToPrimary, shouldOwnOuterMouseMode, splitAttachInput, wheelScrollLinesUp } from "../core/pty-scroll.mjs";
+import { clampInt, encodeWheelReport, resolveAttachMouseAction, resolveAttachWheelRoute, resolvePasteSelectionSource, resolveWheelLines, scrollViewportTop, selectionDragScrollLines, shouldMirrorSelectionToPrimary, shouldOwnOuterMouseMode, splitAttachInput, wheelScrollLinesUp } from "../core/pty-scroll.mjs";
 
 export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null };
 
@@ -99,6 +99,10 @@ interface XtermLike {
 	buffer: {
 		active: {
 			baseY: number;
+			// "normal" | "alternate" (@xterm/headless IBuffer.type): an alternate
+			// buffer keeps no scrollback, which is what routes the fullscreen wheel
+			// to the child instead of the attach's own viewport (issue #185).
+			type: string;
 			cursorX?: number;
 			cursorY?: number;
 			length: number;
@@ -404,9 +408,30 @@ export class PtyAttachComponent implements Component {
 		// SGR sequence through handleInput instead). Consume it locally, honoring the
 		// same kill switches as the legacy path, and fall through when scrolling is
 		// disabled or the viewport cannot actually move.
+		//
+		// Issue #185: an alternate-screen child leaves that scrollback inert (an
+		// alternate buffer keeps no history), so "local" routing can never move
+		// there. Forward one synthesized SGR wheel report instead and let the child
+		// scroll its own viewport — the same fallback PageUp/PageDown already use
+		// when the local viewport cannot move.
 		const wheelLinesUp = wheelScrollLinesUp(event);
 		if (wheelLinesUp !== 0) {
-			if (this.mouseScrollEnabled() && this.tryScrollBy(wheelLinesUp)) return { handled: true, render: false };
+			const route = resolveAttachWheelRoute({
+				bufferType: this.term.buffer.active.type,
+				wheelLinesUp,
+				mouseEnabled: this.mouseScrollEnabled(),
+			});
+			if (route === "child") {
+				// Consume only on effect, as the pre-#185 branch did: when the runner
+				// socket is down the forward would be a silent no-op (send() drops it),
+				// so hand the event back to pi instead of swallowing it pointlessly.
+				if (!this.socket || !this.connected) return undefined;
+				this.clearPendingClick();
+				this.clearSelection();
+				this.forwardWheelToChild(wheelLinesUp, event);
+				return { handled: true, render: false };
+			}
+			if (route === "local" && this.tryScrollBy(wheelLinesUp)) return { handled: true, render: false };
 			return undefined;
 		}
 		const nativePasteEnabled = process.env.AGENT_BOARD_ATTACH_NATIVE_PASTE !== "0";
@@ -1313,6 +1338,23 @@ export class PtyAttachComponent implements Component {
 	/** Feed socket output into the jiggle retry controller (clear/frame detection). */
 	private checkClearSequence(data: string): void {
 		this.jiggleRetry.feed(data);
+	}
+
+	/** Issue #185: forward one synthesized SGR wheel report so an alternate-screen
+	 * child scrolls its own viewport (the attach's scrollback is inert there).
+	 * One report per received event — the child applies its own acceleration,
+	 * exactly as it would for a real terminal. Coordinates are child-screen
+	 * cells: the normalized event is zero-based and local to this overlay, the
+	 * body starts at local row 1 (header row 0, footer last row), and SGR is
+	 * one-based. */
+	private forwardWheelToChild(linesUp: number, event: TuiMouseEvent): void {
+		this.send({
+			type: "input",
+			data: encodeWheelReport(linesUp > 0 ? "up" : "down", {
+				col: clampInt(event.x + 1, 1, this.cols),
+				row: clampInt(event.y, 1, Math.max(1, this.bodyHeight())),
+			}),
+		});
 	}
 
 	private tryScrollBy(linesUp: number): boolean {

@@ -14,6 +14,7 @@ import { claimHost, createView, readHost, readMeta, readState, updateOwnedHost, 
 import { readJournal } from "../src/core/coordinator-journal.mjs";
 import { startCoordinator } from "../test-support/ensure-coordinator-helper.mjs";
 import { capturePostmortem, formatPostmortem, waitForWithPostmortem } from "../test-support/flake-postmortem.mjs";
+import { createEchoProbe } from "../test-support/echo-probe.mjs";
 import { tryAcquireOwnedViewLock } from "../src/core/locks.mjs";
 
 function freshRoot() {
@@ -511,6 +512,11 @@ test("pty-runner survives persistent host.json persist failures (EPERM-class)", 
 test("pty-runner routes editor_state between clients, seeds hello, resets on exit", async () => {
 	const root = freshRoot();
 	let runner;
+	// issue #178 (cross-review R1-G1): this is one of the issue's two target
+	// signatures, so its waits carry the same flake postmortem as
+	// subscribe_terminal's — a red must arrive with a scene, not just
+	// "timed out waiting".
+	const capture = () => formatPostmortem(capturePostmortem(root, "v1", null));
 	try {
 		const meta = createView(root, { id: "v1", name: "editor-state", cwd: process.cwd() });
 		const configPath = P.hostConfigPath(root, "v1");
@@ -529,7 +535,7 @@ test("pty-runner routes editor_state between clients, seeds hello, resets on exi
 			rows: 24,
 		});
 		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
-		await waitFor(() => hostReady(root, "v1"));
+		await waitFor(() => hostReady(root, "v1"), 15000, capture);
 
 		const readMessages = (socket) => {
 			let buf = "";
@@ -547,14 +553,20 @@ test("pty-runner routes editor_state between clients, seeds hello, resets on exi
 		await once(client1, "connect");
 		const messages1 = readMessages(client1);
 		send(client1, { type: "hello" });
-		await waitFor(() => messages1.find((m) => m.type === "hello"));
+		await waitFor(() => messages1.find((m) => m.type === "hello"), 15000, capture);
 
 		// A second client must receive the pushed state as a broadcast.
 		const client2 = createConnection(P.controlSocketPath(root, "v1"));
 		await once(client2, "connect");
 		const messages2 = readMessages(client2);
+		// Registration proof (issue #178): `connect` only proves the TCP handshake.
+		// The runner registers the socket and writes this unsolicited hello inside
+		// the accept callback (runner/pty-runner.mjs:375/:380), so receiving it
+		// means client2 is already in the broadcast set. Without this wait the push
+		// below can be broadcast before registration and is never replayed.
+		await waitFor(() => messages2.find((m) => m.type === "hello"), 15000, capture);
 		send(client1, { type: "editor_state", empty: false });
-		await waitFor(() => messages2.find((m) => m.type === "editor_state"));
+		await waitFor(() => messages2.find((m) => m.type === "editor_state"), 15000, capture);
 		assert.equal(messages2.find((m) => m.type === "editor_state").empty, false);
 
 		// A client connecting afterwards gets the current state seeded in hello.
@@ -565,13 +577,13 @@ test("pty-runner routes editor_state between clients, seeds hello, resets on exi
 		// The runner also sends an unsolicited hello on connect (now with the
 		// current editorEmpty seeded too); both it and the explicit-hello reply
 		// carry the seeded value, so the finder matches either.
-		await waitFor(() => messages3.find((m) => m.type === "hello" && "editorEmpty" in m));
+		await waitFor(() => messages3.find((m) => m.type === "hello" && "editorEmpty" in m), 15000, capture);
 		assert.equal(messages3.find((m) => m.type === "hello" && "editorEmpty" in m).editorEmpty, false);
 
 		// Child exit resets the state to null and broadcasts it.
 		send(client1, { type: "input", data: "exit\r" });
-		await waitFor(() => messages2.find((m) => m.type === "editor_state" && m.empty === null));
-		await waitFor(() => readHost(root, "v1")?.endedAt);
+		await waitFor(() => messages2.find((m) => m.type === "editor_state" && m.empty === null), 15000, capture);
+		await waitFor(() => readHost(root, "v1")?.endedAt, 15000, capture);
 
 		client1.destroy();
 		client2.destroy();
@@ -1819,10 +1831,26 @@ test("subscribe_terminal: snapshot + live continuity alongside legacy clients", 
 		await once(legacy, "connect");
 		const legacyMessages = listen(legacy).messages;
 		send(legacy, { type: "hello" });
-		// Wait for the first child output on the legacy socket: it proves the
-		// runner has fed its canonical model, so the subscribe below cannot hit
-		// the "host starting" empty-baseline race.
-		await waitFor(() => legacyMessages.find((m) => m.type === "output" && String(m.data).includes("fake pi ready")), 15000, capture);
+		// accept-registration race (issue #178): the one-shot boot banner is
+		// broadcast when the child starts, which can be *before* this socket is
+		// accepted — and legacy output has no replay, so waiting for it can burn
+		// the whole budget. Probe with an echo instead — but match only the fake
+		// pty's APPLICATION echo (the "echo:" prefix). Until the child calls
+		// setRawMode the PTY line discipline is still in canonical mode with ECHO
+		// on, so the kernel echoes each probe line too, and the runner broadcasts
+		// that kernel echo before the child has written its banner — converging on
+		// it was the Node 22 merge-blocking flake. Only the application echo
+		// proves the banner was already written (the fake pty registers its stdin
+		// echo handler after the module-top banner write), and so that the runner
+		// has fed its canonical model — which is what keeps the subscribe below
+		// off the "host starting" empty-baseline race.
+		const probe = createEchoProbe({ send: (line) => send(legacy, { type: "input", data: line }) });
+		probe.start();
+		try {
+			await waitFor(() => legacyMessages.find((m) => m.type === "output" && /echo:boot-probe-\d/.test(String(m.data))), 15000, capture);
+		} finally {
+			probe.stop();
+		}
 
 		// Snapshot subscriber on a second socket.
 		const sub = createConnection(P.controlSocketPath(root, "v1"));
@@ -1867,6 +1895,103 @@ test("subscribe_terminal: snapshot + live continuity alongside legacy clients", 
 		legacy.end();
 		sub.end();
 		sub2.end();
+	} finally {
+		try { runner?.kill("SIGTERM"); } catch {}
+		await waitForExit(runner, 5000);
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+// issue #178 spec D4: the reproduction case for the accept-registration race.
+// Load-independent by construction — every leg is event-driven, never a wall
+// clock: poll screen.log until the banner has been broadcast, connect only
+// then, and prove liveness with an echo before asserting the banner never
+// arrived. This pins the design fact "legacy output has no replay"; do not
+// "fix" it by waiting for the banner again.
+test("accept-registration race: a legacy client that connects late never receives the already-broadcast banner", async () => {
+	const root = freshRoot();
+	let runner;
+	// Same postmortem wiring as the file's other issue-178 case: a red must
+	// arrive with a scene, not just "timed out waiting" — screenLogTail answers
+	// whether the banner was ever written to disk.
+	const capture = () => formatPostmortem(capturePostmortem(root, "v1", null));
+	try {
+		const meta = createView(root, { id: "v1", name: "late-join", cwd: process.cwd() });
+		const configPath = P.hostConfigPath(root, "v1");
+		atomicWriteJson(configPath, {
+			root,
+			viewId: "v1",
+			sessionFile: meta.sessionFile,
+			cwd: process.cwd(),
+			initialPrompt: null,
+			piCommand: process.execPath,
+			piArgsPrefix: [resolve("test-support/fake-pty-pi.mjs")],
+			model: null,
+			tools: null,
+			env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" },
+			cols: 80,
+			rows: 24,
+		});
+		runner = spawn(process.execPath, [resolve("runner/pty-runner.mjs"), configPath], { stdio: ["ignore", "pipe", "pipe"] });
+
+		// Leg 0: the runner spawns the child before it binds the control socket
+		// (runner/pty-runner.mjs:312 vs :407), so gate on hostReady first —
+		// host.state becomes "alive" in the listen callback, i.e. the socket is
+		// bound. Connecting earlier would fail with ENOENT.
+		await waitFor(() => hostReady(root, "v1"), 15000, capture);
+
+		// Leg 1: the banner is already out. screen.log is written from the same
+		// onData path that feeds the canonical model (runner/pty-runner.mjs:333),
+		// so once it contains the banner the broadcast has happened — with no
+		// subscriber and no client attached.
+		await waitFor(() => {
+			try {
+				return readFileSync(P.screenLogPath(root, "v1"), "utf8").includes("fake pi ready");
+			} catch {
+				return false;
+			}
+		}, 15000, capture);
+
+		// Leg 2: only now connect a legacy client. No reply carries the banner.
+		const late = createConnection(P.controlSocketPath(root, "v1"));
+		await once(late, "connect");
+		let buf = "";
+		/** @type {any[]} */
+		const lateMessages = [];
+		late.on("data", (chunk) => {
+			buf += chunk.toString();
+			const lines = buf.split("\n");
+			buf = lines.pop() ?? "";
+			for (const line of lines) if (line.trim()) lateMessages.push(JSON.parse(line));
+		});
+		send(late, { type: "hello" });
+
+		// Leg 3: probe until the echo arrives — proof the connection is live and
+		// output is flowing right now. Match the application echo ("echo:"
+		// prefix): until the child calls setRawMode the PTY kernel also echoes
+		// probe lines in canonical mode, and that early echo proves nothing about
+		// the banner. The probe stops on convergence, so it adds
+		// no load for the rest of the case.
+		const probe = createEchoProbe({ send: (line) => send(late, { type: "input", data: line }) });
+		probe.start();
+		try {
+			await waitFor(() => lateMessages.find((m) => m.type === "output" && /echo:boot-probe-\d/.test(String(m.data))), 15000, capture);
+		} finally {
+			probe.stop();
+		}
+
+		// Leg 4: both halves of the race are pinned. The echo proves output flows
+		// to this socket; the missing banner proves there is no replay.
+		assert.ok(
+			lateMessages.some((m) => m.type === "output" && /echo:boot-probe-\d/.test(String(m.data))),
+			"the echo-probe converged: output reaches this connection",
+		);
+		assert.ok(
+			!lateMessages.some((m) => m.type === "output" && String(m.data).includes("fake pi ready")),
+			"legacy clients get no replay: the banner broadcast before accept never arrives",
+		);
+
+		late.end();
 	} finally {
 		try { runner?.kill("SIGTERM"); } catch {}
 		await waitForExit(runner, 5000);
