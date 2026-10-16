@@ -1,0 +1,200 @@
+/**
+ * Inbound terminal reply guard for the PTY attach client (issue #170).
+ *
+ * pi-tui hands replies to forwarded terminal queries to this overlay as input
+ * fragments: the prefix arms a 50ms sequence timeout in StdinBuffer and a
+ * 150ms negotiation flush in ProcessTerminal, so a CSI-shaped reply head is
+ * emitted as an input event and the remaining fragments arrive as plain text.
+ * The overlay's passthrough then feeds that garbage into the child's editor
+ * (upstream earendil-works/pi#10657 — a DA1 reply arrives as four reads and
+ * shows up in the child as a stable `c7c`).
+ *
+ * This module classifies every inbound event and the state machine below
+ * swallows reply fragments until the sequence completes. Color replies (OSC
+ * 4/10/11/12 and the 997 scheme report) are forwarded as ONE whole sequence,
+ * because the child's pi-tui parsers anchor `^...$`; everything else falls
+ * through untouched (issue #128 decision: the child negotiates at spawn, a late
+ * DA/kitty reply is meaningless to it, and forwarding kitty flags would retune
+ * the shared real-terminal keyboard stack).
+ *
+ * Pure only: no I/O, no timers, no `process.env`, no pi-tui import. Time is
+ * injected by the caller (see `armReplyGuardTimer` in src/ui/pty-attach.ts).
+ *
+ * Known boundary: a FRAGMENTED DA3 reply (`\x1b[=...c`) is not armed — this
+ * module's head list deliberately omits `\x1b[=` because the attach client
+ * never queries DA3 — so such a fragment passes through as it did before this
+ * guard. The complete DA3 form is still dropped (it is a DROP_SHAPES entry).
+ *
+ * Known trade-offs in the head list (raised in review): `\x1bP` is also the
+ * legacy xterm encoding of Alt+Shift+P on terminals without the kitty
+ * protocol, so that chord can arm a window and absorb up to the capped bytes
+ * of plain text typed right after it. It is kept because a fragmented DCS
+ * reply (XTVersion) is otherwise unprotected, and the absorption is bounded
+ * (64 bytes / 250ms) and kill-switchable. `\x1b]1` covers the whole OSC 1xx
+ * range, so a fragmented reply outside the forwarded 4/10/11/12 set is
+ * absorbed rather than leaked — the safe direction for an unrecognized OSC.
+ */
+
+/** How long an open reply window stays open for trailing fragments (spec §3.3). */
+export const REPLY_GUARD_WINDOW_MS = 250;
+
+/** Bound on how much of a user's fast typing an open window may absorb. */
+export const REPLY_GUARD_MAX_ABSORB_BYTES = 64;
+
+// Complete reply shapes that are dropped. The child's negotiation happened at
+// spawn, before any attach client existed, so a late reply can only pollute its
+// input or retune keyboards that no longer asked.
+const DROP_SHAPES = [
+	// DA1 / DA3 (`\x1b[?...c`, `\x1b[=...c`) and DA2 (`\x1b[>...c`).
+	{ family: "device-attributes", pattern: /^\x1b\[[?>=][0-9;]*c$/ },
+	// kitty keyboard flags reply.
+	{ family: "kitty-flags", pattern: /^\x1b\[\?[0-9;]*u$/ },
+	// XTWINOPS cell-size report (`\x1b[6;<rows>;<cols>t`).
+	{ family: "cell-size", pattern: /^\x1b\[6;[0-9]+;[0-9]+t$/ },
+	// DCS replies such as XTVersion.
+	{ family: "dcs", pattern: /^\x1bP[\s\S]*\x1b\\$/ },
+];
+
+// Complete reply shapes that are forwarded whole: the child's pi-tui parsers
+// consume them (automatic light/dark theme) and only as one sequence.
+const FORWARD_SHAPES = [
+	// `\x1b[?997;<n>n` color-scheme report. Any numeric value (one or more digits)
+	// is forwarded — value validation belongs to the child's parser, not to this
+	// guard.
+	{ family: "color-scheme", pattern: /^\x1b\[\?997;[0-9]+n$/ },
+	// OSC 4 palette / 10 foreground / 11 background / 12 cursor color replies,
+	// BEL- or ST-terminated.
+	{ family: "osc-color", pattern: /^\x1b\](?:4;[0-9]+|10|11|12);[\s\S]*(?:\x07|\x1b\\)$/ },
+];
+
+// Prefixes that can only start a reply and can never be a key/mouse/paste
+// encoding — only these arm an absorption window. Deliberately absent: bare
+// `\x1b`, `\x1b[`, `\x1b[5`/`\x1b[6` (PageUp/PageDown heads), `\x1b[<` (SGR
+// mouse), `\x1bO` (SS3).
+const REPLY_HEADS = [
+	{ family: "device-attributes", prefix: "\x1b[?" },
+	{ family: "device-attributes", prefix: "\x1b[>" },
+	{ family: "cell-size", prefix: "\x1b[6;" },
+	{ family: "dcs", prefix: "\x1bP" },
+	{ family: "osc-color", prefix: "\x1b]1" },
+	{ family: "osc-color", prefix: "\x1b]4" },
+];
+
+/**
+ * Classify one inbound input event. Complete reply shapes win over head
+ * prefixes (a complete kitty reply also starts with `\x1b[?`); escape-led
+ * events that are neither are keys, mouse or paste data.
+ */
+export function classifyReplyEvent(data) {
+	if (typeof data !== "string" || data.length === 0) return { kind: "plain" };
+	for (const shape of DROP_SHAPES) {
+		if (shape.pattern.test(data)) return { kind: "reply-complete", family: shape.family, action: "drop" };
+	}
+	for (const shape of FORWARD_SHAPES) {
+		if (shape.pattern.test(data)) return { kind: "reply-complete", family: shape.family, action: "forward" };
+	}
+	for (const head of REPLY_HEADS) {
+		if (data.startsWith(head.prefix)) return { kind: "reply-head", family: head.family };
+	}
+	// Everything else that starts with ESC is a key/mouse/paste encoding; plain
+	// text may be a reply tail fragment (those never start with ESC after the
+	// upstream split, see the field evidence in the issue).
+	return data.startsWith("\x1b") ? { kind: "other" } : { kind: "plain" };
+}
+
+const SWALLOW = Object.freeze({ action: "swallow" });
+const PASS = Object.freeze({ action: "pass" });
+
+/**
+ * Issue #170 kill switch: `0`, `off` or `false` (case/space-insensitive)
+ * disable the guard; unset or anything else keeps it enabled.
+ */
+export function isReplyGuardEnabled(value) {
+	if (typeof value !== "string") return true;
+	return !["0", "off", "false"].includes(value.trim().toLowerCase());
+}
+
+/**
+ * Pure reply-fragment state machine (spec §3.3). Two states only — idle and
+ * armed — and no timer of its own: the caller feeds `now` and arms a host
+ * timer from `pendingSince()`.
+ *
+ *   idle  + head            → armed (buffer = event, since = now)  → swallow
+ *   idle  + complete        → idle                                  → drop/forward
+ *   idle  + plain | other   → idle                                  → pass
+ *   armed + plain           → armed, buffer += event                → swallow
+ *   armed + plain over cap  → idle (buffer and event are dropped)   → swallow
+ *   armed + joined complete → idle                                  → drop/forward joined
+ *   armed + head            → armed (stale buffer dropped)          → swallow
+ *   armed + complete        → idle (stale buffer dropped)           → handle event alone
+ *   armed + other           → idle (stale buffer dropped)           → pass
+ *   armed + expire in time  → idle                                  → swallow
+ */
+export function createReplyGuard({
+	windowMs = REPLY_GUARD_WINDOW_MS,
+	maxAbsorbBytes = REPLY_GUARD_MAX_ABSORB_BYTES,
+} = {}) {
+	let armed = false;
+	let buffer = "";
+	let since = null;
+
+	const reset = () => {
+		armed = false;
+		buffer = "";
+		since = null;
+	};
+	const decisionFor = (event, data) => (event.action === "forward" ? { action: "forward", data } : SWALLOW);
+
+	return {
+		feed(data, now) {
+			const event = classifyReplyEvent(data);
+			if (!armed) {
+				if (event.kind === "reply-head") {
+					armed = true;
+					buffer = data;
+					since = now;
+					return SWALLOW;
+				}
+				if (event.kind === "reply-complete") return decisionFor(event, data);
+				return PASS;
+			}
+			if (event.kind === "other") {
+				// Keys, mouse and paste win over absorbing one more fragment.
+				reset();
+				return PASS;
+			}
+			if (event.kind === "reply-head") {
+				// A fresh head means the previous sequence will never complete.
+				buffer = data;
+				since = now;
+				return SWALLOW;
+			}
+			if (event.kind === "reply-complete") {
+				reset();
+				return decisionFor(event, data);
+			}
+			const joined = buffer + data;
+			// Bound in UTF-16 code units — byte-exact for the ASCII reply corpus.
+			if (joined.length > maxAbsorbBytes) {
+				reset();
+				return SWALLOW;
+			}
+			const joinedEvent = classifyReplyEvent(joined);
+			if (joinedEvent.kind === "reply-complete") {
+				reset();
+				return decisionFor(joinedEvent, joined);
+			}
+			buffer = joined;
+			return SWALLOW;
+		},
+		expire(now) {
+			if (!armed || now - since < windowMs) return null;
+			reset();
+			return SWALLOW;
+		},
+		pendingSince() {
+			return armed ? since : null;
+		},
+		reset,
+	};
+}

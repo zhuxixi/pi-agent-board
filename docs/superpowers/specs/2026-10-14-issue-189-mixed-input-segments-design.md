@@ -2,6 +2,7 @@ Drafted: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-14T13:10:00Z (round-1 findings R1-G1/G2/G3/D1/D2 all accepted)
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-14T13:22:00Z (round-2 finding R2-D1 accepted: report table row 3 relabelled as defensive-only)
 Revised: zai-coding-cn/glm-5.3-flash (selected) · zai-coding-cn/glm-5.3-flash (physical) @ 2026-10-15T00:24:50Z (round-2 review follow-up: A9 pinning strengthened)
+Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-16T00:30:00Z (post-merge composition with main's #194 inbound reply guard; zima CR advisory on PR #196)
 
 # Spec: #189 — attach(legacy): dispatch a mixed input read per segment, and stop treating terminal reports as user intent
 
@@ -171,19 +172,31 @@ never recognised and becomes `key`, i.e. the bytes the all-or-nothing parser use
 ```ts
 	handleInput(data: string): void {
 		for (const segment of splitAttachInput(data)) {
-			if (segment.kind === "mouse") this.handleMouseInputChunk(segment.events);
-			else if (segment.kind === "report") this.send({ type: "input", data: segment.data });
-			else this.handleKeyInput(segment.data);
+			if (segment.kind === "mouse") {
+				this.handleMouseInputChunk(segment.events);
+			} else if (!this.consumeByReplyGuard(segment.data)) {
+				if (segment.kind === "report") this.send({ type: "input", data: segment.data });
+				else this.handleKeyInput(segment.data);
+			}
 			// A detach/close inside a segment must stop the rest of this read.
 			if (this.closed) return;
 		}
 	}
 ```
 
+`consumeByReplyGuard(data)` (new private method) runs the issue #170/#194 inbound reply guard over one
+non-mouse **segment** and returns true when the guard took it — a complete protocol reply (DA1/DA2,
+kitty flags, cell-size, DCS) is dropped, a colour reply is forwarded as one whole sequence. Feeding
+segments instead of raw reads is what keeps a reply head from absorbing keys that were coalesced into
+the same read (the very case #189 exists for).
+
 - `mouse` → the existing `handleMouseInputChunk` (wheel branch + `handleLocalMouseEvent`), unchanged.
-- `report` → forwarded to the child (it may be the answer the child's own query is waiting for) but
-  **without** `clearPendingClick()` / `clearSelection()` / `scrollToBottom()`: it arrives without user
-  intent.
+- `report` → passed through the reply guard first; whatever the guard does not own is forwarded to
+  the child (it may be the answer the child's own query is waiting for) but **without**
+  `clearPendingClick()` / `clearSelection()` / `scrollToBottom()`: it arrives without user intent.
+- the reply guard (#170/#194) keeps its drop/forward policy per segment: reports are *not* always
+  forwarded unchanged — complete protocol replies stay dropped as before, and colour replies are
+  forwarded whole by the guard itself.
 - `key` → the existing keyboard chain (`handleKeyInput`), semantics unchanged: typing still clears
   the selection and jumps to the bottom.
 - `if (this.closed) return;` after each segment: `detach()` sets `closed` (`:461`, `close():1609`),
@@ -228,6 +241,9 @@ outer terminal ── stdin ──▶ pi host TUI ──(focused component)─�
 | mouse + any non-mouse bytes (either order) | keyboard default: gesture dropped, selection cleared, viewport reset, whole read forwarded to the child | mouse run processed; non-mouse run dispatched by kind |
 | report-only read with a selection in progress / scrolled back | selection cleared, viewport snapped to bottom | forwarded; local state untouched |
 | report followed/preceded by a real key | whole read treated as typing | report forwarded, key handled as typing |
+| complete DA1/DA2/kitty/cell-size reply (issue #194 guard) | dropped by the guard | **unchanged**: the guard still owns complete protocol replies, now fed one segment at a time |
+| colour reply (OSC 4/10/11/12, 997 report) | forwarded whole by the guard | **unchanged** (the guard forwards it before the kind dispatch) |
+| reply head coalesced with keys (guard window) | guard could absorb the keys into its window | keys are a separate segment, so a head can never absorb them |
 | wheel coalesced with a report | wheel not applied, bytes leaked to the child | wheel scrolls locally; only the report is forwarded |
 | two keys in one read (`"\x1b[5~\x1b[6~"`) | neither recognised → both forwarded to the child | **unchanged**: adjacent key runs merge into one segment, so `matchesKey` still sees the concatenation (a key is only recognised when it is the whole read) |
 | key-only read | typing semantics | unchanged |
@@ -310,8 +326,10 @@ does not rely on their fixes (X10-only terminals still lose the copy — documen
   — exactly today's behaviour for partial sequences; the outer terminal writes complete sequences.
 - Unknown/unlisted reply forms (CPR `CSI … R`, DECRPM `CSI … $ y`, DCS replies) keep key semantics:
   they still clear the selection as today. Adding a form later is one line in the report table.
-- Reports are forwarded to the child, including while the child has not reached raw/bracketed-paste
-  readiness — that is today's behaviour and belongs to #165/#180, not here.
+- Reports the reply guard (#170/#194) does not own are forwarded to the child, including while the
+  child has not reached raw/bracketed-paste readiness — that is today's behaviour and belongs to
+  #165/#180, not here. Complete protocol replies stay dropped by the guard, and colour replies are
+  forwarded whole by the guard; #189 does not change that policy, it only feeds it segments.
 - No clipboard claim: the copy path (OSC 52 + PRIMARY mirror) is unchanged.
 - No claim about fullscreen mode: `handleMouse`/pi-tui still own that path.
 

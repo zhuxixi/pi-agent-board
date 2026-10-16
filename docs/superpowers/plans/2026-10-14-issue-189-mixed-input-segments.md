@@ -660,13 +660,33 @@ the `detach()` early returns and the final default branch) stays **verbatim** in
 		// reports with other bytes used to fall through to the keyboard branch as a whole: the
 		// gesture was dropped, an in-progress selection cleared, the viewport reset, and the raw
 		// mouse bytes forwarded into the hosted session as typed input.
+		//
+		// Issue #170/#194 composition (post-merge with main): the inbound reply guard runs per
+		// non-mouse segment, so a reply head can never absorb keys coalesced into the same read.
 		for (const segment of splitAttachInput(data)) {
-			if (segment.kind === "mouse") this.handleMouseInputChunk(segment.events);
-			else if (segment.kind === "report") this.send({ type: "input", data: segment.data });
-			else this.handleKeyInput(segment.data);
+			if (segment.kind === "mouse") {
+				this.handleMouseInputChunk(segment.events);
+			} else if (!this.consumeByReplyGuard(segment.data)) {
+				if (segment.kind === "report") this.send({ type: "input", data: segment.data });
+				else this.handleKeyInput(segment.data);
+			}
 			// A detach/close inside a segment must stop the rest of this read.
 			if (this.closed) return;
 		}
+	}
+
+	/** Issue #170/#194: run the inbound reply guard over one non-mouse segment. Returns true when
+	 * the guard took it (complete protocol reply dropped / colour reply forwarded whole). */
+	private consumeByReplyGuard(data: string): boolean {
+		const guard = this.replyGuard;
+		if (!guard) return false;
+		const decision = guard.feed(data, this.nowFn());
+		if (guard.pendingSince() !== null) this.armReplyGuardTimer();
+		if (decision.action === "forward") {
+			this.send({ type: "input", data: decision.data });
+			return true;
+		}
+		return decision.action === "swallow";
 	}
 
 	/** Keyboard branch of `handleInput` (issue #189: one segment of the read at a time). Terminal
@@ -676,9 +696,10 @@ the `detach()` early returns and the final default branch) stays **verbatim** in
 		if (matchesKey(data, Key.pageUp)) {
 ```
 
-The `report` branch is deliberately just `send(...)`: no `clearPendingClick()`, no
-`clearSelection()`, no `scrollToBottom()` — that omission is the fix for the second half of the
-issue (spec §3.2).
+The report path is deliberately just a guard pass-through plus `send(...)`: no `clearPendingClick()`,
+no `clearSelection()`, no `scrollToBottom()` — that omission is the fix for the second half of the
+issue (spec §3.2). Complete protocol replies stay dropped by the #194 guard and colour replies are
+forwarded whole by it; #189 only changes *what* the guard is fed (one segment at a time).
 
 - [ ] **Step 6: Run the component test and the unit tests**
 
