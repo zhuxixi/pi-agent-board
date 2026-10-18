@@ -10,10 +10,10 @@ const SCENARIO = join(ROOT_DIR, "test-support", "pty-attach-frame-overflow-scena
 // Production topology (issue #205, A4–A7): a real runner snapshot whose 65-row
 // frame is taller than the attach's 38-row body. Hydrating that frame scrolls 27
 // rows into the attach-local xterm, which the old wheel spent 27 notches on
-// before forwarding. The floor (baseY minus the runner-vouched scrollback count)
-// is what makes the first notch reach the hosted session — and the reason the
-// frame must be served unchanged: a runner that re-captured at the attach size
-// would collapse `attachBaseY === 27` and the topology pin with it.
+// before forwarding. The floor — `baseY` when the hydrate overflowed, `0`
+// otherwise — is what makes the first notch reach the hosted session, and the
+// reason the frame must be served unchanged: a runner that re-captured at the
+// attach size would collapse `attachBaseY === 27` and the topology pin with it.
 test("a snapshot frame taller than the attach viewport forwards the first wheel notch", () => {
 	const out = execFileSync(process.execPath, ["--experimental-transform-types", SCENARIO], {
 		encoding: "utf8",
@@ -30,12 +30,20 @@ test("a snapshot frame taller than the attach viewport forwards the first wheel 
 	assert.equal(parsed.firstForwardAt, 1, "the first notch must reach the child");
 	assert.equal(parsed.firstForwardData, "\x1b[<64;4;3M");
 	assert.equal(parsed.viewportTop, null, "follow-bottom is preserved");
+	assert.ok(parsed.realHistoryCase.baseY > 100, "the real-history case must actually overflow");
+	assert.equal(
+		parsed.realHistoryCase.historyFloor,
+		parsed.realHistoryCase.baseY,
+		"overflow sets the floor to the whole base",
+	);
 	assert.equal(parsed.realHistoryCase.scrollable, 0, "overflowing hydration disables local history rather than skipping rows");
 	assert.equal(parsed.realHistoryCase.firstForwardAt, 1, "the wheel forwards instead of traversing manufactured rows");
 	assert.equal(parsed.resetCase.historyFloor, 0, "empty/resnapshot resets the floor");
 	assert.equal(parsed.resetCase.baseY, 0, "the empty baseline really cleared the buffer");
+	assert.equal(parsed.resetCase.localScrollAfterLiveOutput, true, "a zero floor restores local scrolling");
 	assert.equal(parsed.resizeCase.historyFloor, parsed.resizeCase.baseY, "resize re-bases the floor on the new baseY");
 	assert.equal(parsed.resizeCase.scrollableHistoryLines, 0);
+	assert.equal(parsed.missingFieldCase.attachBaseY, 27);
 	assert.equal(
 		parsed.missingFieldCase.historyFloor,
 		parsed.missingFieldCase.attachBaseY,

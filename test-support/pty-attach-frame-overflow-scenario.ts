@@ -26,7 +26,8 @@
 //
 // Cases: main overflow hydrate + wheel, real-history variant (100 runner
 // scrollback lines still overflow the hydrate, so local history stays disabled
-// and the first notch forwards), reset (empty baseline), resize (floor re-based
+// and the first notch forwards), reset (empty baseline, then live output that
+// overfills the viewport again restores local scrolling), resize (floor re-based
 // on the observed baseY), and missing `scrollbackLines` (older runner: local
 // history disabled, not NaN).
 //
@@ -142,6 +143,17 @@ function buildScreenText(lineCount: number): string {
 	return lines.join("\r\n");
 }
 
+/** Plain live output (what the child streams after hydration), one `\r\n` per line. */
+function buildLiveText(lineCount: number): string {
+	const lines: string[] = [];
+	for (let i = 0; i < lineCount; i++) {
+		lines.push(`live line ${String(i + 1).padStart(3, "0")}`);
+	}
+	// Every line is newline-TERMINATED, as a child's stream is: the terminal has to
+	// scroll for `bodyHeight + 2` lines to overfill the viewport.
+	return `${lines.join("\r\n")}\r\n`;
+}
+
 async function buildRunnerModel(lineCount: number) {
 	const model = createTerminalModel({ cols: 300, rows: RUNNER_ROWS, scrollback: 2000 });
 	feedOutput(model, buildScreenText(lineCount));
@@ -229,8 +241,8 @@ const result = {
 	firstForwardAt: -1,
 	firstForwardData: null as string | null,
 	viewportTop: null as number | null,
-	realHistoryCase: { scrollable: -1, firstForwardAt: -1 },
-	resetCase: { historyFloor: -1, baseY: -1 },
+	realHistoryCase: { baseY: -1, historyFloor: -1, scrollable: -1, firstForwardAt: -1 },
+	resetCase: { historyFloor: -1, baseY: -1, localScrollAfterLiveOutput: false },
 	resizeCase: { baseY: -1, historyFloor: -1, scrollableHistoryLines: -1 },
 	missingFieldCase: { attachBaseY: -1, historyFloor: -1, firstForwardAt: -1 },
 	tuiDispatch: { overlayLayouts: 0, handleMouseCalls: 0, firstForwardAt: 0 },
@@ -263,6 +275,8 @@ try {
 		throw new Error(`real-history case must snapshot 100 scrollback lines, got ${history.dto.scrollback.length}`);
 	}
 	const historyBuf = history.component.term.buffer.active;
+	result.realHistoryCase.baseY = historyBuf.baseY;
+	result.realHistoryCase.historyFloor = history.component.historyFloor;
 	result.realHistoryCase.scrollable = scrollableHistoryLines(historyBuf.baseY, history.component.historyFloor);
 	result.realHistoryCase.firstForwardAt = firstForwardNotch(history.component, 120).at;
 
@@ -272,6 +286,12 @@ try {
 	await drain(reset.component);
 	result.resetCase.historyFloor = reset.component.historyFloor;
 	result.resetCase.baseY = reset.component.term.buffer.active.baseY;
+	// A6b second half: live output taller than the body refills the buffer with real
+	// rows, so a zeroed floor must let the local viewport answer a notch again instead
+	// of a stale overflow floor swallowing it.
+	reset.component.handleAttachEvent("output", buildLiveText(reset.component.bodyHeight() + 2));
+	await drain(reset.component);
+	result.resetCase.localScrollAfterLiveOutput = reset.component.tryScrollBy(1);
 
 	// --- Resize case (A6): a narrower render re-bases the floor -----------------
 	const resized = await hydrate(await buildRunnerModel(RUNNER_ROWS));

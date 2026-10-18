@@ -384,6 +384,10 @@ test("historyFloorAfterHydrate disables local history when hydration overflowed"
 	assert.equal(historyFloorAfterHydrate(27, 0), 27);
 	// overflow => local history disabled (the manufactured rows sit above the oldest real rows)
 	assert.equal(historyFloorAfterHydrate(127, 100), 127);
+	// the realistic non-overflow hydrate: the frame fit exactly, so baseY is the whole
+	// runner-vouched scrollback (baseY === scrollbackLines) and every row above the
+	// viewport is real history. A `>=` typo in the comparison would disable it.
+	assert.equal(historyFloorAfterHydrate(10, 10), 0);
 	assert.equal(historyFloorAfterHydrate(5, 10), 0);
 	assert.equal(historyFloorAfterHydrate(0, 0), 0);
 });
