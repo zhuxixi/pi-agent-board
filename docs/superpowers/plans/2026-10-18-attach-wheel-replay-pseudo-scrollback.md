@@ -76,7 +76,7 @@ test("scrollViewportTop honours the floor and matches the legacy behaviour at fl
 	assert.deepEqual(scrollViewportTop(27, 27, 1), { viewportTop: 26, changed: true });
 	assert.deepEqual(scrollViewportTop(0, 27, 1, 0), { viewportTop: 0, changed: false });
 	// floor clamps a downward scroll the same way bottom does
-	assert.deepEqual(scrollViewportTop(5, 27, -5, 10), { viewportTop: 10, changed: true });
+	assert.deepEqual(scrollViewportTop(5, 27, -5, 10), { viewportTop: 15, changed: true });
 });
 ```
 
