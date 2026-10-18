@@ -352,13 +352,16 @@ export function encodeWheelReport(direction, { col, row } = {}) {
 /**
  * Issue #205: history floor left behind by snapshot hydration.
  *
- * Hydrating a frame taller than the local terminal scrolls the top rows into the
- * local emulator's scrollback, so those rows are not history the user can reach: the
- * hydration manufactured them. Only `scrollbackLines` of those rows were real history
- * on the runner side, so the oldest `baseYAfter - scrollbackLines` rows are pseudo
- * scrollback and must not consume wheel notches. Unvalidated input (an older runner
- * that sends no `scrollbackLines`) degrades to the safe floor, never NaN. Pure by
- * contract.
+ * Hydrating a frame taller than the local terminal scrolls its top rows into the
+ * local emulator's scrollback. The frame writes genuine scrollback rows first and the
+ * viewport rows after them, so an overflowing hydrate lays the local buffer out as
+ * `[genuine history][manufactured rows][viewport]`: the manufactured block does not sit
+ * below the real history but between it and the viewport, and every local scroll
+ * traverses it. No single floor can skip that block while keeping the older genuine
+ * rows, so an overflow disables local history entirely rather than hiding the oldest
+ * real rows. A hydrate that did not overflow leaves only real history above the
+ * viewport, so the base is the floor. Unvalidated input (an older runner that sends no
+ * `scrollbackLines`) degrades to the safe floor, never NaN. Pure by contract.
  *
  * @param {number} baseYAfter
  * @param {number|undefined} scrollbackLines
@@ -367,7 +370,12 @@ export function encodeWheelReport(direction, { col, row } = {}) {
 export function historyFloorAfterHydrate(baseYAfter, scrollbackLines) {
 	const safeBase = Number.isFinite(baseYAfter) ? Math.max(0, Math.floor(baseYAfter)) : 0;
 	const safeScrollback = Number.isFinite(scrollbackLines) ? Math.max(0, Math.floor(scrollbackLines)) : 0;
-	return Math.min(safeBase, Math.max(0, safeBase - safeScrollback));
+	// Issue #205: the frame writes genuine scrollback rows first and viewport rows after
+	// them, so hydration that overflows puts the manufactured rows BETWEEN the genuine
+	// history and the viewport — any local scroll necessarily traverses them. Disable
+	// local history for that case rather than sacrificing the oldest genuine rows.
+	// No overflow means every row above the viewport is real history.
+	return safeBase > safeScrollback ? safeBase : 0;
 }
 
 /**
@@ -375,7 +383,7 @@ export function historyFloorAfterHydrate(baseYAfter, scrollbackLines) {
  *
  * Everything below `historyFloor` is pseudo scrollback produced by hydration (see
  * `historyFloorAfterHydrate`); only the rows above it may answer a wheel notch. A
- * floor past the base clamps to no history. Pure by contract.
+ * floor at or past the base clamps to no history. Pure by contract.
  *
  * @param {number} baseY
  * @param {number} historyFloor

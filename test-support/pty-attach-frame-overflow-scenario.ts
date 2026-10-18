@@ -5,10 +5,12 @@
 // Why this exists: hydrating a frame that overflows the local terminal scrolls
 // the top rows into the attach's own xterm scrollback, so `tryScrollBy()` used
 // to succeed for 27 notches and the wheel never reached the hosted session.
-// `historyFloor` (baseY minus the runner-authoritative scrollback line count)
-// is what makes the first notch forward. The numbers below are the topology
-// pin from spec §2.3/§6, and they only hold while the frame is delivered
-// UNCHANGED:
+// `historyFloor` is what makes the first notch forward: an overflowing hydrate
+// disables local history outright (floor === baseY), because the frame writes
+// its genuine scrollback rows first and the viewport rows after them, leaving
+// the manufactured rows between the real history and the viewport. The numbers
+// below are the topology pin from spec §2.3/§6, and they only hold while the
+// frame is delivered UNCHANGED:
 //
 //   - the fake runner is a real named pipe and answers `subscribe_terminal`
 //     with a fixed `captureTerminalSnapshot()` + `synthesizeFullRedrawFrame()`
@@ -23,9 +25,10 @@
 //     contribute scrollback or `receivedOutput`.
 //
 // Cases: main overflow hydrate + wheel, real-history variant (100 runner
-// scrollback lines still scroll locally, first forward on notch 101), reset
-// (empty baseline), resize (floor re-based on the observed baseY), and
-// missing `scrollbackLines` (older runner: local history disabled, not NaN).
+// scrollback lines still overflow the hydrate, so local history stays disabled
+// and the first notch forwards), reset (empty baseline), resize (floor re-based
+// on the observed baseY), and missing `scrollbackLines` (older runner: local
+// history disabled, not NaN).
 //
 // `tuiDispatch` is the end-to-end smoke on top of the main case: a fresh
 // hydrated component is mounted as an overlay on the REAL TuiAltScreen and the

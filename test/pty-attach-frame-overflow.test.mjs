@@ -30,8 +30,8 @@ test("a snapshot frame taller than the attach viewport forwards the first wheel 
 	assert.equal(parsed.firstForwardAt, 1, "the first notch must reach the child");
 	assert.equal(parsed.firstForwardData, "\x1b[<64;4;3M");
 	assert.equal(parsed.viewportTop, null, "follow-bottom is preserved");
-	assert.equal(parsed.realHistoryCase.scrollable, 100, "runner-vouched history still scrolls locally");
-	assert.equal(parsed.realHistoryCase.firstForwardAt, 101);
+	assert.equal(parsed.realHistoryCase.scrollable, 0, "overflowing hydration disables local history rather than skipping rows");
+	assert.equal(parsed.realHistoryCase.firstForwardAt, 1, "the wheel forwards instead of traversing manufactured rows");
 	assert.equal(parsed.resetCase.historyFloor, 0, "empty/resnapshot resets the floor");
 	assert.equal(parsed.resetCase.baseY, 0, "the empty baseline really cleared the buffer");
 	assert.equal(parsed.resizeCase.historyFloor, parsed.resizeCase.baseY, "resize re-bases the floor on the new baseY");

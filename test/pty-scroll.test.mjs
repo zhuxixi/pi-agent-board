@@ -380,9 +380,10 @@ test("parseMouseInputChunk decodes a concatenated X10 gesture in order (issue #1
 	assert.equal(parseMouseInputChunk("\x1b[M !\"\x1b[M#20\""), null);
 });
 
-test("historyFloorAfterHydrate keeps only scrollback that the runner vouched for", () => {
+test("historyFloorAfterHydrate disables local history when hydration overflowed", () => {
 	assert.equal(historyFloorAfterHydrate(27, 0), 27);
-	assert.equal(historyFloorAfterHydrate(127, 100), 27);
+	// overflow => local history disabled (the manufactured rows sit above the oldest real rows)
+	assert.equal(historyFloorAfterHydrate(127, 100), 127);
 	assert.equal(historyFloorAfterHydrate(5, 10), 0);
 	assert.equal(historyFloorAfterHydrate(0, 0), 0);
 });
