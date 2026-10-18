@@ -13,7 +13,7 @@ import { createJiggleRetryController } from "../core/pty-attach-jiggle-controlle
 import { createTerminalAttachClient } from "../core/terminal-attach-client.mjs";
 import { backgroundRgbFromTerminalColors, buildSettleSchemePatch, colorSchemeForBackgroundRgb, extractOscQuerySequences, resolveProbeApi, toColorSchemeReport } from "../core/terminal-query-sequences.mjs";
 import { REPLY_GUARD_WINDOW_MS, createReplyGuard, isReplyGuardEnabled } from "../core/terminal-reply-guard.mjs";
-import { clampInt, encodeWheelReport, resolveAttachMouseAction, resolveAttachWheelRoute, resolvePasteSelectionSource, resolveWheelLines, sameMousePoint, scrollViewportTop, selectionDragScrollLines, selectionReleaseIsDrag, shouldMirrorSelectionToPrimary, shouldOwnOuterMouseMode, splitAttachInput, wheelScrollLinesUp } from "../core/pty-scroll.mjs";
+import { clampInt, encodeWheelReport, historyFloorAfterHydrate, resolveAttachMouseAction, resolveAttachWheelRoute, resolvePasteSelectionSource, resolveWheelLines, sameMousePoint, scrollableHistoryLines, scrollViewportTop, selectionDragScrollLines, selectionReleaseIsDrag, shouldMirrorSelectionToPrimary, shouldOwnOuterMouseMode, splitAttachInput, wheelScrollLinesUp } from "../core/pty-scroll.mjs";
 
 export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null };
 
@@ -224,6 +224,10 @@ export class PtyAttachComponent implements Component {
 	private rows = 24;
 	// Absolute buffer line shown at the top of the viewport. null means follow bottom.
 	private viewportTop: number | null = null;
+	// Issue #205: buffer line below which every row is pseudo scrollback that
+	// hydrating a snapshot frame into this (smaller) terminal manufactured. Only
+	// rows above it may answer a local wheel notch; the rest is forwarded.
+	private historyFloor = 0;
 	// Runtime desync backstop state (issue #11): last socket-output timestamp,
 	// last heal timestamp, the probe timer, and an injectable clock for tests.
 	private lastOutputAt = 0;
@@ -1393,6 +1397,10 @@ export class PtyAttachComponent implements Component {
 		// hold and adopt the new size as the baseline (guard G4, issue #25).
 		this.jiggleRetry.notifyExternalResize(size.cols, size.rows);
 		this.term.resize(this.cols, this.rows);
+		// Issue #205: reflow after a resize rewrites baseY, so the previous hydrate
+		// floor no longer describes the buffer. Re-base it on the observed baseY —
+		// losing local history is the safe side of this trade.
+		this.historyFloor = this.term.buffer.active.baseY;
 		this.sendResize();
 		this.enableMouseScroll();
 	}
@@ -1431,15 +1439,18 @@ export class PtyAttachComponent implements Component {
 	}
 
 	private tryScrollBy(linesUp: number): boolean {
-		const result = scrollViewportTop(this.viewportTop, this.bottomViewportTop(this.bodyHeight()), linesUp);
+		const height = this.bodyHeight();
+		const result = scrollViewportTop(this.viewportTop, this.bottomViewportTop(height), linesUp, this.scrollFloorStart(height));
 		this.viewportTop = result.viewportTop;
 		if (result.changed) this.requestScrollRender();
 		return result.changed;
 	}
 
 	private tryScrollToTop(): boolean {
-		if (this.bottomViewportTop(this.bodyHeight()) <= 0 || this.viewportTop === 0) return false;
-		this.viewportTop = 0;
+		const height = this.bodyHeight();
+		const floorStart = this.scrollFloorStart(height);
+		if (floorStart <= 0 || this.viewportTop === floorStart) return false;
+		this.viewportTop = floorStart;
 		this.requestScrollRender();
 		return true;
 	}
@@ -1474,9 +1485,18 @@ export class PtyAttachComponent implements Component {
 		return Math.max(0, bottom - height);
 	}
 
+	/** Issue #205: lowest buffer line the local viewport may scroll to — the bottom
+	 * minus the rows the runner vouched for as real scrollback. */
+	private scrollFloorStart(height: number): number {
+		const bottom = this.bottomViewportTop(height);
+		return Math.max(0, bottom - scrollableHistoryLines(this.term.buffer.active.baseY, this.historyFloor));
+	}
+
 	private clampViewportTop(height: number): void {
 		if (this.viewportTop === null) return;
-		this.viewportTop = clampInt(this.viewportTop, 0, this.bottomViewportTop(height));
+		// scrollViewportTop snaps a below-floor viewport up to the floor, so a floor
+		// that rose after the viewport parked (hydrate/resize) has to settle here too.
+		this.viewportTop = clampInt(this.viewportTop, this.scrollFloorStart(height), this.bottomViewportTop(height));
 	}
 
 	private send(msg: Record<string, unknown>): void {
@@ -1579,7 +1599,7 @@ export class PtyAttachComponent implements Component {
 			return;
 		}
 		if (event === "snapshotReady") {
-			const snap = (payload ?? {}) as { frame?: string; empty?: boolean; resnapshot?: boolean };
+			const snap = (payload ?? {}) as { frame?: string; empty?: boolean; resnapshot?: boolean; scrollbackLines?: number };
 			// The synthesized frame is self-contained on dirty terminals (phase 3
 			// torture-proven: DECSTR + clear preamble wipes the constructor
 			// screen.log replay and any pre-probe broadcast bytes), so hydrating is
@@ -1594,11 +1614,15 @@ export class PtyAttachComponent implements Component {
 			// constructor's screen.log warm-start must not outlive the protocol
 			// answer — a gated reset let the dead session's tail render as a
 			// cold-start ghost once the banner lifted (final-review F1).
-			if (typeof snap.frame === "string") this.pushOutput(snap.frame, { authoritative: true });
-			else if (snap.empty || snap.resnapshot) {
+			if (typeof snap.frame === "string") {
+				this.pushOutput(snap.frame, { authoritative: true, scrollbackLines: snap.scrollbackLines });
+			} else if (snap.empty || snap.resnapshot) {
 				this.childInputReady = false;
 				this.childInputModeCarry = "";
 				this.term.reset();
+				// Issue #205: the buffer is empty again, so a stale floor would make the
+				// first `floor` lines of the restarted host unscrollable.
+				this.historyFloor = 0;
 			}
 			return;
 		}
@@ -1691,7 +1715,7 @@ export class PtyAttachComponent implements Component {
 		}
 	}
 
-	private pushOutput(data: string, opts: { forwardProtocols?: boolean; authoritative?: boolean } = {}): void {
+	private pushOutput(data: string, opts: { forwardProtocols?: boolean; authoritative?: boolean; scrollbackLines?: number } = {}): void {
 		if (data.length === 0) return;
 		// Recorded synchronously BEFORE term.write (whose callback is async): the
 		// desync quiet-window must measure when output ARRIVED, not when parsing finished.
@@ -1713,6 +1737,10 @@ export class PtyAttachComponent implements Component {
 		// stops arriving (i.e. the redraw finished), not just until the resize jiggle ends.
 		this.term.write(data, () => {
 			if (opts.forwardProtocols || opts.authoritative) this.flushPendingSchemeReport();
+			// Issue #205: baseY is only final once this chunk parsed, and the callback
+			// has no buffer binding — re-read it. Rows past the runner-vouched
+			// scrollback are overflow the hydration itself scrolled out.
+			if (opts.authoritative) this.historyFloor = historyFloorAfterHydrate(this.term.buffer.active.baseY, opts.scrollbackLines);
 			this.receivedOutput = true;
 			this.deferAttachSettle();
 			this.outputRenderScheduler.request();

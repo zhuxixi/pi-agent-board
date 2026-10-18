@@ -412,3 +412,10 @@ test("scrollViewportTop honours the floor and matches the legacy behaviour at fl
 	// floor clamps a downward scroll the same way bottom does
 	assert.deepEqual(scrollViewportTop(5, 27, -5, 10), { viewportTop: 15, changed: true });
 });
+
+test("scrollViewportTop snaps a below-floor viewport up to the floor without consuming", () => {
+	// Issue #205: a viewport parked below a floor that later rose (hydrate/resize)
+	// must settle onto the floor instead of scrolling the pseudo history in between.
+	assert.deepEqual(scrollViewportTop(3, 27, 1, 27), { viewportTop: null, changed: false });
+	assert.deepEqual(scrollViewportTop(3, 27, 1, 10), { viewportTop: 10, changed: false });
+});

@@ -3,6 +3,7 @@ import test from "node:test";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
+import { scrollableHistoryLines } from "../src/core/pty-scroll.mjs";
 
 const ROOT_DIR = fileURLToPath(new URL("../", import.meta.url));
 const SCENARIO = join(ROOT_DIR, "test-support", "pty-attach-wheel-scenario.ts");
@@ -34,4 +35,11 @@ test("attach fullscreen wheel: scrolls the local viewport, falls through when it
 	assert.equal(parsed.scrollSwitchOffFallsThrough, true, "AGENT_BOARD_ENABLE_MOUSE_SCROLL=0 must fall through in fullscreen too");
 	assert.equal(parsed.scrollSwitchOffNoMove, true, "AGENT_BOARD_ENABLE_MOUSE_SCROLL=0 must not move the viewport");
 	assert.equal(parsed.restoredAfterKillSwitch, true, "clearing the kill switches must restore local wheel scrolling");
+	assert.ok(parsed.hydratedBaseY > 0, "the 40-row frame must overflow the 22-row attach buffer");
+	assert.equal(
+		scrollableHistoryLines(parsed.hydratedBaseY, parsed.hydratedHistoryFloor),
+		0,
+		"hydration overflow must not be offered to the wheel as scrollback",
+	);
+	assert.equal(parsed.hydratedFloorStartIsBottom, true, "the scroll floor must sit at follow-bottom after hydration");
 });
