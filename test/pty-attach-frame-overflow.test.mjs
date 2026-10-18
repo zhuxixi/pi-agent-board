@@ -42,4 +42,7 @@ test("a snapshot frame taller than the attach viewport forwards the first wheel 
 		"a runner without scrollbackLines disables local history instead of NaN",
 	);
 	assert.equal(parsed.missingFieldCase.firstForwardAt, 1);
+	assert.ok(parsed.tuiDispatch.overlayLayouts >= 1, "the attach overlay must be laid out full-screen");
+	assert.ok(parsed.tuiDispatch.handleMouseCalls >= 1, "the wheel must reach the overlay component through the real dispatcher");
+	assert.equal(parsed.tuiDispatch.firstForwardAt, 1);
 });

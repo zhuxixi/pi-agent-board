@@ -27,8 +27,14 @@
 // (empty baseline), resize (floor re-based on the observed baseY), and
 // missing `scrollbackLines` (older runner: local history disabled, not NaN).
 //
+// `tuiDispatch` is the end-to-end smoke on top of the main case: a fresh
+// hydrated component is mounted as an overlay on the REAL TuiAltScreen and the
+// wheel arrives as a raw SGR report through `handleTerminalInput()` — the path
+// a live fullscreen session takes — instead of a hand-built mouse event.
+//
 // Run via `node --experimental-transform-types`; prints one JSON line.
 import { createServer, Socket, type Server } from "node:net";
+import { TuiAltScreen } from "@earendil-works/pi-tui/dist/tui-alt-screen.js";
 import { createTerminalModel, feedOutput, whenIdle } from "../src/core/terminal-model.mjs";
 import { captureTerminalSnapshot, synthesizeFullRedrawFrame } from "../src/core/terminal-snapshot.mjs";
 import { scrollableHistoryLines } from "../src/core/pty-scroll.mjs";
@@ -150,11 +156,14 @@ async function drain(component: any): Promise<void> {
 const cleanups: Array<() => void> = [];
 
 /** Attach a real component to a fake runner serving `model`'s fixed capture. */
-async function hydrate(model: any, { omitScrollbackLines = false } = {}) {
+async function hydrate(
+	model: any,
+	{ omitScrollbackLines = false, tui: tuiOverride }: { omitScrollbackLines?: boolean; tui?: any } = {},
+) {
 	const dto = await captureTerminalSnapshot(model);
 	const frame = await synthesizeFullRedrawFrame(dto);
 	const runner = await startFakeRunner({ dto, frame, omitScrollbackLines });
-	const tui = {
+	const tui = tuiOverride ?? {
 		mode: "fullscreen",
 		terminal: { rows: ATTACH_TERMINAL_ROWS, cols: 300, columns: 300, write: () => {} },
 		requestRender: () => {},
@@ -221,6 +230,7 @@ const result = {
 	resetCase: { historyFloor: -1, baseY: -1 },
 	resizeCase: { baseY: -1, historyFloor: -1, scrollableHistoryLines: -1 },
 	missingFieldCase: { attachBaseY: -1, historyFloor: -1, firstForwardAt: -1 },
+	tuiDispatch: { overlayLayouts: 0, handleMouseCalls: 0, firstForwardAt: 0 },
 };
 
 try {
@@ -274,6 +284,63 @@ try {
 	result.missingFieldCase.attachBaseY = missing.component.term.buffer.active.baseY;
 	result.missingFieldCase.historyFloor = missing.component.historyFloor;
 	result.missingFieldCase.firstForwardAt = firstForwardNotch(missing.component, 40).at;
+
+	// --- Fullscreen dispatch case (Task 5): the wheel through the real TUI -----
+	// The stub terminal only has to satisfy the dispatcher: columns/rows build the
+	// normalized wheel event and size the overlay. `renderedOverlayLayouts` is
+	// filled by compositeOverlays(), so that render pass is what makes the overlay
+	// hit-testable — without it dispatchMouseToOverlay() finds no target and the
+	// raw SGR report would only reach the viewport router, never the component.
+	const stubTerminal = {
+		columns: 300,
+		rows: ATTACH_TERMINAL_ROWS,
+		kittyProtocolActive: false,
+		start() {},
+		stop() {},
+		drainInput: async () => {},
+		write() {},
+		moveBy() {},
+		hideCursor() {},
+		showCursor() {},
+		clearLine() {},
+		clearFromCursor() {},
+		clearScreen() {},
+		setTitle() {},
+		setProgress() {},
+		setProgramStatus() {},
+	};
+	const tui = new TuiAltScreen(stubTerminal as never, false, undefined, { mouse: true, wheelScrollLines: 1 });
+	const overlay = await hydrate(await buildRunnerModel(RUNNER_ROWS), { tui });
+	const dispatcher = tui as unknown as {
+		handleTerminalInput(data: string): void;
+		compositeOverlays(lines: string[], termWidth: number, termHeight: number): string[];
+		renderedOverlayLayouts: unknown[];
+	};
+	tui.showOverlay(overlay.component, { anchor: "top-left", width: "100%", maxHeight: "100%", margin: 0 });
+	await drain(overlay.component);
+	dispatcher.compositeOverlays(tui.render(300), 300, ATTACH_TERMINAL_ROWS);
+	let handleMouseCalls = 0;
+	const originalHandleMouse = overlay.component.handleMouse.bind(overlay.component);
+	overlay.component.handleMouse = (event: any) => {
+		handleMouseCalls += 1;
+		return originalHandleMouse(event);
+	};
+	const forwardedBefore = forwardedInputs.length;
+	let tuiFirstForwardAt = 0;
+	for (let notch = 1; notch <= 5; notch++) {
+		// SGR wheel-up at column 10, row 10: the dispatcher turns it into a
+		// wheel event for the overlay that covers the pointer.
+		dispatcher.handleTerminalInput("\x1b[<64;10;10M");
+		if (forwardedInputs.length > forwardedBefore) {
+			tuiFirstForwardAt = notch;
+			break;
+		}
+	}
+	result.tuiDispatch = {
+		overlayLayouts: dispatcher.renderedOverlayLayouts.length,
+		handleMouseCalls,
+		firstForwardAt: tuiFirstForwardAt,
+	};
 } catch (err) {
 	result.error = err instanceof Error ? err.message : String(err);
 } finally {
