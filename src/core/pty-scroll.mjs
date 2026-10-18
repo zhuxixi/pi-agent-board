@@ -350,16 +350,58 @@ export function encodeWheelReport(direction, { col, row } = {}) {
 }
 
 /**
+ * Issue #205: history floor left behind by snapshot hydration.
+ *
+ * Hydrating a frame taller than the local terminal scrolls the top rows into the
+ * local emulator's scrollback, so those rows are not history the user can reach: the
+ * hydration manufactured them. Only `scrollbackLines` of those rows were real history
+ * on the runner side, so the oldest `baseYAfter - scrollbackLines` rows are pseudo
+ * scrollback and must not consume wheel notches. Unvalidated input (an older runner
+ * that sends no `scrollbackLines`) degrades to the safe floor, never NaN. Pure by
+ * contract.
+ *
+ * @param {number} baseYAfter
+ * @param {number|undefined} scrollbackLines
+ * @returns {number}
+ */
+export function historyFloorAfterHydrate(baseYAfter, scrollbackLines) {
+	const safeBase = Number.isFinite(baseYAfter) ? Math.max(0, Math.floor(baseYAfter)) : 0;
+	const safeScrollback = Number.isFinite(scrollbackLines) ? Math.max(0, Math.floor(scrollbackLines)) : 0;
+	return Math.min(safeBase, Math.max(0, safeBase - safeScrollback));
+}
+
+/**
+ * Issue #205: how many rows of the local buffer are genuine history.
+ *
+ * Everything below `historyFloor` is pseudo scrollback produced by hydration (see
+ * `historyFloorAfterHydrate`); only the rows above it may answer a wheel notch. A
+ * floor past the base clamps to no history. Pure by contract.
+ *
+ * @param {number} baseY
+ * @param {number} historyFloor
+ * @returns {number}
+ */
+export function scrollableHistoryLines(baseY, historyFloor) {
+	const safeBase = Number.isFinite(baseY) ? Math.max(0, Math.floor(baseY)) : 0;
+	const safeFloor = Number.isFinite(historyFloor) ? Math.max(0, Math.floor(historyFloor)) : 0;
+	return Math.max(0, safeBase - Math.min(safeBase, safeFloor));
+}
+
+/**
  * Compute the next local PTY viewport after a scroll gesture.
  *
  * `viewportTop === null` means follow bottom. `changed` reports whether the gesture
  * would visibly move the local scrollback viewport; callers can forward unconsumed
- * scroll keys/wheel events to the hosted TUI instead.
+ * scroll keys/wheel events to the hosted TUI instead. `floor` is the lowest reachable
+ * row (issue #205): hydration can manufacture pseudo scrollback below it, which the
+ * gesture must neither scroll to nor report as consumed. The default 0 keeps the
+ * pre-floor behaviour for callers that have no hydration floor to enforce.
  */
-export function scrollViewportTop(viewportTop, bottom, linesUp) {
+export function scrollViewportTop(viewportTop, bottom, linesUp, floor = 0) {
 	const safeBottom = Math.max(0, Math.floor(bottom));
-	const current = viewportTop == null ? safeBottom : clampInt(viewportTop, 0, safeBottom);
-	const next = clampInt(current - linesUp, 0, safeBottom);
+	const safeFloor = clampInt(floor, 0, safeBottom);
+	const current = viewportTop == null ? safeBottom : clampInt(viewportTop, safeFloor, safeBottom);
+	const next = clampInt(current - linesUp, safeFloor, safeBottom);
 	return {
 		viewportTop: next >= safeBottom ? null : next,
 		changed: next !== current,

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	encodeWheelReport,
+	historyFloorAfterHydrate,
 	mouseWheelDirection,
 	parseMouseEvent,
 	parseMouseInputChunk,
@@ -12,6 +13,7 @@ import {
 	resolveWheelLines,
 	sameMousePoint,
 	sameScreenCell,
+	scrollableHistoryLines,
 	scrollViewportTop,
 	selectionDragScrollLines,
 	selectionReleaseIsDrag,
@@ -376,4 +378,37 @@ test("parseMouseInputChunk decodes a concatenated X10 gesture in order (issue #1
 	// Seven bytes is not an X10 report: the all-or-nothing chunk parser rejects it
 	// (#189), which is why every literal above is exactly six bytes.
 	assert.equal(parseMouseInputChunk("\x1b[M !\"\x1b[M#20\""), null);
+});
+
+test("historyFloorAfterHydrate keeps only scrollback that the runner vouched for", () => {
+	assert.equal(historyFloorAfterHydrate(27, 0), 27);
+	assert.equal(historyFloorAfterHydrate(127, 100), 27);
+	assert.equal(historyFloorAfterHydrate(5, 10), 0);
+	assert.equal(historyFloorAfterHydrate(0, 0), 0);
+});
+
+test("historyFloorAfterHydrate never returns NaN for unvalidated input", () => {
+	assert.equal(historyFloorAfterHydrate(undefined, 0), 0);
+	assert.equal(historyFloorAfterHydrate(27, undefined), 27);
+	assert.equal(historyFloorAfterHydrate(Number.NaN, Number.NaN), 0);
+	assert.equal(historyFloorAfterHydrate(27, Number.POSITIVE_INFINITY), 27);
+});
+
+test("scrollableHistoryLines reports only the rows above the floor", () => {
+	assert.equal(scrollableHistoryLines(27, 27), 0);
+	assert.equal(scrollableHistoryLines(127, 27), 100);
+	assert.equal(scrollableHistoryLines(0, 0), 0);
+	assert.equal(scrollableHistoryLines(5, 9), 0);
+});
+
+test("scrollViewportTop honours the floor and matches the legacy behaviour at floor 0", () => {
+	// floor === bottom: nothing to scroll back to
+	assert.deepEqual(scrollViewportTop(null, 27, 1, 27), { viewportTop: null, changed: false });
+	assert.deepEqual(scrollViewportTop(27, 27, 1, 27), { viewportTop: null, changed: false });
+	// floor 0 must reproduce the pre-change contract exactly
+	assert.deepEqual(scrollViewportTop(null, 27, 1, 0), { viewportTop: 26, changed: true });
+	assert.deepEqual(scrollViewportTop(27, 27, 1), { viewportTop: 26, changed: true });
+	assert.deepEqual(scrollViewportTop(0, 27, 1, 0), { viewportTop: 0, changed: false });
+	// floor clamps a downward scroll the same way bottom does
+	assert.deepEqual(scrollViewportTop(5, 27, -5, 10), { viewportTop: 15, changed: true });
 });
