@@ -82,10 +82,12 @@
  *   resized at every connect (jiggle start), the protocol probe carries no
  *   size, so without this sync a full-screen TUI child would keep its
  *   host-creation geometry (CR R1 blocking). Matched sizes send nothing.
- * - `snapshotReady` — `{ frame?, empty?, resnapshot?, nextSeq }` after
- *   continuity is verified at `snapshot_end`. UI: `term.reset()` +
- *   `write(frame)` (the frame is self-contained on dirty terminals), or
- *   loading baseline for `empty`. Empty baselines carry no frame.
+ * - `snapshotReady` — `{ frame?, empty?, resnapshot?, nextSeq, scrollbackLines? }`
+ *   after continuity is verified at `snapshot_end`. `scrollbackLines` is the
+ *   runner's scrollback line count for the frame just delivered; the key is
+ *   omitted (never `undefined`) when the runner did not send one. UI:
+ *   `term.reset()` + `write(frame)` (the frame is self-contained on dirty
+ *   terminals), or loading baseline for `empty`. Empty baselines carry no frame.
  * - `output` — live/replay chunk data (protocol-managed only), including gate
  *   strays emitted during `reconciling`.
  * - `resubscribing` — the client sent a recovery subscribe itself. The plan
@@ -488,6 +490,9 @@ export function createTerminalAttachClient({
 			empty: partial.empty || undefined,
 			resnapshot: partial.resnapshot || undefined,
 			nextSeq,
+			// Optional field: omit the key for a runner that predates it, so the
+			// event shape stays exactly what old consumers assert on.
+			...(typeof msg.scrollbackLines === "number" ? { scrollbackLines: msg.scrollbackLines } : {}),
 		});
 		for (const chunk of partial.flush) emit("output", chunk.data);
 		lastSeq = nextSeq - 1;

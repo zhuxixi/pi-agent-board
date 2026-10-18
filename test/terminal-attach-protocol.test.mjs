@@ -5,7 +5,7 @@ import {
 	createTerminalSubscription,
 	TERMINAL_FRAME_VERSION,
 } from "../src/core/terminal-attach-protocol.mjs";
-import { TERMINAL_SNAPSHOT_VERSION } from "../src/core/terminal-snapshot.mjs";
+import { captureTerminalSnapshot, TERMINAL_SNAPSHOT_VERSION } from "../src/core/terminal-snapshot.mjs";
 
 /** Real @xterm/headless model (fast enough for protocol tests). */
 function realModel(opts = {}) {
@@ -208,9 +208,27 @@ test("empty model: host-starting baseline without frame", async () => {
 	assert.equal(begin.empty, true);
 	assert.equal(begin.snapshotSeq, 0);
 	assert.equal(begin.frameVersion, TERMINAL_FRAME_VERSION);
-	assert.equal(messages.find((m) => m.type === "snapshot_end").nextSeq, 1);
+	assert.deepEqual(messages.find((m) => m.type === "snapshot_end"), {
+		type: "snapshot_end",
+		nextSeq: 1,
+		scrollbackLines: 0,
+	});
 	assert.equal(messages.find((m) => m.type === "snapshot_frame"), undefined, "no frame for an empty baseline");
 	assert.equal(types(messages), "snapshot_begin,snapshot_end");
+});
+
+test("snapshot_end carries the runner-side scrollback line count", async () => {
+	const model = realModel();
+	// 10 full lines in a 4-row terminal scroll the first rows out of the viewport.
+	for (let i = 0; i < 10; i++) feedOutput(model, `row-${i}\r\n`);
+	const dto = await captureTerminalSnapshot(model);
+	assert.ok(dto.scrollback.length > 0, "fixture must actually have scrollback");
+	const { sub, messages, waitUntil } = subscriber(model);
+	sub.handleMessage({ type: "subscribe_terminal" });
+	await waitUntil(() => messages.some((m) => m.type === "snapshot_end"), "snapshot_end");
+	const end = messages.find((m) => m.type === "snapshot_end");
+	assert.equal(typeof end.scrollbackLines, "number", "the count must be numeric, never undefined");
+	assert.equal(end.scrollbackLines, dto.scrollback.length, "same capture as the frame");
 });
 
 test("frameVersion mismatch on subscribe_terminal is rejected", async () => {

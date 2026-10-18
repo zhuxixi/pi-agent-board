@@ -104,6 +104,29 @@ test("probe → protocol happy path: frame assembly, nextSeq continuity, seq-che
 	assert.equal(client.getLastSeq(), 7);
 });
 
+test("snapshot_end.scrollbackLines reaches snapshotReady", () => {
+	const { client, events } = harness();
+	client.start();
+	client.handleMessage(begin({ snapshotSeq: 5 }));
+	client.handleMessage(frame("FRAME"));
+	client.handleMessage({ ...end(6), scrollbackLines: 100 });
+	assert.deepEqual(eventsOf(events, "snapshotReady"), [
+		{ frame: "FRAME", empty: undefined, resnapshot: undefined, nextSeq: 6, scrollbackLines: 100 },
+	]);
+});
+
+test("snapshot_end.scrollbackLines that is not a number omits the key", () => {
+	const { client, events } = harness();
+	client.start();
+	client.handleMessage(begin({ snapshotSeq: 5 }));
+	client.handleMessage(frame("FRAME"));
+	client.handleMessage({ ...end(6), scrollbackLines: "100" });
+	// Exact shape pin: an old/foreign runner must not leave `scrollbackLines: undefined`.
+	assert.deepEqual(eventsOf(events, "snapshotReady"), [
+		{ frame: "FRAME", empty: undefined, resnapshot: undefined, nextSeq: 6 },
+	]);
+});
+
 test("probe timeout → legacy fallback (old runner silently ignores subscribe)", () => {
 	const { client, sent, events, timers } = harness();
 	client.start();

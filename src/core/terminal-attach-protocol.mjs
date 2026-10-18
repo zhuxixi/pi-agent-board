@@ -117,7 +117,7 @@ export function createTerminalSubscription({ model, send: rawSend, generation })
 				if (resnapshot) begin.resnapshot = true;
 				send(begin);
 				lastSeq = 0;
-				send({ type: "snapshot_end", nextSeq: lastSeq + 1 });
+				send({ type: "snapshot_end", nextSeq: lastSeq + 1, scrollbackLines: 0 });
 				if (!sendBroken) state = "live";
 				return;
 			}
@@ -147,7 +147,10 @@ export function createTerminalSubscription({ model, send: rawSend, generation })
 				lastSeq = chunk.seq;
 			}
 			if (after.chunks.length === 0) lastSeq = dto.snapshotSeq;
-			send({ type: "snapshot_end", nextSeq: lastSeq + 1 });
+			// scrollbackLines is the runner-authoritative history count for the very
+			// frame just sent (same capture): the client needs it to tell real history
+			// from rows its local hydration scrolled out of the viewport (issue #205).
+			send({ type: "snapshot_end", nextSeq: lastSeq + 1, scrollbackLines: dto.scrollback.length });
 			if (!sendBroken) state = "live";
 		} catch (err) {
 			state = "idle";
