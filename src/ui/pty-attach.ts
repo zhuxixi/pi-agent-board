@@ -1537,7 +1537,7 @@ export class PtyAttachComponent implements Component {
 		return Math.max(0, bottom - height);
 	}
 
-		/** Issue #205: lowest buffer line the local viewport may scroll to — the bottom
+	/** Issue #205: lowest buffer line the local viewport may scroll to — the bottom
 	 * minus the rows the runner vouched for as real scrollback. */
 	private scrollFloorStart(height: number): number {
 		const bottom = this.bottomViewportTop(height);

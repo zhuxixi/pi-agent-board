@@ -10,17 +10,6 @@ export const MIN_WHEEL_LINES = 1;
 export const MAX_WHEEL_LINES = 50;
 
 /**
- * Resolve how many lines a single mouse-wheel event scrolls in the attach viewport.
- *
- * Reads `AGENT_BOARD_WHEEL_LINES`, clamps it to `[MIN_WHEEL_LINES, MAX_WHEEL_LINES]`,
- * and falls back to `DEFAULT_WHEEL_LINES` when unset, empty, or non-numeric. macOS
- * inertial/momentum scrolling fires a *burst* of wheel events per gesture, so a small
- * value here already scrolls quickly; the previous fixed `5` overshot badly.
- *
- * @param {Record<string, string|undefined>} [env]
- * @returns {number}
- */
-/**
  * Issue #207: the full-screen mouse enable sequence to re-assert, matching pi-tui's own
  * choice. Multiplexers get button-motion only (1000/1002/1004/1006) because any-motion
  * (1003) makes them lag; plain terminals get the full set. Re-asserting the wrong form
@@ -42,6 +31,18 @@ export function fullscreenMouseEnableSequence(env = process.env) {
 		? "\x1b[?1000h\x1b[?1002h\x1b[?1004h\x1b[?1006h"
 		: "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1004h\x1b[?1006h";
 }
+
+/**
+ * Resolve how many lines a single mouse-wheel event scrolls in the attach viewport.
+ *
+ * Reads `AGENT_BOARD_WHEEL_LINES`, clamps it to `[MIN_WHEEL_LINES, MAX_WHEEL_LINES]`,
+ * and falls back to `DEFAULT_WHEEL_LINES` when unset, empty, or non-numeric. macOS
+ * inertial/momentum scrolling fires a *burst* of wheel events per gesture, so a small
+ * value here already scrolls quickly; the previous fixed `5` overshot badly.
+ *
+ * @param {Record<string, string|undefined>} [env]
+ * @returns {number}
+ */
 
 export function resolveWheelLines(env = process.env) {
 	const raw = String(env.AGENT_BOARD_WHEEL_LINES ?? "").trim();
