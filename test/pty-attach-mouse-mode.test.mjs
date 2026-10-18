@@ -20,9 +20,15 @@ test("attach mouse-mode ownership: fullscreen writes nothing; regular pairing ke
 	});
 	const parsed = JSON.parse(out.trim().split("\n").filter(Boolean).pop());
 	assert.equal(parsed.error, null, `scenario error: ${parsed.error}`);
-	assert.equal(parsed.fullscreen.writes, 0, "fullscreen: zero mouse-mode/XTSHIFTESCAPE writes across ctor+timers+close");
-	assert.equal(parsed.fullscreen.enableAtCtor, false, "fullscreen: no MOUSE_ENABLE at ctor");
+	// Issue #207: pi-tui writes ENABLE_MOUSE exactly once at startup and never again, so a
+	// lost handshake turns every wheel notch into an arrow key for the rest of the session.
+	// The attach surface therefore re-asserts the enable form once on open. Issue #169's
+	// actual contract -- never DOWNGRADE or kill the TUI's mode -- is preserved: the
+	// disable form is still never written in fullscreen.
+	assert.equal(parsed.fullscreen.enableAtCtor, true, "fullscreen: the one-shot mouse handshake is re-asserted at ctor");
 	assert.equal(parsed.fullscreen.disableAtClose, false, "fullscreen: no MOUSE_DISABLE at close");
+	assert.equal(parsed.fullscreen.disables, 0, "fullscreen: never writes a disable form");
+	assert.equal(parsed.fullscreen.enables, 1, "fullscreen: exactly one re-assert, not a stream of them");
 	assert.equal(parsed.regular.enableAtCtor, true, "regular: MOUSE_ENABLE at ctor preserved");
 	assert.equal(parsed.regular.disableAtClose, true, "regular: MOUSE_DISABLE at close preserved");
 	assert.equal(parsed.off.writes, 0, "AGENT_BOARD_ATTACH_MOUSE=0: zero writes including close");

@@ -13,7 +13,7 @@ import { createJiggleRetryController } from "../core/pty-attach-jiggle-controlle
 import { createTerminalAttachClient } from "../core/terminal-attach-client.mjs";
 import { backgroundRgbFromTerminalColors, buildSettleSchemePatch, colorSchemeForBackgroundRgb, extractOscQuerySequences, resolveProbeApi, toColorSchemeReport } from "../core/terminal-query-sequences.mjs";
 import { REPLY_GUARD_WINDOW_MS, createReplyGuard, isReplyGuardEnabled } from "../core/terminal-reply-guard.mjs";
-import { clampInt, encodeWheelReport, historyFloorAfterHydrate, resolveAttachMouseAction, resolveAttachWheelRoute, resolvePasteSelectionSource, resolveWheelLines, sameMousePoint, scrollableHistoryLines, scrollViewportTop, selectionDragScrollLines, selectionReleaseIsDrag, shouldMirrorSelectionToPrimary, shouldOwnOuterMouseMode, splitAttachInput, wheelScrollLinesUp } from "../core/pty-scroll.mjs";
+import { clampInt, encodeWheelReport, fullscreenMouseEnableSequence, historyFloorAfterHydrate, resolveAttachMouseAction, resolveAttachWheelRoute, resolvePasteSelectionSource, resolveWheelLines, sameMousePoint, scrollableHistoryLines, scrollViewportTop, selectionDragScrollLines, selectionReleaseIsDrag, shouldMirrorSelectionToPrimary, shouldOwnOuterMouseMode, splitAttachInput, wheelScrollLinesUp } from "../core/pty-scroll.mjs";
 
 export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null };
 
@@ -305,6 +305,7 @@ export class PtyAttachComponent implements Component {
 		this.disableMouseScroll();
 		this.enableMouseScroll();
 		this.refreshMouseScrollMode();
+		this.assertFullscreenMouseMode();
 		this.replayScreenLog();
 		this.replyGuard = isReplyGuardEnabled(process.env.AGENT_BOARD_REPLY_GUARD) ? createReplyGuard() : null;
 		this.connect();
@@ -1493,11 +1494,29 @@ export class PtyAttachComponent implements Component {
 		return Math.max(0, bottom - height);
 	}
 
-	/** Issue #205: lowest buffer line the local viewport may scroll to — the bottom
+		/** Issue #205: lowest buffer line the local viewport may scroll to — the bottom
 	 * minus the rows the runner vouched for as real scrollback. */
 	private scrollFloorStart(height: number): number {
 		const bottom = this.bottomViewportTop(height);
 		return Math.max(0, bottom - scrollableHistoryLines(this.term.buffer.active.baseY, this.historyFloor));
+	}
+
+	/** Issue #207: re-assert the outer terminal mouse mode when the full-screen TUI owns it.
+	 *  pi-tui writes ENABLE_MOUSE exactly once in `beforeTerminalStart` and never again, so a
+	 *  single lost handshake (WezTerm on Windows is the reported case) turns every wheel
+	 *  notch into an arrow key for the rest of the session: pi-tui keeps dispatching mouse
+	 *  events that never arrive, and the attach surface only ever sees `[A`/`[B`.
+	 *  The sequence is pi-tui's own multiplexer-aware choice, so hover (1003) and focus
+	 *  (1004) reporting cannot be downgraded. We never write the disable form here, so this
+	 *  cannot break pi's own state either (the #173 contract stays intact). */
+	private assertFullscreenMouseMode(): void {
+		if (this.tui.mode !== "fullscreen") return;
+		if (!this.mouseScrollEnabled()) return;
+		try {
+			this.tui.terminal.write(fullscreenMouseEnableSequence());
+		} catch {
+			/* best-effort: a dead terminal must not break attach */
+		}
 	}
 
 	private clampViewportTop(height: number): void {

@@ -20,6 +20,7 @@ import {
 	shouldMirrorSelectionToPrimary,
 	shouldOwnOuterMouseMode,
 	splitAttachInput,
+	fullscreenMouseEnableSequence,
 	wheelScrollLinesUp,
 } from "../src/core/pty-scroll.mjs";
 
@@ -423,4 +424,19 @@ test("scrollViewportTop snaps a below-floor viewport up to the floor without con
 	// must settle onto the floor instead of scrolling the pseudo history in between.
 	assert.deepEqual(scrollViewportTop(3, 27, 1, 27), { viewportTop: null, changed: false });
 	assert.deepEqual(scrollViewportTop(3, 27, 1, 10), { viewportTop: 10, changed: false });
+});
+
+test("fullscreenMouseEnableSequence mirrors pi-tui's multiplexer split", () => {
+	// Plain terminals get any-motion (1003) so hover reporting keeps working.
+	const plain = fullscreenMouseEnableSequence({ TERM: "xterm-256color" });
+	assert.ok(plain.includes("[?1003h"), "plain terminal must request any-motion");
+	assert.ok(plain.includes("[?1004h"), "plain terminal must request focus reporting");
+	assert.ok(plain.includes("[?1000h") && plain.includes("[?1006h"));
+
+	// Multiplexers get button-motion only: 1003 makes them lag, and pi-tui avoids it.
+	for (const env of [{ TMUX: "/tmp/tmux" }, { ZELLIJ: "1" }, { STY: "x" }, { TERM: "tmux-256color" }, { TERM: "screen-256color" }]) {
+		const seq = fullscreenMouseEnableSequence(env);
+		assert.ok(!seq.includes("[?1003h"), `multiplexer ${JSON.stringify(env)} must not request any-motion`);
+		assert.ok(seq.includes("[?1000h") && seq.includes("[?1006h"));
+	}
 });

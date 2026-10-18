@@ -20,6 +20,29 @@ export const MAX_WHEEL_LINES = 50;
  * @param {Record<string, string|undefined>} [env]
  * @returns {number}
  */
+/**
+ * Issue #207: the full-screen mouse enable sequence to re-assert, matching pi-tui's own
+ * choice. Multiplexers get button-motion only (1000/1002/1004/1006) because any-motion
+ * (1003) makes them lag; plain terminals get the full set. Re-asserting the wrong form
+ * would either reintroduce multiplexer lag or silently drop hover reporting (1003).
+ * Pure by contract: the environment is passed in, never read here.
+ *
+ * @param {NodeJS.ProcessEnv|Record<string, string|undefined>} [env]
+ * @returns {string}
+ */
+export function fullscreenMouseEnableSequence(env = process.env) {
+	const term = String(env.TERM ?? "").toLowerCase();
+	const multiplexer =
+		env.TMUX !== undefined ||
+		env.ZELLIJ !== undefined ||
+		env.STY !== undefined ||
+		term.startsWith("tmux") ||
+		term.startsWith("screen");
+	return multiplexer
+		? "\x1b[?1000h\x1b[?1002h\x1b[?1004h\x1b[?1006h"
+		: "\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1004h\x1b[?1006h";
+}
+
 export function resolveWheelLines(env = process.env) {
 	const raw = String(env.AGENT_BOARD_WHEEL_LINES ?? "").trim();
 	if (!raw) return DEFAULT_WHEEL_LINES;

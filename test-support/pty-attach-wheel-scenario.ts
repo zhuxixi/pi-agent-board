@@ -37,9 +37,21 @@ const root = mkdtempSync(join(tmpdir(), "agentview-attach-wheel-"));
 const socketPath = join(root, "nonexistent.sock");
 process.env.AGENT_BOARD_ATTACH_MOUSE = "1";
 
+/** Every byte the component writes to the outer terminal (issue #207). */
+const outerWrites: string[] = [];
+
 const tui = {
 	mode: "fullscreen",
-	terminal: { rows: 24, cols: 80, columns: 80, write: () => {} },
+	terminal: {
+		rows: 24,
+		cols: 80,
+		columns: 80,
+		// Issue #207: capture what the component writes to the OUTER terminal so a
+		// test can prove the full-screen mouse mode is re-asserted on open.
+		write: (data: string) => {
+			outerWrites.push(data);
+		},
+	},
 	requestRender: () => {},
 };
 const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
@@ -59,6 +71,7 @@ const result = {
 	upHandled: false,
 	upRenderFalse: false,
 	upMovedByDelta: false,
+	outerWrites: [] as string[],
 	downHandled: false,
 	downLandedOnBottom: false,
 	atBottomFallsThrough: false,
@@ -127,8 +140,11 @@ try {
 	// Both switches cleared ⇒ local scrolling is back.
 	result.restoredAfterKillSwitch = !!component.handleMouse(wheelEvent(-3));
 
-	// 5. Issue #205: this component never hydrated a snapshot, so its scrollback is
-	// real history and the Home key still jumps the local viewport to line 0.
+	// Issue #207: ship the RAW bytes the component wrote to the outer terminal.
+	// The test derives the expected sequence from the same pure helper the
+	// implementation calls (fullscreenMouseEnableSequence), so neither side
+	// hard-codes a form and the check follows TMUX/ZELLIJ/STY/TERM automatically.
+	result.outerWrites = outerWrites;
 	result.legacyHomeScrolls = component.tryScrollToTop();
 	result.legacyHomeViewportTop = component.viewportTop;
 

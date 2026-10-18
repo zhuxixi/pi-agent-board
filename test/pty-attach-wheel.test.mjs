@@ -3,7 +3,7 @@ import test from "node:test";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
-import { scrollableHistoryLines } from "../src/core/pty-scroll.mjs";
+import { fullscreenMouseEnableSequence, scrollableHistoryLines } from "../src/core/pty-scroll.mjs";
 
 const ROOT_DIR = fileURLToPath(new URL("../", import.meta.url));
 const SCENARIO = join(ROOT_DIR, "test-support", "pty-attach-wheel-scenario.ts");
@@ -44,4 +44,25 @@ test("attach fullscreen wheel: scrolls the local viewport, falls through when it
 		"hydration overflow must not be offered to the wheel as scrollback",
 	);
 	assert.equal(parsed.hydratedFloorStartIsBottom, true, "the scroll floor must sit at follow-bottom after hydration");
+	// Issue #207: pi-tui enables the outer mouse mode once at startup and never again;
+	// a lost handshake turns every wheel notch into an arrow key, so the attach surface
+	// must re-assert the enable form on open (and never write the disable form).
+	// Issue #207: the expected enable form comes from the SAME pure helper the
+	// implementation calls, so this assertion carries no hard-coded mouse sequence
+	// and follows pi-tui's multiplexer split (1003 absent under tmux/zellij).
+	const expectedEnable = fullscreenMouseEnableSequence();
+	assert.ok(
+		parsed.outerWrites.includes(expectedEnable),
+		"opening the attach view must write the expected enable sequence",
+	);
+	// The scenario builds two components (legacy + hydrated), so one enable each.
+	assert.ok(
+		parsed.outerWrites.filter((chunk) => chunk.includes(expectedEnable)).length >= 1,
+		"every attach instance re-asserts the enable form",
+	);
+	assert.equal(
+		parsed.outerWrites.some((chunk) => /\x1b\[\?(?:1000|1002|1003|1004|1006)l/.test(chunk)),
+		false,
+		"the attach view must never write a mouse disable form",
+	);
 });

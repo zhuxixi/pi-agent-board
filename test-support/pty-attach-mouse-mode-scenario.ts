@@ -3,7 +3,8 @@
 // against a nonexistent control socket (on non-Windows, connect() short-
 // circuits to its reconnect loop before creating a socket — no socket churn).
 // Four cases:
-//   1. mode "fullscreen"       → ZERO mouse-mode/XTSHIFTESCAPE writes across
+//   1. mode "fullscreen"       → exactly one enable re-assert (issue #207: pi-tui's
+//      one-shot handshake can be lost) and ZERO disable writes across
 //      ctor + the 0/50/250ms refresh window + close() (TuiAltScreen owns it);
 //   2. mode "regular"          → today's pairing preserved (MOUSE_ENABLE at
 //      ctor, MOUSE_DISABLE at close);
@@ -19,6 +20,7 @@ import { PtyAttachComponent } from "../src/ui/pty-attach.ts";
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 const MOUSE_BYTE_RE = /\x1b\[\?(1000|1002|1003|1004|1006)[hl]/;
+const MOUSE_DISABLE_RE = /\x1b\[\?(1000|1002|1003|1004|1006)l/;
 const XTSHIFTESCAPE_RE = /\x1b\[>0s/;
 
 interface CaseResult {
@@ -60,6 +62,8 @@ async function runCase(mode: string | undefined, env: Record<string, string> | u
 			writes: writes.filter((s) => MOUSE_BYTE_RE.test(s) || XTSHIFTESCAPE_RE.test(s)).length,
 			enableAtCtor,
 			disableAtClose,
+			disables: writes.filter((s) => MOUSE_DISABLE_RE.test(s)).length,
+			enables: writes.filter((s) => s.includes("[?1000h")).length,
 		};
 	} finally {
 		try { component?.dispose(); } catch {}
