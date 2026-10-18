@@ -21,7 +21,8 @@
 //   3. a wheel report with no delta, and a non-wheel press, both fall through;
 //   4. the AGENT_BOARD_ATTACH_MOUSE / AGENT_BOARD_ENABLE_MOUSE_SCROLL kill
 //      switches disable local scrolling in fullscreen too;
-//   5. hydrating an authoritative frame taller than this terminal leaves no
+//   5. Home still scrolls a legacy attach (no hydrate floor) to line 0;
+//   6. hydrating an authoritative frame taller than this terminal leaves no
 //      scrollable history (issue #205: the overflow is hydration residue, so the
 //      floor has to swallow it).
 // Run via `node --experimental-transform-types`.
@@ -68,6 +69,8 @@ const result = {
 	scrollSwitchOffFallsThrough: false,
 	scrollSwitchOffNoMove: false,
 	restoredAfterKillSwitch: false,
+	legacyHomeScrolls: false,
+	legacyHomeViewportTop: null as number | null,
 	hydratedBaseY: 0,
 	hydratedHistoryFloor: 0,
 	hydratedFloorStartIsBottom: false,
@@ -124,7 +127,12 @@ try {
 	// Both switches cleared ⇒ local scrolling is back.
 	result.restoredAfterKillSwitch = !!component.handleMouse(wheelEvent(-3));
 
-	// 5. Issue #205: hydrating an authoritative frame taller than this terminal
+	// 5. Issue #205: this component never hydrated a snapshot, so its scrollback is
+	// real history and the Home key still jumps the local viewport to line 0.
+	result.legacyHomeScrolls = component.tryScrollToTop();
+	result.legacyHomeViewportTop = component.viewportTop;
+
+	// 6. Issue #205: hydrating an authoritative frame taller than this terminal
 	// scrolls the overflow rows into the local buffer, but those rows are a
 	// by-product of the hydration, not session history the runner ever had. The
 	// floor must swallow them so the first wheel notch is forwarded instead of

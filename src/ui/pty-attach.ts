@@ -1399,8 +1399,10 @@ export class PtyAttachComponent implements Component {
 		this.term.resize(this.cols, this.rows);
 		// Issue #205: reflow after a resize rewrites baseY, so the previous hydrate
 		// floor no longer describes the buffer. Re-base it on the observed baseY —
-		// losing local history is the safe side of this trade.
-		this.historyFloor = this.term.buffer.active.baseY;
+		// losing local history is the safe side of this trade. A zero floor means no
+		// hydrate has established one yet, so a legacy attach keeps its replayed
+		// scrollback as real local history.
+		if (this.historyFloor > 0) this.historyFloor = this.term.buffer.active.baseY;
 		this.sendResize();
 		this.enableMouseScroll();
 	}
@@ -1449,7 +1451,13 @@ export class PtyAttachComponent implements Component {
 	private tryScrollToTop(): boolean {
 		const height = this.bodyHeight();
 		const floorStart = this.scrollFloorStart(height);
-		if (floorStart <= 0 || this.viewportTop === floorStart) return false;
+		// Issue #205: compare against follow-bottom rather than against 0. A legacy
+		// attach has `historyFloor === 0`, so `floorStart` is 0 while `bottom` is not —
+		// this is then provably the parent "no local history" guard, and Home still
+		// scrolls the local viewport to line 0. A hydrated overflow frame sits at
+		// `floorStart === bottom`, so Home is forwarded to the child instead of being
+		// spent scrolling hydration residue.
+		if (floorStart >= this.bottomViewportTop(height) || this.viewportTop === floorStart) return false;
 		this.viewportTop = floorStart;
 		this.requestScrollRender();
 		return true;

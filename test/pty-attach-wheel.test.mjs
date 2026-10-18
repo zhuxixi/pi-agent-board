@@ -35,6 +35,8 @@ test("attach fullscreen wheel: scrolls the local viewport, falls through when it
 	assert.equal(parsed.scrollSwitchOffFallsThrough, true, "AGENT_BOARD_ENABLE_MOUSE_SCROLL=0 must fall through in fullscreen too");
 	assert.equal(parsed.scrollSwitchOffNoMove, true, "AGENT_BOARD_ENABLE_MOUSE_SCROLL=0 must not move the viewport");
 	assert.equal(parsed.restoredAfterKillSwitch, true, "clearing the kill switches must restore local wheel scrolling");
+	assert.equal(parsed.legacyHomeScrolls, true, "legacy Home must still scroll the local viewport");
+	assert.equal(parsed.legacyHomeViewportTop, 0, "legacy Home must land on line 0");
 	assert.ok(parsed.hydratedBaseY > 0, "the 40-row frame must overflow the 22-row attach buffer");
 	assert.equal(
 		scrollableHistoryLines(parsed.hydratedBaseY, parsed.hydratedHistoryFloor),
