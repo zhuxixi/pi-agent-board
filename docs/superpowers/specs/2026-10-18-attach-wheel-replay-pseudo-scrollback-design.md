@@ -44,11 +44,24 @@ pi fullscreen TUI → `/agent-board` → attach 会话：
 核心关系：
 
 ```
-baseY_after_hydrate = 真实历史行（runner 快照的 scrollback）+ 伪历史行（溢出/换行，全部不是历史）
+baseY_after_hydrate = 真实历史行（runner 快照的 scrollback）+ 溢出伪历史行（帧写入时被挤出视口的屏幕顶部行）
 真实历史行          = snapshot.scrollback.length    ← runner 唯一知道，需随协议下发
 可向上滚的行数       = max(0, baseY - historyFloor)
-historyFloor        = max(0, baseY_after_hydrate - scrollbackLines)   // 已校验非负有限数的简写；未校验输入的守卫形式见 §3.2
+historyFloor        = baseY_after_hydrate > scrollbackLines ? baseY_after_hydrate : 0
 ```
+
+**为什么是"全有或全无"**：`synthesizeFullRedrawFrame` 先写真实 scrollback 行、再写 viewport 行
+（`src/core/terminal-snapshot.mjs:336-351`），所以 hydrate 之后本地 buffer 的布局是
+
+```
+[0 .. S)        真实历史（最旧优先）
+[S .. S+k)      制造行：被挤出视口的屏幕顶部 k 行
+[S+k ..)        视口
+baseY_after = S + k
+```
+
+制造行**夹在真实历史和视口之间**，任何本地滚动都必然先穿过它们；单一 floor 常量无法跳过中间块。
+因此只要发生溢出就把 floor 设为 `baseY`（本地历史整体禁用、滚轮全部转发），不牺牲最旧的真实行。
 
 ### 2.3 实证（真实链路，无 mock 组件）
 
@@ -123,10 +136,12 @@ next       = clampInt(current - linesUp, safeFloor, safeBottom)
 // 非有限数（undefined / NaN / Infinity）一律归 0——老 runner 不发送该字段
 safeBase       = Number.isFinite(baseYAfter)     ? Math.max(0, Math.floor(baseYAfter))     : 0
 safeScrollback = Number.isFinite(scrollbackLines) ? Math.max(0, Math.floor(scrollbackLines)) : 0
-return Math.min(safeBase, Math.max(0, safeBase - safeScrollback))
+// 溢出（baseY > scrollback）=> 制造行夹在真实历史与视口之间 => 整体禁用本地历史
+// 未溢出          => 视口之上的每一行都是真实历史 => floor 0，全部可滚
+return safeBase > safeScrollback ? safeBase : 0
 ```
 
-语义：`baseYAfter` 至少为 0，`scrollbackLines` 不小于 0 且不超过 `baseYAfter`，返回值夹在 `[0, safeBase]`。
+语义：`baseYAfter` 至少为 0；`scrollbackLines` 只用来判断"是否溢出"，不用来计算"保留多少行历史"。
 **不得**用 `max(0, floor(x))` 处理未校验的输入（`Math.floor(undefined) === NaN`，会污染整条判定链）。
 
 ### 3.3 组件接线（`src/ui/pty-attach.ts`）
@@ -143,6 +158,7 @@ return Math.min(safeBase, Math.max(0, safeBase - safeScrollback))
 
 ### 3.4 保证边界
 
+- **hydration 溢出即禁用本地历史**：只要 `baseY > scrollbackLines`，`historyFloor = baseY`，本地一行都滚不动、滚轮全部转发给子会话。制造行夹在真实历史与视口之间（见 §2.2），这是唯一不牺牲最旧真实行的选择。
 - **resize 之后本地滚动历史清零**：`historyFloor` 被设为当前 `baseY`，"宁可暂时不能本地滚，也不把伪历史当历史滚"。resize 之后的真实历史只保留在子会话侧（可转发滚动）。
 - **老 runner 没有 `scrollbackLines`**：按 0 处理 → 本地历史被禁，滚轮全部转发给子会话（对 fullscreen 子会话是正确的；对 regular 子会话是本地滚动能力的退化，记录在 §4）。
 - frame 解析是异步的：解析完成前的滚轮事件按旧 floor 处理（最坏情况 = 现状），解析完成后收敛。
@@ -171,11 +187,11 @@ return Math.min(safeBase, Math.max(0, safeBase - safeScrollback))
 
 | ID | 功能点 | 验收方式 | 具体验证 | 通过标准 |
 | --- | --- | --- | --- | --- |
-| A1 | `historyFloorAfterHydrate` 纯函数 | 自动化（unit） | `test/pty-scroll.test.mjs` 新增用例 | `(27,0)=27`、`(127,100)=27`、`(5,10)=0`、`(undefined,0)=0`、`(27,undefined)=27` |
+| A1 | `historyFloorAfterHydrate` 纯函数 | 自动化（unit） | `test/pty-scroll.test.mjs` 新增用例 | `(27,0)=27`（溢出）、`(127,100)=127`（溢出→禁用）、`(5,10)=0`（未溢出）、`(undefined,0)=0`、`(27,undefined)=27` |
 | A2 | `scrollableHistoryLines` 纯函数 | 自动化（unit） | 同上 | `(27,27)=0`、`(127,27)=100`、`(0,0)=0` |
 | A3 | `scrollViewportTop` floor 语义 | 自动化（unit） | 同上（含对拍） | floor=bottom 时 `changed=false`；floor=0 时对现有全部输入逐例与旧实现一致 |
 | A4 | protocol 快照溢出后首次滚轮即转发 | 自动化（integration） | 新增 `test-support/pty-attach-frame-overflow-scenario.ts` + `test/pty-attach-frame-overflow.test.mjs`：假 runner 用真实 `captureTerminalSnapshot`/`synthesizeFullRedrawFrame`（**runner 模型 rows=65，attach rows=38，scrollback=0**），attach 侧真实 `PtyAttachComponent`，直接调 `component.handleMouse` 驱动 | `attachBaseY===27`、`historyFloor===27`、`scrollableHistoryLines===0`；首个 wheel 返回 `{handled:true,render:false}` 并发出 `{type:"input","data":"\x1b[<64;…M"}`；`viewportTop` 保持 `null` |
-| A5 | 快照带真实历史时本地仍可滚 | 自动化（integration） | 同 scenario 变体：runner 模型先写 100 行普通文本再快照（`scrollbackLines=100`） | `scrollableHistoryLines===100`；前 100 次 wheel 本地消费（不发转发），第 101 次转发 |
+| A5 | 溢出时禁用本地历史而不是牺牲最旧真实行 | 自动化（integration） | 同 scenario 变体：runner 先写 100 行普通文本再快照（`scrollbackLines=100`，帧 165 行写入 38 行终端 → 溢出） | `historyFloor === baseY`、`scrollableHistoryLines === 0`，首个 wheel 即转发（未溢出且带历史的情形由 A1 的 `(5,10)=0` 覆盖） |
 | A6 | resize 后基线重置（含保证边界） | 自动化（integration） | 同 scenario：hydrate 后 `component.render(<更窄宽度>)` 触发 `term.resize` | `historyFloor === baseY`、`scrollableHistoryLines===0`，下一次 wheel 立即转发 |
 | A6b | `term.reset()` 后基线归零 | 自动化（integration） | 同 scenario 的 `snap.empty`（或 `resnapshot`）变体：hydration 后投递一次 empty 基线 | `historyFloor === 0` 且 `baseY === 0`；随后以超过 `bodyHeight` 行的 live 输出填满视口，wheel 可本地滚动（floor 不再残留旧值） |
 | A7 | `scrollbackLines` 缺失降级 | 自动化（unit + integration） | unit：`historyFloorAfterHydrate(27, undefined)=27`；integration：scenario 不发 `scrollbackLines` 的变体 | 与 A4 同结果（本地不滚、直接转发），不抛错 |
