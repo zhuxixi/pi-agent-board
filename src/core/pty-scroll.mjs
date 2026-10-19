@@ -363,12 +363,18 @@ export function resolveAttachWheelRoute({ bufferType, wheelLinesUp, mouseEnabled
  * event: the child applies its own wheel acceleration, exactly as it would for
  * a real terminal.
  *
+ * `alt` sets SGR bit 3 (value 8) so the child keeps its Alt+wheel accelerator.
+ *
  * @param {"up"|"down"} direction
- * @param {{col?: number, row?: number}} coords
+ * @param {{col?: number, row?: number, alt?: boolean}} coords
  * @returns {string}
  */
-export function encodeWheelReport(direction, { col, row } = {}) {
-	const button = direction === "up" ? 64 : 65;
+export function encodeWheelReport(direction, { col, row, alt = false } = {}) {
+	const base = direction === "up" ? 64 : 65;
+	// Issue #214: SGR bit 3 (value 8) is Alt. pi-tui multiplies by 5 when it is set,
+	// so the forward hop must carry it. Strict comparison: a truthy non-boolean must
+	// not flip the bit.
+	const button = alt === true ? base + 8 : base;
 	const cell = (v) => (Number.isFinite(v) ? Math.max(1, Math.floor(v)) : 1);
 	return `\x1b[<${button};${cell(col)};${cell(row)}M`;
 }

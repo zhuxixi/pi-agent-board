@@ -27,6 +27,9 @@ test("attach wheel fallback: forwards to the child when the local viewport canno
 	assert.equal(parsed.upRenderFalse, true, "wheel must suppress the redundant render");
 	assert.equal(parsed.forwardedUp, "\x1b[<64;4;3M", "wheel up must reach the child as one SGR report (button 64)");
 	assert.equal(parsed.forwardedDown, "\x1b[<65;4;3M", "wheel down must reach the child as one SGR report (button 65)");
+	// Issue #214: the overlay receives Alt from pi-tui; the forward hop must keep it.
+	assert.equal(parsed.forwardedAltUp, "\x1b[<72;4;3M", "Alt+wheel-up must reach the child as button 72");
+	assert.equal(parsed.forwardedAltDown, "\x1b[<73;4;3M", "Alt+wheel-down must reach the child as button 73");
 	assert.equal(parsed.viewportStayedNull, true, "the attach's own viewport must stay on follow-bottom");
 	assert.equal(parsed.attachMouseOffFallsThrough, true, "AGENT_BOARD_ATTACH_MOUSE=0 must fall through");
 	assert.equal(parsed.attachMouseOffNoForward, true, "AGENT_BOARD_ATTACH_MOUSE=0 must forward nothing");

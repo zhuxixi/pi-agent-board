@@ -15,7 +15,8 @@
 //      no room to travel, despite the child holding the alternate screen;
 //   2. wheel up/down → {handled:true, render:false}, the exact SGR report
 //      reaches the runner as {type:"input"} (button 64 up / 65 down, 1-based
-//      child-screen coordinates), and the attach's own viewport never moves;
+//      child-screen coordinates, +8 for Alt+wheel — issue #214), and the
+//      attach's own viewport never moves;
 //   3. the kill switches still fall through and forward nothing.
 // Run via `node --experimental-transform-types`.
 import { mkdtempSync, rmSync, statSync } from "node:fs";
@@ -83,6 +84,8 @@ const result = {
 	upRenderFalse: false,
 	forwardedUp: null as string | null,
 	forwardedDown: null as string | null,
+	forwardedAltUp: null as string | null,
+	forwardedAltDown: null as string | null,
 	viewportStayedNull: false,
 	attachMouseOffFallsThrough: false,
 	attachMouseOffNoForward: false,
@@ -178,7 +181,20 @@ try {
 		result.forwardedDown = forwardedInputs().at(-1) ?? null;
 	}
 
-	// 3. Kill switch: fall through, forward nothing.
+	// 3. Alt+wheel: the overlay already received the Alt bit from pi-tui, so the
+	// forwarded report must keep it (issue #214) — button 72 up / 73 down.
+	before = forwardedInputs().length;
+	(component as any).handleMouse({ ...wheelEvent(-3), alt: true });
+	if (await waitFor(() => forwardedInputs().length > before, 3000)) {
+		result.forwardedAltUp = forwardedInputs().at(-1) ?? null;
+	}
+	before = forwardedInputs().length;
+	(component as any).handleMouse({ ...wheelEvent(2), alt: true });
+	if (await waitFor(() => forwardedInputs().length > before, 3000)) {
+		result.forwardedAltDown = forwardedInputs().at(-1) ?? null;
+	}
+
+	// 4. Kill switch: fall through, forward nothing.
 	before = forwardedInputs().length;
 	process.env.AGENT_BOARD_ATTACH_MOUSE = "0";
 	result.attachMouseOffFallsThrough = (component as any).handleMouse(wheelEvent(-3)) === undefined;

@@ -1480,6 +1480,9 @@ export class PtyAttachComponent implements Component {
 			data: encodeWheelReport(linesUp > 0 ? "up" : "down", {
 				col: clampInt(event.x + 1, 1, this.cols),
 				row: clampInt(event.y, 1, Math.max(1, this.bodyHeight())),
+				// Issue #214: the overlay already received the Alt bit from pi-tui; carry it
+				// into the synthesized report so the child keeps its 5x wheel accelerator.
+				alt: event.alt === true,
 			}),
 		});
 	}

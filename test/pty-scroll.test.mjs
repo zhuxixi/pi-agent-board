@@ -60,6 +60,25 @@ test("encodeWheelReport emits SGR up/down reports with 1-based clamped coordinat
 	assert.equal(encodeWheelReport("up", { col: Number.NaN, row: undefined }), "\x1b[<64;1;1M");
 });
 
+// Issue #214: Alt is SGR bit 3 (value 8); the child's pi-tui reads it to apply the
+// 5x wheel multiplier, so the forward hop must not strip it.
+test("#214-A1: Alt+wheel-up encodes button 72", () => {
+	assert.equal(encodeWheelReport("up", { col: 5, row: 3, alt: true }), "\x1b[<72;5;3M");
+});
+
+test("#214-A2: Alt+wheel-down encodes button 73", () => {
+	assert.equal(encodeWheelReport("down", { col: 5, row: 3, alt: true }), "\x1b[<73;5;3M");
+});
+
+// Two-sided pin by design: this passes before AND after the fix; it fails only if the
+// bit is ever set by truthiness instead of `=== true`. (A1/A2 carry the red-first proof.)
+test("#214-A3: without a strict boolean true, bit 3 stays clear", () => {
+	for (const alt of [false, undefined, null, 0, 1, "yes"]) {
+		assert.equal(encodeWheelReport("up", { col: 5, row: 3, alt }), "\x1b[<64;5;3M", `alt=${String(alt)} must not set bit 3`);
+		assert.equal(encodeWheelReport("down", { col: 5, row: 3, alt }), "\x1b[<65;5;3M", `alt=${String(alt)} must not set bit 3`);
+	}
+});
+
 test("wheelScrollLinesUp flips pi-tui's wheel delta into the viewport's linesUp", () => {
 	// pi-tui scrolls up on a NEGATIVE wheelDelta; tryScrollBy/scrollViewportTop
 	// scroll up on a POSITIVE linesUp. The sign flip is the whole contract.
