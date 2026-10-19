@@ -17,6 +17,12 @@
  * DA/kitty reply is meaningless to it, and forwarding kitty flags would retune
  * the shared real-terminal keyboard stack).
  *
+ * Issue #213: `\x1b[6;` is not proof of a reply — kitty's functional-key encoding puts
+ * PageDown at `CSI 6;<mods>u` (and modifyOtherKeys at `\x1b[6;<mods>~`). The rule is
+ * therefore key-first: a complete CSI key sequence (`u`/`~` terminated) beats the head
+ * prefixes, so the head list is a heuristic rather than an invariant.
+ * Fragments without a terminator still arm.
+ *
  * Pure only: no I/O, no timers, no `process.env`, no pi-tui import. Time is
  * injected by the caller (see `armReplyGuardTimer` in src/ui/pty-attach.ts).
  *
@@ -67,10 +73,11 @@ const FORWARD_SHAPES = [
 	{ family: "osc-color", pattern: /^\x1b\](?:4;[0-9]+|10|11|12);[\s\S]*(?:\x07|\x1b\\)$/ },
 ];
 
-// Prefixes that can only start a reply and can never be a key/mouse/paste
-// encoding — only these arm an absorption window. Deliberately absent: bare
-// `\x1b`, `\x1b[`, `\x1b[5`/`\x1b[6` (PageUp/PageDown heads), `\x1b[<` (SGR
-// mouse), `\x1bO` (SS3).
+// Prefixes that arm an absorption window for a possibly-fragmented reply. These are
+// heuristics, not proofs: `\x1b[6;` also prefixes kitty's PageDown (`CSI 6;<mods>u`,
+// see CSI_KEY_SEQUENCE) and modifyOtherKeys' `\x1b[6;<mods>~`, which is why a COMPLETE
+// CSI key is classified before this list is consulted. Bare `\x1b`, `\x1b[`, `\x1b[<`
+// (SGR mouse) and `\x1bO` (SS3) are deliberately absent.
 const REPLY_HEADS = [
 	{ family: "device-attributes", prefix: "\x1b[?" },
 	{ family: "device-attributes", prefix: "\x1b[>" },
@@ -79,6 +86,19 @@ const REPLY_HEADS = [
 	{ family: "osc-color", prefix: "\x1b]1" },
 	{ family: "osc-color", prefix: "\x1b]4" },
 ];
+
+// Issue #213: kitty keyboard protocol keys that carry a modifier use the legacy
+// functional-key encoding `CSI <num>;<mods>u`, and PageDown's legacy number IS 6
+// (`\x1b[6;1u` = no modifier, the mods field is bitmask+1). modifyOtherKeys uses the
+// same prefix with `~` (`\x1b[6;5~`). Both therefore share the cell-size head prefix
+// (`\x1b[6;`), which used to arm the guard and swallow the key — asymmetric with
+// PageUp (key number 5) and invisible to the previous tests.
+//
+// A COMPLETE CSI key is user input, never a reply fragment: check it before the head
+// prefixes. Only the terminator decides — genuine cell-size fragments (`\x1b[6;`,
+// `\x1b[6;24`) carry no `u`/`~` and still arm below. `(?:[;:]\d+)*` also covers the
+// alternate-key form (`\x1b[6;1:2;65u`), which a narrower `(?:;\d+)?(?::\d+)?` misses.
+const CSI_KEY_SEQUENCE = /^\x1b\[\d+(?:[;:]\d+)*[u~]$/;
 
 /**
  * Classify one inbound input event. Complete reply shapes win over head
@@ -93,6 +113,8 @@ export function classifyReplyEvent(data) {
 	for (const shape of FORWARD_SHAPES) {
 		if (shape.pattern.test(data)) return { kind: "reply-complete", family: shape.family, action: "forward" };
 	}
+	// Issue #213: a complete CSI key wins over the head prefixes (see CSI_KEY_SEQUENCE).
+	if (CSI_KEY_SEQUENCE.test(data)) return { kind: "other" };
 	for (const head of REPLY_HEADS) {
 		if (data.startsWith(head.prefix)) return { kind: "reply-head", family: head.family };
 	}

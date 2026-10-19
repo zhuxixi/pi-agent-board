@@ -113,7 +113,7 @@ test("A3: reset() leaves no residue and windows do not leak across events", () =
 });
 
 test("A3: an 'other' event ends the window, passes, and protects later text", () => {
-	for (const seq of ["\x1b[5~", "\x1b[<35;20;5M", "\x1b[200~hi\x1b[201~"]) {
+	for (const seq of ["\x1b[5~", "\x1b[<35;20;5M", "\x1b[200~hi\x1b[201~", "\x1b[6;1u"]) {
 		const guard = createReplyGuard();
 		guard.feed("\x1b[?61;6;", 1000);
 		assert.deepEqual(guard.feed(seq, 1010), { action: "pass" }, JSON.stringify(seq));
@@ -178,4 +178,27 @@ test("A7: the kill switch accepts 0/off/false and defaults to enabled", () => {
 	for (const off of ["0", "off", "false", " 0 ", "OFF", "False"]) {
 		assert.equal(isReplyGuardEnabled(off), false, JSON.stringify(off));
 	}
+});
+
+// Issue #213: kitty / modifyOtherKeys PageDown shares the cell-size head prefix.
+test("#213-A1: a complete CSI key sequence is user input, never a reply head", () => {
+	for (const seq of ["\x1b[6;1u", "\x1b[6;5u", "\x1b[6;1:2u", "\x1b[6;1:2;65u", "\x1b[6;5~", "\x1b[6;2~"]) {
+		assert.deepEqual(classifyReplyEvent(seq), { kind: "other" }, `${JSON.stringify(seq)} must be a key`);
+	}
+});
+
+test("#213-A2: neighbouring keys are unaffected", () => {
+	for (const seq of ["\x1b[5;1u", "\x1b[5;5~", "\x1b[57422u", "\x1b[57421u", "\x1b[3;5~"]) {
+		assert.deepEqual(classifyReplyEvent(seq), { kind: "other" }, `${JSON.stringify(seq)} must stay a key`);
+	}
+});
+
+test("#213-A3: genuine cell-size fragments still arm", () => {
+	for (const seq of ["\x1b[6;", "\x1b[6;24"]) {
+		assert.deepEqual(classifyReplyEvent(seq), { kind: "reply-head", family: "cell-size" });
+	}
+});
+
+test("#213-A4: a complete cell-size reply still drops", () => {
+	assert.deepEqual(classifyReplyEvent("\x1b[6;24;80t"), { kind: "reply-complete", family: "cell-size", action: "drop" });
 });

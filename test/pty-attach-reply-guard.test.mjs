@@ -14,6 +14,9 @@ test("A6: fragmented DA1 never reaches the child, color replies still do", () =>
 	const out = run();
 	assert.deepEqual(out.guardedFragments, [], "four DA1 reads through the real handleInput must emit no input frame");
 	assert.deepEqual(out.guardedColorReply, ["\x1b]11;rgb:2887/2a18/353c\x1b\\"], "a complete color reply is forwarded byte-for-byte");
+	// Issue #213: kitty / modifyOtherKeys PageDown reaches the child through the guard.
+	assert.deepEqual(out.guardedPageDown, ["\x1b[6;1u", "\x1b[6;5~"], "kitty and modifyOtherKeys PageDown must be forwarded to the child, not swallowed");
+	assert.deepEqual(out.guardedPageDownThenText, ["\x1b[6;1u", "x"], "text after a key must still be forwarded verbatim");
 	assert.deepEqual(out.killSwitchFragments, DA1_CHUNKS, "AGENT_BOARD_REPLY_GUARD=0 restores the pre-#170 passthrough");
 });
 

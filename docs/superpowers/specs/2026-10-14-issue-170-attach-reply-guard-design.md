@@ -111,6 +111,11 @@ export function createReplyGuard({ windowMs = REPLY_GUARD_WINDOW_MS, maxAbsorbBy
 
 6. **近失形状的归属**（R2-D3）：完整但参数为空的 DA（`ESC[?c`）按完成形状处理（drop）；不完整前缀（`ESC[?1;`、`ESC[6;`、`ESC[6;24;80`、`ESC]11;`、`ESC P`）一律武装（swallow）；未知第三值的 997 报告按 forward 家族整条转发。这三类由 A1/A4 的「近失形状」清单锁死，不得靠实现者自由发挥。
 
+7. **修正（issue #213）**：第 1 条「`ESC[6;` 永不可能是按键前缀」已被推翻 —— kitty 功能键编码
+   把 PageDown 放在 `CSI 6;<mods>u`（modifyOtherKeys 为 `\x1b[6;<mods>~`），与 cell-size 的
+   `ESC[6;` 共享前缀。「完整 CSI 键序列优先」（#213）是现行规则：以 `u`/`~` 终结的完整键序列
+   先于 head 前缀判定，不带终结符的片段仍然武装。实现见 `CSI_KEY_SEQUENCE`。
+
 ### 3.4 接线点
 
 `src/ui/pty-attach.ts` 的 `handleInput(data)` **最前面**（在既有 mouse/key 拦截之前）：

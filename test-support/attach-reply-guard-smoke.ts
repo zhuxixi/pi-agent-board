@@ -52,6 +52,22 @@ const out: Record<string, unknown> = {};
 	}
 }
 {
+	// Issue #213: a complete CSI key must reach the child, not the absorption window,
+	// and the bytes typed right after a key must still be forwarded verbatim.
+	const f = fixture();
+	try {
+		f.attach.handleInput("\x1b[6;1u");
+		f.attach.handleInput("\x1b[6;5~");
+		out.guardedPageDown = [...f.sent];
+		f.sent.length = 0;
+		f.attach.handleInput("\x1b[6;1u");
+		f.attach.handleInput("x");
+		out.guardedPageDownThenText = [...f.sent];
+	} finally {
+		f.attach.dispose();
+	}
+}
+{
 	process.env.AGENT_BOARD_REPLY_GUARD = "0";
 	const f = fixture();
 	try {
