@@ -200,11 +200,11 @@ In `docs/superpowers/specs/2026-10-14-issue-170-attach-reply-guard-design.md`, a
 
 Run:
 ```bash
-grep -n "完整 CSI 键序列优先" src/core/terminal-reply-guard.mjs
+grep -n "complete CSI key" src/core/terminal-reply-guard.mjs
 grep -n "完整 CSI 键序列优先.*#213" docs/superpowers/specs/2026-10-14-issue-170-attach-reply-guard-design.md
-grep -n "更宽的前缀" src/core/terminal-reply-guard.mjs
+grep -c "can never be a key" src/core/terminal-reply-guard.mjs
 ```
-Expected: the first two each match at least once (the first inside the module header, not inside a function body); the third returns nothing.
+Expected: the first two each match at least once (the first inside the module header, not inside a function body); the third prints 0.
 
 - [ ] **Step 4: Commit**
 

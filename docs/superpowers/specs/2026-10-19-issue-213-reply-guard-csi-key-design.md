@@ -2,6 +2,7 @@ Drafted: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-19T13:05:00+08:00 — 第 1 轮复核处置（R1-G1/G2/G3 + D1/D2/D3）
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-19T13:15:00+08:00 — 第 2 轮复核处置（R2-G1 + D1/D2/D3）
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-19T13:25:00+08:00 — 第 3 轮复核处置（收敛轮，R3-D1/D2/D3 细化）
+Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-19T14:20:00+08:00 — 代码评审批次修复（A8③ 空转 grep、REPLY_HEADS 注释未改、armed 路径未覆盖）
 
 # issue #213 根因报告与修复设计：reply guard 的 cell-size 前缀吞掉 kitty 编码的 PageDown
 
@@ -104,7 +105,11 @@ kitty 的"交替键"编码 `\x1b[6;1:2;65u`（`;65` 在主修饰符之后），�
 
 同步要求（实现阶段必做）：
 
-- 更新 `terminal-reply-guard.mjs` 顶部注释（它写着 "spec §3.3" 指向这份文档）
+- **改掉 `REPLY_HEADS` 上方那段与新语义矛盾的注释**（源码 :76-79，「can never be a key/mouse/paste
+  encoding」「Deliberately absent: … `[5`/`[6`（PageUp/PageDown heads）」）：不得再出现
+  绝对断言，改为说明「完整键序列优先，只有不带终结符的片段才武装」。
+  模块 header 用**英文**写同一条规则（`complete CSI key sequence … beats the head prefixes`），
+  中文仅在 #170 文档里作为跨引用出现。
 - 在 #170 设计文档 §3.3 的「设计要点」清单里补上「完整 CSI 键序列优先于 head 前缀」这一新类别，
   并把 L106 的论断标注为已被 #213 修正（追加而非改写历史）
 - #170 文档 L112 与 A4 清单里「`ESC[6;` 必须武装」仍然成立（本修复只对**完整**键序列例外）
@@ -130,7 +135,7 @@ kitty 的"交替键"编码 `\x1b[6;1:2;65u`（`;65` 在主修饰符之后），�
 | A5 | guard 状态机不回归 | 自动化（unit） | 现有 `terminal-reply-guard` 全部用例 | 全绿 |
 | A6 | attach 按键真的转发到子会话（不被 guard 吞） | 自动化（integration） | `test-support/attach-reply-guard-smoke.ts` 新增：`handleInput("[6;1u")` / `handleInput("[6;5~")` 后 `sent` 含该字节；断言归 `test/pty-attach-reply-guard.test.mjs` | `sent` 收到完整键序列；且随后的普通文本仍正常转发 |
 | A7 | 语法/静态检查 | 自动化（static） | `npm run typecheck`（`tsconfig` 对 `.mjs` 是 `allowJs` + `checkJs:false`，只做语法解析）+ `npm run pack:dry` | 均通过 |
-| A8 | §4.1 的文档同步真的落地 | 自动化（static） | 三条独立 grep（不锚定常量名，避免被代码本身命中）：① `grep -n "完整 CSI 键序列优先" src/core/terminal-reply-guard.mjs` —— 命中行必须位于文件顶部模块注释区（非函数体）；② `grep -n "完整 CSI 键序列优先.*#213" docs/superpowers/specs/2026-10-14-issue-170-attach-reply-guard-design.md`；③ `grep -n "更宽的前缀" src/core/terminal-reply-guard.mjs` 零命中（旧的矛盾注释已改） | ①②各至少一条命中、③零命中 |
+| A8 | §4.1 的文档同步真的落地 | 自动化（static） | 三条独立 grep，全部锚定**英文** marker（源码是英文注释，中文只出现在 #170 文档）：① `grep -c "complete CSI key" src/core/terminal-reply-guard.mjs`（≥1，且位于模块顶部注释区）；② `grep -n "完整 CSI 键序列优先.*#213" docs/superpowers/specs/2026-10-14-issue-170-attach-reply-guard-design.md`（≥1）；③ `grep -c "can never be a key" src/core/terminal-reply-guard.mjs`（**必须为 0** —— 旧的绝对断言已删除） | ①② ≥1、③ ==0 |
 | U1 | 真实终端 PageDown | 用户实测 | 见 §6.1 三步前置 + WezTerm + pi fullscreen → attach → 按 PageDown | 面板按页向后滚动（或转发给子会话），与 PageUp 对称 |
 
 ### 6.1 U1 执行时机与部署前置
