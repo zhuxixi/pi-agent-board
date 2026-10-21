@@ -223,6 +223,12 @@ test("interactive ask_user_question waits for input and clears on end", () => {
 	assert.equal(s.question, null);
 	assert.deepEqual(s.pendingQuestions, []);
 
+	// The name alone must count: an empty-args call has no questionnaire shape to match.
+	const bare = createRunStatus(cfg(), 1, 1000);
+	reduceEvent(bare, { type: "tool_execution_start", toolCallId: "q1", toolName: "ask_user_question", args: {} }, 2000, { interactive: true });
+	assert.equal(bare.semanticState, "needs_input");
+	assert.equal(bare.question, "Answer the pending question");
+
 	const detached = createRunStatus(cfg(), 1, 1000);
 	reduceEvent(detached, {
 		type: "tool_execution_start",
