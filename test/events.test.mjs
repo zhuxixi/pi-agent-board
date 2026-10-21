@@ -203,6 +203,64 @@ test("interactive pi question tool is treated as a pending question", () => {
 	assert.deepEqual(s.pendingQuestions, []);
 });
 
+test("interactive ask_user_question waits for input and clears on end", () => {
+	const s = createRunStatus(cfg(), 1, 1000);
+	reduceEvent(s, {
+		type: "tool_execution_start",
+		toolCallId: "q1",
+		toolName: "ask_user_question",
+		args: { questions: [{ question: "Which approach?", header: "Approach", options: [{ label: "A", description: "a" }] }] },
+	}, 2000, { interactive: true });
+	assert.equal(s.semanticState, "needs_input");
+	assert.equal(s.summary, "Which approach?");
+	assert.equal(s.question, "Which approach?");
+	assert.equal(s.currentTool, null);
+	assert.deepEqual(s.pendingQuestions, [{ toolCallId: "q1", question: "Which approach?" }]);
+	assert.equal(projectViewState(s, 2100).needsInput, true);
+
+	reduceEvent(s, { type: "tool_execution_end", toolCallId: "q1", toolName: "ask_user_question", isError: false }, 2400, { interactive: true });
+	assert.equal(s.semanticState, "working");
+	assert.equal(s.question, null);
+	assert.deepEqual(s.pendingQuestions, []);
+
+	const detached = createRunStatus(cfg(), 1, 1000);
+	reduceEvent(detached, {
+		type: "tool_execution_start",
+		toolCallId: "q1",
+		toolName: "ask_user_question",
+		args: { questions: [{ question: "Which approach?" }] },
+	}, 2000);
+	assert.equal(detached.semanticState, "working");
+	assert.equal(detached.currentTool.name, "ask_user_question");
+	assert.deepEqual(detached.pendingQuestions, []);
+});
+
+test("interactive unknown questionnaire shape is treated as a pending question", () => {
+	const s = createRunStatus(cfg(), 1, 1000);
+	reduceEvent(s, {
+		type: "tool_execution_start",
+		toolCallId: "q1",
+		toolName: "mystery_questionnaire",
+		args: { questions: [{ question: "Ship it?", header: "Release", options: [{ label: "Yes" }] }] },
+	}, 2000, { interactive: true });
+	assert.equal(s.semanticState, "needs_input");
+	assert.equal(s.question, "Ship it?");
+	assert.equal(s.currentTool, null);
+	assert.deepEqual(s.pendingQuestions, [{ toolCallId: "q1", question: "Ship it?" }]);
+
+	reduceEvent(s, { type: "tool_execution_end", toolCallId: "q1", toolName: "mystery_questionnaire", isError: false }, 2400, { interactive: true });
+	assert.equal(s.semanticState, "working");
+	assert.equal(s.question, null);
+	assert.deepEqual(s.pendingQuestions, []);
+
+	for (const args of [{ questions: [] }, { questions: "nope" }, { command: "ls" }]) {
+		const negative = createRunStatus(cfg(), 1, 1000);
+		reduceEvent(negative, { type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args }, 2000, { interactive: true });
+		assert.equal(negative.semanticState, "working", JSON.stringify(args));
+		assert.deepEqual(negative.pendingQuestions, []);
+	}
+});
+
 test("interactive questionnaire tool extracts prompt and clears on end", () => {
 	const s = createRunStatus(cfg(), 1, 1000);
 	reduceEvent(s, {

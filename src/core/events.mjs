@@ -18,7 +18,18 @@ import { assistantText, detectNeedsInput, toolPath, toolSummary, truncate } from
 const PREVIEW_MAX = 240;
 
 /** Tool names whose interactive execution blocks on a user answer. */
-const QUESTION_TOOL_NAMES = new Set(["ask_questions", "question", "questionnaire"]);
+const QUESTION_TOOL_NAMES = new Set(["ask_user_question", "ask_questions", "question", "questionnaire"]);
+
+/** Questionnaire args shared by pi/Claude-Code style question tools. */
+function isQuestionArgShape(args) {
+	const questions = Array.isArray(args?.questions) ? args.questions : null;
+	return Boolean(questions && questions.length > 0 && typeof questions[0]?.question === "string");
+}
+
+/** A start event is a question when its name is known or its args carry the questionnaire shape. */
+function isQuestionToolCall(name, args) {
+	return QUESTION_TOOL_NAMES.has(name) || isQuestionArgShape(args);
+}
 
 /**
  * Build the initial status for a freshly-launched run.
@@ -83,7 +94,7 @@ export function reduceEvent(status, event, now, opts = {}) {
 			const name = event.toolName ?? event.args?.name ?? "tool";
 			const args = event.args ?? {};
 			status.toolCount += 1;
-			if (opts.interactive && QUESTION_TOOL_NAMES.has(name)) {
+			if (opts.interactive && isQuestionToolCall(name, args)) {
 				upsertPendingQuestion(status, event.toolCallId, questionFromArgs(args));
 			} else if (pendingQuestions(status).length === 0) {
 				status.currentTool = { name, path: toolPath(args), summary: toolSummary(name, args) };
@@ -97,7 +108,9 @@ export function reduceEvent(status, event, now, opts = {}) {
 		}
 		case "tool_execution_end": {
 			if (event.isError) status.error = `Tool ${event.toolName ?? ""} failed`.trim();
-			if (opts.interactive && QUESTION_TOOL_NAMES.has(event.toolName ?? "")) removePendingQuestion(status, event.toolCallId);
+			// The end event carries no args, so a shape-matched start cannot be recognized here;
+			// remove by call id instead (a no-op when this call had no pending question).
+			if (opts.interactive) removePendingQuestion(status, event.toolCallId);
 			status.currentTool = null;
 			status.semanticState = "working";
 			status.question = null;
