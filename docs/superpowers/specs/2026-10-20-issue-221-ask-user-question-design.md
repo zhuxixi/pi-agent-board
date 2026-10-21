@@ -6,6 +6,7 @@ Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-21T22:22:00+08:00 — R2-D1 reference precision (blocked-event emit site)
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-21T22:15:00+08:00 — user chose the hybrid guard (name OR questionnaire arg shape); design, acceptance matrix, risks and testability split updated
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-21T22:35:00+08:00 — R3-D1..D3 (deliverables list, superseded decision row, no-id fallback boundary)
+Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-21T22:52:00+08:00 — local-CR: shape bound wording matches the implementation (empty question string still matches)
 
 - **Issue**: zhuxixi/pi-agent-board#221
 - **Date**: 2026-10-20
@@ -212,10 +213,12 @@ A1–A5 still prove the reducer contract.
 
 - **False positive (accepted)**: any interactive tool whose args are
   `{ questions: [{ question: <string> }] }` is treated as a pending question, even if it is
-  not asking the user. Bounded by the `opts.interactive` gate and by requiring a non-empty
-  first `question` string. No installed extension is known to declare that shape for a
-  non-question purpose today (research §4), but absence over third-party code is not provable,
-  so the guard is the bound itself, not a completeness claim.
+  not asking the user. Bounded by the `opts.interactive` gate and by requiring the first
+  `question` to be a string; an empty or whitespace-only string still matches and falls back
+  to the generic "Answer the pending question" text, exactly like the name-set path. No
+  installed extension is known to declare that shape for a non-question purpose today
+  (research §4), but absence over third-party code is not provable, so the guard is the bound
+  itself, not a completeness claim.
 - **End gate is now name-agnostic**: every interactive `tool_execution_end` calls
   `removePendingQuestion(id)`. For real worker events (which always carry `toolCallId`) ids are
   unique per call, so this clears the matching entry or does nothing; it cannot clear another
