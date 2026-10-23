@@ -975,6 +975,10 @@ export function createService(opts) {
 	 * then corroborated by the process identity probe before recovery decides
 	 * (issue #217). The caller's `memo` deduplicates probes per pid so one
 	 * recovery pass never probes the same process twice.
+	 * @param {any} host host record holding this role's identity/pid/spawn fields
+	 * @param {"runner"|"child"} role which host process to observe
+	 * @param {{ sessionFile: string|null, memo: Map<number, any> }} opts session file
+	 *   used as the child command fragment, and the per-call probe memo
 	 */
 	async function observeHostRole(host, role, { sessionFile, memo }) {
 		const identity = host?.[`${role}Identity`] ?? null;
@@ -1001,8 +1005,11 @@ export function createService(opts) {
 
 	/**
 	 * Record the host roles that stranded a recovery (issue #217 D4).
-	 * Only the producing side writes: one event per instance+role, so repeated
-	 * attach clicks on the same stranded host never flood the diagnostics tail.
+	 * Only roles whose identity is unverifiable (`"unknown"`) are recorded: an
+	 * `"owned"` role is alive and verified, so flagging it as unverifiable would
+	 * contradict the observation that stranded recovery. Only the producing side
+	 * writes: one event per instance+role, so repeated attach clicks on the same
+	 * stranded host never flood the diagnostics tail.
 	 * @param {string} viewId
 	 * @param {any} host host record the observations came from
 	 * @param {{ runner: string, child?: string|null }} observations `null` = not observed
@@ -1012,7 +1019,7 @@ export function createService(opts) {
 	function noteRecoveryPending(viewId, host, observations, memo, path) {
 		for (const role of ["runner", "child"]) {
 			const observation = observations[role];
-			if (observation == null || hostRoleEnded(observation)) continue;
+			if (observation !== "unknown") continue;
 			const pid = host?.[`${role}Identity`]?.pid ?? host?.[`${role}Pid`] ?? null;
 			appendDiagnosticOnce(
 				root,
@@ -1044,6 +1051,8 @@ export function createService(opts) {
 	 * after runner and child are both confirmed ended.
 	 * @param {string} viewId
 	 * @param {string} expectedInstanceId
+	 * @param {string|null} [sessionFile] session whose file identifies the child
+	 *   process; defaults to the row's meta session file
 	 * @returns {Promise<{ ok: boolean, recovered?: boolean, instanceId?: string, socketPath?: string|null, error?: string }>}
 	 */
 	async function recoverHost(viewId, expectedInstanceId, sessionFile = loadRow(root, viewId)?.meta.sessionFile ?? null) {
