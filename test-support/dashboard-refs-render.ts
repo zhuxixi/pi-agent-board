@@ -69,7 +69,7 @@ try {
 		terminal: { rows: 40, cols: 160, columns: 160, write: (d: string) => writes.push(d) },
 		requestRender: () => {},
 	};
-	const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
+	const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t, bg: (_c: string, t: string) => t };
 	const keybindings = {};
 	const dashboard = new DashboardComponent(
 		tui,

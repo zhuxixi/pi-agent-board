@@ -64,7 +64,7 @@ const tui = {
 	terminal: { rows: 24, cols: 80, columns: 80, write: (d: string) => { writes.push(d); } },
 	requestRender: () => {},
 };
-const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
+const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t, bg: (_c: string, t: string) => t };
 
 function makeDash(env: ReturnType<typeof makeEnv>): DashboardComponent {
 	return new DashboardComponent(tui as never, theme as never, { matches: () => false } as never, () => {}, {

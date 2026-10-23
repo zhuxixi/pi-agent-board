@@ -29,7 +29,7 @@ const tui = {
 	terminal: { rows: 24, cols: 80, columns: 80, write: (d) => writes.push(d) },
 	requestRender: () => {},
 };
-const theme = { fg: (_c, t) => t, bold: (t) => t };
+const theme = { fg: (_c, t) => t, bold: (t) => t, bg: (_c, t) => t };
 const keybindings = {};
 
 let dashboard;

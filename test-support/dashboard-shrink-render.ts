@@ -52,7 +52,7 @@ try {
 			if (args[0] === true) clearedFrameLabels.push(currentFrameLabel);
 		},
 	};
-	const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
+	const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t, bg: (_c: string, t: string) => t };
 	const keybindings = {};
 	const dashboard = new DashboardComponent(
 		tui,

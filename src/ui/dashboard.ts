@@ -1478,7 +1478,12 @@ export class DashboardComponent implements Component {
 		let line = `${marker} ${t.fg(selected ? "text" : "muted", selected ? t.bold(nameText) : nameText)}${folder} ${t.fg(selected ? "text" : "muted", summary)}`;
 		line = padTo(line, contentWidth - visibleWidth(ageRaw));
 		line += t.fg("dim", ageRaw);
-		return clip(`${" ".repeat(indent)}${clip(line, contentWidth)}`, width);
+		// Issue #231: paint `indent + body` so the background opens at column 0 and
+		// covers the trailing pad and the age column. `bg` closes inside the string,
+		// so a clipped row cannot leak into the next line.
+		const body = clip(line, contentWidth);
+		const painted = applyRowHighlight(t, selected, `${" ".repeat(indent)}${body}`);
+		return clip(painted, width);
 	}
 
 	private renderPeek(width: number): string[] {
