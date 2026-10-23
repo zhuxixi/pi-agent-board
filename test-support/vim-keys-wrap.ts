@@ -116,5 +116,20 @@ dash2.handleInput("l");
 out.busyL = { mode: dash2.mode, done: done2.length, prompt: dash2.pending?.prompt ?? null };
 dash2.dispose();
 
+// A7: help overlay + hint lines copy.
+// The help box is 32 lines; the probe terminal is 24 rows, so render() would
+// clip the bottom rows. Bump the height for the help capture only.
+tui.terminal.rows = 40;
+dash.mode = "help"; dash.helpReturnMode = "list";
+const help120 = dash.render(120).join("\n");
+const help80 = dash.render(80); // must not throw; renderCenteredBox clips
+tui.terminal.rows = 24;
+dash.mode = "list";
+const listRender = dash.render(120).join("\n");
+dash.mode = "select";
+const selectRender = dash.render(120).join("\n");
+dash.mode = "list";
+out.copy = { help120, listRender, selectRender, help80Lines: help80.length };
+
 dash.dispose();
 console.log(JSON.stringify(out));

@@ -35,3 +35,23 @@ test("vim j/k/l bindings mirror the arrow keys across board modes (issue #229)",
 	assert.equal(out.busyL.done, 0);
 	assert.match(out.busyL.prompt, /Interrupt and attach/);
 });
+
+test("help overlay and hint lines document j/k/l (issue #229 A7)", () => {
+	const out = JSON.parse(execFileSync(process.execPath, ["--experimental-transform-types", PROBE], { encoding: "utf8", timeout: 30_000 }));
+	const { help120, listRender, selectRender, help80Lines } = out.copy;
+	assert.match(help120, /↑\/↓ or j\/k/);
+	assert.match(help120, /→ \/ > \/ l/);
+	assert.match(help120, /In select.*j\/k/);
+	assert.match(help120, /In peek.*↑↓\/j\/k/);
+	assert.match(help120, /In peek.*→\/l attach/);
+	assert.match(help120, /In session.*↑↓\/j\/k scroll/);
+	assert.match(help120, /In evidence.*↑↓\/j\/k scroll/);
+	assert.match(help120, /In evidence.*→\/l attach/);
+	// Negative: stale pre-change wording is gone from every row that named bare arrows.
+	assert.doesNotMatch(help120, /In peek.*· ↑↓ adjacent/);
+	assert.doesNotMatch(help120, /In session.*· ↑↓ scroll/);
+	assert.doesNotMatch(help120, /In evidence.*· ↑↓ scroll/);
+	assert.match(listRender, /→\/l attach/);
+	assert.match(selectRender, /↑↓\/j\/k move/);
+	assert.ok(help80Lines > 0, "80-col help render must not throw (RF3)");
+});

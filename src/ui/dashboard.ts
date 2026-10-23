@@ -1348,6 +1348,7 @@ export class DashboardComponent implements Component {
 			return this.hintLine("SELECT", "accent", [
 				`${this.selectionCount()} selected`,
 				...(unread > 0 ? [`•${unread} unread`] : []),
+				"↑↓/j/k move",
 				"space toggle",
 				"a all visible",
 				"u clear",
@@ -1357,7 +1358,7 @@ export class DashboardComponent implements Component {
 			]);
 		}
 		const primary = this.input.trim() ? "enter launch" : live ? "enter attach live" : "enter resume";
-		const hints = ["i insert", primary, "→ attach", "m multi-select", ...(unread > 0 ? [`•${unread} unread`] : []), "d done", "h hold", "space peek", "v transcript", "e evidence", "ctrl+n new session", "ctrl+r rename", "x delete (y/N)", "ctrl+x x2 quick", "X delete state", "/ filter", "! pty", "? help"];
+		const hints = ["i insert", primary, "→/l attach", "m multi-select", ...(unread > 0 ? [`•${unread} unread`] : []), "d done", "h hold", "space peek", "v transcript", "e evidence", "ctrl+n new session", "ctrl+r rename", "x delete (y/N)", "ctrl+x x2 quick", "X delete state", "/ filter", "! pty", "? help"];
 		if (this.input.trim()) hints.splice(1, 0, "esc clear");
 		return this.hintLine("NORMAL", "muted", hints);
 	}
@@ -1704,9 +1705,9 @@ export class DashboardComponent implements Component {
 			["enter", "Normal/insert with draft: open start-session dialog; empty: attach/resume"],
 			["shift+enter", "Insert a newline while in insert/reply"],
 			["esc", "Insert → normal; Normal with draft clears; empty quits standalone dashboard"],
-			["↑/↓", "Normal: move selection; Insert: move cursor"],
+			["↑/↓ or j/k", "Normal: move selection; Insert: move cursor"],
 			["ctrl/alt+←/→", "Jump by word in insert mode"],
-			["→ or >", "Attach to the selected real Pi session"],
+			["→ / > / l", "Attach to the selected real Pi session"],
 			["d", "Confirm and mark selected inactive session done"],
 			["h", "Hold / unhold the selected inactive session (on-hold state)"],
 			["space", "Peek when input is empty; in multi-select: toggle current row"],
@@ -1719,10 +1720,10 @@ export class DashboardComponent implements Component {
 			["ctrl+x x2", "Delete selected session (quick double-press, no confirm)"],
 			["X", "Delete all inactive sessions in selected state"],
 			["v", "Open read-only transcript view"],
-			["In select", "a select all visible · u clear · d move done · ctrl+x delete done · esc cancel"],
-			["In peek", "→ attach · v transcript · e evidence · r reply · ↑↓ adjacent"],
-			["In session", "← back · ↑↓ scroll · e evidence · enter attach · r reply"],
-			["In evidence", "← back · ↑↓ scroll · r reply · v transcript · x clear diagnostics"],
+			["In select", "j/k move · a select all · u clear · d move done · ctrl+x delete · esc cancel"],
+			["In peek", "→/l attach · v transcript · e evidence · r reply · ↑↓/j/k adjacent"],
+			["In session", "← back · ↑↓/j/k scroll · e evidence · enter attach · r reply"],
+			["In evidence", "← back · ↑↓/j/k scroll · →/l attach · r reply · v transcript · x clear diag"],
 		];
 		const dialog = [t.fg("accent", t.bold("Hotkeys / keybindings")), ""];
 		for (const [k, v] of rows) dialog.push(`  ${t.fg("accent", k.padEnd(14))} ${t.fg("muted", v)}`);
