@@ -95,8 +95,8 @@ try {
 
 	// ultra-narrow: width 23 with indent 4 overflows (4 + max(20, 19) = 24 > 23),
 	// so `clip` really truncates. The intent is width safety plus "the opener is
-	// only on the selected row": the name is truncated there, so identify the
-	// selected row by its `›` cursor marker instead of the session name.
+	// only on the selected row": identify the selected row by its `›` cursor
+	// marker rather than relying on the session name to survive clipping.
 	const narrowLines = dash.render(23);
 	const narrowMaxWidth = Math.max(...narrowLines.map((line) => visibleWidth(line)));
 	const narrowBgLines = narrowLines.filter((line) => line.includes(BG_OPEN));
@@ -120,8 +120,6 @@ try {
 				unselectedHasNoOpener,
 				selectedHasArrow,
 				unselectedHasNoArrow,
-				// `bgCalls` is the interface-contract name for the first-frame count.
-				bgCalls: firstFrameBgCalls,
 				firstFrameBgCalls,
 				selectMarkerPresent,
 				selectHasBg,
