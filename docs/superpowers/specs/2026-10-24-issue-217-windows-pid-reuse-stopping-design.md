@@ -5,6 +5,7 @@ Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-24T02:37:00+08:00 · 依据 R2 复核（G1 + D1–D4）
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-24T02:55:00+08:00 · 依据 R3 复核（G1 + D1–D3）
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-24T03:12:00+08:00 · 依据 R4 复核（0 真缺口 + D1–D3，收敛轮）
+Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-24T03:30:00+08:00 · 依据 PR #240 CR：probe 派生的 owned 在发信号前重验（防 mid-recovery pid 复用）
 
 仓库：zhuxixi/pi-agent-board · issue：#217 · 起草轮次：R0（待交叉复核）
 
@@ -193,7 +194,11 @@ async function observeHostRole(host, role, { sessionFile, memo }) {
 - **memo 必须由调用方显式创建并下传**（R1-D1）：默认参数 `= new Map()` 会在每次调用时新建，
   `recoverHost` 循环（`:1014-1015`）与 final 复检（`:1046`）就各自重探测。
   `HOST_RECOVERY_POLL_MS = 150`、`HOST_RECOVERY_GRACE_MS = 5_000`，最坏 33 轮 × 2 角色 → 无 memo 时
-  66 次 × ~470 ms 远超 grace；共享 memo 后 ≤2 次（runner + child 各一次）。
+  66 次 × ~470 ms 远超 grace。memo 是**分类缓存**：共享 memo 后单次观测的探测 ≤2 次
+  （runner + child 各一次）；但 **probe 派生的 `owned` 必须在每次发信号前重新探测并重新分类**
+  （`revalidateProbeOwned`，PR #240 CR）——若 pid 在 recovery 中被复用，重验得到 `foreign`，
+  不发信号且不置 `*Sent`，下一轮 `hostRoleEnded` 按 ended 放行。token 路径（Linux）不重探测：
+  `observeProcessImpl` 读取实时 `/proc`，且探测层本就不支持 Linux。
 - **resolver stopping 分支的接线（R2-G1）**：该分支（`service.mjs:1304-1305`）不是循环，用自己的局部 memo，
   并把分支内已有的 `sessionFile`（`:1260`）传入，不得依赖未定义的解构：
 
@@ -313,7 +318,7 @@ U1/U2 需要真实 Windows 交互环境；本机可构造，但 U 级结果以�
 | 风险 | 缓解 |
 |---|---|
 | 误判 `foreign` → 释放后新 host 与真孤儿同时写 session 文件 | 命令行匹配是确定性证据；只有命令行不可读时才依赖时间窗；探测失败一律 `unknown` |
-| 误判 `owned` → 向复用 pid 发信号（杀无辜） | owned 仅在命令行匹配（确定性）或时间窗内成立；时间窗 5 s 远小于实测 pid 复用跨度（天级） |
+| 误判 `owned` → 向复用 pid 发信号（杀无辜） | owned 仅在命令行匹配（确定性）或时间窗内成立；时间窗 5 s 远小于实测 pid 复用跨度（天级）；且每次 probe 派生的升级信号发送前都重验 pid（PR #240 CR），mid-recovery 复用的 pid 会被判 `foreign` 而不发信号 |
 | 异步化改变 recovery 时序 / 竞态 | memo 把探测压到 ≤2 次；所有调用点已在 async 上下文；`recoverHost` 的 owner 复检逻辑不变 |
 | Windows 杀软/组策略禁用 PowerShell | 探测返回 `null` → 维持现状 `unknown` + 诊断，不回归 |
 | 测试依赖宿主机 pid 表 | 所有 unknown 用例显式注入探测桩 |

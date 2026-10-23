@@ -999,6 +999,24 @@ export function createService(opts) {
 		});
 	}
 
+	/** Re-validate a probe-derived "owned" immediately before signalling: a pid reused
+	 *  mid-recovery must never receive an escalation signal (#240 CR). The token path
+	 *  is already live (`isAlive` + /proc), so it needs no re-probe. */
+	async function revalidateProbeOwned(host, role, sessionFile, memo) {
+		const identity = host?.[`${role}Identity`] ?? null;
+		if (identity?.startToken != null) return true;
+		const pid = identity?.pid ?? host?.[`${role}Pid`] ?? null;
+		if (pid == null) return false;
+		const probe = await probeProcessIdentityImpl(pid);
+		memo.set(pid, probe);
+		return classifyUnverifiableProcess({
+			spawnedAt: host?.[`${role}SpawnedAt`] ?? null,
+			probe,
+			expectedCommandFragment: role === "child" ? sessionFile : host?.configPath ?? null,
+			toleranceMs: resolveIdentityCreationToleranceMs(),
+		}) === "owned";
+	}
+
 	/** A host role observation is "ended" when it is provably not running:
 	 *  never-spawned, confirmed dead, or a reused PID (foreign). */
 	const hostRoleEnded = (o) => o === "not_started" || o === "dead" || o === "foreign";
@@ -1100,22 +1118,30 @@ export function createService(opts) {
 			const elapsed = nowImpl() - startedAt;
 			if (runnerObservation === "owned") {
 				if (!runnerTermSent) {
-					signalOwnedProcessImpl(host.runnerIdentity, "SIGTERM");
-					runnerTermSent = true;
+					if (await revalidateProbeOwned(host, "runner", sessionFile, probeMemo)) {
+						signalOwnedProcessImpl(host.runnerIdentity, "SIGTERM");
+						runnerTermSent = true;
+					}
 				} else if (elapsed >= resolveHostRecoveryGraceMs() / 2 && !runnerKillSent) {
-					signalOwnedProcessImpl(host.runnerIdentity, "SIGKILL");
-					runnerKillSent = true;
+					if (await revalidateProbeOwned(host, "runner", sessionFile, probeMemo)) {
+						signalOwnedProcessImpl(host.runnerIdentity, "SIGKILL");
+						runnerKillSent = true;
+					}
 				}
 			}
 			// The child is only escalated once its runner is confirmed gone.
 			if (childObservation === "owned" && runnerObservation !== "owned") {
 				if (!childTermSent) {
-					signalOwnedProcessImpl(host.childIdentity, "SIGTERM");
-					childTermSent = true;
-					childTermAt = elapsed;
+					if (await revalidateProbeOwned(host, "child", sessionFile, probeMemo)) {
+						signalOwnedProcessImpl(host.childIdentity, "SIGTERM");
+						childTermSent = true;
+						childTermAt = elapsed;
+					}
 				} else if (elapsed - childTermAt >= 1_000 && !childKillSent) {
-					signalOwnedProcessImpl(host.childIdentity, "SIGKILL");
-					childKillSent = true;
+					if (await revalidateProbeOwned(host, "child", sessionFile, probeMemo)) {
+						signalOwnedProcessImpl(host.childIdentity, "SIGKILL");
+						childKillSent = true;
+					}
 				}
 			}
 			await sleepFnImpl(resolveHostRecoveryPollMs());

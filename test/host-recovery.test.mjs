@@ -308,6 +308,47 @@ test("recoverHost signals an unverifiable owned pid when the command line matche
 	}
 });
 
+test("recoverHost re-validates a probe-derived owned pid before signalling (PR #240 CR)", async () => {
+	const root = freshRoot();
+	const signals = [];
+	let probeCalls = 0;
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeHostRecord(root, "v1", {
+			state: "stopping",
+			runnerPid: 4242,
+			runnerIdentity: { pid: 4242, startToken: null },
+			runnerSpawnedAt: 1,
+			childPid: null,
+			childIdentity: null,
+			childSpawnedAt: null,
+		});
+		const configPath = P.hostConfigPathFor(root, "v1", "i1");
+		const svc = service(root, {
+			observeProcess: () => "unknown",
+			probeProcessIdentity: async () => {
+				probeCalls += 1;
+				return probeCalls === 1
+					? { creationTimeMs: 1, commandLine: `node runner --host ${configPath}` }
+					: { creationTimeMs: 1, commandLine: "node unrelated.js" };
+			},
+			signalOwnedProcess: (identity, signal) => signals.push({ pid: identity.pid, signal }),
+		});
+
+		const res = await svc.recoverHost("v1", "i1");
+
+		assert.equal(res.ok, true);
+		assert.equal(res.recovered, true);
+		assert.equal(signals.length, 0, "a reused pid must never receive an escalation signal");
+		assert.equal(probeCalls, 2, "one observation probe + one signal-time re-validation probe");
+		const host = readHost(root, "v1");
+		assert.equal(host.instanceId, res.instanceId);
+		assert.equal(host.state, "starting");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("recoverHost probes at most twice per call (shared memo)", async () => {
 	const root = freshRoot();
 	let probeCalls = 0;
