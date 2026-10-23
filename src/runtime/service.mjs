@@ -12,7 +12,7 @@ import { resolve } from "node:path";
 import { applyAutoStateToStatus, autoStateEnabled, heuristicAutoState, isManualVerdict } from "../core/auto-state.mjs";
 import { appendLine, atomicWriteJson, removeFile } from "../core/atomic.mjs";
 import { finalizeRun, projectViewState, reduceEvent } from "../core/events.mjs";
-import { clearDiagnostics, appendDiagnostic, tailDiagnostics } from "../core/diagnostics.mjs";
+import { clearDiagnostics, appendDiagnostic, appendDiagnosticOnce, tailDiagnostics } from "../core/diagnostics.mjs";
 import { emptyEvidenceSnapshot, finalizeEvidence, readEvidence, reduceEvidence, summarizeEvidence, writeEvidence } from "../core/evidence.mjs";
 import { updateCodeRefsFromEvidence } from "../core/code-refs-store.mjs";
 import { claimNextFollowUp, completeFollowUp, enqueueFollowUp, failFollowUp, readFollowUpQueue, releaseFollowUp, summarizeFollowUpQueue, clearQueuedFollowUps, removeLastFollowUp } from "../core/follow-up-queue.mjs";
@@ -995,6 +995,46 @@ export function createService(opts) {
 		});
 	}
 
+	/** A host role observation is "ended" when it is provably not running:
+	 *  never-spawned, confirmed dead, or a reused PID (foreign). */
+	const hostRoleEnded = (o) => o === "not_started" || o === "dead" || o === "foreign";
+
+	/**
+	 * Record the host roles that stranded a recovery (issue #217 D4).
+	 * Only the producing side writes: one event per instance+role, so repeated
+	 * attach clicks on the same stranded host never flood the diagnostics tail.
+	 * @param {string} viewId
+	 * @param {any} host host record the observations came from
+	 * @param {{ runner: string, child?: string|null }} observations `null` = not observed
+	 * @param {Map<number, any>} memo probe memo of the pass that produced `observations`
+	 * @param {"recover"|"attach"} path which call site stranded
+	 */
+	function noteRecoveryPending(viewId, host, observations, memo, path) {
+		for (const role of ["runner", "child"]) {
+			const observation = observations[role];
+			if (observation == null || hostRoleEnded(observation)) continue;
+			const pid = host?.[`${role}Identity`]?.pid ?? host?.[`${role}Pid`] ?? null;
+			appendDiagnosticOnce(
+				root,
+				viewId,
+				{
+					source: "service",
+					level: "warn",
+					code: "host_recovery_pending",
+					message: "Host recovery is pending: process identity unverifiable",
+					details: {
+						instanceId: host?.instanceId ?? null,
+						role,
+						observation,
+						probe: (pid == null ? null : memo.get(pid)) ? "available" : "unavailable",
+						path,
+					},
+				},
+				{ match: ["instanceId", "role"] },
+			);
+		}
+	}
+
 	/**
 	 * Revoke + wait + replace a broken host (issue #70). The caller (attach
 	 * resolver) has already probed and decided the instance is unrecoverable.
@@ -1006,10 +1046,6 @@ export function createService(opts) {
 	 * @param {string} expectedInstanceId
 	 * @returns {Promise<{ ok: boolean, recovered?: boolean, instanceId?: string, socketPath?: string|null, error?: string }>}
 	 */
-	/** A host role observation is "ended" when it is provably not running:
-	 *  never-spawned, confirmed dead, or a reused PID (foreign). */
-	const hostRoleEnded = (o) => o === "not_started" || o === "dead" || o === "foreign";
-
 	async function recoverHost(viewId, expectedInstanceId, sessionFile = loadRow(root, viewId)?.meta.sessionFile ?? null) {
 		const ended = hostRoleEnded;
 		const probeMemo = new Map();
@@ -1047,7 +1083,10 @@ export function createService(opts) {
 			const childObservation = await observeHostRole(host, "child", { sessionFile, memo: probeMemo });
 			if (ended(runnerObservation) && ended(childObservation)) break;
 			// Alive-but-unverifiable: never signal, never claim — stay pending.
-			if (runnerObservation === "unknown" || childObservation === "unknown") return { ok: false, error: "recovery_pending" };
+			if (runnerObservation === "unknown" || childObservation === "unknown") {
+				noteRecoveryPending(viewId, host, { runner: runnerObservation, child: childObservation }, probeMemo, "recover");
+				return { ok: false, error: "recovery_pending" };
+			}
 			if (!instanceStillExpected()) return { ok: false, error: "already_recovered" };
 			const elapsed = nowImpl() - startedAt;
 			if (runnerObservation === "owned") {
@@ -1075,7 +1114,12 @@ export function createService(opts) {
 		// Grace exhausted or loop broke — verify both roles are confirmed ended before claiming.
 		const finalHost = readHost(root, viewId);
 		if (!finalHost || finalHost.instanceId !== expectedInstanceId) return { ok: false, error: "already_recovered" };
-		if (!ended(await observeHostRole(finalHost, "runner", { sessionFile, memo: probeMemo })) || !ended(await observeHostRole(finalHost, "child", { sessionFile, memo: probeMemo }))) {
+		const finalRunnerObservation = await observeHostRole(finalHost, "runner", { sessionFile, memo: probeMemo });
+		// Decision order preserved: the child is observed only once the runner is ended,
+		// and `null` means "not observed" so no diagnostic claims an unlooked-at role.
+		const finalChildObservation = ended(finalRunnerObservation) ? await observeHostRole(finalHost, "child", { sessionFile, memo: probeMemo }) : null;
+		if (!ended(finalRunnerObservation) || !ended(finalChildObservation)) {
+			noteRecoveryPending(viewId, finalHost, { runner: finalRunnerObservation, child: finalChildObservation }, probeMemo, "recover");
 			return { ok: false, error: "recovery_pending" };
 		}
 
@@ -1338,6 +1382,7 @@ export function createService(opts) {
 					const childObs = await observeHostRole(host, "child", { sessionFile, memo: probeMemo });
 					if (runnerObs === "unknown" || childObs === "unknown") {
 						// Unverifiable processes on a stranded record — never force.
+						noteRecoveryPending(viewId, host, { runner: runnerObs, child: childObs }, probeMemo, "attach");
 						return pending(sessionFile, "recovery_pending: host identity unverifiable");
 					}
 					if (hostRoleEnded(runnerObs) && hostRoleEnded(childObs)) {

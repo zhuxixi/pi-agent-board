@@ -16,6 +16,30 @@ export function appendDiagnostic(root, viewId, patch = {}) {
 	return event;
 }
 
+/**
+ * Append a diagnostic unless a recent event already carries the same code and the
+ * same `opts.match` detail values (issue #217 D4): repeated attach clicks on one
+ * unverifiable host must leave one trail, not a flood.
+ * @param {string} root
+ * @param {string} viewId
+ * @param {Partial<import("./types.mjs").DiagnosticEvent>} patch
+ * @param {{ match?: string[], limit?: number }} [opts] `match: []` never dedupes.
+ * @returns {import("./types.mjs").DiagnosticEvent|null} the appended event, or null when skipped
+ */
+export function appendDiagnosticOnce(root, viewId, patch = {}, opts = {}) {
+	const event = normalizeDiagnostic(viewId, patch);
+	const match = Array.isArray(opts.match) ? opts.match : [];
+	if (match.length > 0) {
+		const limit = opts.limit ?? 20;
+		const duplicate = readJsonlTail(P.diagnosticsPath(root, viewId), limit)
+			.map((e) => normalizeDiagnostic(viewId, e))
+			.some((e) => e.code === event.code && match.every((key) => e.details?.[key] === event.details?.[key]));
+		if (duplicate) return null;
+	}
+	appendJsonl(P.diagnosticsPath(root, viewId), event);
+	return event;
+}
+
 /** @param {string} root @param {string} viewId @returns {import("./types.mjs").DiagnosticEvent[]} */
 export function readDiagnostics(root, viewId) {
 	return readJsonl(P.diagnosticsPath(root, viewId)).map((e) => normalizeDiagnostic(viewId, e));

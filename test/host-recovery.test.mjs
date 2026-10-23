@@ -196,6 +196,13 @@ test("recoverHost refuses to signal an unknown identity and stays pending", asyn
 		const host = readHost(root, "v1");
 		assert.equal(host.instanceId, "i1");
 		assert.equal(host.state, "stopping");
+		// The stranded recovery leaves a trail, and a repeat attempt does not repeat it (issue #217 D4).
+		const pendingDiagnostics = () => readDiagnostics(root, "v1").filter((e) => e.code === "host_recovery_pending");
+		const recorded = pendingDiagnostics();
+		assert.ok(recorded.some((e) => e.details.role === "runner"), "expected a host_recovery_pending diagnostic for the unverifiable runner");
+		const again = await svc.recoverHost("v1", "i1");
+		assert.equal(again.error, "recovery_pending");
+		assert.equal(pendingDiagnostics().length, recorded.length, "a repeat recovery must not append a duplicate diagnostic");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
