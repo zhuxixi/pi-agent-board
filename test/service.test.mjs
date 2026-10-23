@@ -1004,6 +1004,12 @@ test("a manual verdict survives a foreground tool event (issue #225)", async () 
 	const root = freshRoot();
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		// Seed the projection cache first: a beat the coordinator accepts but that the
+		// fake never materializes. The later tool event therefore runs `adopt` against
+		// the cached (newer) projection before the fenced write is rejected.
+		const accepted = service(root, { sendStateCommand: async () => ({ status: "applied", reason: "sync_foreground" }) });
+		await accepted.syncHostedEvent("v1", { type: "tool_execution_start", toolCallId: "t0", toolName: "bash", args: { command: "ls" } });
+
 		const done = readState(root, "v1");
 		done.semanticState = "completed";
 		done.processState = "exited";
@@ -1012,8 +1018,8 @@ test("a manual verdict survives a foreground tool event (issue #225)", async () 
 		done.updatedAt = Date.now() - 1000;
 		writeState(root, done);
 
-		const svc = service(root, { sendStateCommand: async () => ({ status: "rejected", reason: "manual_fence" }) });
-		await svc.syncHostedEvent("v1", { type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: { command: "ls" } });
+		const fenced = service(root, { sendStateCommand: async () => ({ status: "rejected", reason: "manual_fence" }) });
+		await fenced.syncHostedEvent("v1", { type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: { command: "ls" } });
 		const next = readState(root, "v1");
 		assert.equal(next.semanticState, "completed");
 		assert.equal(next.autoState, null);

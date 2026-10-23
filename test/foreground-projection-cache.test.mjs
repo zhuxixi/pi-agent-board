@@ -83,7 +83,7 @@ test("nextStamp is strictly increasing per view even when the clock is frozen", 
 		assert.ok(a2 > a1);
 		assert.equal(a1, 1_700_000_000_000);
 		assert.equal(b1, 1_700_000_000_000);
-		assert.ok(a2 === b1 || a2 > b1);
+		assert.ok(a2 > b1);
 	} finally {
 		Date.now = realNow;
 	}

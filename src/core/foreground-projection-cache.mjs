@@ -91,5 +91,9 @@ export function createForegroundProjectionCache() {
 	return { nextStamp, remember, adopt, forget, clear, size };
 }
 
-/** Shared cache used by the runtime service (module-level: see module doc). */
+/**
+ * Shared cache used by the runtime service (module-level: see module doc).
+ * Keyed by view id only, matching the preview cache: production view ids are generated
+ * and never reused, and tests clear the cache per case.
+ */
 export const foregroundProjectionCache = createForegroundProjectionCache();

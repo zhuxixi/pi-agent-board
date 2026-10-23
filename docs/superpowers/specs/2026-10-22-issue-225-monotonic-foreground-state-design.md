@@ -142,7 +142,7 @@ resurrect a verdict. No extra fence is added; the existing `manual_fence` and th
 | A2 | Whitelist copy is exact and isolated | automated (unit) | same file | all whitelisted fields copied; non-whitelisted untouched; mutating `status.pendingQuestions[0]` after `adopt` does not change a second `adopt`; mutating the status after `remember` does not change the stored snapshot |
 | A3 | `nextStamp` is strictly increasing per view | automated (unit) | same file | two calls in a row return `b > a`, even when `Date.now()` is stubbed to a constant; different view ids do not share the counter |
 | A4 | Out-of-order materialization no longer resurrects `needs_input` | automated (integration) | `test/service.test.mjs`, coordinator disabled, `Date.now` pinned to a constant for the whole test so the pre-fix same-millisecond tie is deterministic: question start → capture `state.json` (its `updatedAt` is the start stamp) → question end → `writeState(captured snapshot)` (an older stamp) → `tool_execution_start` for `bash` | persisted state is `working`, `pendingQuestions` empty, `needsInput` false. Pre-fix this asserts `needs_input` (the disk rebuild wins the tie), post-fix the monotonic stamp adopts the newer cached status |
-| A5 | A manual verdict survives a foreground event | automated (integration) | `test/service.test.mjs` with the tracked coordinator: `completed` + `autoState: null`, then a `tool_execution_start` event | persisted state stays `completed` (coordinator answers `manual_fence`) |
+| A5 | A manual verdict survives a foreground event | automated (integration) | `test/service.test.mjs`: seed the projection cache with an accepted-but-unmaterialized beat, write `completed` + `autoState: null` with an older `updatedAt`, then a `tool_execution_start` that adopts the cached snapshot | persisted state stays `completed` (coordinator answers `manual_fence`). Pins the fence, not adoption isolation — adoption has no independent observable there |
 | A6 | `forget` drops the entry and is wired into archive | automated (unit + integration) | cache test: `remember` → `forget` → `adopt` false; `test/service.test.mjs`: `archiveByState` on a remembered view | `adopt` returns `false` after `forget`; after archiving, `foregroundProjectionCache.size()` no longer counts that view |
 | A7 | Existing foreground behavior unchanged | automated (unit/integration) | `npm test` (existing `syncForegroundEvent` and preview-cache tests) | all pass |
 | A8 | Repo static gate | automated (static) | `npm run typecheck` | exit 0 (`checkJs:false`, so this is a repo regression gate, not proof of the `.mjs` change) |
@@ -186,6 +186,12 @@ If the environment cannot be updated at completion time, U1 is reported as `pend
 - **Cross-process writers**: another Pi process mirroring the same view writes its own
   `updatedAt`; this cache only protects against out-of-order writes from *this* process.
   Outside the supported single-host model; documented, not fixed.
+- **In-process writers with a bare `Date.now()`**: the auto-state classifier
+  (`applyAutoStateToViewState`, `src/core/auto-state.mjs:254`) stamps a wall-clock
+  `updatedAt`, which can compare older than a cache stamp that ran ahead within the same
+  millisecond. A late foreground tool event would then adopt the pre-classification
+  snapshot — but such an event already clobbers the classification through `reduceEvent`
+  today (it sets `working` and `alive`), so this is not a new resurrection path.
 - **Manual verdicts**: protected by the coordinator's `manual_fence` and the `agent_end`
   branch fence, not by timestamps. Coordinator materialization does not stamp `updatedAt`
   for verdict writes; coordinator-disabled direct writers do stamp `Date.now()`, which can
