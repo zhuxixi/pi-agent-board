@@ -53,6 +53,68 @@ export function processIdentityState(identity, observed, spawnedAt) {
 	return identity.startToken === observed.startToken ? "owned" : "foreign";
 }
 
+/** Characters that may abut a path fragment in a command line without being part of it. */
+const COMMAND_LINE_BOUNDARIES = /[\s"']/;
+
+/** Windows path semantics: separators and case are not significant. */
+function normalizeCommandLine(text) {
+	return text.replace(/\\/g, "/").toLowerCase();
+}
+
+function isCommandLineBoundary(text, index, length) {
+	const before = index === 0 ? null : text[index - 1];
+	const after = index + length >= text.length ? null : text[index + length];
+	return (before == null || COMMAND_LINE_BOUNDARIES.test(before)) && (after == null || COMMAND_LINE_BOUNDARIES.test(after));
+}
+
+/**
+ * Whether a process command line mentions `fragment` as a whole path, not as a
+ * prefix of a longer one (`view_abc` must not match `view_abcd`, nor
+ * `session.jsonl` match `session-2.jsonl`). Comparison is slash- and
+ * case-insensitive because Windows reports `C:\x\y` inside quotes while the
+ * recorded fragment is a plain path (issue #217). Empty/missing input is never
+ * a match: a blank fragment would otherwise corroborate any process.
+ * @param {string|null|undefined} commandLine
+ * @param {string|null|undefined} fragment
+ * @returns {boolean}
+ */
+export function commandLineMentions(commandLine, fragment) {
+	if (!commandLine || !fragment) return false;
+	const haystack = normalizeCommandLine(commandLine);
+	const needle = normalizeCommandLine(fragment);
+	let index = haystack.indexOf(needle);
+	while (index !== -1) {
+		if (isCommandLineBoundary(haystack, index, needle.length)) return true;
+		index = haystack.indexOf(needle, index + 1);
+	}
+	return false;
+}
+
+/**
+ * Refine a host-role observation that the token path could only call `unknown`
+ * (platforms without a start token) using deterministic probe evidence
+ * (issue #217). The command line is authoritative because every host role we
+ * spawn carries its own unique path argument; process creation time only
+ * corroborates when the command line is unreadable, and the tolerance absorbs
+ * spawn→record skew. A missing probe stays `unknown` — the #70 contract: an
+ * unverifiable process is never guessed as foreign.
+ * @param {{
+ *   spawnedAt: number|null,
+ *   probe: {creationTimeMs: number|null, commandLine: string|null}|null,
+ *   expectedCommandFragment: string|null,
+ *   toleranceMs: number,
+ * }} input
+ * @returns {"owned"|"foreign"|"unknown"}
+ */
+export function classifyUnverifiableProcess({ spawnedAt, probe, expectedCommandFragment, toleranceMs }) {
+	if (!probe) return "unknown";
+	if (probe.commandLine && expectedCommandFragment) {
+		return commandLineMentions(probe.commandLine, expectedCommandFragment) ? "owned" : "foreign";
+	}
+	if (spawnedAt == null || probe.creationTimeMs == null) return "unknown";
+	return Math.abs(probe.creationTimeMs - spawnedAt) <= toleranceMs ? "owned" : "foreign";
+}
+
 /** Role observations that mean "no live process can belong to the old instance". */
 const SAFE_TO_RELEASE = new Set(["not_started", "dead", "foreign"]);
 

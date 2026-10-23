@@ -184,6 +184,7 @@ test("recoverHost refuses to signal an unknown identity and stays pending", asyn
 		writeHostRecord(root, "v1", { runnerPid: 4242, runnerIdentity: { pid: 4242, startToken: null }, runnerSpawnedAt: 1 });
 		const svc = service(root, {
 			observeProcess: () => "unknown",
+			probeProcessIdentity: async () => null,
 			signalOwnedProcess: (identity, signal) => signals.push({ pid: identity.pid, signal }),
 		});
 
@@ -195,6 +196,13 @@ test("recoverHost refuses to signal an unknown identity and stays pending", asyn
 		const host = readHost(root, "v1");
 		assert.equal(host.instanceId, "i1");
 		assert.equal(host.state, "stopping");
+		// The stranded recovery leaves a trail, and a repeat attempt does not repeat it (issue #217 D4).
+		const pendingDiagnostics = () => readDiagnostics(root, "v1").filter((e) => e.code === "host_recovery_pending");
+		const recorded = pendingDiagnostics();
+		assert.ok(recorded.some((e) => e.details.role === "runner"), "expected a host_recovery_pending diagnostic for the unverifiable runner");
+		const again = await svc.recoverHost("v1", "i1");
+		assert.equal(again.error, "recovery_pending");
+		assert.equal(pendingDiagnostics().length, recorded.length, "a repeat recovery must not append a duplicate diagnostic");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -219,6 +227,157 @@ test("recoverHost treats a foreign pid as ended: no signal, replacement claimed"
 		const host = readHost(root, "v1");
 		assert.equal(host.instanceId, res.instanceId);
 		assert.equal(host.state, "starting");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("recoverHost releases an unverifiable reused pid when the command line is foreign", async () => {
+	const root = freshRoot();
+	const signals = [];
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeHostRecord(root, "v1", {
+			state: "stopping",
+			runnerPid: 4242,
+			runnerIdentity: { pid: 4242, startToken: null },
+			runnerSpawnedAt: 1,
+			childPid: 4243,
+			childIdentity: { pid: 4243, startToken: null },
+			childSpawnedAt: 1,
+		});
+		const svc = service(root, {
+			observeProcess: () => "unknown",
+			probeProcessIdentity: async () => ({ creationTimeMs: 9, commandLine: "node other.js" }),
+			signalOwnedProcess: (identity, signal) => signals.push({ pid: identity.pid, signal }),
+		});
+
+		const res = await svc.recoverHost("v1", "i1");
+
+		assert.equal(res.ok, true);
+		assert.equal(res.recovered, true);
+		assert.equal(signals.length, 0, "a reused foreign pid is never signalled");
+		const host = readHost(root, "v1");
+		assert.equal(host.instanceId, res.instanceId);
+		assert.equal(host.state, "starting");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("recoverHost signals an unverifiable owned pid when the command line matches", async () => {
+	const root = freshRoot();
+	const signals = [];
+	let childAlive = true;
+	try {
+		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeHostRecord(root, "v1", {
+			state: "stopping",
+			runnerPid: 4242,
+			runnerIdentity: { pid: 4242, startToken: null },
+			runnerSpawnedAt: 1,
+			childPid: 4243,
+			childIdentity: { pid: 4243, startToken: null },
+			childSpawnedAt: 1,
+		});
+		const svc = service(root, {
+			observeProcess: (identity) => {
+				if (identity.pid === 4242) return "dead";
+				return childAlive ? "unknown" : "dead";
+			},
+			probeProcessIdentity: async (pid) => {
+				if (pid === 4243) return { creationTimeMs: 1, commandLine: `node pi --session ${meta.sessionFile}` };
+				return null;
+			},
+			signalOwnedProcess: (identity, signal) => {
+				signals.push({ pid: identity.pid, signal });
+				if (identity.pid === 4243) childAlive = false;
+			},
+		});
+
+		const res = await svc.recoverHost("v1", "i1");
+
+		assert.equal(res.ok, true);
+		assert.equal(res.recovered, true);
+		assert.deepEqual(signals, [{ pid: 4243, signal: "SIGTERM" }]);
+		const host = readHost(root, "v1");
+		assert.equal(host.instanceId, res.instanceId);
+		assert.equal(host.state, "starting");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("recoverHost re-validates a probe-derived owned pid before signalling (PR #240 CR)", async () => {
+	const root = freshRoot();
+	const signals = [];
+	let probeCalls = 0;
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeHostRecord(root, "v1", {
+			state: "stopping",
+			runnerPid: 4242,
+			runnerIdentity: { pid: 4242, startToken: null },
+			runnerSpawnedAt: 1,
+			childPid: null,
+			childIdentity: null,
+			childSpawnedAt: null,
+		});
+		const configPath = P.hostConfigPathFor(root, "v1", "i1");
+		const svc = service(root, {
+			observeProcess: () => "unknown",
+			probeProcessIdentity: async () => {
+				probeCalls += 1;
+				return probeCalls === 1
+					? { creationTimeMs: 1, commandLine: `node runner --host ${configPath}` }
+					: { creationTimeMs: 1, commandLine: "node unrelated.js" };
+			},
+			signalOwnedProcess: (identity, signal) => signals.push({ pid: identity.pid, signal }),
+		});
+
+		const res = await svc.recoverHost("v1", "i1");
+
+		assert.equal(res.ok, true);
+		assert.equal(res.recovered, true);
+		assert.equal(signals.length, 0, "a reused pid must never receive an escalation signal");
+		assert.equal(probeCalls, 2, "one observation probe + one signal-time re-validation probe");
+		const host = readHost(root, "v1");
+		assert.equal(host.instanceId, res.instanceId);
+		assert.equal(host.state, "starting");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("recoverHost probes at most twice per call (shared memo)", async () => {
+	const root = freshRoot();
+	let probeCalls = 0;
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeHostRecord(root, "v1", {
+			state: "stopping",
+			runnerPid: 4242,
+			runnerIdentity: { pid: 4242, startToken: null },
+			runnerSpawnedAt: 1,
+			childPid: 4243,
+			childIdentity: { pid: 4243, startToken: null },
+			childSpawnedAt: 1,
+		});
+		const svc = service(root, {
+			observeProcess: () => "unknown",
+			probeProcessIdentity: async () => {
+				probeCalls += 1;
+				return null;
+			},
+			signalOwnedProcess: () => {},
+		});
+
+		const res = await svc.recoverHost("v1", "i1");
+
+		assert.equal(res.ok, false);
+		assert.equal(res.error, "recovery_pending");
+		assert.ok(probeCalls <= 2, `expected at most 2 probes, got ${probeCalls}`);
+		assert.equal(probeCalls, 2, "one probe per unverifiable role");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

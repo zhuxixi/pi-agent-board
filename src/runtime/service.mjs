@@ -12,7 +12,7 @@ import { resolve } from "node:path";
 import { applyAutoStateToStatus, autoStateEnabled, heuristicAutoState, isManualVerdict } from "../core/auto-state.mjs";
 import { appendLine, atomicWriteJson, removeFile } from "../core/atomic.mjs";
 import { finalizeRun, projectViewState, reduceEvent } from "../core/events.mjs";
-import { clearDiagnostics, appendDiagnostic, tailDiagnostics } from "../core/diagnostics.mjs";
+import { clearDiagnostics, appendDiagnostic, appendDiagnosticOnce, tailDiagnostics } from "../core/diagnostics.mjs";
 import { emptyEvidenceSnapshot, finalizeEvidence, readEvidence, reduceEvidence, summarizeEvidence, writeEvidence } from "../core/evidence.mjs";
 import { updateCodeRefsFromEvidence } from "../core/code-refs-store.mjs";
 import { claimNextFollowUp, completeFollowUp, enqueueFollowUp, failFollowUp, readFollowUpQueue, releaseFollowUp, summarizeFollowUpQueue, clearQueuedFollowUps, removeLastFollowUp } from "../core/follow-up-queue.mjs";
@@ -27,7 +27,8 @@ import { launchAutoState as launchAutoStateProcess, launchHost as launchHostProc
 import { gitRepoRoot } from "../core/repo.mjs";
 import { isAlive, killProcess } from "../core/pid.mjs";
 import { acquireOwnedViewLock, tryAcquireOwnedViewLock } from "../core/locks.mjs";
-import { canFinalizeLegacyHost, canReplaceHost } from "../core/host-coordination.mjs";
+import { canFinalizeLegacyHost, canReplaceHost, classifyUnverifiableProcess } from "../core/host-coordination.mjs";
+import { readProcessIdentityProbe } from "../core/process-identity-probe.mjs";
 import { modelRefAvailable } from "../core/launch-options.mjs";
 import { ensureCoordinator, sendStateCommand, coordinatorDisabled } from "../core/coordinator-client.mjs";
 import { createDesyncEpisodeThrottle, rereadPair, statusRevisionDesynced } from "../core/status-consistency.mjs";
@@ -67,6 +68,8 @@ export const HOST_START_LOCK_WAIT_MS = 500;
 export const HOST_RECOVERY_GRACE_MS = 5_000;
 /** Poll cadence while waiting out a host recovery window. */
 const HOST_RECOVERY_POLL_MS = 150;
+/** Creation-time tolerance when a host role can only be corroborated by process creation time (issue #217). */
+export const HOST_IDENTITY_CREATION_TOLERANCE_MS = 5_000;
 /** Default wall-clock budget for one attach resolution (issue #70 Task 12). */
 const ATTACH_RESOLVE_TIMEOUT_MS = 120_000;
 
@@ -89,6 +92,11 @@ export function resolveHostRecoveryGraceMs(env = process.env) {
 /** @param {NodeJS.ProcessEnv} [env] @returns {number} */
 export function resolveHostRecoveryPollMs(env = process.env) {
 	return resolveTestMs(env, "AGENT_BOARD_TEST_HOST_RECOVERY_POLL_MS", HOST_RECOVERY_POLL_MS);
+}
+
+/** @param {NodeJS.ProcessEnv} [env] @returns {number} */
+export function resolveIdentityCreationToleranceMs(env = process.env) {
+	return resolveTestMs(env, "AGENT_BOARD_TEST_IDENTITY_CREATION_TOLERANCE_MS", HOST_IDENTITY_CREATION_TOLERANCE_MS);
 }
 
 /** @param {NodeJS.ProcessEnv} [env] @returns {number} */
@@ -117,6 +125,7 @@ export function resolveAttachResolveTimeoutMs(env = process.env) {
  *   acquireLock?: typeof acquireOwnedViewLock,
  *   tryAcquireLock?: typeof tryAcquireOwnedViewLock,
  *   observeProcess?: (identity: {pid: number, startToken: string|null}|null) => "not_started"|"dead"|"owned"|"foreign"|"unknown",
+ *   probeProcessIdentity?: (pid: number) => Promise<{creationTimeMs: number|null, commandLine: string|null}|null>,
  *   signalOwnedProcess?: (identity: {pid: number, startToken: string|null}, signal: string) => void,
  *   probeHostFn?: typeof probeHost,
  *   sleepFn?: (ms: number) => Promise<void>,
@@ -146,6 +155,10 @@ export function createService(opts) {
 	// only signal after observeProcess returned "owned" for that exact identity.
 	const observeProcessImpl = opts.observeProcess ?? defaultObserveProcess;
 	const signalOwnedProcessImpl = opts.signalOwnedProcess ?? defaultSignalOwnedProcess;
+	// Corroborating process identity probe for platforms without a start token
+	// (issue #217). Callers inject it in tests; the default reads platform-
+	// specific creation time + command line for one pid.
+	const probeProcessIdentityImpl = opts.probeProcessIdentity ?? readProcessIdentityProbe;
 	// Attach-resolver dependencies (issue #70 Task 12): a real socket probe and an
 	// awaitable sleep. The resolver runs on the UI thread, so its waits MUST go
 	// through sleepFn (never a blocking acquire / Atomics.wait).
@@ -955,13 +968,96 @@ export function createService(opts) {
 		return { ok: true, requested: wasRequested };
 	}
 
-	/** Observe one host role: a recorded identity goes through identity-aware
-	 *  observation; a missing identity means `not_started` (never spawned) or
-	 *  `unknown` (spawn attempted, identity unavailable) — never `dead`. */
-	function observeHostRole(host, role) {
+	/**
+	 * Observe one host role: a recorded identity goes through identity-aware
+	 * observation; a missing identity means `not_started` (never spawned). An
+	 * `unknown` identity (no stable token, or the token path unavailable) is
+	 * then corroborated by the process identity probe before recovery decides
+	 * (issue #217). The caller's `memo` deduplicates probes per pid so one
+	 * recovery pass never probes the same process twice.
+	 * @param {any} host host record holding this role's identity/pid/spawn fields
+	 * @param {"runner"|"child"} role which host process to observe
+	 * @param {{ sessionFile: string|null, memo: Map<number, any> }} opts session file
+	 *   used as the child command fragment, and the per-call probe memo
+	 */
+	async function observeHostRole(host, role, { sessionFile, memo }) {
 		const identity = host?.[`${role}Identity`] ?? null;
-		if (identity) return observeProcessImpl(identity);
-		return host?.[`${role}SpawnedAt`] == null ? "not_started" : "unknown";
+		if (identity) {
+			const observed = observeProcessImpl(identity);
+			if (observed !== "unknown") return observed;
+		} else if (host?.[`${role}SpawnedAt`] == null) {
+			return "not_started";
+		}
+		const pid = identity?.pid ?? host?.[`${role}Pid`] ?? null;
+		if (pid == null) return "unknown";
+		if (!memo.has(pid)) memo.set(pid, await probeProcessIdentityImpl(pid));
+		return classifyUnverifiableProcess({
+			spawnedAt: host?.[`${role}SpawnedAt`] ?? null,
+			probe: memo.get(pid),
+			expectedCommandFragment: role === "child" ? sessionFile : host?.configPath ?? null,
+			toleranceMs: resolveIdentityCreationToleranceMs(),
+		});
+	}
+
+	/** Re-validate a probe-derived "owned" immediately before signalling: a pid reused
+	 *  mid-recovery must never receive an escalation signal (#240 CR). The token path
+	 *  is already live (`isAlive` + /proc), so it needs no re-probe. */
+	async function revalidateProbeOwned(host, role, sessionFile, memo) {
+		const identity = host?.[`${role}Identity`] ?? null;
+		if (identity?.startToken != null) return true;
+		const pid = identity?.pid ?? host?.[`${role}Pid`] ?? null;
+		if (pid == null) return false;
+		const probe = await probeProcessIdentityImpl(pid);
+		memo.set(pid, probe);
+		return classifyUnverifiableProcess({
+			spawnedAt: host?.[`${role}SpawnedAt`] ?? null,
+			probe,
+			expectedCommandFragment: role === "child" ? sessionFile : host?.configPath ?? null,
+			toleranceMs: resolveIdentityCreationToleranceMs(),
+		}) === "owned";
+	}
+
+	/** A host role observation is "ended" when it is provably not running:
+	 *  never-spawned, confirmed dead, or a reused PID (foreign). */
+	const hostRoleEnded = (o) => o === "not_started" || o === "dead" || o === "foreign";
+
+	/**
+	 * Record the host roles that stranded a recovery (issue #217 D4).
+	 * Only roles whose identity is unverifiable (`"unknown"`) are recorded: an
+	 * `"owned"` role is alive and verified, so flagging it as unverifiable would
+	 * contradict the observation that stranded recovery. Only the producing side
+	 * writes: one event per instance+role, so repeated attach clicks on the same
+	 * stranded host never flood the diagnostics tail.
+	 * @param {string} viewId
+	 * @param {any} host host record the observations came from
+	 * @param {{ runner: string, child?: string|null }} observations `null` = not observed
+	 * @param {Map<number, any>} memo probe memo of the pass that produced `observations`
+	 * @param {"recover"|"attach"} path which call site stranded
+	 */
+	function noteRecoveryPending(viewId, host, observations, memo, path) {
+		for (const role of ["runner", "child"]) {
+			const observation = observations[role];
+			if (observation !== "unknown") continue;
+			const pid = host?.[`${role}Identity`]?.pid ?? host?.[`${role}Pid`] ?? null;
+			appendDiagnosticOnce(
+				root,
+				viewId,
+				{
+					source: "service",
+					level: "warn",
+					code: "host_recovery_pending",
+					message: "Host recovery is pending: process identity unverifiable",
+					details: {
+						instanceId: host?.instanceId ?? null,
+						role,
+						observation,
+						probe: (pid == null ? null : memo.get(pid)) ? "available" : "unavailable",
+						path,
+					},
+				},
+				{ match: ["instanceId", "role"] },
+			);
+		}
 	}
 
 	/**
@@ -973,14 +1069,13 @@ export function createService(opts) {
 	 * after runner and child are both confirmed ended.
 	 * @param {string} viewId
 	 * @param {string} expectedInstanceId
+	 * @param {string|null} [sessionFile] session whose file identifies the child
+	 *   process; defaults to the row's meta session file
 	 * @returns {Promise<{ ok: boolean, recovered?: boolean, instanceId?: string, socketPath?: string|null, error?: string }>}
 	 */
-	/** A host role observation is "ended" when it is provably not running:
-	 *  never-spawned, confirmed dead, or a reused PID (foreign). */
-	const hostRoleEnded = (o) => o === "not_started" || o === "dead" || o === "foreign";
-
-	async function recoverHost(viewId, expectedInstanceId) {
+	async function recoverHost(viewId, expectedInstanceId, sessionFile = loadRow(root, viewId)?.meta.sessionFile ?? null) {
 		const ended = hostRoleEnded;
+		const probeMemo = new Map();
 		const instanceStillExpected = () => {
 			const h = readHost(root, viewId);
 			return h != null && h.instanceId === expectedInstanceId;
@@ -1011,31 +1106,42 @@ export function createService(opts) {
 		while (nowImpl() - startedAt < resolveHostRecoveryGraceMs()) {
 			const host = readHost(root, viewId);
 			if (!host || host.instanceId !== expectedInstanceId) return { ok: false, error: "already_recovered" };
-			const runnerObservation = observeHostRole(host, "runner");
-			const childObservation = observeHostRole(host, "child");
+			const runnerObservation = await observeHostRole(host, "runner", { sessionFile, memo: probeMemo });
+			const childObservation = await observeHostRole(host, "child", { sessionFile, memo: probeMemo });
 			if (ended(runnerObservation) && ended(childObservation)) break;
 			// Alive-but-unverifiable: never signal, never claim — stay pending.
-			if (runnerObservation === "unknown" || childObservation === "unknown") return { ok: false, error: "recovery_pending" };
+			if (runnerObservation === "unknown" || childObservation === "unknown") {
+				noteRecoveryPending(viewId, host, { runner: runnerObservation, child: childObservation }, probeMemo, "recover");
+				return { ok: false, error: "recovery_pending" };
+			}
 			if (!instanceStillExpected()) return { ok: false, error: "already_recovered" };
 			const elapsed = nowImpl() - startedAt;
 			if (runnerObservation === "owned") {
 				if (!runnerTermSent) {
-					signalOwnedProcessImpl(host.runnerIdentity, "SIGTERM");
-					runnerTermSent = true;
+					if (await revalidateProbeOwned(host, "runner", sessionFile, probeMemo)) {
+						signalOwnedProcessImpl(host.runnerIdentity, "SIGTERM");
+						runnerTermSent = true;
+					}
 				} else if (elapsed >= resolveHostRecoveryGraceMs() / 2 && !runnerKillSent) {
-					signalOwnedProcessImpl(host.runnerIdentity, "SIGKILL");
-					runnerKillSent = true;
+					if (await revalidateProbeOwned(host, "runner", sessionFile, probeMemo)) {
+						signalOwnedProcessImpl(host.runnerIdentity, "SIGKILL");
+						runnerKillSent = true;
+					}
 				}
 			}
 			// The child is only escalated once its runner is confirmed gone.
 			if (childObservation === "owned" && runnerObservation !== "owned") {
 				if (!childTermSent) {
-					signalOwnedProcessImpl(host.childIdentity, "SIGTERM");
-					childTermSent = true;
-					childTermAt = elapsed;
+					if (await revalidateProbeOwned(host, "child", sessionFile, probeMemo)) {
+						signalOwnedProcessImpl(host.childIdentity, "SIGTERM");
+						childTermSent = true;
+						childTermAt = elapsed;
+					}
 				} else if (elapsed - childTermAt >= 1_000 && !childKillSent) {
-					signalOwnedProcessImpl(host.childIdentity, "SIGKILL");
-					childKillSent = true;
+					if (await revalidateProbeOwned(host, "child", sessionFile, probeMemo)) {
+						signalOwnedProcessImpl(host.childIdentity, "SIGKILL");
+						childKillSent = true;
+					}
 				}
 			}
 			await sleepFnImpl(resolveHostRecoveryPollMs());
@@ -1043,7 +1149,12 @@ export function createService(opts) {
 		// Grace exhausted or loop broke — verify both roles are confirmed ended before claiming.
 		const finalHost = readHost(root, viewId);
 		if (!finalHost || finalHost.instanceId !== expectedInstanceId) return { ok: false, error: "already_recovered" };
-		if (!ended(observeHostRole(finalHost, "runner")) || !ended(observeHostRole(finalHost, "child"))) {
+		const finalRunnerObservation = await observeHostRole(finalHost, "runner", { sessionFile, memo: probeMemo });
+		// Decision order preserved: the child is observed only once the runner is ended,
+		// and `null` means "not observed" so no diagnostic claims an unlooked-at role.
+		const finalChildObservation = ended(finalRunnerObservation) ? await observeHostRole(finalHost, "child", { sessionFile, memo: probeMemo }) : null;
+		if (!ended(finalRunnerObservation) || !ended(finalChildObservation)) {
+			noteRecoveryPending(viewId, finalHost, { runner: finalRunnerObservation, child: finalChildObservation }, probeMemo, "recover");
 			return { ok: false, error: "recovery_pending" };
 		}
 
@@ -1301,16 +1412,18 @@ export function createService(opts) {
 			if (host.state === "stopping") {
 				const staleStop = host.instanceId != null && nowImpl() - (host.stopRequestedAt ?? host.claimAt ?? 0) >= resolveHostRecoveryGraceMs();
 				if (staleStop && !recovered) {
-					const runnerObs = observeHostRole(host, "runner");
-					const childObs = observeHostRole(host, "child");
+					const probeMemo = new Map();
+					const runnerObs = await observeHostRole(host, "runner", { sessionFile, memo: probeMemo });
+					const childObs = await observeHostRole(host, "child", { sessionFile, memo: probeMemo });
 					if (runnerObs === "unknown" || childObs === "unknown") {
 						// Unverifiable processes on a stranded record — never force.
+						noteRecoveryPending(viewId, host, { runner: runnerObs, child: childObs }, probeMemo, "attach");
 						return pending(sessionFile, "recovery_pending: host identity unverifiable");
 					}
 					if (hostRoleEnded(runnerObs) && hostRoleEnded(childObs)) {
 						recovered = true;
 						try {
-							const rec = await recoverHost(viewId, /** @type {string} */ (host.instanceId));
+							const rec = await recoverHost(viewId, /** @type {string} */ (host.instanceId), sessionFile);
 							if (!rec.ok && rec.error === "recovery_pending") {
 								return pending(sessionFile, "recovery_pending: host identity unverifiable");
 							}
@@ -1378,7 +1491,7 @@ export function createService(opts) {
 			if (!recovered) {
 				recovered = true;
 				try {
-					const rec = await recoverHost(viewId, /** @type {string} */ (host.instanceId));
+					const rec = await recoverHost(viewId, /** @type {string} */ (host.instanceId), sessionFile);
 					if (!rec.ok && rec.error === "recovery_pending") {
 						return pending(sessionFile, "recovery_pending: host identity unverifiable");
 					}
