@@ -1294,4 +1294,7 @@ test("#224 A14b: a failing diagnostic write must not block the step-down", async
 	const code = await waitForExit(child, 5000);
 	assert.equal(code, 0, "diagnostic failure must not skip shutdown");
 	assert.equal(existsSync(P.viewLockPath(root, "_coordinator", "state-coordinator")), false, "lease still released");
+	if (process.platform !== "win32") {
+		assert.equal(existsSync(P.coordinatorEndpointPathFor(process.platform, root)), false, "endpoint still cleaned up");
+	}
 });
