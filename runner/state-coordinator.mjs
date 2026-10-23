@@ -50,7 +50,8 @@ import {
 	writeCheckpoint,
 } from "../src/core/coordinator-journal.mjs";
 import { ownsEndpoint } from "../src/core/host-coordination.mjs";
-import { acquireOwnedViewLock, withViewLockSync } from "../src/core/locks.mjs";
+import { appendDiagnostic } from "../src/core/diagnostics.mjs";
+import { acquireOwnedViewLock, describeLeaseConflict, withViewLockSync } from "../src/core/locks.mjs";
 import * as P from "../src/core/paths.mjs";
 import { readState, readStatus, writeState, writeStatus } from "../src/core/store.mjs";
 import { TRANSIENT_KINDS, decideStateTransition, validateCommand } from "../src/core/state-commands.mjs";
@@ -97,6 +98,19 @@ main().catch((err) => {
 	process.exit(1);
 });
 
+/**
+ * Append a coordinator-scoped diagnostic. `appendDiagnostic` throws when the
+ * disk is failing, so callers fence the write where a crash would be worse
+ * than a lost diagnostic (issue #224 D4).
+ * @param {string} code
+ * @param {Record<string, any>} details
+ * @param {"info"|"warn"|"error"} [level]
+ * @param {string} [source]
+ */
+function appendCoordinatorDiagnostic(code, details, level = "info", source = "coordinator") {
+	appendDiagnostic(root, "_coordinator", { source, level, code, details });
+}
+
 async function main() {
 	const instanceId = randomBytes(8).toString("hex");
 	const startedAt = Date.now();
@@ -112,8 +126,19 @@ async function main() {
 			identity: { pid: process.pid, startToken: captureStartToken(process.pid) },
 		});
 	} catch (err) {
+		// Record the conflict instead of exiting silently (issue #224 D6). The
+		// diagnostic write is best-effort: it must never turn the expected
+		// idempotent exit into a crash.
+		const summary = describeLeaseConflict(root, "_coordinator", "state-coordinator");
+		if (summary) {
+			try { appendCoordinatorDiagnostic("coordinator_lease_unavailable", summary, "error"); } catch { /* best effort */ }
+		}
 		process.stderr.write(`state-coordinator: lease unavailable (${err?.code ?? err?.message ?? "unknown"}); another instance may own it; exiting\n`);
 		process.exit(0);
+	}
+	// Leave a trace when this acquire reclaimed a stale lease (issue #224 D6).
+	if (lease.reclaimed) {
+		try { appendCoordinatorDiagnostic("lease_reclaimed", { ...lease.reclaimed }, "info", "lock"); } catch { /* best effort */ }
 	}
 	const startTouchTimer = setInterval(() => {
 		try { lease?.touch(); } catch { /* best effort */ }
