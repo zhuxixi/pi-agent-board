@@ -189,6 +189,7 @@ export const GROUP_LABELS = {
  * @property {number} toolCount
  * @property {number} [eventCount]
  * @property {number|null} [lastEventAt]
+ * @property {number} [updatedAt] In-memory foreground rebuild freshness (issue #225); not persisted on run status files.
  * @property {EvidenceUsage|null} [usage]
  * @property {string|null} [stallReason]
  * @property {ReviewSummary|null} [evidenceSummary]
