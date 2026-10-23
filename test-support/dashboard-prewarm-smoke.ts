@@ -22,7 +22,7 @@ function fakeRow(id, { hostActive = false, alive = false, semanticState = null }
 
 const results = {};
 const tui = { terminal: { rows: 24, cols: 80, columns: 80, write: () => {} }, requestRender: () => {} };
-const theme = { fg: (_c, t) => t, bold: (t) => t };
+const theme = { fg: (_c, t) => t, bold: (t) => t, bg: (_c, t) => t };
 
 function makeDashboard(rows, { prewarmResult = { ok: true }, doneCapture } = {}) {
 	const service = {

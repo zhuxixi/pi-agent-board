@@ -49,7 +49,7 @@ const notifications: Array<{ text: string; level: string }> = [];
 const boardDeps: Array<{ initialSelectedId: string | null; initialNotice?: string }> = [];
 let stage = 0;
 const fakeTui = { terminal: { rows: 24, cols: 80, columns: 80, write() {} }, requestRender() {} };
-const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t };
+const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t, bg: (_c: string, t: string) => t };
 
 const ctx = {
 	cwd: root,
