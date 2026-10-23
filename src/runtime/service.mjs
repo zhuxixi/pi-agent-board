@@ -27,7 +27,8 @@ import { launchAutoState as launchAutoStateProcess, launchHost as launchHostProc
 import { gitRepoRoot } from "../core/repo.mjs";
 import { isAlive, killProcess } from "../core/pid.mjs";
 import { acquireOwnedViewLock, tryAcquireOwnedViewLock } from "../core/locks.mjs";
-import { canFinalizeLegacyHost, canReplaceHost } from "../core/host-coordination.mjs";
+import { canFinalizeLegacyHost, canReplaceHost, classifyUnverifiableProcess } from "../core/host-coordination.mjs";
+import { readProcessIdentityProbe } from "../core/process-identity-probe.mjs";
 import { modelRefAvailable } from "../core/launch-options.mjs";
 import { ensureCoordinator, sendStateCommand, coordinatorDisabled } from "../core/coordinator-client.mjs";
 import { createDesyncEpisodeThrottle, rereadPair, statusRevisionDesynced } from "../core/status-consistency.mjs";
@@ -124,6 +125,7 @@ export function resolveAttachResolveTimeoutMs(env = process.env) {
  *   acquireLock?: typeof acquireOwnedViewLock,
  *   tryAcquireLock?: typeof tryAcquireOwnedViewLock,
  *   observeProcess?: (identity: {pid: number, startToken: string|null}|null) => "not_started"|"dead"|"owned"|"foreign"|"unknown",
+ *   probeProcessIdentity?: (pid: number) => Promise<{creationTimeMs: number|null, commandLine: string|null}|null>,
  *   signalOwnedProcess?: (identity: {pid: number, startToken: string|null}, signal: string) => void,
  *   probeHostFn?: typeof probeHost,
  *   sleepFn?: (ms: number) => Promise<void>,
@@ -153,6 +155,10 @@ export function createService(opts) {
 	// only signal after observeProcess returned "owned" for that exact identity.
 	const observeProcessImpl = opts.observeProcess ?? defaultObserveProcess;
 	const signalOwnedProcessImpl = opts.signalOwnedProcess ?? defaultSignalOwnedProcess;
+	// Corroborating process identity probe for platforms without a start token
+	// (issue #217). Callers inject it in tests; the default reads platform-
+	// specific creation time + command line for one pid.
+	const probeProcessIdentityImpl = opts.probeProcessIdentity ?? readProcessIdentityProbe;
 	// Attach-resolver dependencies (issue #70 Task 12): a real socket probe and an
 	// awaitable sleep. The resolver runs on the UI thread, so its waits MUST go
 	// through sleepFn (never a blocking acquire / Atomics.wait).
@@ -962,13 +968,31 @@ export function createService(opts) {
 		return { ok: true, requested: wasRequested };
 	}
 
-	/** Observe one host role: a recorded identity goes through identity-aware
-	 *  observation; a missing identity means `not_started` (never spawned) or
-	 *  `unknown` (spawn attempted, identity unavailable) — never `dead`. */
-	function observeHostRole(host, role) {
+	/**
+	 * Observe one host role: a recorded identity goes through identity-aware
+	 * observation; a missing identity means `not_started` (never spawned). An
+	 * `unknown` identity (no stable token, or the token path unavailable) is
+	 * then corroborated by the process identity probe before recovery decides
+	 * (issue #217). The caller's `memo` deduplicates probes per pid so one
+	 * recovery pass never probes the same process twice.
+	 */
+	async function observeHostRole(host, role, { sessionFile, memo }) {
 		const identity = host?.[`${role}Identity`] ?? null;
-		if (identity) return observeProcessImpl(identity);
-		return host?.[`${role}SpawnedAt`] == null ? "not_started" : "unknown";
+		if (identity) {
+			const observed = observeProcessImpl(identity);
+			if (observed !== "unknown") return observed;
+		} else if (host?.[`${role}SpawnedAt`] == null) {
+			return "not_started";
+		}
+		const pid = identity?.pid ?? host?.[`${role}Pid`] ?? null;
+		if (pid == null) return "unknown";
+		if (!memo.has(pid)) memo.set(pid, await probeProcessIdentityImpl(pid));
+		return classifyUnverifiableProcess({
+			spawnedAt: host?.[`${role}SpawnedAt`] ?? null,
+			probe: memo.get(pid),
+			expectedCommandFragment: role === "child" ? sessionFile : host?.configPath ?? null,
+			toleranceMs: resolveIdentityCreationToleranceMs(),
+		});
 	}
 
 	/**
@@ -986,8 +1010,9 @@ export function createService(opts) {
 	 *  never-spawned, confirmed dead, or a reused PID (foreign). */
 	const hostRoleEnded = (o) => o === "not_started" || o === "dead" || o === "foreign";
 
-	async function recoverHost(viewId, expectedInstanceId) {
+	async function recoverHost(viewId, expectedInstanceId, sessionFile = loadRow(root, viewId)?.meta.sessionFile ?? null) {
 		const ended = hostRoleEnded;
+		const probeMemo = new Map();
 		const instanceStillExpected = () => {
 			const h = readHost(root, viewId);
 			return h != null && h.instanceId === expectedInstanceId;
@@ -1018,8 +1043,8 @@ export function createService(opts) {
 		while (nowImpl() - startedAt < resolveHostRecoveryGraceMs()) {
 			const host = readHost(root, viewId);
 			if (!host || host.instanceId !== expectedInstanceId) return { ok: false, error: "already_recovered" };
-			const runnerObservation = observeHostRole(host, "runner");
-			const childObservation = observeHostRole(host, "child");
+			const runnerObservation = await observeHostRole(host, "runner", { sessionFile, memo: probeMemo });
+			const childObservation = await observeHostRole(host, "child", { sessionFile, memo: probeMemo });
 			if (ended(runnerObservation) && ended(childObservation)) break;
 			// Alive-but-unverifiable: never signal, never claim — stay pending.
 			if (runnerObservation === "unknown" || childObservation === "unknown") return { ok: false, error: "recovery_pending" };
@@ -1050,7 +1075,7 @@ export function createService(opts) {
 		// Grace exhausted or loop broke — verify both roles are confirmed ended before claiming.
 		const finalHost = readHost(root, viewId);
 		if (!finalHost || finalHost.instanceId !== expectedInstanceId) return { ok: false, error: "already_recovered" };
-		if (!ended(observeHostRole(finalHost, "runner")) || !ended(observeHostRole(finalHost, "child"))) {
+		if (!ended(await observeHostRole(finalHost, "runner", { sessionFile, memo: probeMemo })) || !ended(await observeHostRole(finalHost, "child", { sessionFile, memo: probeMemo }))) {
 			return { ok: false, error: "recovery_pending" };
 		}
 
@@ -1308,8 +1333,9 @@ export function createService(opts) {
 			if (host.state === "stopping") {
 				const staleStop = host.instanceId != null && nowImpl() - (host.stopRequestedAt ?? host.claimAt ?? 0) >= resolveHostRecoveryGraceMs();
 				if (staleStop && !recovered) {
-					const runnerObs = observeHostRole(host, "runner");
-					const childObs = observeHostRole(host, "child");
+					const probeMemo = new Map();
+					const runnerObs = await observeHostRole(host, "runner", { sessionFile, memo: probeMemo });
+					const childObs = await observeHostRole(host, "child", { sessionFile, memo: probeMemo });
 					if (runnerObs === "unknown" || childObs === "unknown") {
 						// Unverifiable processes on a stranded record — never force.
 						return pending(sessionFile, "recovery_pending: host identity unverifiable");
@@ -1317,7 +1343,7 @@ export function createService(opts) {
 					if (hostRoleEnded(runnerObs) && hostRoleEnded(childObs)) {
 						recovered = true;
 						try {
-							const rec = await recoverHost(viewId, /** @type {string} */ (host.instanceId));
+							const rec = await recoverHost(viewId, /** @type {string} */ (host.instanceId), sessionFile);
 							if (!rec.ok && rec.error === "recovery_pending") {
 								return pending(sessionFile, "recovery_pending: host identity unverifiable");
 							}
@@ -1385,7 +1411,7 @@ export function createService(opts) {
 			if (!recovered) {
 				recovered = true;
 				try {
-					const rec = await recoverHost(viewId, /** @type {string} */ (host.instanceId));
+					const rec = await recoverHost(viewId, /** @type {string} */ (host.instanceId), sessionFile);
 					if (!rec.ok && rec.error === "recovery_pending") {
 						return pending(sessionFile, "recovery_pending: host identity unverifiable");
 					}
