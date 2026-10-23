@@ -348,8 +348,9 @@ export function readLeaseHeartbeat(lockPath, token, fs = defaultLocksFs, now = D
 	} catch {
 		return null;
 	}
-	const at = Number(parsed?.at);
-	return Number.isFinite(at) ? Math.max(0, now - at) : null;
+	const at = parsed?.at;
+	if (typeof at !== "number" || !Number.isFinite(at)) return null;
+	return Math.max(0, now - at);
 }
 
 /**

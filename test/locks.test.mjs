@@ -518,7 +518,7 @@ test("#224 A1: reused pid + stale heartbeat + aged lock is reclaimed", () => {
 test("#224 A1b: young lock with a heartbeat file stays blocked", () => {
 	const root = freshRoot();
 	try {
-		seedLock(root, "v1", "host-meta", { token: "boot", pid: process.pid, identity: null, startedAt: Date.now() - 30_000 }, 29_000);
+		seedLock(root, "v1", "host-meta", { token: "boot", pid: process.pid, identity: null, startedAt: Date.now() - 30_000 }, 120_000);
 		const got = tryAcquireOwnedViewLock(root, "v1", "host-meta", { identity: ME });
 		assert.equal(got.acquired, false);
 		assert.equal(got.reason, "blocked");
@@ -563,6 +563,26 @@ test("#224 A5b: readLeaseHeartbeat clamps a future timestamp to 0", () => {
 	const now = Date.now();
 	const fakeFs = { ...defaultLocksFs, readFileSync: () => JSON.stringify({ at: now + 5000 }) };
 	assert.equal(readLeaseHeartbeat("/nonexistent/lock", "t", fakeFs, now), 0);
+});
+
+test("#224 A6b: a non-numeric heartbeat timestamp grants no eligibility", () => {
+	const root = freshRoot();
+	try {
+		["0", null, [], false].forEach((badAt, i) => {
+			const viewId = `bad${i}`;
+			const token = `bad-${i}`;
+			const lockPath = seedLock(root, viewId, "host-meta", {
+				token, pid: process.pid, identity: null,
+				startedAt: Date.now() - 10 * 60_000,
+			}, null);
+			writeFileSync(join(lockPath, `heartbeat.${token}`), JSON.stringify({ at: badAt }));
+			const got = tryAcquireOwnedViewLock(root, viewId, "host-meta", { identity: ME });
+			assert.equal(got.acquired, false, `at=${JSON.stringify(badAt)} must not make a live holder look stale`);
+			assert.equal(got.reason, "busy", `at=${JSON.stringify(badAt)} must fall back to liveness`);
+		});
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });
 
 test("#224 A6: broken heartbeat fails closed for legacy, falls back for declared", () => {
