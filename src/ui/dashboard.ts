@@ -1981,6 +1981,19 @@ function stageFg(state: keyof typeof GROUP_LABELS, text: string): string {
 	return ansiFg(r, g, b, text);
 }
 
+/**
+ * Issue #231: the selected row's full-line background. Pure (the theme is
+ * injected) so the wrap/close contract is unit-testable, and an unselected row
+ * is returned byte-identical.
+ */
+export function applyRowHighlight(
+	theme: Pick<ThemeLike, "bg">,
+	selected: boolean,
+	text: string,
+): string {
+	return selected ? theme.bg("selectedBg", text) : text;
+}
+
 function renderPiIconLine(theme: ThemeLike, line: string): string {
 	return theme.fg("accent", line);
 }
