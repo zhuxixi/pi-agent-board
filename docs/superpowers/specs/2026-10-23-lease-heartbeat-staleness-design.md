@@ -5,6 +5,7 @@ Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-23T22:12:00+08:00 · 依据 R2 复核（G1 + G2 + D1–D5）
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-23T22:31:00+08:00 · 依据 R3 复核（0 真缺口 + D1–D6，收敛轮）
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-23T23:20:00+08:00 · 规划期回改（监督定时器起点移到 listen 之后、A9b、`reason` 语义）
+Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-24T00:05:00+08:00 · 实现期回改（D1 伪代码的无 token 语义与既有 A4 契约对齐）
 
 仓库：zhuxixi/pi-agent-board · issue：#224 · 起草轮次：R0（待交叉复核）
 
@@ -73,31 +74,36 @@ classifyLeaseOwner(owner, now, isProcessDead, {
 const hasIdentity = identity.pid > 0 && typeof identity.startToken === "string";
 const pid         = Number(owner?.identity?.pid ?? owner?.pid ?? 0);
 const declared    = Number(heartbeatMs) > 0;                 // D2 显式声明
-if (!owner || typeof owner.token !== "string" || pid <= 0) return "blocked";
+// 无 token 只剥夺「可回收性」，不影响 busy 判定（既有契约，已被单测钉住）
+const reclaimable = typeof owner?.token === "string";
+if (!owner || typeof owner !== "object") return "blocked";
+if (pid <= 0) return "blocked";                              // 没有 pid 无法判定
 
 if (declared) {
     // 显式声明：对 identity 与 identity-less 两个分支都生效，且**绕过** age 早退
     const hbAge = heartbeatAgeMs ?? (now - owner.startedAt);  // 无文件/破损 → startedAt 回退（D3）
-    if (hbAge >= Math.max(heartbeatStaleMs, 3 * heartbeatMs)) return "reclaim";
+    if (hbAge >= Math.max(heartbeatStaleMs, 3 * heartbeatMs)) return reclaimable ? "reclaim" : "blocked";
 } else if (heartbeatAgeMs != null && (now - owner.startedAt) >= orphanAgeMs) {
     // 存量自愈：只对 identity-less 生效，且要求 age >= orphanAgeMs（D2）
-    if (heartbeatAgeMs >= heartbeatStaleMs) return "reclaim";
+    if (heartbeatAgeMs >= heartbeatStaleMs) return reclaimable ? "reclaim" : "blocked";
 }
 
 if (hasIdentity) {
     if (!isProcessDead(pid)) return "busy";                   // 既有：identity 分支不跳 age
-    return "reclaim";
+    return reclaimable ? "reclaim" : "blocked";
 }
 // identity-less
 if (!declared && (now - owner.startedAt) < orphanAgeMs) return "blocked";   // 既有；仅非声明租约受 age 约束
 if (!isProcessDead(pid)) return "busy";
-return "reclaim";
+return reclaimable ? "reclaim" : "blocked";
 ```
 
 三点必须钉住（否则前向契约形同虚设）：
 1. 显式声明分支**先于** `hasIdentity` 的 `busy` 早退 —— 否则 Linux（有 startToken）上永远不进心跳判定。
 2. 显式声明**绕过** identity-less 的 `age < orphanAgeMs -> blocked` —— 否则崩溃后 60s 自愈退化为 5min+。
 3. 负值 `heartbeatAgeMs` 在纯函数与 I/O 壳两层都按 0（新鲜）处理（防御性双保险；壳层见 D3）。
+4. **无 token 不等于 blocked**：它只剥夺「可回收性」（quarantine 需 token 校验），仍可返回 `busy`。
+   既有单测 `live-holder path keeps busy even without a token` 钉住了这一点。
 
 ### D2 心跳承诺如何成立（eligibility）——两条互斥路径
 
