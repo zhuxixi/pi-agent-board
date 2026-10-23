@@ -374,6 +374,39 @@ test("resolver never downgrades to session while an unknown host may be alive", 
 	}
 });
 
+test("resolver diagnoses the attach path when a stranded stopping record is unverifiable", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		// A stranded `stopping` record: the revoke never finalized, its recovery
+		// grace is long past, and the runner identity cannot be verified (issue #217).
+		aliveHost(root, "v1", "i1", { state: "stopping", stopRequestedAt: 1 });
+		const spawns = [];
+		const svc = resolverService(root, {
+			probeHostFn: scriptProbe(["unknown"]).fn,
+			sleepFn: instantSleep,
+			observeProcess: () => "unknown",
+			probeProcessIdentity: async () => null,
+			launchHost: (_root, config) => {
+				spawns.push({ config });
+				return { pid: process.pid, configPath: config.configPath };
+			},
+		});
+		const result = await svc.resolveAttachTarget("v1", { timeoutMs: 250 });
+		assert.equal(result.kind, "pending");
+		assert.match(result.reason, /recovery_pending/);
+		// Spec A10: the resolver-side producer must leave a trail naming the attach path.
+		const recorded = readDiagnostics(root, "v1").filter((e) => e.code === "host_recovery_pending");
+		const attachEvent = recorded.find((e) => e.details.path === "attach");
+		assert.ok(attachEvent, `expected a host_recovery_pending event on the attach path, got ${JSON.stringify(recorded)}`);
+		assert.equal(attachEvent.details.role, "runner");
+		assert.equal(attachEvent.details.instanceId, "i1");
+		assert.equal(spawns.length, 0, "unverifiable identities are never replaced");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("live JSON runner without a host stays pending and never spawns a PTY child", async () => {
 	const root = freshRoot();
 	try {
