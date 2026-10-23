@@ -67,6 +67,8 @@ export const HOST_START_LOCK_WAIT_MS = 500;
 export const HOST_RECOVERY_GRACE_MS = 5_000;
 /** Poll cadence while waiting out a host recovery window. */
 const HOST_RECOVERY_POLL_MS = 150;
+/** Creation-time tolerance when a host role can only be corroborated by process creation time (issue #217). */
+export const HOST_IDENTITY_CREATION_TOLERANCE_MS = 5_000;
 /** Default wall-clock budget for one attach resolution (issue #70 Task 12). */
 const ATTACH_RESOLVE_TIMEOUT_MS = 120_000;
 
@@ -89,6 +91,11 @@ export function resolveHostRecoveryGraceMs(env = process.env) {
 /** @param {NodeJS.ProcessEnv} [env] @returns {number} */
 export function resolveHostRecoveryPollMs(env = process.env) {
 	return resolveTestMs(env, "AGENT_BOARD_TEST_HOST_RECOVERY_POLL_MS", HOST_RECOVERY_POLL_MS);
+}
+
+/** @param {NodeJS.ProcessEnv} [env] @returns {number} */
+export function resolveIdentityCreationToleranceMs(env = process.env) {
+	return resolveTestMs(env, "AGENT_BOARD_TEST_IDENTITY_CREATION_TOLERANCE_MS", HOST_IDENTITY_CREATION_TOLERANCE_MS);
 }
 
 /** @param {NodeJS.ProcessEnv} [env] @returns {number} */

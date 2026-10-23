@@ -4,12 +4,14 @@ import { resolveTestMs } from "../src/core/test-knobs.mjs";
 import { HOST_PROBE_TIMEOUT_MS, resolveHostProbeTimeoutMs } from "../src/core/host-probe.mjs";
 import { ATTACH_RECONNECT_TIMEOUT_MS, resolveAttachReconnectTimeoutMs } from "../src/core/pty-attach-reconnect.mjs";
 import {
+	HOST_IDENTITY_CREATION_TOLERANCE_MS,
 	HOST_RECOVERY_GRACE_MS,
 	HOST_START_GRACE_MS,
 	resolveAttachResolveTimeoutMs,
 	resolveHostRecoveryGraceMs,
 	resolveHostRecoveryPollMs,
 	resolveHostStartGraceMs,
+	resolveIdentityCreationToleranceMs,
 } from "../src/runtime/service.mjs";
 
 /** Collect everything written to process.stderr while `fn` runs, then restore. */
@@ -61,9 +63,11 @@ test("per-constant readers: defaults match the exported constants", () => {
 	assert.equal(HOST_RECOVERY_GRACE_MS, 5_000);
 	assert.equal(HOST_PROBE_TIMEOUT_MS, 250);
 	assert.equal(ATTACH_RECONNECT_TIMEOUT_MS, 15_000);
+	assert.equal(HOST_IDENTITY_CREATION_TOLERANCE_MS, 5_000);
 	assert.equal(resolveHostStartGraceMs({}), 10_000);
 	assert.equal(resolveHostRecoveryGraceMs({}), 5_000);
 	assert.equal(resolveHostRecoveryPollMs({}), 150);
+	assert.equal(resolveIdentityCreationToleranceMs({}), 5_000);
 	assert.equal(resolveAttachResolveTimeoutMs({}), 120_000);
 	assert.equal(resolveHostProbeTimeoutMs({}), 250);
 	assert.equal(resolveAttachReconnectTimeoutMs({}), 15_000);
@@ -78,6 +82,7 @@ test("per-constant readers: env overrides win", () => {
 	assert.equal(resolveHostStartGraceMs({ AGENT_BOARD_TEST_HOST_START_GRACE_MS: "25" }), 25);
 	assert.equal(resolveHostRecoveryGraceMs({ AGENT_BOARD_TEST_HOST_RECOVERY_GRACE_MS: "30" }), 30);
 	assert.equal(resolveHostRecoveryPollMs({ AGENT_BOARD_TEST_HOST_RECOVERY_POLL_MS: "5" }), 5);
+	assert.equal(resolveIdentityCreationToleranceMs({ AGENT_BOARD_TEST_IDENTITY_CREATION_TOLERANCE_MS: "25" }), 25);
 	assert.equal(resolveAttachResolveTimeoutMs({ AGENT_BOARD_TEST_ATTACH_RESOLVE_TIMEOUT_MS: "1000" }), 1000);
 	assert.equal(resolveHostProbeTimeoutMs({ AGENT_BOARD_TEST_HOST_PROBE_TIMEOUT_MS: "40" }), 40);
 	assert.equal(resolveAttachReconnectTimeoutMs({ AGENT_BOARD_TEST_ATTACH_RECONNECT_TIMEOUT_MS: "80" }), 80);
