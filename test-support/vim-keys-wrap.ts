@@ -128,8 +128,16 @@ dash.mode = "list";
 const listRender = dash.render(120).join("\n");
 dash.mode = "select";
 const selectRender = dash.render(120).join("\n");
+// A5's filter run leaves the list filtered to zero rows; clear it so the
+// session/evidence view captures render a selected row (and its footer).
+dash.filterQuery = "";
+dash.refresh();
+dash.mode = "session";
+const sessionRender = dash.render(120).join("\n");
+dash.mode = "evidence";
+const evidenceRender = dash.render(120).join("\n");
 dash.mode = "list";
-out.copy = { help120, listRender, selectRender, help80Lines: help80.length };
+out.copy = { help120, listRender, selectRender, sessionRender, evidenceRender, help80Lines: help80.length };
 
 dash.dispose();
 console.log(JSON.stringify(out));

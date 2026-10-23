@@ -1562,7 +1562,7 @@ export class DashboardComponent implements Component {
 		const capacity = Math.max(3, (this.tui.terminal?.rows ?? 24) - 5);
 		out.push(...panel.slice(this.evidenceScrollTop, this.evidenceScrollTop + capacity).map((line: string) => clip(line, width)));
 		out.push(t.fg("dim", "─".repeat(width)));
-		out.push(clip(t.fg("dim", "←/< back · ↑↓ scroll · pgup/pgdn page · enter attach · r reply · v transcript · x clear diagnostics"), width));
+		out.push(clip(t.fg("dim", "←/< back · ↑↓/j/k scroll · pgup/pgdn page · enter attach · r reply · v transcript · x clear diagnostics"), width));
 		return out;
 	}
 
@@ -1597,7 +1597,7 @@ export class DashboardComponent implements Component {
 		const capacity = Math.max(3, (this.tui.terminal?.rows ?? 24) - out.length - 3);
 		out.push(...this.windowSession(body, capacity));
 		out.push(t.fg("dim", "─".repeat(width)));
-		out.push(clip(t.fg("dim", "←/< back · ↑↓ scroll · pgup/pgdn page · enter attach · d done · r reply · space peek"), width));
+		out.push(clip(t.fg("dim", "←/< back · ↑↓/j/k scroll · pgup/pgdn page · enter attach · d done · r reply · space peek"), width));
 		return out;
 	}
 
