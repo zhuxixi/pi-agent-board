@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, renameSync as realRenameSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync as realRenameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { acquireOwnedViewLock, classifyLeaseOwner, defaultLocksFs, isPublishConflictCode, releaseWithToken, tryAcquireOwnedViewLock, withFileLockSync, withViewLockSync } from "../src/core/locks.mjs";
+import { acquireOwnedViewLock, classifyLeaseOwner, defaultLocksFs, isPublishConflictCode, readLeaseHeartbeat, releaseWithToken, tryAcquireOwnedViewLock, withFileLockSync, withViewLockSync } from "../src/core/locks.mjs";
 import * as P from "../src/core/paths.mjs";
 
 function freshRoot() {
@@ -482,4 +482,129 @@ test("classifyLeaseOwner: legacy heartbeat requires age >= orphanAgeMs (A1b/A1c 
 test("classifyLeaseOwner: negative heartbeat age counts as fresh (A5)", () => {
 	const owner = { token: "t", pid: 1, identity: null, startedAt: FIXED_NOW - 10 * 60_000, heartbeatMs: 1000 };
 	assert.equal(classifyLeaseOwner(owner, FIXED_NOW, livePid, hb({ heartbeatAgeMs: -5000 })), "busy");
+});
+
+const HOUR = 3_600_000;
+const ME_NULL = { pid: process.pid, startToken: null };   // Windows coordinator identity
+
+function seedLock(root, viewId, name, owner, heartbeatAgeMs) {
+	const lockPath = P.viewLockPath(root, viewId, name);
+	mkdirSync(lockPath, { recursive: true });
+	writeFileSync(join(lockPath, "owner.json"), JSON.stringify(owner));
+	if (heartbeatAgeMs != null) {
+		writeFileSync(join(lockPath, `heartbeat.${owner.token}`), JSON.stringify({ at: Date.now() - heartbeatAgeMs }));
+	}
+	return lockPath;
+}
+
+test("#224 A1: reused pid + stale heartbeat + aged lock is reclaimed", () => {
+	const root = freshRoot();
+	try {
+		seedLock(root, "_coordinator", "state-coordinator", {
+			token: "stranded", pid: process.pid,
+			identity: { pid: process.pid, startToken: null },
+			startedAt: Date.now() - 48 * HOUR,
+		}, 24 * HOUR);
+		const got = tryAcquireOwnedViewLock(root, "_coordinator", "state-coordinator", { identity: ME_NULL });
+		assert.equal(got.acquired, true);
+		assert.equal(got.lease.reclaimed.eligibility, "legacy");
+		assert.ok(got.lease.reclaimed.heartbeatAgeMs >= 24 * HOUR - 1000);
+		got.lease.release();
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("#224 A1b: young lock with a heartbeat file stays blocked", () => {
+	const root = freshRoot();
+	try {
+		seedLock(root, "v1", "host-meta", { token: "boot", pid: process.pid, identity: null, startedAt: Date.now() - 30_000 }, 29_000);
+		const got = tryAcquireOwnedViewLock(root, "v1", "host-meta", { identity: ME });
+		assert.equal(got.acquired, false);
+		assert.equal(got.reason, "blocked");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("#224 A1c: aged lock with a fresh heartbeat stays busy", () => {
+	const root = freshRoot();
+	try {
+		seedLock(root, "v1", "host-meta", { token: "slow", pid: process.pid, identity: null, startedAt: Date.now() - 10 * 60_000 }, 0);
+		const got = tryAcquireOwnedViewLock(root, "v1", "host-meta", { identity: ME });
+		assert.equal(got.acquired, false);
+		assert.equal(got.reason, "busy");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("#224 A2: declared period reaches owner.json and a fresh heartbeat stays busy", () => {
+	const root = freshRoot();
+	try {
+		const got = tryAcquireOwnedViewLock(root, "_coordinator", "state-coordinator", { identity: ME_NULL, heartbeatMs: 1000 });
+		assert.equal(got.acquired, true);
+		const ownerPath = join(P.viewLockPath(root, "_coordinator", "state-coordinator"), "owner.json");
+		assert.equal(JSON.parse(readFileSync(ownerPath, "utf8")).heartbeatMs, 1000);
+		got.lease.release();
+		seedLock(root, "_coordinator", "state-coordinator", {
+			token: "declared", pid: process.pid, identity: { pid: process.pid, startToken: null },
+			startedAt: Date.now() - 30_000, heartbeatMs: 1000,
+		}, 0);
+		const held = tryAcquireOwnedViewLock(root, "_coordinator", "state-coordinator", { identity: ME_NULL });
+		assert.equal(held.acquired, false);
+		assert.equal(held.reason, "busy");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("#224 A5b: readLeaseHeartbeat clamps a future timestamp to 0", () => {
+	const now = Date.now();
+	const fakeFs = { ...defaultLocksFs, readFileSync: () => JSON.stringify({ at: now + 5000 }) };
+	assert.equal(readLeaseHeartbeat("/nonexistent/lock", "t", fakeFs, now), 0);
+});
+
+test("#224 A6: broken heartbeat fails closed for legacy, falls back for declared", () => {
+	const root = freshRoot();
+	try {
+		const legacyPath = seedLock(root, "v1", "host-meta", { token: "b", pid: process.pid, identity: null, startedAt: Date.now() - 10 * 60_000 }, null);
+		writeFileSync(join(legacyPath, "heartbeat.b"), "{not json");
+		const legacy = tryAcquireOwnedViewLock(root, "v1", "host-meta", { identity: ME });
+		assert.equal(legacy.acquired, false);
+		assert.equal(legacy.reason, "busy", "unreadable heartbeat grants no eligibility");
+
+		seedLock(root, "v2", "host-meta", {
+			token: "d", pid: process.pid, identity: { pid: process.pid, startToken: null },
+			startedAt: Date.now() - 10 * 60_000, heartbeatMs: 1000,
+		}, null);
+		writeFileSync(join(P.viewLockPath(root, "v2", "host-meta"), "heartbeat.d"), "{not json");
+		const declared = tryAcquireOwnedViewLock(root, "v2", "host-meta", { identity: ME });
+		assert.equal(declared.acquired, true, "declared leases fall back to startedAt");
+		declared.lease.release();
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("#224 A7: a successor's lock is never deleted by a stale reclaim", () => {
+	const root = freshRoot();
+	try {
+		const lockPath = seedLock(root, "v1", "host-meta", { token: "old", pid: process.pid, identity: null, startedAt: Date.now() - 10 * 60_000 }, 120_000);
+		const successor = { token: "new", pid: process.pid, identity: null, startedAt: Date.now() };
+		const racingFs = {
+			...defaultLocksFs,
+			renameSync: (from, to) => {
+				// A concurrent winner publishes between our read and our quarantine rename.
+				if (String(from) === lockPath) writeFileSync(join(lockPath, "owner.json"), JSON.stringify(successor));
+				return realRenameSync(from, to);
+			},
+		};
+		const got = tryAcquireOwnedViewLock(root, "v1", "host-meta", { identity: ME, fs: racingFs });
+		assert.equal(got.acquired, false);
+		assert.equal(got.reason, "busy");
+		assert.equal(JSON.parse(readFileSync(join(lockPath, "owner.json"), "utf8")).token, "new");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
 });
