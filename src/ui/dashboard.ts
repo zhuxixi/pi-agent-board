@@ -358,9 +358,9 @@ export class DashboardComponent implements Component {
 
 	private handleListKey(data: string): void {
 		if (!matchesKey(data, Key.ctrl("x"))) this.deleteArm = null;
-		if (matchesKey(data, Key.up)) return void this.moveSelection(-1);
-		if (matchesKey(data, Key.down)) return void this.moveSelection(1);
-		if (matchesKey(data, Key.right) || data === ">") return this.attachSelected();
+		if (matchesKey(data, Key.up) || data === "k") return void this.moveSelection(-1);
+		if (matchesKey(data, Key.down) || data === "j") return void this.moveSelection(1);
+		if (matchesKey(data, Key.right) || data === ">" || data === "l") return this.attachSelected();
 		if (data === "v") return this.openSessionView();
 		if (data === "e") return this.openEvidenceView();
 		if (matchesKey(data, Key.enter)) {
@@ -378,10 +378,8 @@ export class DashboardComponent implements Component {
 		if (matchesKey(data, Key.ctrl("t"))) return this.togglePin();
 		if (matchesKey(data, Key.ctrl("s"))) return this.stopSelected();
 		if (data === "d") return this.confirmDone();
-		if (data === "d") return this.confirmDone();
 		if (data === "x") return this.confirmDelete();
 		if (data === "h") return this.toggleHold();
-		if (matchesKey(data, Key.ctrl("x"))) return this.handleDeleteKey();
 		if (matchesKey(data, Key.ctrl("x"))) return this.handleDeleteKey();
 		if (data === "X") return this.confirmDeleteState();
 		if (matchesKey(data, Key.escape) || matchesKey(data, Key.ctrl("c"))) {
@@ -398,8 +396,8 @@ export class DashboardComponent implements Component {
 	}
 
 	private handleSelectKey(data: string): void {
-		if (matchesKey(data, Key.up)) return void this.moveSelection(-1);
-		if (matchesKey(data, Key.down)) return void this.moveSelection(1);
+		if (matchesKey(data, Key.up) || data === "k") return void this.moveSelection(-1);
+		if (matchesKey(data, Key.down) || data === "j") return void this.moveSelection(1);
 		if (matchesKey(data, Key.space)) {
 			this.toggleSelectedCurrent();
 			return;
@@ -426,13 +424,13 @@ export class DashboardComponent implements Component {
 
 	private handlePeekKey(data: string): void {
 		if (matchesKey(data, Key.escape)) return void (this.mode = "list");
-		if (matchesKey(data, Key.right) || data === ">") return this.attachPeek();
+		if (matchesKey(data, Key.right) || data === ">" || data === "l") return this.attachPeek();
 		if (data === "v") return this.openSessionView();
-		if (matchesKey(data, Key.up)) {
+		if (matchesKey(data, Key.up) || data === "k") {
 			this.peekStep(-1);
 			return;
 		}
-		if (matchesKey(data, Key.down)) {
+		if (matchesKey(data, Key.down) || data === "j") {
 			this.peekStep(1);
 			return;
 		}
@@ -506,7 +504,7 @@ export class DashboardComponent implements Component {
 		}
 		if (data === "r") return this.startReply();
 		if (data === "v") return this.openSessionView();
-		if (data === "a" || matchesKey(data, Key.enter) || matchesKey(data, Key.right)) return this.attachSelected();
+		if (data === "a" || matchesKey(data, Key.enter) || matchesKey(data, Key.right) || data === "l") return this.attachSelected();
 		if (data === "x") return this.confirmClearDiagnostics();
 	}
 
