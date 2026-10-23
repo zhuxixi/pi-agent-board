@@ -3,7 +3,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync as realRen
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { acquireOwnedViewLock, classifyLeaseOwner, defaultLocksFs, isPublishConflictCode, readLeaseHeartbeat, releaseWithToken, tryAcquireOwnedViewLock, withFileLockSync, withViewLockSync } from "../src/core/locks.mjs";
+import { acquireOwnedViewLock, classifyLeaseOwner, defaultLocksFs, describeLeaseConflict, heartbeatFailureAction, isPublishConflictCode, LEASE_HEARTBEAT_STALE_MS, MAX_CONSECUTIVE_TOUCH_FAILURES, readLeaseHeartbeat, releaseWithToken, tryAcquireOwnedViewLock, withFileLockSync, withViewLockSync } from "../src/core/locks.mjs";
 import * as P from "../src/core/paths.mjs";
 
 function freshRoot() {
@@ -607,4 +607,34 @@ test("#224 A7: a successor's lock is never deleted by a stale reclaim", () => {
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
+});
+
+test("#224 A8: describeLeaseConflict returns exactly six fields", () => {
+	const root = freshRoot();
+	try {
+		seedLock(root, "_coordinator", "state-coordinator", {
+			token: "t", pid: process.pid, identity: { pid: process.pid, startToken: null },
+			startedAt: Date.now() - 1000,
+		}, 0);
+		const world = describeLeaseConflict(root, "_coordinator", "state-coordinator");
+		assert.deepEqual(
+			Object.keys(world).sort(),
+			["hasIdentity", "heartbeatAgeMs", "heartbeatMs", "lockAgeMs", "ownerPid", "reason"],
+		);
+		assert.equal(world.reason, "blocked", "young identity-less lock is fail-closed");
+		assert.equal(world.ownerPid, process.pid);
+		assert.equal(world.hasIdentity, false);
+		assert.equal(world.heartbeatMs, null);
+		assert.ok(world.lockAgeMs >= 0 && world.lockAgeMs < 60_000);
+		assert.ok(world.heartbeatAgeMs != null && world.heartbeatAgeMs >= 0);
+		assert.equal(describeLeaseConflict(root, "_coordinator", "absent"), null);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("#224 A9/A9b: step-down boundary and its relationship to the stale threshold", () => {
+	assert.equal(heartbeatFailureAction(2, 3), "continue");
+	assert.equal(heartbeatFailureAction(3, 3), "abandon");
+	assert.ok(MAX_CONSECUTIVE_TOUCH_FAILURES * 1000 < LEASE_HEARTBEAT_STALE_MS, "step down before anyone can reclaim us");
 });

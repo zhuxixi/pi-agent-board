@@ -418,6 +418,61 @@ function reclaimOrBlock(lockPath, token, fs, isProcessDead, now) {
 }
 
 /**
+ * Summarize why an existing lock is not acquirable, so the coordinator can
+ * record a diagnostic instead of exiting silently (issue #224 D6).
+ *
+ * Returns exactly the six keys that become the `coordinator_lease_unavailable`
+ * details — no more, no less. `reason` is the raw `classifyLeaseOwner` verdict
+ * at call time, so on the acquisition-failure path it is `"busy"` or
+ * `"blocked"`.
+ * @param {string} root
+ * @param {string} viewId
+ * @param {string} name
+ * @param {{ fs?: Partial<typeof defaultLeaseFs>, clock?: () => number, isProcessDead?: (pid: number) => boolean }} [opts]
+ * @returns {{ reason: "reclaim"|"busy"|"blocked", ownerPid: number, hasIdentity: boolean, lockAgeMs: number, heartbeatAgeMs: number|null, heartbeatMs: number|null } | null}
+ */
+export function describeLeaseConflict(root, viewId, name, opts = {}) {
+	const fs = { ...defaultLeaseFs, ...(opts.fs ?? {}) };
+	const lockPath = P.viewLockPath(root, viewId, name);
+	let owner;
+	try {
+		owner = JSON.parse(fs.readFileSync(path.join(lockPath, "owner.json"), "utf8"));
+	} catch {
+		return null;
+	}
+	if (!owner || typeof owner !== "object") return null;
+	const at = (opts.clock ?? Date.now)();
+	const isProcessDead = opts.isProcessDead ?? ((pid) => !isAlive(pid));
+	const identityPid = Number(owner?.identity?.pid ?? 0);
+	const heartbeatAgeMs = readLeaseHeartbeat(lockPath, owner?.token, fs, at);
+	const declaredHeartbeatMs = Number(owner?.heartbeatMs ?? 0);
+	const heartbeatMs = Number.isFinite(declaredHeartbeatMs) && declaredHeartbeatMs > 0 ? declaredHeartbeatMs : null;
+	return {
+		reason: classifyLeaseOwner(owner, at, isProcessDead, {
+			heartbeatAgeMs,
+			heartbeatMs: heartbeatMs ?? undefined,
+			heartbeatStaleMs: LEASE_HEARTBEAT_STALE_MS,
+		}),
+		ownerPid: Number(owner?.identity?.pid ?? owner?.pid ?? 0),
+		hasIdentity: Number.isFinite(identityPid) && identityPid > 0 && typeof owner?.identity?.startToken === "string",
+		lockAgeMs: at - Number(owner?.startedAt ?? 0),
+		heartbeatAgeMs,
+		heartbeatMs,
+	};
+}
+
+/**
+ * Supervised heartbeat failure policy: a holder that cannot prove liveness for
+ * `maxFailures` consecutive ticks must vacate rather than be preempted later.
+ * @param {number} consecutiveFailures
+ * @param {number} [maxFailures]
+ * @returns {"continue" | "abandon"}
+ */
+export function heartbeatFailureAction(consecutiveFailures, maxFailures = MAX_CONSECUTIVE_TOUCH_FAILURES) {
+	return Number(consecutiveFailures) >= Number(maxFailures) ? "abandon" : "continue";
+}
+
+/**
  * @param {string} lockPath
  * @param {string} token
  * @param {typeof defaultLeaseFs} fs
