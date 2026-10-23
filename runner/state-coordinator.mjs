@@ -50,7 +50,9 @@ import {
 	writeCheckpoint,
 } from "../src/core/coordinator-journal.mjs";
 import { ownsEndpoint } from "../src/core/host-coordination.mjs";
-import { acquireOwnedViewLock, withViewLockSync } from "../src/core/locks.mjs";
+import { appendDiagnostic } from "../src/core/diagnostics.mjs";
+import { acquireOwnedViewLock, describeLeaseConflict, heartbeatFailureAction, withViewLockSync } from "../src/core/locks.mjs";
+import { resolveTestMs } from "../src/core/test-knobs.mjs";
 import * as P from "../src/core/paths.mjs";
 import { readState, readStatus, writeState, writeStatus } from "../src/core/store.mjs";
 import { TRANSIENT_KINDS, decideStateTransition, validateCommand } from "../src/core/state-commands.mjs";
@@ -97,28 +99,59 @@ main().catch((err) => {
 	process.exit(1);
 });
 
+/**
+ * Append a coordinator-scoped diagnostic. `appendDiagnostic` throws when the
+ * disk is failing, so callers fence the write where a crash would be worse
+ * than a lost diagnostic (issue #224 D4). The AGENT_BOARD_TEST_FAIL_DIAGNOSTIC
+ * knob forces that throw so A14b can prove the step-down survives it.
+ * @param {string} code
+ * @param {Record<string, any>} details
+ * @param {"info"|"warn"|"error"} [level]
+ * @param {string} [source]
+ */
+function appendCoordinatorDiagnostic(code, details, level = "info", source = "coordinator") {
+	if (process.env.AGENT_BOARD_TEST_FAIL_DIAGNOSTIC === "1") {
+		throw new Error(`forced coordinator diagnostic failure (${code})`);
+	}
+	appendDiagnostic(root, "_coordinator", { source, level, code, details });
+}
+
 async function main() {
 	const instanceId = randomBytes(8).toString("hex");
 	const startedAt = Date.now();
+	const heartbeatMs = resolveTestMs(process.env, "AGENT_BOARD_TEST_COORDINATOR_HEARTBEAT_MS", HEARTBEAT_MS);
 
 	// 1. Lease first: a second coordinator is an expected, idempotent no-op.
 	// Identity carries a POSIX startToken (pty-runner pattern) so a SIGKILLed
 	// coordinator's lease can be reclaimed by the next instance after pid reuse.
+	// heartbeatMs declares the staleness contract (issue #224): a holder that
+	// stops heartbeating becomes reclaimable on its own staleness.
 	/** @type {import("../src/core/locks.mjs").Lease} */
 	let lease;
 	try {
 		lease = acquireOwnedViewLock(root, "_coordinator", "state-coordinator", {
 			waitMs: 500,
 			identity: { pid: process.pid, startToken: captureStartToken(process.pid) },
+			heartbeatMs,
 		});
 	} catch (err) {
+		// Record the conflict instead of exiting silently (issue #224 D6). The
+		// diagnostic write is best-effort: it must never turn the expected
+		// idempotent exit into a crash.
+		const summary = describeLeaseConflict(root, "_coordinator", "state-coordinator");
+		if (summary) {
+			try { appendCoordinatorDiagnostic("coordinator_lease_unavailable", summary, "error"); } catch { /* best effort */ }
+		}
 		process.stderr.write(`state-coordinator: lease unavailable (${err?.code ?? err?.message ?? "unknown"}); another instance may own it; exiting\n`);
 		process.exit(0);
 	}
-	const startTouchTimer = setInterval(() => {
-		try { lease?.touch(); } catch { /* best effort */ }
-	}, HEARTBEAT_MS);
-	startTouchTimer.unref?.();
+	// Leave a trace when this acquire reclaimed a stale lease (issue #224 D6).
+	if (lease.reclaimed) {
+		try { appendCoordinatorDiagnostic("lease_reclaimed", { ...lease.reclaimed }, "info", "lock"); } catch { /* best effort */ }
+	}
+	// Boot-edge touch (issue #224 D5): reflect acquisition progress before the
+	// supervised interval starts. Never counted toward the failure counter.
+	try { lease.touch(); } catch { /* best effort */ }
 
 	// 2. Boot state: journal summary, processed-command ring, replay, counter init.
 	// Repair a crash-torn tail FIRST: without it the first post-restart append
@@ -161,6 +194,10 @@ async function main() {
 	}
 	let lastCheckpointBytes = 0;
 
+	// Boot-edge touch (issue #224 D5): replay is done; the heartbeat now
+	// reflects live progress before the endpoint binds. Never counted.
+	try { lease.touch(); } catch { /* best effort */ }
+
 	// 3. Control socket (JSONL, pty-runner's line-buffered server shape).
 	const socketPath = P.coordinatorEndpointPathFor(process.platform, root);
 	if (process.platform !== "win32" && existsSync(socketPath)) {
@@ -186,6 +223,16 @@ async function main() {
 		shutdown(1);
 	});
 
+	// Boot-edge touch (issue #224 D5): the endpoint bind is the last boot
+	// boundary; the supervised interval takes over once listen succeeds.
+	// Never counted toward the failure counter.
+	try { lease.touch(); } catch { /* best effort */ }
+
+	// Consecutive supervised heartbeat failures. Only interval touches count;
+	// the boot-edge touches above are deliberately ignored (issue #224 D4/D5).
+	let consecutiveTouchFailures = 0;
+	let heartbeatTimer = null;
+
 	server.listen(socketPath, () => {
 		if (process.platform !== "win32") {
 			try {
@@ -193,6 +240,34 @@ async function main() {
 				boundSocketIdentity = { dev: st.dev, ino: st.ino };
 			} catch { /* without the identity, cleanup degrades to no-op */ }
 		}
+		// Supervision starts only after the endpoint is bound (issue #224 D4):
+		// a live-but-stuck holder must step down before its lease can be
+		// preempted as stale, and stepping down before the socket exists would
+		// make the A14 endpoint cleanup a no-op.
+		heartbeatTimer = setInterval(() => {
+			let ok;
+			try {
+				ok = process.env.AGENT_BOARD_TEST_FORCE_TOUCH_FAILURE === "1" ? false : lease.touch();
+			} catch {
+				ok = false;
+			}
+			if (!ok) {
+				consecutiveTouchFailures += 1;
+				if (heartbeatFailureAction(consecutiveTouchFailures) === "abandon") {
+					// Count → diagnostic → shutdown, in that order. The
+					// diagnostic write throws when the disk is failing (the
+					// exact step-down scenario), so it is fenced and must not
+					// block the exit.
+					try {
+						appendCoordinatorDiagnostic("coordinator_heartbeat_lost", { consecutiveFailures: consecutiveTouchFailures }, "error");
+					} catch { /* a failing diagnostic must not block the step-down */ }
+					shutdown(0);
+				}
+			} else {
+				consecutiveTouchFailures = 0;
+			}
+		}, heartbeatMs);
+		heartbeatTimer.unref?.();
 	});
 
 	let shuttingDown = false;
@@ -202,7 +277,7 @@ async function main() {
 	function shutdown(code) {
 		if (shuttingDown) return;
 		shuttingDown = true;
-		try { clearInterval(startTouchTimer); } catch { /* best effort */ }
+		try { clearInterval(heartbeatTimer); } catch { /* best effort */ }
 		try { server.close(); } catch { /* already closed */ }
 		if (process.platform !== "win32" && boundSocketIdentity) {
 			try {
