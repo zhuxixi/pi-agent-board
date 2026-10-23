@@ -181,7 +181,7 @@ git commit -m "feat(ui): add pure selected-row highlight helper (issue #231)"
 
 **Interfaces:**
 - Consumes: `applyRowHighlight` from Task 1.
-- Produces: `renderRow` output whose selected-row string begins with the theme's bg opener and ends with `\x1b[49m`; harness JSON gains `integration: { selectedStartsAtCol0, selectedWidth, unselectedHasNoOpener, bgCalls, narrowMaxWidth, narrowLeaked, selectedHasArrow, unselectedHasNoArrow, selectMarkerPresent, peekHasNoOpener, unselectedUsesMuted }`.
+- Produces: `renderRow` output whose selected-row string begins with the theme's bg opener and ends with `\x1b[49m`; harness JSON gains `integration: { selectedStartsAtCol0, selectedWidth, unselectedHasNoOpener, selectedHasArrow, unselectedHasNoArrow, selectedCloserLast, selectedCloserCount, firstFrameBgCalls, zeroSelectionBgCalls, selectMarkerPresent, selectUnselectedCircle, selectHasBg, peekHasNoOpener, peekHeaderUsesAccent, narrowMaxWidth, narrowLeaked, unselectedUsesMuted, unselectedNameIsDim }` (`firstFrameBgCalls` is the per-frame `bgCalls` counter of the selected-row render; `zeroSelectionBgCalls` is the same counter with a `selectedId` that matches no visible row).
 
 - [ ] **Step 1: Write the failing integration assertions**
 

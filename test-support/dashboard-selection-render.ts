@@ -78,6 +78,10 @@ try {
 	const unselectedHasNoOpener = !otherLine.includes(BG_OPEN);
 	const selectedHasArrow = selectedLine.includes("›");
 	const unselectedHasNoArrow = !otherLine.includes("›");
+	// A1/A2: the bg span must close exactly once and close last, i.e. the
+	// background reaches the final painted cell instead of stopping mid-row.
+	const selectedCloserLast = selectedLine.endsWith(BG_CLOSE);
+	const selectedCloserCount = selectedLine.split(BG_CLOSE).length - 1;
 	const firstFrameBgCalls = bgCalls;
 
 	// select mode: press `m`, then space to batch-mark the current row.
@@ -85,13 +89,19 @@ try {
 	dash.handleInput(" ");
 	const selectLines = dash.render(160);
 	const selectMarkerPresent = selectLines.some((line) => line.includes("◉"));
+	const selectUnselectedCircle = selectLines.some((line) => line.includes("○"));
 	const selectHasBg = selectLines.find((line) => line.includes("alpha session"))?.includes(BG_OPEN) ?? false;
 	dash.handleInput("\x1b");
 
-	// peek: space in list mode opens the peek header (must stay unhighlighted).
+	// peek: space in list mode opens the peek header (must stay unhighlighted and
+	// keep the accent+bold selected name). Only this render's fg calls count.
+	const fgCallsBeforePeek = fgCalls.length;
 	const peekDash = makeDash();
 	peekDash.handleInput(" ");
 	const peekHasNoOpener = !peekDash.render(160).some((line) => line.includes(BG_OPEN));
+	const peekHeaderUsesAccent = fgCalls
+		.slice(fgCallsBeforePeek)
+		.some(([token, text]) => token === "accent" && text === "alpha session");
 
 	// ultra-narrow: width 23 with indent 4 overflows (4 + max(20, 19) = 24 > 23),
 	// so `clip` really truncates. The intent is width safety plus "the opener is
@@ -101,6 +111,13 @@ try {
 	const narrowMaxWidth = Math.max(...narrowLines.map((line) => visibleWidth(line)));
 	const narrowBgLines = narrowLines.filter((line) => line.includes(BG_OPEN));
 	const narrowLeaked = narrowBgLines.length !== 1 || !narrowBgLines[0].includes("›");
+
+	// A5 zero branch: a selectedId that matches no visible row paints nothing.
+	const zeroDash = makeDash();
+	(zeroDash as unknown as { selectedId: string }).selectedId = "missing";
+	bgCalls = 0;
+	zeroDash.render(160);
+	const zeroSelectionBgCalls = bgCalls;
 
 	// D4: unselected rows keep `muted`, never `dim`, for name/summary.
 	const unselectedUsesMuted = fgCalls.some(([token, text]) => token === "muted" && text.includes("beta session"));
@@ -120,10 +137,15 @@ try {
 				unselectedHasNoOpener,
 				selectedHasArrow,
 				unselectedHasNoArrow,
+				selectedCloserLast,
+				selectedCloserCount,
 				firstFrameBgCalls,
+				zeroSelectionBgCalls,
 				selectMarkerPresent,
+				selectUnselectedCircle,
 				selectHasBg,
 				peekHasNoOpener,
+				peekHeaderUsesAccent,
 				narrowMaxWidth,
 				narrowLeaked,
 				unselectedUsesMuted,

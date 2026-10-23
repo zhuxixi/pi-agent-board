@@ -31,15 +31,24 @@ test("renderRow paints the selected row from column 0 through the padded right e
 	assert.equal(it.unselectedHasNoOpener, true, "unselected rows must have no bg");
 	assert.equal(it.selectedHasArrow, true, "the › cursor marker stays on the selected row");
 	assert.equal(it.unselectedHasNoArrow, true, "no › on unselected rows");
+	assert.equal(it.selectedCloserLast, true, "the bg closer must be the last token so the highlight reaches the right edge");
+	assert.equal(it.selectedCloserCount, 1, "the bg span must close exactly once");
 	assert.equal(it.firstFrameBgCalls, 1, "exactly one row is painted per frame");
+});
+
+test("no row is painted when the selected id matches no visible row (issue #231 A5 zero branch)", () => {
+	const parsed = runHarness();
+	assert.equal(parsed.integration.zeroSelectionBgCalls, 0, "an unselected or absent selection must not call theme.bg");
 });
 
 test("selected-row highlight coexists with select mode, peek, and narrow terminals (issue #231)", () => {
 	const parsed = runHarness();
 	const it = parsed.integration;
 	assert.equal(it.selectMarkerPresent, true, "select mode's ◉ batch marker survives");
+	assert.equal(it.selectUnselectedCircle, true, "select mode's ○ marker survives on the other row");
 	assert.equal(it.selectHasBg, true, "select mode keeps the row highlight");
 	assert.equal(it.peekHasNoOpener, true, "peek header is not highlighted");
+	assert.equal(it.peekHeaderUsesAccent, true, "the peek header keeps the accent+bold selected name");
 	assert.ok(it.narrowMaxWidth <= 23, "no line may exceed the requested width");
 	assert.equal(it.narrowLeaked, false, "narrow clipping must not leak bg into other rows");
 });
