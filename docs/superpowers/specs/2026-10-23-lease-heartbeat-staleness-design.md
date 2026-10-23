@@ -4,6 +4,7 @@ Drafted: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-23T21:58:00+08:00 · 依据 R1 复核（G1 + D1–D5）
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-23T22:12:00+08:00 · 依据 R2 复核（G1 + G2 + D1–D5）
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-23T22:31:00+08:00 · 依据 R3 复核（0 真缺口 + D1–D6，收敛轮）
+Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-23T23:20:00+08:00 · 规划期回改（监督定时器起点移到 listen 之后、A9b、`reason` 语义）
 
 仓库：zhuxixi/pi-agent-board · issue：#224 · 起草轮次：R0（待交叉复核）
 
@@ -140,10 +141,9 @@ return "reclaim";
 即：**不能在门限耗尽前证明自己活着，就主动让位**，而不是被别人抢占。门限与失败上限的关系写死为常量注释：
 `LEASE_HEARTBEAT_STALE_MS (60s) > MAX_CONSECUTIVE_TOUCH_FAILURES (3) × heartbeatMs (1s)`。
 
-**计数范围（与 D5 协调）**：只有 interval 监督的 touch 计入连续失败。D5 提到的 boot 阶段边界 touch
-（取锁后、回放后、listen 前）直接调 `lease.touch()` 并忽略返回值，**不计入**——否则强制失败 seam 会在
-`server.listen` 之前就把进程关掉，A14 的 socket 清理断言退化为空断言。boot 阶段的磁盘故障会由随后的
-第一个 interval tick 在一个周期内捕获。
+**计数范围（与 D5 协调）**：监督心跳定时器在 **`server.listen` 成功后**启动，不在取锁后启动。理由：若在 boot 期间就监督，`3 × 50ms` 的强制失败测试会在 `server.listen` 之前触发让位，socket 从未绑定，A14 的端点清理断言退化为空断言；语义上也应「服务期间才需要心跳」。boot 期间由 D5 的边界 touch 保活。
+只有监督定时器的 touch 计入连续失败；boot 阶段边界 touch（取锁后、回放后、listen 前）直接调 `lease.touch()`
+并忽略返回值，**不计入**。boot 阶段的磁盘故障会由启动后的第一个 tick 在一个周期内捕获。
 
 **适用范围（明确边界）**：D4 只覆盖 coordinator 租约。`pty-runner` 的 `host-start` 租约虽然也写心跳，
 但其磁盘故障兜底是 instance 校验（`shouldYieldRunner` / `owner_lost`，见 R2），本 issue **不**给
@@ -159,7 +159,9 @@ host-start 加自终止（非目标，避免范围扩张）。
 租约持有者在拿到锁到绑定端点之间有一段同步 boot（`repairJournalTail` + `readJournal` 回放，
 `state-coordinator.mjs:127-189`）；回放被 `CHECKPOINT_THRESHOLD_BYTES`（256KB）约束，正常情况下 << 1s，
 但慢盘/杀软扫描不可假设。60s 给出 60× 余量，代价是最坏 60s 才自愈（远优于「永不」）。
-另外在 boot 阶段边界各补一次 `touch()`（取锁后、回放后、listen 前），使心跳反映真实进度。
+另外在 boot 阶段边界各补一次同步 `touch()`（取锁后、回放后、listen 前），使心跳反映真实进度；
+**监督定时器在 `server.listen` 成功后才启动**（见 D4），因此 boot 的心跳间隙 = boot 耗时，由 60s 门限覆盖
+（回放受 `CHECKPOINT_THRESHOLD_BYTES` 约束，正常 << 1s）。
 
 ### D6 可观测性：coordinator 级诊断 + 回收留痕
 
@@ -172,6 +174,7 @@ host-start 加自终止（非目标，避免范围扩张）。
   （`lease.reclaimed: {ownerPid, heartbeatAgeMs, lockAgeMs, eligibility} | null`），由调用方决定是否落盘。
 - 抢锁失败细节由新导出 `describeLeaseConflict(root, viewId, name, opts)` 提供（读 owner.json + 心跳），
   返回**固定六字段**：`{ reason, ownerPid, hasIdentity, lockAgeMs, heartbeatAgeMs, heartbeatMs }`（读不到锁时返回 `null`）。
+  `reason` 的语义固定为**调用时刻 `classifyLeaseOwner` 的原始判定**：`"reclaim" | "busy" | "blocked"`（诊断路径上实际只会看到后两者）。
   该六字段**即** `coordinator_lease_unavailable` 事件 `details` 的全部键（`reason` 取代上文的 `code`），
   A8 断言与实现字段**一一对应**，不得增删。
 
@@ -194,7 +197,7 @@ host-start 加自终止（非目标，避免范围扩张）。
 | A1 | 存量记录（identity.startToken=null、pid 活着、心跳 24h 陈旧、`startedAt` 48h 前即锁龄≥5min、无 `heartbeatMs`）可回收 | 自动化（unit） | `node --test test/locks.test.mjs` 中新增用例：构造 #224 原样 owner.json（含 `startedAt = now - 48h`）+ `heartbeat.<token>`，用真实 fs 调 `tryAcquireOwnedViewLock` | `acquired: true`，锁目录被替换，`lease.reclaimed.heartbeatAgeMs ≥ 24h` |
 | A1b | **D2 否决项的失败分支**：有心跳文件但锁龄 <5min（pid 活着、未声明 `heartbeatMs`）→ 不得回收 | 自动化（unit） | 同上：`startedAt = now - 30s`、`heartbeat.at = now - 29s`、pid 活着 | `acquired: false, reason: "blocked"`（与既有「fresh identity-less lock → blocked」一致：超龄门槛先于 liveness 判定，故不是 busy） |
 | A1c | 存量路径的反向边界：锁龄超龄但心跳**新鲜** → 仍不得回收 | 自动化（unit） | `startedAt = now - 10min`、`heartbeat.at = now`、pid 活着 | `acquired: false, reason: "busy"` |
-| A2 | 心跳新鲜时仍 busy（不得抢占） | 自动化（unit） | 同上，`heartbeat.at = now` | `acquired: false, reason: "busy"` |
+| A2 | 显式声明租约：心跳新鲜时仍 busy，且 `heartbeatMs` 真的被写入 `owner.json` | 自动化（unit） | (a) `tryAcquireOwnedViewLock(..., { heartbeatMs: 1000 })` → 读 `owner.json`；(b) 预置声明租约 `startedAt = now-30s` + `heartbeat.at = now` → 再抢 | (a) `owner.heartbeatMs === 1000`；(b) `acquired: false, reason: "busy"` |
 | A3 | 声明 `heartbeatMs` 的租约：陈旧 → 回收；门限 = `max(heartbeatStaleMs, 3×heartbeatMs)` 两侧都能被穷举 | 自动化（unit） | 纯函数直接调用，**同时注入** `heartbeatMs`、`heartbeatStaleMs`、`now`、`heartbeatAgeMs`；分两组：(a) `heartbeatStaleMs > 3×heartbeatMs`（max 取 staleMs）(b) `heartbeatStaleMs < 3×heartbeatMs`（max 取 3×周期）。各在门限 `-1ms` / `+0ms` 处断言 | 两组均：`门限-1ms → busy`、`门限 → reclaim` |
 | A3b | 显式声明**绕过** identity-less 的 age 早退 | 自动化（unit） | 纯函数：`startedAt = now - 30s`（锁龄<5min）+ `heartbeatMs: 1000` + `heartbeatAgeMs = 120_000`（陈旧）| `reclaim`（若实现保留 age 早退则得 `blocked`，测试必挂） |
 | A4 | 无心跳证据的租约行为完全不变 | 自动化（unit） | 三条：全新 identity-less→blocked；超龄+pid 死→reclaim；超龄+pid 活→busy | 与现状一致 |
@@ -203,6 +206,7 @@ host-start 加自终止（非目标，避免范围扩张）。
 | A7 | 回收路径仍受 quarantine token 校验保护（不得删除后继的锁） | 自动化（unit） | 沿用既有并发模式：回收过程中插入新 owner，断言恢复而非删除 | 后继锁存活，verdict=busy |
 | A8 | `describeLeaseConflict` 摘要正确 | 自动化（unit） | 临时目录构造 owner+heartbeat，调用该函数 | 恰好返回 `{reason, ownerPid, hasIdentity, lockAgeMs, heartbeatAgeMs, heartbeatMs}` 六字段且值正确；无锁时返回 `null` |
 | A9 | 心跳连续失败 → 让位（纯判定） | 自动化（unit） | 新增 `heartbeatFailureAction(n, max)` 纯函数（导出位置见 §9：`locks.mjs`） | `n<max → "continue"`，`n>=max → "abandon"`，边界包含 |
+| A9b | 让位界限严格早于陈旧门限（常量关系） | 自动化（unit） | 断言 `MAX_CONSECUTIVE_TOUCH_FAILURES × 1000 < LEASE_HEARTBEAT_STALE_MS` | 断言成立（防未来有人把两者调反） |
 | A14 | 让位的**接线**：连续心跳失败 → coordinator 释放租约、清理端点、退出并留诊断 | 自动化（integration） | 在 `test/state-coordinator.integration.test.mjs` 内先写 `process.env.AGENT_BOARD_TEST_COORDINATOR_HEARTBEAT_MS="50"` 与 `AGENT_BOARD_TEST_FORCE_TOUCH_FAILURE="1"`（`startCoordinator` 经 `env:{...process.env}` 继承，**无需改签名**），`t.after` 里 `delete` 清理；等待退出 | 进程在 ≤ 1s 内以 0 退出；`views/_coordinator/state-coordinator.lock/` 已删除（租约释放）；`views/_coordinator/diagnostics.jsonl` 有 `coordinator_heartbeat_lost`（details 含 consecutiveFailures）；**端点清理**：POSIX 断言 socket 文件已 unlink（`boundSocketIdentity` 已置位，非空断言），win32 断言命名管道不再可连接 |
 | A14b | **诊断写失败的失败分支**：诊断写抛错不得阻断 shutdown | 自动化（integration） | 同 A14，额外加 `AGENT_BOARD_TEST_FAIL_DIAGNOSTIC="1"`（只包住 coordinator 的 diag 包装，使 `appendDiagnostic` 抛） | 进程仍以 0 退出、租约仍释放、端点仍清理；`diagnostics.jsonl` 无该事件（写失败）——断言的是**不阻断**，不是落盘 |
 | A10 | 端到端：陈旧租约存在时新 coordinator 接管并恢复写入 | 自动化（integration） | `test/state-coordinator.integration.test.mjs` 新增用例：预置陈旧锁 + `createView`，起 coordinator，发 `state_command` | 命令 `applied`、`state-journal.jsonl` 增长、`views/_coordinator/diagnostics.jsonl` 含 `lease_reclaimed` |
@@ -253,7 +257,7 @@ host-start 加自终止（非目标，避免范围扩张）。
 | 文件 | 变更 |
 |---|---|
 | `src/core/locks.mjs` | `LEASE_HEARTBEAT_STALE_MS`、`MAX_CONSECUTIVE_TOUCH_FAILURES`、`readLeaseHeartbeat`、`classifyLeaseOwner` opts 扩展 + **两个分支都先判心跳**（显式声明绕过 age 早退，见 D1 伪代码）、回收判定、`lease.reclaimed`、`describeLeaseConflict`、`heartbeatFailureAction`；**`attemptAcquireLease` 接受 `opts.heartbeatMs` 并写入 `owner.json`**（新 seam，D2 显式声明路径的前提） |
-| `runner/state-coordinator.mjs` | 传 `heartbeatMs: HEARTBEAT_MS`（心跳周期经 `resolveTestMs(env, "AGENT_BOARD_TEST_COORDINATOR_HEARTBEAT_MS", HEARTBEAT_MS)`）；boot 边界 touch（不计数）；interval touch 失败 → `heartbeatFailureAction` → **先** try/catch 写诊断 → **后** `shutdown(0)`；`AGENT_BOARD_TEST_FORCE_TOUCH_FAILURE` / `AGENT_BOARD_TEST_FAIL_DIAGNOSTIC` seam；抢锁失败写 `coordinator_lease_unavailable`（details = `describeLeaseConflict` 六字段）；成功后 `lease.reclaimed` → `lease_reclaimed` |
-| `test/locks.test.mjs` | A1、A1b、A1c、A2–A9（含 A3/A3b/A5 的两组与两层断言） |
+| `runner/state-coordinator.mjs` | 传 `heartbeatMs: HEARTBEAT_MS`（心跳周期经 `resolveTestMs(env, "AGENT_BOARD_TEST_COORDINATOR_HEARTBEAT_MS", HEARTBEAT_MS)`）；boot 边界 touch（不计数）；**监督定时器在 `server.listen` 成功后启动**；interval touch 失败 → `heartbeatFailureAction` → **先** try/catch 写诊断 → **后** `shutdown(0)`；`AGENT_BOARD_TEST_FORCE_TOUCH_FAILURE` / `AGENT_BOARD_TEST_FAIL_DIAGNOSTIC` seam；抢锁失败写 `coordinator_lease_unavailable`（details = `describeLeaseConflict` 六字段）；成功后 `lease.reclaimed` → `lease_reclaimed` |
+| `test/locks.test.mjs` | A1、A1b、A1c、A2–A9（含 A3/A3b/A5 的两组与两层断言、A9b） |
 | `test/state-coordinator.integration.test.mjs` | A10、A11（含新增诊断断言）、A14、A14b |
 | `docs/superpowers/specs/2026-10-23-lease-heartbeat-staleness-design.md` | 本 spec（进 worktree，首个 commit） |
