@@ -436,3 +436,50 @@ test("EPERM publish contention: fresh identity-less owner stays blocked", () => 
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+// ---- heartbeat staleness reclaim (issue #224) -------------------------------
+
+const HB_STALE = 60_000;
+const hb = (o) => ({ heartbeatStaleMs: HB_STALE, ...o });
+
+test("classifyLeaseOwner: declared heartbeat — stale reclaims, fresh stays busy (A3)", () => {
+	const owner = { token: "t", pid: 1, identity: null, startedAt: FIXED_NOW - 2 * 60_000, heartbeatMs: 1000 };
+	assert.equal(classifyLeaseOwner(owner, FIXED_NOW, livePid, hb({ heartbeatAgeMs: HB_STALE })), "reclaim");
+	assert.equal(classifyLeaseOwner(owner, FIXED_NOW, livePid, hb({ heartbeatAgeMs: HB_STALE - 1 })), "busy");
+});
+
+test("classifyLeaseOwner: threshold is max(staleMs, 3 × period) — both sides (A3)", () => {
+	const owner = { token: "t", pid: 1, identity: null, startedAt: FIXED_NOW - 10 * 60_000, heartbeatMs: 20_000 };
+	// (a) staleMs (90s) dominates 3 × period (60s)
+	const a = hb({ heartbeatStaleMs: 90_000, heartbeatAgeMs: 90_000 });
+	assert.equal(classifyLeaseOwner(owner, FIXED_NOW, livePid, a), "reclaim");
+	assert.equal(classifyLeaseOwner(owner, FIXED_NOW, livePid, { ...a, heartbeatAgeMs: 89_999 }), "busy");
+	// (b) 3 × period (60s) dominates a 10s staleMs
+	const b = hb({ heartbeatStaleMs: 10_000, heartbeatAgeMs: 60_000 });
+	assert.equal(classifyLeaseOwner(owner, FIXED_NOW, livePid, b), "reclaim");
+	assert.equal(classifyLeaseOwner(owner, FIXED_NOW, livePid, { ...b, heartbeatAgeMs: 59_999 }), "busy");
+});
+
+test("classifyLeaseOwner: declared bypasses the identity-less age gate (A3b)", () => {
+	const young = { token: "t", pid: 1, identity: null, startedAt: FIXED_NOW - 30_000, heartbeatMs: 1000 };
+	assert.equal(classifyLeaseOwner(young, FIXED_NOW, livePid, hb({ heartbeatAgeMs: 120_000 })), "reclaim");
+});
+
+test("classifyLeaseOwner: declared runs before the hasIdentity busy path (A3, Linux shape)", () => {
+	const linux = { token: "t", pid: 1, identity: { pid: 1, startToken: "s" }, startedAt: FIXED_NOW - 60_000, heartbeatMs: 1000 };
+	assert.equal(classifyLeaseOwner(linux, FIXED_NOW, livePid, hb({ heartbeatAgeMs: 120_000 })), "reclaim");
+	assert.equal(classifyLeaseOwner(linux, FIXED_NOW, livePid, hb({ heartbeatAgeMs: 0 })), "busy");
+});
+
+test("classifyLeaseOwner: legacy heartbeat requires age >= orphanAgeMs (A1b/A1c pure shape)", () => {
+	const young = { token: "t", pid: 1, identity: null, startedAt: FIXED_NOW - 30_000 };
+	assert.equal(classifyLeaseOwner(young, FIXED_NOW, livePid, hb({ heartbeatAgeMs: 120_000 })), "blocked");
+	const aged = { ...young, startedAt: FIXED_NOW - 10 * 60_000 };
+	assert.equal(classifyLeaseOwner(aged, FIXED_NOW, livePid, hb({ heartbeatAgeMs: 120_000 })), "reclaim");
+	assert.equal(classifyLeaseOwner(aged, FIXED_NOW, livePid, hb({ heartbeatAgeMs: 0 })), "busy");
+});
+
+test("classifyLeaseOwner: negative heartbeat age counts as fresh (A5)", () => {
+	const owner = { token: "t", pid: 1, identity: null, startedAt: FIXED_NOW - 10 * 60_000, heartbeatMs: 1000 };
+	assert.equal(classifyLeaseOwner(owner, FIXED_NOW, livePid, hb({ heartbeatAgeMs: -5000 })), "busy");
+});

@@ -149,6 +149,10 @@ const MAX_LEASE_RECLAIM_ATTEMPTS = 3;
  * holder reaches this (issue #112).
  */
 const ORPHAN_LEASE_AGE_MS = 5 * 60_000;
+/** Age past which a heartbeating lease with no live proof of ownership is an orphan. */
+export const LEASE_HEARTBEAT_STALE_MS = 60_000;
+/** Consecutive supervised heartbeat failures after which a holder must vacate. */
+export const MAX_CONSECUTIVE_TOUCH_FAILURES = 3;
 
 /**
  * A token-fenced lease over the view-lock directory. Every operation re-reads
@@ -254,35 +258,58 @@ function attemptAcquireLease(lockPath, opts) {
 
 /**
  * Decide what to do with an inspected lease owner. Pure: the caller supplies
- * `now` and a pid-liveness probe.
+ * `now`, a pid-liveness probe and the observed heartbeat age.
  *
- * A full identity (pid + startToken) reclaims exactly when its pid is dead.
- * An identity-less owner — legacy short-hold locks, or platforms where
- * startToken cannot be captured — is only reclaimable past `orphanAgeMs`
- * with a provably dead top-level pid: fresh identity-less locks stay blocked,
- * preserving the short-critical-section contract (issue #112).
+ * Heartbeat eligibility comes first, because a reused pid looks alive while the
+ * recorded owner is long gone (issue #224). Two mutually exclusive paths:
+ * - declared: the owner wrote `heartbeatMs` into owner.json. Threshold is
+ *   `max(heartbeatStaleMs, 3 × heartbeatMs)`; a missing heartbeat falls back to
+ *   the lock age. This path applies to identity and identity-less owners and
+ *   bypasses the identity-less age gate, or a crash would take 5 minutes to heal.
+ * - legacy: a `heartbeat.<token>` file exists (hence `heartbeatAgeMs != null`)
+ *   and the lock is past `orphanAgeMs`. The age gate keeps millisecond-scale
+ *   short-hold leases (`host-meta`, `host-start`) out of this path.
+ *
+ * Without heartbeat evidence the pre-#224 liveness rules apply unchanged: a
+ * full identity (pid + startToken) reclaims exactly when its pid is dead; an
+ * identity-less owner is only reclaimable past `orphanAgeMs` with a provably
+ * dead pid, so fresh identity-less locks stay blocked (issue #112).
  * @param {any} owner parsed owner.json
  * @param {number} now
  * @param {(pid: number) => boolean} isProcessDead
- * @param {{ orphanAgeMs?: number }} [opts]
+ * @param {{ orphanAgeMs?: number, heartbeatAgeMs?: number|null, heartbeatMs?: number, heartbeatStaleMs?: number }} [opts]
  * @returns {"reclaim" | "busy" | "blocked"}
  */
 export function classifyLeaseOwner(owner, now, isProcessDead, opts = {}) {
 	if (!owner || typeof owner !== "object") return "blocked";
-	const ownPid = Number(owner?.identity?.pid ?? 0);
-	const hasIdentity = Number.isFinite(ownPid) && ownPid > 0 && typeof owner?.identity?.startToken === "string";
-	if (hasIdentity) {
-		if (!isProcessDead(ownPid)) return "busy";
-		// Quarantine-mode reclaim verifies by token that it renamed the lock it
-		// inspected — without one nothing may be deleted.
-		return typeof owner.token === "string" ? "reclaim" : "blocked";
-	}
-	const pid = Number(owner?.pid ?? 0);
+	const identityPid = Number(owner?.identity?.pid ?? 0);
+	const hasIdentity = Number.isFinite(identityPid) && identityPid > 0 && typeof owner?.identity?.startToken === "string";
+	const pid = Number(owner?.identity?.pid ?? owner?.pid ?? 0);
 	if (!Number.isFinite(pid) || pid <= 0) return "blocked";
+	// Quarantine-mode reclaim verifies by token that it renamed the lock it
+	// inspected — without one nothing may be deleted.
+	const reclaimable = typeof owner.token === "string";
 	const orphanAgeMs = Number(opts.orphanAgeMs ?? ORPHAN_LEASE_AGE_MS);
-	if (!(Number(now) - Number(owner?.startedAt ?? 0) >= orphanAgeMs)) return "blocked";
+	// The declared period may arrive via opts (I/O shell) or already be on the
+	// parsed owner record (pure callers); opts wins.
+	const heartbeatMs = Number(opts.heartbeatMs ?? owner?.heartbeatMs ?? 0);
+	const declared = Number.isFinite(heartbeatMs) && heartbeatMs > 0;
+	const heartbeatStaleMs = Number(opts.heartbeatStaleMs ?? LEASE_HEARTBEAT_STALE_MS);
+	const lockAgeMs = Number(now) - Number(owner?.startedAt ?? 0);
+	if (declared) {
+		const heartbeatAgeMs = Math.max(0, Number(opts.heartbeatAgeMs ?? lockAgeMs));
+		if (heartbeatAgeMs >= Math.max(heartbeatStaleMs, 3 * heartbeatMs)) return reclaimable ? "reclaim" : "blocked";
+	} else if (opts.heartbeatAgeMs != null && lockAgeMs >= orphanAgeMs) {
+		const heartbeatAgeMs = Math.max(0, Number(opts.heartbeatAgeMs));
+		if (heartbeatAgeMs >= heartbeatStaleMs) return reclaimable ? "reclaim" : "blocked";
+	}
+	if (hasIdentity) {
+		if (!isProcessDead(pid)) return "busy";
+		return reclaimable ? "reclaim" : "blocked";
+	}
+	if (!declared && lockAgeMs < orphanAgeMs) return "blocked";
 	if (!isProcessDead(pid)) return "busy";
-	return typeof owner.token === "string" ? "reclaim" : "blocked";
+	return reclaimable ? "reclaim" : "blocked";
 }
 
 /**
