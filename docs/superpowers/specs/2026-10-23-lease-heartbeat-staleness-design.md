@@ -6,6 +6,7 @@ Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-23T22:31:00+08:00 · 依据 R3 复核（0 真缺口 + D1–D6，收敛轮）
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-23T23:20:00+08:00 · 规划期回改（监督定时器起点移到 listen 之后、A9b、`reason` 语义）
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-24T00:05:00+08:00 · 实现期回改（D1 伪代码的无 token 语义与既有 A4 契约对齐）
+Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-24T01:00:00+08:00 · 整支复核后文档精确性修正（A6 表述、D4 常量关系改为由 A9b 单测钉住）
 
 仓库：zhuxixi/pi-agent-board · issue：#224 · 起草轮次：R0（待交叉复核）
 
@@ -144,7 +145,8 @@ return reclaimable ? "reclaim" : "blocked";
 `appendDiagnostic` 内部的 `appendFileSync` 会抛（仓库 host-meta spec 已记录此风险），而 D4 的目标场景
 恰恰是磁盘故障，因此诊断必须 try/catch 包住，**写失败不得阻断 shutdown**。
 
-即：**不能在门限耗尽前证明自己活着，就主动让位**，而不是被别人抢占。门限与失败上限的关系写死为常量注释：
+即：**不能在门限耗尽前证明自己活着，就主动让位**，而不是被别人抢占。门限与失败上限的关系由 **A9b 单测**钉住
+（`MAX_CONSECUTIVE_TOUCH_FAILURES × heartbeatMs < LEASE_HEARTBEAT_STALE_MS`，比注释更难被绕过）：
 `LEASE_HEARTBEAT_STALE_MS (60s) > MAX_CONSECUTIVE_TOUCH_FAILURES (3) × heartbeatMs (1s)`。
 
 **计数范围（与 D5 协调）**：监督心跳定时器在 **`server.listen` 成功后**启动，不在取锁后启动。理由：若在 boot 期间就监督，`3 × 50ms` 的强制失败测试会在 `server.listen` 之前触发让位，socket 从未绑定，A14 的端点清理断言退化为空断言；语义上也应「服务期间才需要心跳」。boot 期间由 D5 的边界 touch 保活。
@@ -208,7 +210,7 @@ host-start 加自终止（非目标，避免范围扩张）。
 | A3b | 显式声明**绕过** identity-less 的 age 早退 | 自动化（unit） | 纯函数：`startedAt = now - 30s`（锁龄<5min）+ `heartbeatMs: 1000` + `heartbeatAgeMs = 120_000`（陈旧）| `reclaim`（若实现保留 age 早退则得 `blocked`，测试必挂） |
 | A4 | 无心跳证据的租约行为完全不变 | 自动化（unit） | 三条：全新 identity-less→blocked；超龄+pid 死→reclaim；超龄+pid 活→busy | 与现状一致 |
 | A5 | 负值 `heartbeatAgeMs`（未来时间戳/时钟回拨）按新鲜处理——纯函数与 I/O 壳两层都钉住 | 自动化（unit） | (a) 纯函数：`heartbeatAgeMs = -5000` + 已声明 → `busy`（不得 reclaim）；(b) `readLeaseHeartbeat` 注入假 fs 返回 `at = now + 5000` → 返回 `0` | 两层均按新鲜处理，无 reclaim |
-| A6 | 心跳文件破损/不可读的失败方向 | 自动化（unit） | 未声明→`heartbeatAgeMs=null`→blocked；已声明→按 startedAt 回退→超门限 reclaim | 与 D3 表一致 |
+| A6 | 心跳文件破损/不可读的失败方向 | 自动化（unit） | 未声明→无资格（`heartbeatAgeMs=null`）：超龄+pid 活→`busy`，锁龄<5min→`blocked`；已声明→按 startedAt 回退→超门限 reclaim | 与 D3 表一致 |
 | A7 | 回收路径仍受 quarantine token 校验保护（不得删除后继的锁） | 自动化（unit） | 沿用既有并发模式：回收过程中插入新 owner，断言恢复而非删除 | 后继锁存活，verdict=busy |
 | A8 | `describeLeaseConflict` 摘要正确 | 自动化（unit） | 临时目录构造 owner+heartbeat，调用该函数 | 恰好返回 `{reason, ownerPid, hasIdentity, lockAgeMs, heartbeatAgeMs, heartbeatMs}` 六字段且值正确；无锁时返回 `null` |
 | A9 | 心跳连续失败 → 让位（纯判定） | 自动化（unit） | 新增 `heartbeatFailureAction(n, max)` 纯函数（导出位置见 §9：`locks.mjs`） | `n<max → "continue"`，`n>=max → "abandon"`，边界包含 |
