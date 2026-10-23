@@ -8,6 +8,7 @@ import { test, beforeEach } from "node:test";
 import { createService, shouldProbePtySupport } from "../src/runtime/service.mjs";
 import { isManualVerdict } from "../src/core/auto-state.mjs";
 import { foregroundPreviewCache } from "../src/core/foreground-preview-cache.mjs";
+import { foregroundProjectionCache } from "../src/core/foreground-projection-cache.mjs";
 import { readCodeRefs } from "../src/core/code-refs-store.mjs";
 import { diagnoseNodePtyFailure } from "../src/core/pty-support.mjs";
 import { readJournal } from "../src/core/coordinator-journal.mjs";
@@ -86,9 +87,10 @@ async function startTrackedCoordinator(root) {
 	};
 }
 
-/** Reset the module-level preview cache between tests (issue #113). */
+/** Reset the module-level foreground caches between tests (issues #113, #225). */
 beforeEach(() => {
 	foregroundPreviewCache.clear();
+	foregroundProjectionCache.clear();
 });
 
 /**
@@ -963,6 +965,63 @@ test("syncHostedEvent persists interactive questions and resets them on new inpu
 	}
 });
 
+test("a stale needs_input snapshot cannot resurrect a cleared question (issue #225)", async () => {
+	const root = freshRoot();
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");
+	const realNow = Date.now;
+	// Pin the clock so the pre-fix same-millisecond tie is deterministic: without
+	// monotonic stamps the end write and the start write share one updatedAt.
+	Date.now = () => 1_700_000_000_000;
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const svc = service(root);
+		assert.equal(await svc.syncHostedEvent("v1", {
+			type: "tool_execution_start",
+			toolCallId: "q1",
+			toolName: "ask_questions",
+			args: { questions: [{ question: "Choose a mode?" }] },
+		}), true);
+		const stale = readState(root, "v1");
+		assert.equal(stale.semanticState, "needs_input");
+
+		assert.equal(await svc.syncHostedEvent("v1", { type: "tool_execution_end", toolCallId: "q1", toolName: "ask_questions", isError: false }), true);
+		// Simulate the older projection materializing after the newer one.
+		writeState(root, stale);
+
+		assert.equal(await svc.syncHostedEvent("v1", { type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: { command: "ls" } }), true);
+		const next = readState(root, "v1");
+		assert.equal(next.semanticState, "working");
+		assert.equal(next.needsInput, false);
+		assert.deepEqual(next.pendingQuestions, []);
+	} finally {
+		Date.now = realNow;
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a manual verdict survives a foreground tool event (issue #225)", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const done = readState(root, "v1");
+		done.semanticState = "completed";
+		done.processState = "exited";
+		done.autoState = null;
+		done.summary = "Done";
+		done.updatedAt = Date.now() - 1000;
+		writeState(root, done);
+
+		const svc = service(root, { sendStateCommand: async () => ({ status: "rejected", reason: "manual_fence" }) });
+		await svc.syncHostedEvent("v1", { type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: { command: "ls" } });
+		const next = readState(root, "v1");
+		assert.equal(next.semanticState, "completed");
+		assert.equal(next.autoState, null);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("syncRowEvent routes interactive input as dashboard-user; rpc/extension stay service (issue #145)", async () => {
 	const root = freshRoot();
 	try {
@@ -1181,12 +1240,17 @@ test("issue 113: archiving a row evicts its preview cache entry", async () => {
 		createView(root, { id: "v2", name: "b", cwd: "/r" });
 		foregroundPreviewCache.remember("v1", { latestAssistantPreview: "one", lastAgentActivityAt: 1 });
 		foregroundPreviewCache.remember("v2", { latestAssistantPreview: "two", lastAgentActivityAt: 2 });
+		foregroundProjectionCache.remember("v1", { summary: "one" }, 1);
+		foregroundProjectionCache.remember("v2", { summary: "two" }, 2);
 
 		const res = await service(root).archive("v1");
 		assert.equal(res.ok, true);
 		assert.equal(foregroundPreviewCache.size(), 1, "only the archived view's entry is evicted");
 		assert.equal(foregroundPreviewCache.backfill("v1", { latestAssistantPreview: "", lastAgentActivityAt: null }), false);
 		assert.equal(foregroundPreviewCache.backfill("v2", { latestAssistantPreview: "", lastAgentActivityAt: null }), true);
+		assert.equal(foregroundProjectionCache.size(), 1, "projection cache evicts the archived view too");
+		assert.equal(foregroundProjectionCache.adopt("v1", { updatedAt: 0 }), false);
+		assert.equal(foregroundProjectionCache.adopt("v2", { updatedAt: 0 }), true);
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -1199,6 +1263,8 @@ test("issue 113: archiveByState evicts preview cache entries for archived rows",
 		createView(root, { id: "v2", name: "b", cwd: "/r" });
 		foregroundPreviewCache.remember("v1", { latestAssistantPreview: "one", lastAgentActivityAt: 1 });
 		foregroundPreviewCache.remember("v2", { latestAssistantPreview: "two", lastAgentActivityAt: 2 });
+		foregroundProjectionCache.remember("v1", { summary: "one" }, 1);
+		foregroundProjectionCache.remember("v2", { summary: "two" }, 2);
 		const s = readState(root, "v1");
 		s.semanticState = "completed";
 		s.processState = "exited";
@@ -1207,6 +1273,7 @@ test("issue 113: archiveByState evicts preview cache entries for archived rows",
 		const res = service(root).archiveByState("completed");
 		assert.equal(res.archived, 1);
 		assert.equal(foregroundPreviewCache.size(), 1);
+		assert.equal(foregroundProjectionCache.size(), 1, "projection cache evicts the archived view too");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

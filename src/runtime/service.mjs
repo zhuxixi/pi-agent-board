@@ -17,6 +17,7 @@ import { emptyEvidenceSnapshot, finalizeEvidence, readEvidence, reduceEvidence, 
 import { updateCodeRefsFromEvidence } from "../core/code-refs-store.mjs";
 import { claimNextFollowUp, completeFollowUp, enqueueFollowUp, failFollowUp, readFollowUpQueue, releaseFollowUp, summarizeFollowUpQueue, clearQueuedFollowUps, removeLastFollowUp } from "../core/follow-up-queue.mjs";
 import { foregroundPreviewCache } from "../core/foreground-preview-cache.mjs";
+import { foregroundProjectionCache } from "../core/foreground-projection-cache.mjs";
 import { approvePlan as approvePlanState, markExecutingApprovedPlan, readSteering, recordPlanReady, requestPlan as requestPlanState, requestPlanChanges as requestPlanChangesState, summarizeSteering } from "../core/steering.mjs";
 import { buildApprovePlanPrompt, buildPlanChangesPrompt, buildPlanRequestPrompt } from "../core/steering-prompts.mjs";
 import { isGenericStatusText } from "../core/derive.mjs";
@@ -773,6 +774,7 @@ export function createService(opts) {
 			if (result.reason === "coordinator_disabled") archiveStateDirect(row);
 		}
 		foregroundPreviewCache.forget(viewId);
+		foregroundProjectionCache.forget(viewId);
 		row.meta.archived = true;
 		writeMeta(root, row.meta);
 		return { ok: true };
@@ -829,6 +831,8 @@ export function createService(opts) {
 			processState: s.processState,
 			summary: s.summary,
 			lastActivityAt: s.lastActivityAt,
+			// Issue #225: freshness signal for the projection cache. Absent on legacy rows.
+			updatedAt: typeof s.updatedAt === "number" ? s.updatedAt : 0,
 			currentTool: s.latestTool ? { name: s.latestTool.name, path: s.latestTool.path, summary: s.summary } : null,
 			latestAssistantPreview: s.latestAssistantPreview,
 			question: s.question,
@@ -852,7 +856,11 @@ export function createService(opts) {
 	 * @returns {Promise<void>}
 	 */
 	async function writeForegroundState(row, status, opts = {}) {
-		const projected = projectViewState(status, Date.now(), readState(root, row.meta.id) ?? row.state ?? null);
+		// Issue #225: a strictly increasing stamp lets the next disk rebuild tell a stale
+		// snapshot from this write, even when both land in the same millisecond.
+		const stamp = foregroundProjectionCache.nextStamp(row.meta.id);
+		const projected = projectViewState(status, stamp, readState(root, row.meta.id) ?? row.state ?? null);
+		foregroundProjectionCache.remember(row.meta.id, status, stamp);
 		// Foreground turns are driven by the interactive Pi process, not a detached
 		// runner, so keep currentRunId null. This prevents reconcile()/stop() from
 		// treating a foreground turn as a managed background runner pid. (The
@@ -1538,6 +1546,8 @@ export function createService(opts) {
 		// can lag the freshest known preview/activity. Restore read-your-writes
 		// before any event branch touches the status.
 		foregroundPreviewCache.backfill(row.meta.id, status);
+		// Issue #225: correct a stale disk rebuild before the new event is reduced.
+		foregroundProjectionCache.adopt(row.meta.id, status);
 		let evidence = readEvidence(root, row.meta.id);
 		if (!evidence.viewId) evidence = emptyEvidenceSnapshot({ viewId: row.meta.id, source: "hosted" });
 		try {
@@ -2129,6 +2139,7 @@ export function createService(opts) {
 				if (row.host?.instanceId) stopHostRow(row, "archive");
 				else if (row.hostAlive) sendHostMessage(row, { type: "terminate" });
 				foregroundPreviewCache.forget(row.meta.id);
+				foregroundProjectionCache.forget(row.meta.id);
 				row.meta.archived = true;
 				writeMeta(root, row.meta);
 				archived += 1;
