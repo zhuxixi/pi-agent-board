@@ -4,7 +4,7 @@
  * safety rule. Pure node + core modules; the Pi-coupled bits (attach, dialogs) live in
  * the command handler. The pi invocation + runner path are injected (resolved in index.ts).
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { createConnection } from "node:net";
@@ -25,7 +25,7 @@ import { firstSentence, truncate } from "../core/heuristics.mjs";
 import { newRunId, newViewId, slugifyTask } from "../core/ids.mjs";
 import { launchAutoState as launchAutoStateProcess, launchHost as launchHostProcess, launchRun, launchTitle as launchTitleProcess } from "../core/launch.mjs";
 import { gitRepoRoot } from "../core/repo.mjs";
-import { isAlive, killProcess } from "../core/pid.mjs";
+import { captureStartToken, isAlive, killProcess } from "../core/pid.mjs";
 import { acquireOwnedViewLock, tryAcquireOwnedViewLock } from "../core/locks.mjs";
 import { canFinalizeLegacyHost, canReplaceHost, classifyUnverifiableProcess } from "../core/host-coordination.mjs";
 import { readProcessIdentityProbe } from "../core/process-identity-probe.mjs";
@@ -2539,26 +2539,9 @@ function compactSummary(text) {
 	return truncate(first.length >= 12 ? first : cleaned, 80);
 }
 
-/** POSIX process start token — /proc/<pid>/stat field 22 (starttime). Mirrors the
- *  runner's captureStartToken (issue #70) so both sides publish comparable
- *  identities; null on failure or non-Linux platforms. Task 11 may promote this
- *  to a shared module when identity-aware observation lands. */
-function readProcStartToken(pid) {
-	if (process.platform !== "linux" || !pid) return null;
-	try {
-		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-		// comm (field 2) may contain spaces and parens — fields resume AFTER the
-		// last ')'. fields[0] is state (field 3) → starttime (field 22) is [19].
-		const afterComm = stat.slice(stat.lastIndexOf(")") + 1).trimStart();
-		return afterComm.split(/\s+/)[19] ?? null;
-	} catch {
-		return null;
-	}
-}
-
 /** Launch-time identity this service process stamps on leases and claims. */
 function serviceIdentity() {
-	return { pid: process.pid, startToken: readProcStartToken(process.pid) };
+	return { pid: process.pid, startToken: captureStartToken(process.pid) };
 }
 
 /**
@@ -2624,7 +2607,7 @@ function conservativeObservation(pid) {
 function defaultObserveProcess(identity) {
 	if (!identity || identity.pid == null) return "unknown";
 	if (!isAlive(identity.pid)) return "dead";
-	const token = readProcStartToken(identity.pid);
+	const token = captureStartToken(identity.pid);
 	if (identity.startToken == null || token == null) return "unknown";
 	return token === identity.startToken ? "owned" : "foreign";
 }

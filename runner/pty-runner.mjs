@@ -21,6 +21,7 @@ import { ownsEndpoint, shouldYieldRunner } from "../src/core/host-coordination.m
 import { lastVisibleLogLine } from "../src/core/heuristics.mjs";
 import { acquireOwnedViewLock } from "../src/core/locks.mjs";
 import * as P from "../src/core/paths.mjs";
+import { captureStartToken } from "../src/core/pid.mjs";
 import { appendBoundedScreenLog, reconcileScreenLog } from "../src/core/screen-log.mjs";
 import { createTerminalModel, feedOutput, resizeChildAndModel } from "../src/core/terminal-model.mjs";
 import { createTerminalSubscription } from "../src/core/terminal-attach-protocol.mjs";
@@ -1605,26 +1606,6 @@ function createControlRuntime({ viewId, root, instanceId, send, diag, actions })
 	// synchronous — there is no held-resize completion path. Task 2 review P2-C.)
 	return { handle, closeSocket, flushTerminateObservations, journalIds };
 }
-
-/** POSIX process start token — /proc/<pid>/stat field 22 (starttime), stable
- *  across exec(2). Recorded in published identities so service-side recovery
- *  (issue #70 Task 11) can tell an owned-live pid from a reused one; null on
- *  failure or non-Linux platforms. */
-function captureStartToken(pid) {
-	if (process.platform !== "linux" || !pid) return null;
-	try {
-		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-		// comm (field 2) may contain spaces and parens — fields resume AFTER the
-		// last ')'. fields[0] is state (field 3) → starttime (field 22) is [19].
-		const afterComm = stat.slice(stat.lastIndexOf(")") + 1).trimStart();
-		const fields = afterComm.split(/\s+/);
-		const startTime = fields[19];
-		return startTime ?? null;
-	} catch {
-		return null;
-	}
-}
-
 
 /**
  * Finalize the view row as failed when the PTY host itself fails (child spawn
