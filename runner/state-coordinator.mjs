@@ -36,7 +36,7 @@
  * - AGENT_BOARD_COORDINATOR=off makes the process exit 0 immediately (tests and
  *   the client's degradation path).
  */
-import { existsSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:net";
 import { readJson } from "../src/core/atomic.mjs";
@@ -52,6 +52,7 @@ import {
 import { ownsEndpoint } from "../src/core/host-coordination.mjs";
 import { appendDiagnostic } from "../src/core/diagnostics.mjs";
 import { acquireOwnedViewLock, describeLeaseConflict, heartbeatFailureAction, withViewLockSync } from "../src/core/locks.mjs";
+import { captureStartToken } from "../src/core/pid.mjs";
 import { resolveTestMs } from "../src/core/test-knobs.mjs";
 import * as P from "../src/core/paths.mjs";
 import { readState, readStatus, writeState, writeStatus } from "../src/core/store.mjs";
@@ -483,22 +484,5 @@ async function main() {
 		if (journalBytes - lastCheckpointBytes < CHECKPOINT_THRESHOLD_BYTES) return;
 		if (!writeCheckpoint(root, { materializedRevision: revisionCounter, journalBytes })) return;
 		lastCheckpointBytes = gcJournal(root);
-	}
-}
-
-/** POSIX process start token — /proc/<pid>/stat field 22 (starttime), stable
- *  across exec(2). Same recipe as pty-runner: lets locks.mjs reclaim this
- *  coordinator's lease after a SIGKILL even if the pid was reused. null on
- *  failure or non-Linux platforms (reclaim degrades to "blocked" there — same
- *  platform parity as PTY hosts). */
-function captureStartToken(pid) {
-	if (process.platform !== "linux" || !pid) return null;
-	try {
-		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-		const afterComm = stat.slice(stat.lastIndexOf(")") + 1).trimStart();
-		const fields = afterComm.split(/\s+/);
-		return fields[19] ?? null;
-	} catch {
-		return null;
 	}
 }

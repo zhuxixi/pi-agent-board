@@ -1,22 +1,77 @@
 /**
- * Cross-platform process identity probe (issue #217).
+ * Cross-platform process identity probe (issue #217) and start-token reader
+ * (issue #238).
  *
- * Produces the two corroborating signals — process creation time and command
- * line — that `classifyUnverifiableProcess` judges when a recorded start token
- * is missing (Windows, or Linux without `/proc` access). Pure parsers are
- * exported for exhaustive unit tests; `readProcessIdentityProbe` is the only
- * I/O layer (one async `execFile` per pid, never throwing).
+ * The probe produces the two corroborating signals — process creation time and
+ * command line — that `classifyUnverifiableProcess` judges when a recorded
+ * start token is missing. `readProcessStartToken` produces the comparable token
+ * itself: linux reads `/proc` and win32 converts the probe's creation time into
+ * a `ct:<ms>` token. Pure parsers are exported for exhaustive unit tests;
+ * `readProcessIdentityProbe` is the only I/O layer (one async `execFile` per
+ * pid, never throwing).
  *
- * Linux is deliberately unsupported: the existing `/proc` start token already
+ * `readProcessStartToken` has no darwin path on purpose: `ps` reports elapsed
+ * time at second resolution, so two reads of one process drift by up to ~1 s
+ * and a token comparison would misclassify a live process as `foreign`.
+ * Returning `null` keeps callers on the "unverifiable" path instead of
+ * guessing. The probe itself stays off linux: the `/proc` token already
  * identifies processes there, so probing would only add latency.
  */
 import { execFile } from "node:child_process";
+import { captureStartToken } from "./pid.mjs";
 
 /** Hard cap on one probe: a hung PowerShell/ps must not stall recovery. */
 export const PROBE_TIMEOUT_MS = 3_000;
 
 /** Cap on captured stdout — a command line is small; anything larger is junk. */
 const PROBE_MAX_BUFFER = 64 * 1024;
+
+/**
+ * Format an absolute creation time as the comparable `ct:` identity token
+ * (issue #238): two reads of the same process yield the same token regardless
+ * of when they happen. Only positive safe integers format — anything else
+ * (missing creation time, a fractional or out-of-range value, a coerced
+ * string) would produce a token that can never match a recorded one.
+ * @param {number} creationTimeMs
+ * @returns {string|null}
+ */
+export function creationTimeToken(creationTimeMs) {
+	if (!Number.isSafeInteger(creationTimeMs) || creationTimeMs <= 0) return null;
+	return `ct:${creationTimeMs}`;
+}
+
+/**
+ * Read the comparable start token for a process (issue #238): the token is
+ * recorded next to a lease and compared later to tell "same process" from
+ * "reused pid".
+ *
+ * - linux: `captureStartToken(pid)` — `/proc/<pid>/stat` starttime.
+ * - win32: probe → `creationTimeToken(creationTimeMs)` — CIM creation time is
+ *   millisecond-resolution, so two reads of one process are strictly equal.
+ * - anything else, including darwin: `null`, and the probe is never called.
+ *
+ * A pid that is not a positive safe integer yields `null` before any I/O; a
+ * probe rejection or unusable result also yields `null` (unverifiable, never
+ * "foreign").
+ *
+ * @param {number} pid
+ * @param {{ platform?: string, probe?: typeof readProcessIdentityProbe }} [opts]
+ * @returns {Promise<string|null>}
+ */
+export async function readProcessStartToken(pid, {
+	platform = process.platform,
+	probe = readProcessIdentityProbe,
+} = {}) {
+	if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+	if (platform === "linux") return captureStartToken(pid);
+	if (platform !== "win32") return null;
+	try {
+		const observed = await probe(pid);
+		return observed ? creationTimeToken(observed.creationTimeMs) : null;
+	} catch {
+		return null;
+	}
+}
 
 /**
  * Parse an epoch-milliseconds value from CIM JSON output. Accepts decimal

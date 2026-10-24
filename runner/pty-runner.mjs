@@ -21,6 +21,8 @@ import { ownsEndpoint, shouldYieldRunner } from "../src/core/host-coordination.m
 import { lastVisibleLogLine } from "../src/core/heuristics.mjs";
 import { acquireOwnedViewLock } from "../src/core/locks.mjs";
 import * as P from "../src/core/paths.mjs";
+import { captureStartToken } from "../src/core/pid.mjs";
+import { readProcessStartToken } from "../src/core/process-identity-probe.mjs";
 import { appendBoundedScreenLog, reconcileScreenLog } from "../src/core/screen-log.mjs";
 import { createTerminalModel, feedOutput, resizeChildAndModel } from "../src/core/terminal-model.mjs";
 import { createTerminalSubscription } from "../src/core/terminal-attach-protocol.mjs";
@@ -543,6 +545,10 @@ function legacyMain(config) {
  * @param {import("../src/core/types.mjs").HostConfig & { instanceId: string }} config
  */
 async function ownedMain(config) {
+	// Self token for the published runner identity (issue #238): started before
+	// the start lease so the win32 creation-time probe (~390 ms) overlaps the
+	// lease, the yield check and endpoint binding. Never awaited here.
+	const selfTokenPromise = readProcessStartToken(process.pid);
 	if (!config.socketPath) failEarly("pty-runner: owned config missing socketPath");
 	const socketPath = config.socketPath;
 	const screenLog = P.screenLogPath(config.root, config.viewId);
@@ -930,10 +936,11 @@ async function ownedMain(config) {
 	}
 
 	// 4. Publish runner identity while still holding the lease.
+	const selfToken = await selfTokenPromise;
 	const claimedSelf = ownedUpdate((cur) => ({
 		...cur,
 		runnerPid: process.pid,
-		runnerIdentity: { pid: process.pid, startToken: captureStartToken(process.pid) },
+		runnerIdentity: { pid: process.pid, startToken: selfToken },
 		runnerSpawnedAt: cur.runnerSpawnedAt ?? Date.now(),
 		state: cur.state === "alive" ? "alive" : "starting",
 	}));
@@ -1020,10 +1027,19 @@ async function ownedMain(config) {
 	});
 
 	// 6. Re-check ownership after the child exists, then publish ready.
+	// The child's token is read asynchronously (win32 probe, issue #238); a
+	// failed read yields null, the same shape the record had before #238.
+	const childToken = await readProcessStartToken(childPid);
+	// The child may exit while the token probe is in flight; its terminal record
+	// must not be overwritten by a later "alive" publish (issue #238 review).
+	if (childExited || shutdownStarted) {
+		await finishHost("child_exit", exitCode ?? 0);
+		return;
+	}
 	const ready = ownedUpdate((cur) => ({
 		...cur,
 		childPid,
-		childIdentity: { pid: childPid, startToken: captureStartToken(childPid) },
+		childIdentity: { pid: childPid, startToken: childToken },
 		childSpawnedAt: Date.now(),
 		state: "alive",
 		readyAt: Date.now(),
@@ -1605,26 +1621,6 @@ function createControlRuntime({ viewId, root, instanceId, send, diag, actions })
 	// synchronous — there is no held-resize completion path. Task 2 review P2-C.)
 	return { handle, closeSocket, flushTerminateObservations, journalIds };
 }
-
-/** POSIX process start token — /proc/<pid>/stat field 22 (starttime), stable
- *  across exec(2). Recorded in published identities so service-side recovery
- *  (issue #70 Task 11) can tell an owned-live pid from a reused one; null on
- *  failure or non-Linux platforms. */
-function captureStartToken(pid) {
-	if (process.platform !== "linux" || !pid) return null;
-	try {
-		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-		// comm (field 2) may contain spaces and parens — fields resume AFTER the
-		// last ')'. fields[0] is state (field 3) → starttime (field 22) is [19].
-		const afterComm = stat.slice(stat.lastIndexOf(")") + 1).trimStart();
-		const fields = afterComm.split(/\s+/);
-		const startTime = fields[19];
-		return startTime ?? null;
-	} catch {
-		return null;
-	}
-}
-
 
 /**
  * Finalize the view row as failed when the PTY host itself fails (child spawn

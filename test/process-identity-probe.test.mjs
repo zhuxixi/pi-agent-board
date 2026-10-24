@@ -1,13 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+	creationTimeToken,
 	parseProbeJson,
 	parsePsElapsedMs,
 	parsePsProbeLine,
 	parseUnixMillis,
 	readProcessIdentityProbe,
+	readProcessStartToken,
 	resolveProbeCommand,
 } from "../src/core/process-identity-probe.mjs";
+import { captureStartToken } from "../src/core/pid.mjs";
 
 test("parseUnixMillis accepts positive integers only", () => {
 	assert.equal(parseUnixMillis("1792718500139"), 1_792_718_500_139);
@@ -102,4 +105,49 @@ test("resolveProbeCommand is platform- and pid-aware", () => {
 	assert.equal(resolveProbeCommand("linux", 123), null);
 	assert.equal(resolveProbeCommand("win32", 0), null);
 	assert.equal(resolveProbeCommand("win32", 1.5), null);
+});
+
+test("creationTimeToken formats only positive safe integers", () => {
+	assert.equal(creationTimeToken(1792811668715), "ct:1792811668715");
+	assert.equal(creationTimeToken(1), "ct:1");
+	assert.equal(creationTimeToken(0), null);
+	assert.equal(creationTimeToken(-1), null);
+	assert.equal(creationTimeToken(1.5), null);
+	assert.equal(creationTimeToken(NaN), null);
+	assert.equal(creationTimeToken(Infinity), null);
+	assert.equal(creationTimeToken(Number.MAX_SAFE_INTEGER + 1), null);
+	assert.equal(creationTimeToken("1792811668715"), null);
+	assert.equal(creationTimeToken(null), null);
+	assert.equal(creationTimeToken(undefined), null);
+});
+
+test("readProcessStartToken: linux delegates to captureStartToken", async () => {
+	let probed = false;
+	const token = await readProcessStartToken(process.pid, { platform: "linux", probe: async () => { probed = true; return null; } });
+	assert.equal(probed, false);
+	assert.equal(token, captureStartToken(process.pid));
+});
+
+test("readProcessStartToken: win32 converts the probe creation time", async () => {
+	let seenPid = null;
+	const token = await readProcessStartToken(4242, {
+		platform: "win32",
+		probe: async (pid) => { seenPid = pid; return { creationTimeMs: 1792811668715, commandLine: "node x" }; },
+	});
+	assert.equal(seenPid, 4242);
+	assert.equal(token, "ct:1792811668715");
+});
+
+test("readProcessStartToken: darwin never probes and returns null", async () => {
+	let probed = false;
+	const token = await readProcessStartToken(4242, { platform: "darwin", probe: async () => { probed = true; return { creationTimeMs: 1, commandLine: null }; } });
+	assert.equal(probed, false);
+	assert.equal(token, null);
+});
+
+test("readProcessStartToken: probe failure and bad pids degrade to null", async () => {
+	assert.equal(await readProcessStartToken(4242, { platform: "win32", probe: async () => null }), null);
+	assert.equal(await readProcessStartToken(4242, { platform: "win32", probe: async () => ({ creationTimeMs: null, commandLine: null }) }), null);
+	assert.equal(await readProcessStartToken(0, { platform: "win32", probe: async () => { throw new Error("must not probe"); } }), null);
+	assert.equal(await readProcessStartToken(null, { platform: "win32", probe: async () => { throw new Error("must not probe"); } }), null);
 });
