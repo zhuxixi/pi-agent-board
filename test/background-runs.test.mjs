@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
 	CLOCK_EPSILON_MS,
@@ -6,7 +9,9 @@ import {
 	classifyRunsForRow,
 	isSameSessionFile,
 	parseRunHead,
+	probeBackgroundRun,
 	resolveWorkflowHome,
+	scanBackgroundRuns,
 } from "../src/core/background-runs.mjs";
 
 const V2 = (o = {}) => ({
@@ -132,4 +137,107 @@ test("ReviewFocus: protecting outranks paused in one scan", () => {
 	assert.equal(classifyRunsForRow([paused, running], { sessionFile: "C:\\r\\sessions\\view_a.jsonl", hostStartedAt: null }).state, "protecting");
 	assert.equal(classifyRunsForRow([paused], { sessionFile: "C:\\r\\sessions\\view_a.jsonl", hostStartedAt: null }).state, "paused");
 	assert.equal(classifyRunsForRow([], { sessionFile: "C:\\r\\sessions\\view_a.jsonl", hostStartedAt: null }).state, "irrelevant");
+});
+
+function fixtureTree() {
+	const root = mkdtempSync(join(tmpdir(), "agentboard-wf-"));
+	const runsDir = join(root, "projects", "proj-abc123", "runs");
+	mkdirSync(runsDir, { recursive: true });
+	return { root, runsDir, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+const writeHead = (runsDir, name, body) => writeFileSync(join(runsDir, name), JSON.stringify(body));
+
+test("A6: scan enumerates v2 heads and skips .bak/.events.jsonl/.log/.result", () => {
+	const fx = fixtureTree();
+	try {
+		writeHead(fx.runsDir, "run-1.json", V2());
+		writeHead(fx.runsDir, "run-1.json.bak", V2());
+		writeFileSync(join(fx.runsDir, "run-1.json.events.jsonl"), "{}\n");
+		writeFileSync(join(fx.runsDir, "run-1.log"), "log\n");
+		writeFileSync(join(fx.runsDir, "run-1.json.result-deadbeef"), "{}");
+		const res = scanBackgroundRuns({ workflowHome: fx.root });
+		assert.equal(res.ok, true);
+		assert.equal(res.heads.length, 1);
+		assert.equal(res.heads[0].runId, "run-1");
+		assert.ok(typeof res.heads[0].mtimeMs === "number");
+	} finally {
+		fx.cleanup();
+	}
+});
+
+test("A6: minMtimeMs prefilter drops old heads", () => {
+	const fx = fixtureTree();
+	try {
+		writeHead(fx.runsDir, "run-1.json", V2());
+		const future = Date.now() + 60_000;
+		assert.deepEqual(scanBackgroundRuns({ workflowHome: fx.root, minMtimeMs: future }), { ok: true, heads: [], error: null });
+	} finally {
+		fx.cleanup();
+	}
+});
+
+test("A6: corrupt JSON does not throw and does not change the verdict", () => {
+	const fx = fixtureTree();
+	try {
+		writeHead(fx.runsDir, "run-1.json", V2());
+		writeFileSync(join(fx.runsDir, "broken.json"), "{ not json");
+		const res = scanBackgroundRuns({ workflowHome: fx.root });
+		assert.equal(res.ok, true);
+		assert.equal(res.heads.length, 1);
+		assert.ok(res.error);
+	} finally {
+		fx.cleanup();
+	}
+});
+
+test("A6: missing projects dir -> ok:true with empty heads", () => {
+	const root = mkdtempSync(join(tmpdir(), "agentboard-wf-none-"));
+	try {
+		assert.deepEqual(scanBackgroundRuns({ workflowHome: root }), { ok: true, heads: [], error: null });
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("A10(setup): unreadable store -> ok:false (workflowHome is a file, not a dir)", () => {
+	const root = mkdtempSync(join(tmpdir(), "agentboard-wf-bad-"));
+	try {
+		const asFile = join(root, "not-a-dir");
+		writeFileSync(asFile, "x");
+		const res = scanBackgroundRuns({ workflowHome: asFile });
+		assert.equal(res.ok, false);
+		assert.ok(res.error);
+		assert.deepEqual(res.heads, []);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("A6/probe: probe splits running vs paused for the matching session", () => {
+	const fx = fixtureTree();
+	try {
+		writeHead(fx.runsDir, "run-2.json", V2({ runId: "run-2" }));
+		writeHead(fx.runsDir, "run-1.json", V2({ runId: "run-1", status: "paused" }));
+		const res = probeBackgroundRun({ sessionFile: "C:\\r\\sessions\\view_a.jsonl", hostStartedAt: null, workflowHome: fx.root });
+		assert.equal(res.ok, true);
+		assert.equal(res.running.runId, "run-2");
+		assert.equal(res.paused.runId, "run-1");
+	} finally {
+		fx.cleanup();
+	}
+});
+
+test("A6/probe: two paused runs for the session -> newest updatedAt wins", () => {
+	const fx = fixtureTree();
+	try {
+		writeHead(fx.runsDir, "p-old.json", V2({ runId: "p-old", status: "paused", updatedAt: "2026-10-24T00:10:00.000Z" }));
+		writeHead(fx.runsDir, "p-new.json", V2({ runId: "p-new", status: "paused", updatedAt: "2026-10-24T00:20:00.000Z" }));
+		const res = probeBackgroundRun({ sessionFile: "C:\\r\\sessions\\view_a.jsonl", hostStartedAt: null, workflowHome: fx.root });
+		assert.equal(res.ok, true);
+		assert.equal(res.paused.runId, "p-new");
+		assert.equal(res.running, null);
+	} finally {
+		fx.cleanup();
+	}
 });

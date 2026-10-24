@@ -13,6 +13,7 @@
  * scan, mtime prefilter) belongs to the caller. Design:
  * docs/superpowers/specs/2026-10-24-issue-230-warm-host-background-runs-design.md
  */
+import { readdirSync, readFileSync, statSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
@@ -141,6 +142,100 @@ export function classifyRunsForRow(runs, o) {
 }
 
 /**
+ * @typedef {RunHead & { path: string, mtimeMs: number }} RunHeadWithPath
+ */
+
+/**
+ * Enumerate every run head under `<workflowHome>/projects/<project>/runs/`.
+ * Only `*.json` regular files are candidates (upstream keeps `.bak`,
+ * `.events.jsonl`, `.log` and `.result-*` siblings next to the head), and
+ * `minMtimeMs` drops heads too old to belong to a live host — a prefilter only,
+ * the protection verdict still comes from `classifyRunsForRow`.
+ *
+ * Failure policy (spec D6): an absent store is normal and yields `ok:true`; a
+ * store that exists but cannot be read yields `ok:false` so the caller can log a
+ * `warm_prune_probe_failed` diagnostic and fail open. Per-file trouble (bad JSON,
+ * unreadable head) keeps the scan usable: the first message lands in `error` and
+ * the remaining heads are still returned.
+ * The store root is stat-ed before the child paths are enumerated because on
+ * win32 a child path under a regular file reports `ENOENT` exactly like a
+ * missing directory does: a missing `workflowHome` is "no store yet", a
+ * `workflowHome` that is not a directory is a read failure.
+ * @param {{ workflowHome: string, minMtimeMs?: number }} o
+ * @returns {{ ok: boolean, heads: Array<RunHeadWithPath>, error: string|null }}
+ */
+export function scanBackgroundRuns({ workflowHome, minMtimeMs = 0 }) {
+	const heads = [];
+	let error = null;
+	const noteError = (message) => {
+		error ??= message;
+	};
+
+	let projects;
+	try {
+		if (!statSync(workflowHome).isDirectory()) {
+			return { ok: false, heads: [], error: `workflow home is not a directory: ${workflowHome}` };
+		}
+		projects = readdirSync(joinPath(workflowHome, "projects"), { withFileTypes: true });
+	} catch (e) {
+		if (e?.code === "ENOENT") return { ok: true, heads: [], error: null };
+		return { ok: false, heads: [], error: errorMessage(e) };
+	}
+
+	for (const project of projects) {
+		if (!project.isDirectory()) continue;
+		const runsDir = joinPath(workflowHome, "projects", project.name, "runs");
+		let entries;
+		try {
+			entries = readdirSync(runsDir, { withFileTypes: true });
+		} catch (e) {
+			if (e?.code !== "ENOENT") noteError(`${runsDir}: ${errorMessage(e)}`);
+			continue;
+		}
+		for (const entry of entries) {
+			if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+			const filePath = joinPath(runsDir, entry.name);
+			try {
+				const mtimeMs = statSync(filePath).mtimeMs;
+				if (mtimeMs < minMtimeMs) continue;
+				const head = parseRunHead(JSON.parse(readFileSync(filePath, "utf8")));
+				if (head) heads.push({ ...head, path: filePath, mtimeMs });
+			} catch (e) {
+				noteError(`${filePath}: ${errorMessage(e)}`);
+			}
+		}
+	}
+
+	return { ok: true, heads, error };
+}
+
+/**
+ * Fresh protection probe for one row: the scan prefiltered to runs that could
+ * have been updated by this host incarnation, classified against the row's
+ * session file. Each field answers one question and is filled independently
+ * (design §5.1: a running/paused split): `running` is the run that must keep the
+ * host alive (spec D1), `paused` is the run whose interruption the reconcile
+ * pass announces (spec D2). They coexist because one session may hold an older
+ * paused run while a new one is running, and each consumer reads one field.
+ * `ok:false` only means the store could not be read (spec D6).
+ * @param {{ sessionFile: string|null, hostStartedAt: number|null, workflowHome: string }} o
+ * @returns {{ ok: boolean, running: RunHeadWithPath|null, paused: RunHeadWithPath|null, error: string|null }}
+ */
+export function probeBackgroundRun({ sessionFile, hostStartedAt, workflowHome }) {
+	const minMtimeMs = hostStartedAt == null ? 0 : hostStartedAt - CLOCK_EPSILON_MS;
+	const scan = scanBackgroundRuns({ workflowHome, minMtimeMs });
+	if (!scan.ok) return { ok: false, running: null, paused: null, error: scan.error };
+	const verdict = classifyRunsForRow(scan.heads, { sessionFile, hostStartedAt });
+	const running = verdict.state === "protecting" ? verdict.run : null;
+	// Newest paused run wins, because it is the one most likely to be the run the
+	// just-ended host left behind; `path` only breaks ties deterministically.
+	const paused = scan.heads
+		.filter((head) => classifyRunForRow(head, { sessionFile, hostStartedAt }) === "paused")
+		.sort((a, b) => (b.updatedAtMs ?? 0) - (a.updatedAtMs ?? 0) || a.path.localeCompare(b.path))[0] ?? null;
+	return { ok: true, running, paused, error: scan.error };
+}
+
+/**
  * Join segments with the separator style of the base path. The ambient
  * `path.join` uses the host separator, which would turn POSIX-style injected
  * inputs (tests, Linux CI) into backslash paths when the suite runs on Windows,
@@ -152,6 +247,14 @@ export function classifyRunsForRow(runs, o) {
 function joinPath(base, ...parts) {
 	const impl = /^[A-Za-z]:/.test(base) || base.includes("\\") ? path.win32 : path.posix;
 	return impl.join(base, ...parts);
+}
+
+/**
+ * @param {unknown} e
+ * @returns {string}
+ */
+function errorMessage(e) {
+	return e instanceof Error ? e.message : String(e);
 }
 
 /**
