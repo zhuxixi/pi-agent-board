@@ -178,6 +178,10 @@ export function createService(opts) {
 	// home are injectable for tests; the env guard flag is read at call time.
 	const backgroundRunsImpl = opts.backgroundRuns ?? { scanBackgroundRuns, probeBackgroundRun };
 	const workflowHomeImpl = opts.workflowHome ?? resolveWorkflowHome();
+	// Notice memo (issue #230): remember (viewId, host.endedAt) only after a
+	// successful probe, so a transient ok:false retries on the next tick instead
+	// of suppressing the paused-run notice for the service's lifetime.
+	const noticeProbeMemo = new Set();
 	// In-flight attach resolutions, keyed by viewId: concurrent resolver calls for
 	// the same view share one promise (issue #70 Task 12).
 	const inflightAttachResolvers = new Map();
@@ -1830,6 +1834,66 @@ export function createService(opts) {
 		return false;
 	}
 
+	/**
+	 * Reconcile pre-pass (issue #230): when a warm host has died (state
+	 * `exited`/`failed` and no longer alive) while its session owns a paused
+	 * background workflow run, the row otherwise stays silent. Announce the
+	 * interruption by patching `summary` (through patch_fields so the manual
+	 * fence still governs) and record one diagnostic per run.
+	 *
+	 * The memo key is `(viewId, host.endedAt)`: a host incarnation is probed at
+	 * most once, and the key is added ONLY after a successful probe (ok === true)
+	 * so a transient read failure retries on the next tick instead of suppressing
+	 * the notice for the service's lifetime. This pre-pass deliberately sits
+	 * outside the looksActive-gated loop below: the target rows are already at
+	 * `processState: "exited"`.
+	 * @param {number} now
+	 */
+	async function noticeInterruptedBackgroundRuns(now) {
+		for (const row of listRows(root)) {
+			const host = row.host;
+			if (!host || (host.state !== "exited" && host.state !== "failed") || row.hostAlive) continue;
+			const viewId = row.meta.id;
+			const key = `${viewId}:${host.endedAt ?? 0}`;
+			if (noticeProbeMemo.has(key)) continue;
+			const probe = backgroundRunsImpl.probeBackgroundRun({
+				sessionFile: row.meta.sessionFile ?? null,
+				hostStartedAt: host.startedAt ?? null,
+				workflowHome: workflowHomeImpl,
+			});
+			if (!probe.ok) continue; // incomplete scan: retry next tick, memo not written
+			noticeProbeMemo.add(key);
+			if (!probe.paused) continue;
+			const runId = probe.paused.runId;
+			const summary = `Background workflow ${runId} was interrupted when its host died; resume it from the board.`;
+			const alreadyAnnounced = typeof row.state?.summary === "string" && row.state.summary.startsWith("Background workflow ");
+			if (!alreadyAnnounced) {
+				const result = await sendLifecycleCommand({
+					type: "state_command",
+					viewId,
+					runId: null,
+					source: "service",
+					kind: "patch_fields",
+					expectedRevision: null,
+					payload: { state: { summary } },
+				}, viewId);
+				if (result.reason === "coordinator_disabled") {
+					const fresh = readState(root, viewId) ?? blankState(viewId);
+					fresh.summary = summary;
+					fresh.updatedAt = now;
+					writeState(root, fresh);
+				}
+			}
+			appendDiagnosticOnce(root, viewId, {
+				source: "service",
+				level: "warn",
+				code: "background_run_interrupted",
+				message: `Background workflow ${runId} was interrupted when its host died`,
+				details: { runId, hostState: host.state },
+			}, { match: ["runId"] });
+		}
+	}
+
 	return {
 		root,
 		/**
@@ -2342,6 +2406,7 @@ export function createService(opts) {
 		 */
 		async reconcile() {
 			const now = Date.now();
+			await noticeInterruptedBackgroundRuns(now);
 			let fixed = 0;
 			for (const row of listRows(root)) {
 				const s = row.state;
