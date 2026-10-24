@@ -45,16 +45,18 @@ export function canAutoDrain(row) {
  * idle = host alive && !busy && no attached clients && not keepViewId.
  * graceMs exempts freshly started hosts (attach handoff race: ensureHost has
  * started a host but the client has not connected yet).
+ * isProtected is injected by the caller (this pure function never reads disk):
+ * a host running a background workflow is exempt from both eviction branches.
  * TTL eviction runs first; survivors over maxWarm are evicted oldest-first by
  * idleSince = max(state.lastActivityAt, host.startedAt) || meta.updatedAt (host-level
  * idle counts from host start, so a stale lastActivityAt from a previous host
  * incarnation never makes a fresh host look idle longer than it has been up).
  *
  * @param {Array<import("./store.mjs").Row>} rows
- * @param {{ now: number, maxWarm: number, ttlMs: number, graceMs?: number, keepViewId?: string|null }} o
+ * @param {{ now: number, maxWarm: number, ttlMs: number, graceMs?: number, keepViewId?: string|null, isProtected?: ((row: import("./store.mjs").Row) => boolean)|null }} o
  * @returns {{ ttlEvicted: string[], excessEvicted: string[] }} viewIds, ttl group first
  */
-export function selectIdleHostsToEvict(rows, { now, maxWarm, ttlMs, graceMs = 0, keepViewId = null }) {
+export function selectIdleHostsToEvict(rows, { now, maxWarm, ttlMs, graceMs = 0, keepViewId = null, isProtected = null }) {
 	// Both-zero = eviction disabled entirely. Callers (service.pruneWarmHosts)
 	// may additionally early-return for the same reason.
 	if (maxWarm === 0 && ttlMs === 0) return { ttlEvicted: [], excessEvicted: [] };
@@ -63,6 +65,9 @@ export function selectIdleHostsToEvict(rows, { now, maxWarm, ttlMs, graceMs = 0,
 		if (keepViewId != null && row.meta.id === keepViewId) continue;
 		if (!row.hostAlive) continue;
 		if (isAgentBusy(row)) continue;
+		// Background-run protection (issue #230): a host executing a background
+		// workflow still counts as busy even though the assistant turn ended.
+		if (isProtected && isProtected(row)) continue;
 		if ((row.host?.attachedClients ?? 0) !== 0) continue;
 		const startedAt = row.host?.startedAt;
 		if (graceMs > 0 && startedAt != null && now - startedAt < graceMs) continue;
