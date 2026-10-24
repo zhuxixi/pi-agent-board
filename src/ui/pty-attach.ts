@@ -1976,12 +1976,19 @@ function lineToAnsi(
 		if (isCursorRow && cursor!.col >= 0) return cursorHidden ? CURSOR_MARKER : CURSOR_MARKER + "\x1b[7m \x1b[0m";
 		return "";
 	}
+	let lastBg = -1;
 	for (let x = 0; x < line.length; x++) {
 		const cell = line.getCell(x, reusable);
 		if (!cell || cell.getWidth() === 0) continue;
 		if (cell.getChars()) last = x;
+		if (!cell.isBgDefault()) lastBg = x;
 	}
-	if (last < 0) {
+	// Issue #232: full-screen TUIs paint an explicit theme bg over otherwise empty
+	// regions. Trimming at the last character drops that paint and lets the host
+	// terminal's default bg show through, so the render bound covers the last
+	// painted cell too. Default-bg lines keep the old bound, byte for byte.
+	const renderEnd = Math.max(last, lastBg);
+	if (renderEnd < 0) {
 		// Empty line: same split as above.
 		if (isCursorRow && cursor!.col >= 0) return cursorHidden ? CURSOR_MARKER : CURSOR_MARKER + "\x1b[7m \x1b[0m";
 		return "";
@@ -1990,7 +1997,7 @@ function lineToAnsi(
 	let out = "";
 	let prevAttr = "";
 	let prevUri = "";
-	for (let x = 0; x <= last; x++) {
+	for (let x = 0; x <= renderEnd; x++) {
 		const cell = line.getCell(x, reusable);
 		if (!cell || cell.getWidth() === 0) continue;
 		const uri = osc8UriForCell(term, cell);
@@ -2017,9 +2024,10 @@ function lineToAnsi(
 		out += cell.getChars() || " ";
 	}
 	if (prevUri) out += closeOsc8();
-	// Cursor past the end of the line content (cursorX == cols or beyond last cell):
-	// append an inverse space so a VISIBLE position shows, keeping the marker either way.
-	if (isCursorRow && cursor!.col > last) {
+	// Cursor past the end of the painted region (cursorX == cols or beyond the last
+	// rendered cell): append an inverse space so a VISIBLE position shows, keeping the
+	// marker either way.
+	if (isCursorRow && cursor!.col > renderEnd) {
 		out += CURSOR_MARKER + (cursorHidden ? "" : "\x1b[7m \x1b[0m");
 	}
 	return out + "\x1b[0m";
