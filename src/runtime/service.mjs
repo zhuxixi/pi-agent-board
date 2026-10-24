@@ -10,6 +10,7 @@ import { createRequire } from "node:module";
 import { createConnection } from "node:net";
 import { resolve } from "node:path";
 import { applyAutoStateToStatus, autoStateEnabled, heuristicAutoState, isManualVerdict } from "../core/auto-state.mjs";
+import { CLOCK_EPSILON_MS, classifyRunsForRow, probeBackgroundRun, resolveWorkflowHome, scanBackgroundRuns } from "../core/background-runs.mjs";
 import { appendLine, atomicWriteJson, removeFile } from "../core/atomic.mjs";
 import { finalizeRun, projectViewState, reduceEvent } from "../core/events.mjs";
 import { clearDiagnostics, appendDiagnostic, appendDiagnosticOnce, tailDiagnostics } from "../core/diagnostics.mjs";
@@ -131,6 +132,11 @@ export function resolveAttachResolveTimeoutMs(env = process.env) {
  *   sleepFn?: (ms: number) => Promise<void>,
  *   sendStateCommand?: typeof sendStateCommand,
  *   availableModels?: () => Array<{ provider: string, id: string }> | undefined,
+ *   workflowHome?: string,
+ *   backgroundRuns?: {
+ *     scanBackgroundRuns: typeof scanBackgroundRuns,
+ *     probeBackgroundRun: typeof probeBackgroundRun,
+ *   },
  * }} opts
  */
 export function createService(opts) {
@@ -168,6 +174,10 @@ export function createService(opts) {
 	// at validation time (never cached at startup) and wrapped defensively by the
 	// caller; undefined/absent skips validation entirely.
 	const availableModelsImpl = opts.availableModels ?? null;
+	// Background-run protection (issue #230): the scan/probe pair and the workflow
+	// home are injectable for tests; the env guard flag is read at call time.
+	const backgroundRunsImpl = opts.backgroundRuns ?? { scanBackgroundRuns, probeBackgroundRun };
+	const workflowHomeImpl = opts.workflowHome ?? resolveWorkflowHome();
 	// In-flight attach resolutions, keyed by viewId: concurrent resolver calls for
 	// the same view share one promise (issue #70 Task 12).
 	const inflightAttachResolvers = new Map();
@@ -917,14 +927,42 @@ export function createService(opts) {
 		const ttlMs = envInt("AGENT_BOARD_WARM_HOST_TTL_MS", 10 * 60 * 1000, 0, 24 * 60 * 60 * 1000, "AGENT_VIEW_WARM_HOST_TTL_MS");
 		if (maxWarm === 0 && ttlMs === 0) return;
 		const graceMs = envInt("AGENT_BOARD_WARM_HOST_GRACE_MS", 30 * 1000, 0, 24 * 60 * 60 * 1000, "AGENT_VIEW_WARM_HOST_GRACE_MS");
-		const { ttlEvicted, excessEvicted } = selectIdleHostsToEvict(listRows(root), {
-			now: Date.now(),
-			maxWarm,
-			ttlMs,
-			graceMs,
-			keepViewId: pruneOpts.keepViewId ?? null,
-		});
-		for (const viewId of [...ttlEvicted, ...excessEvicted]) {
+		const keepViewId = pruneOpts.keepViewId ?? null;
+		const now = Date.now();
+		const rows = listRows(root);
+		const guardDisabled = process.env.AGENT_BOARD_NO_BACKGROUND_RUN_GUARD === "1";
+
+		// Phase 1 (dry): select without background-run protection. No candidates
+		// means no IO at all, preserving today's fast path for a full warm pool.
+		const dry = selectIdleHostsToEvict(rows, { now, maxWarm, ttlMs, graceMs, keepViewId });
+		const candidates = [...dry.ttlEvicted, ...dry.excessEvicted];
+		if (candidates.length === 0) return;
+
+		// One scan for the whole pass; the protection predicate stays pure
+		// in-memory (spec D5). minMtimeMs prefilters to heads that could belong
+		// to a live candidate host (spec D4); a candidate without startedAt
+		// falls back to 0, which disables the prefilter.
+		let scan = { ok: true, heads: [], error: null };
+		if (!guardDisabled) {
+			const candidateStartedAts = candidates.map((viewId) => rows.find((r) => r.meta.id === viewId)?.host?.startedAt ?? null);
+			const minStartedAt = candidateStartedAts.some((v) => v == null) ? 0 : Math.min(...candidateStartedAts);
+			scan = backgroundRunsImpl.scanBackgroundRuns({
+				workflowHome: workflowHomeImpl,
+				minMtimeMs: minStartedAt - CLOCK_EPSILON_MS,
+			});
+		}
+		const isProtected = (row) => {
+			if (guardDisabled) return false;
+			return classifyRunsForRow(scan.heads, {
+				sessionFile: row.meta.sessionFile,
+				hostStartedAt: row.host?.startedAt,
+			}).state === "protecting";
+		};
+
+		// Phase 2: re-select with the protection predicate so both eviction
+		// branches (TTL and maxWarm) exempt hosts running a background workflow.
+		const selected = selectIdleHostsToEvict(rows, { now, maxWarm, ttlMs, graceMs, keepViewId, isProtected });
+		for (const viewId of [...selected.ttlEvicted, ...selected.excessEvicted]) {
 			// Re-verify against fresh state before terminating: the selection ran
 			// on a listRows snapshot, and the host may have been dispatched (busy)
 			// or attached (attachedClients > 0) since. Never kill a busy/attached
@@ -934,6 +972,42 @@ export function createService(opts) {
 			if (isAgentBusy(row)) continue;
 			if ((row.host?.attachedClients ?? 0) !== 0) continue;
 			if (graceMs > 0 && row.host?.startedAt != null && Date.now() - row.host.startedAt < graceMs) continue;
+			if (isProtected(row)) continue;
+
+			if (guardDisabled) {
+				stopHostRow(row, "warm_prune");
+				continue;
+			}
+			// Fresh protection probe (A9): a run started between the snapshot and
+			// this stop decision still blocks the eviction. Fail-open: a probe
+			// error logs a deduped warning and proceeds without protection (D6).
+			const fresh = backgroundRunsImpl.probeBackgroundRun({
+				sessionFile: row.meta.sessionFile ?? null,
+				hostStartedAt: row.host?.startedAt ?? null,
+				workflowHome: workflowHomeImpl,
+			});
+			if (fresh.running) {
+				const runId = fresh.running.runId;
+				appendDiagnosticOnce(root, viewId, {
+					source: "service",
+					level: "warn",
+					code: "warm_prune_during_background_run",
+					message: `Skipped warm-host eviction: background workflow ${runId} started after selection`,
+					details: { runId, hostStartedAt: row.host?.startedAt ?? null },
+				}, { match: ["runId"] });
+				continue;
+			}
+			if (!fresh.ok) {
+				appendDiagnosticOnce(root, viewId, {
+					source: "service",
+					level: "warn",
+					code: "warm_prune_probe_failed",
+					message: "Could not read the workflow run store; warm-host eviction proceeded without background-run protection",
+					details: { error: String(fresh.error ?? "unknown") },
+				}, { match: ["error"] });
+				stopHostRow(row, "warm_prune");
+				continue;
+			}
 			stopHostRow(row, "warm_prune");
 		}
 	}
