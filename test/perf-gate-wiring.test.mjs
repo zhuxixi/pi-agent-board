@@ -16,9 +16,9 @@ test("ci.yml: perf gate step exists and runs before Unit tests", () => {
 	assert.ok(perfIdx < unitIdx, "perf gate runs before Unit tests (quietest machine window)");
 });
 
-test("package.json: default globs unchanged, test:perf wired, verify ordered", () => {
-	assert.equal(PKG.scripts.test, "node --test test/*.test.mjs");
-	assert.equal(PKG.scripts["test:coverage"], "c8 node --test test/*.test.mjs");
+test("package.json: suite wrapped by run-tests.mjs, test:perf wired, verify ordered", () => {
+	assert.equal(PKG.scripts.test, "node scripts/run-tests.mjs");
+	assert.equal(PKG.scripts["test:coverage"], "c8 node scripts/run-tests.mjs");
 	assert.equal(PKG.scripts["test:perf"], "node scripts/run-perf-gate.mjs");
 	const order = PKG.scripts.verify.split("&&").map((s) => s.trim());
 	const idx = (needle) => order.findIndex((s) => s === needle);
