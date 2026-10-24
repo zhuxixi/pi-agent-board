@@ -6,6 +6,7 @@
  * records the runner pid in `pid.json` and watches the store files the runner writes.
  */
 import { spawn } from "node:child_process";
+import { dirname, resolve } from "node:path";
 import { atomicWriteJson } from "./atomic.mjs";
 import { resolveNode } from "./invocation.mjs";
 import * as P from "./paths.mjs";
@@ -122,16 +123,35 @@ export function launchAutoState(root, config, opts) {
 }
 
 /**
+ * Compute the detached coordinator spawn plan (issue #241): an absolute root
+ * argv and a cwd OUTSIDE the root (the root's parent; at a drive/filesystem
+ * root the parent is the root itself). The coordinator derives all paths from
+ * the root argument and never uses cwd, so keeping cwd off the root releases
+ * the win32 directory handle that made throwaway roots undeletable.
+ * @param {string} root
+ * @returns {{ root: string, cwd: string }}
+ */
+export function coordinatorSpawnPlan(root) {
+	const absoluteRoot = resolve(root);
+	return { root: absoluteRoot, cwd: dirname(absoluteRoot) };
+}
+
+/**
  * Launch the detached view-state coordinator for a board root (issue #91, spec
  * D3). No config file: the coordinator takes the root as its only argument.
  * Idempotent by lease — a second instance loses the coordinator lease and
  * exits silently, so callers may spawn freely on probe failure.
+ * The child's cwd is the root's PARENT (issue #241): the coordinator derives
+ * paths from argv and cwd must not pin the root on win32. At a drive/filesystem
+ * root (win32 `C:\`, POSIX `/`) the parent is the root itself — see
+ * `coordinatorSpawnPlan`.
  * @param {string} root
  * @param {{ runnerScript: string, node?: string }} opts
  * @returns {{ pid: number|null }}
  */
 export function launchCoordinator(root, opts) {
 	const node = opts.node ?? resolveNode();
-	const child = spawnDetached(node, [opts.runnerScript, root], root);
+	const plan = coordinatorSpawnPlan(root);
+	const child = spawnDetached(node, [opts.runnerScript, plan.root], plan.cwd);
 	return { pid: child.pid ?? null };
 }

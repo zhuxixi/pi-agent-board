@@ -13,7 +13,7 @@ entry point is `index.ts`.
 
 ```bash
 npm run typecheck      # tsc --noEmit
-npm test               # node --test test/*.test.mjs
+npm test               # node scripts/run-tests.mjs; fails on leaked coordinators
 npm run test:coverage  # c8 + the same tests; thresholds lines 85 / funcs 80 / branches 70
 npm run test:perf      # A11 perf gate — opt-in, skipped under plain `npm test`
 npm run pack:dry       # what would ship in the tarball
