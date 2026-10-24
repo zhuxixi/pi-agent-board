@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
-import { isAbsolute, dirname, join, resolve } from "node:path";
+import { isAbsolute, dirname, join, relative, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -29,7 +29,15 @@ writeFileSync(join(process.argv[2], "spawn-probe.json"), JSON.stringify({ cwd: p
 
 test("A1 coordinatorSpawnPlan: absolute root argv, parent-dir cwd", () => {
 	const base = join(tmpdir(), "agentview-c241-plan", "board root");
-	for (const input of [base, `${base}/`, join(base, "views", "..")]) {
+	// The dot-segment spelling is literal: path.join() would normalize it away
+	// before coordinatorSpawnPlan ever saw the non-canonical input.
+	const inputs = [base, `${base}/`, `${base}/views/..`];
+	// A relative spelling is what makes the absolute-root assertion non-vacuous;
+	// only add it while it really is relative and stays under cwd (a different
+	// drive on win32 yields an absolute path, and tmpdir outside cwd starts "..").
+	const relativeBase = relative(process.cwd(), base);
+	if (relativeBase && !relativeBase.startsWith("..") && !isAbsolute(relativeBase)) inputs.push(relativeBase);
+	for (const input of inputs) {
 		const plan = coordinatorSpawnPlan(input);
 		assert.ok(isAbsolute(plan.root), `root must be absolute for ${input}`);
 		assert.equal(plan.root, resolve(input));
@@ -42,15 +50,20 @@ test("A2 launchCoordinator spawns with absolute root argv and parent-dir cwd", a
 	try {
 		const fake = join(root, "fake-runner.mjs");
 		writeFileSync(fake, FAKE_RUNNER, "utf8");
-		const { pid } = launchCoordinator(root, { runnerScript: fake });
+		// Deliberately non-canonical spelling: the spawn plan must canonicalize it.
+		const { pid } = launchCoordinator(`${root}/`, { runnerScript: fake });
 		assert.ok(pid, "detached child has a pid");
 		const probePath = join(root, "spawn-probe.json");
 		const raw = await waitFor(() => (existsSync(probePath) ? readFileSync(probePath, "utf8") : null), 5000);
 		assert.ok(raw, "fake runner must write its probe file");
 		const probe = JSON.parse(raw);
-		const norm = (p) => (process.platform === "win32" ? resolve(p).toLowerCase() : resolve(p));
-		assert.equal(norm(probe.arg), norm(root), "argv[2] is the absolute root");
-		assert.equal(norm(probe.cwd), norm(dirname(root)), "cwd is the root's parent, not the root");
+		// Exact raw comparison: argv carries the canonical root itself, not the
+		// caller's trailing-separator spelling.
+		assert.equal(probe.arg, resolve(root), "argv[2] is the canonical absolute root");
+		// cwd keeps the normalized comparison: win32 casing plus the POSIX case of
+		// symlinked temp dirs (macOS /var -> /private/var) must not false-fail.
+		const normCwd = (p) => (process.platform === "win32" ? resolve(p).toLowerCase() : realpathSync(resolve(p)));
+		assert.equal(normCwd(probe.cwd), normCwd(dirname(root)), "cwd is the root's parent, not the root");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

@@ -124,9 +124,10 @@ export function launchAutoState(root, config, opts) {
 
 /**
  * Compute the detached coordinator spawn plan (issue #241): an absolute root
- * argv and a cwd OUTSIDE the root. The coordinator derives all paths from the
- * root argument and never uses cwd, so keeping cwd off the root releases the
- * win32 directory handle that made throwaway roots undeletable.
+ * argv and a cwd OUTSIDE the root (the root's parent; at a drive/filesystem
+ * root the parent is the root itself). The coordinator derives all paths from
+ * the root argument and never uses cwd, so keeping cwd off the root releases
+ * the win32 directory handle that made throwaway roots undeletable.
  * @param {string} root
  * @returns {{ root: string, cwd: string }}
  */
