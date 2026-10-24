@@ -28,6 +28,8 @@ function freshRoot() {
 
 test("launchHost spawns a detached runner and persists the host config", async () => {
 	const root = freshRoot();
+	/** @type {{ pid: number|null, configPath: string }|null} */
+	let res = null;
 	try {
 		const config = {
 			root,
@@ -45,7 +47,7 @@ test("launchHost spawns a detached runner and persists the host config", async (
 			rows: 24,
 			screenLogMaxBytes: 1_000_000,
 		};
-		const res = launchHost(root, config, { runnerScript: FAKE_PI });
+		res = launchHost(root, config, { runnerScript: FAKE_PI });
 		assert.ok(res.pid, "detached runner must have a pid");
 		assert.equal(res.configPath, P.hostConfigPath(root, "view_1"));
 		// Wait for the config to hit disk (the runner may keep running briefly).
@@ -53,12 +55,14 @@ test("launchHost spawns a detached runner and persists the host config", async (
 		assert.ok(persisted, "host config must be written");
 		assert.equal(JSON.parse(persisted).viewId, "view_1");
 	} finally {
-		rmSync(root, { recursive: true, force: true });
+		await killAndRemove(res?.pid ?? null, root);
 	}
 });
 
 test("launchHost honors the instance-specific config path when provided", async () => {
 	const root = freshRoot();
+	/** @type {{ pid: number|null, configPath: string }|null} */
+	let res = null;
 	try {
 		const configPath = P.hostConfigPathFor(root, "view_inst", "inst-1");
 		const config = {
@@ -77,7 +81,7 @@ test("launchHost honors the instance-specific config path when provided", async 
 			rows: 24,
 			configPath,
 		};
-		const res = launchHost(root, config, { runnerScript: FAKE_PI });
+		res = launchHost(root, config, { runnerScript: FAKE_PI });
 		assert.ok(res.pid);
 		assert.equal(res.configPath, configPath);
 		const persisted = await waitFor(() => (existsSync(configPath) ? readFileSync(configPath, "utf8") : null));
@@ -86,12 +90,14 @@ test("launchHost honors the instance-specific config path when provided", async 
 		// The launch must not also touch the legacy fixed config path.
 		assert.equal(existsSync(P.hostConfigPath(root, "view_inst")), false);
 	} finally {
-		rmSync(root, { recursive: true, force: true });
+		await killAndRemove(res?.pid ?? null, root);
 	}
 });
 
 test("launchTitle persists the title config with the injected node", async () => {
 	const root = freshRoot();
+	/** @type {{ pid: number|null, configPath: string }|null} */
+	let res = null;
 	try {
 		const config = {
 			root,
@@ -103,19 +109,21 @@ test("launchTitle persists the title config with the injected node", async () =>
 			piArgsPrefix: [],
 			model: null,
 		};
-		const res = launchTitle(root, config, { runnerScript: FAKE_PI, node: process.execPath });
+		res = launchTitle(root, config, { runnerScript: FAKE_PI, node: process.execPath });
 		assert.ok(res.pid);
 		assert.equal(res.configPath, P.titleConfigPath(root, "view_2"));
 		const persisted = await waitFor(() => (existsSync(res.configPath) ? readFileSync(res.configPath, "utf8") : null));
 		assert.ok(persisted, "title config must be written");
 		assert.equal(JSON.parse(persisted).fallbackName, "fix");
 	} finally {
-		rmSync(root, { recursive: true, force: true });
+		await killAndRemove(res?.pid ?? null, root);
 	}
 });
 
 test("launchAutoState persists the auto-state config", async () => {
 	const root = freshRoot();
+	/** @type {{ pid: number|null, configPath: string }|null} */
+	let res = null;
 	try {
 		const config = {
 			root,
@@ -125,14 +133,14 @@ test("launchAutoState persists the auto-state config", async () => {
 			piCommand: process.execPath,
 			piArgsPrefix: [],
 		};
-		const res = launchAutoState(root, config, { runnerScript: FAKE_PI });
+		res = launchAutoState(root, config, { runnerScript: FAKE_PI });
 		assert.ok(res.pid);
 		assert.equal(res.configPath, P.autoStateConfigPath(root, "view_3"));
 		const persisted = await waitFor(() => (existsSync(res.configPath) ? readFileSync(res.configPath, "utf8") : null));
 		assert.ok(persisted, "auto-state config must be written");
 		assert.equal(JSON.parse(persisted).runId, "run_3");
 	} finally {
-		rmSync(root, { recursive: true, force: true });
+		await killAndRemove(res?.pid ?? null, root);
 	}
 });
 
@@ -204,3 +212,54 @@ test("async spawn failures are swallowed instead of crashing the host (issue #86
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+// --- Launched-runner cleanup (issue #241) ---
+
+/**
+ * Liveness probe for a runner this file spawned. Signal 0 performs the
+ * existence/permission check without delivering a signal; a throw means the pid
+ * is gone.
+ * @param {number} pid
+ * @returns {boolean}
+ */
+function isAlive(pid) {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Stop a launched fake runner and delete its temp root. These fixtures pass
+ * `config.cwd = root` to the detached runner, and on win32 that pinned directory
+ * makes an immediate `rmSync` fail EPERM until the process has fully exited — so
+ * terminate first, poll for the exit, then retry the delete with slack.
+ * @param {number|null} pid
+ * @param {string} dir
+ * @returns {Promise<void>}
+ */
+async function killAndRemove(pid, dir) {
+	if (pid) {
+		try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+		for (let waited = 0; waited < 2000; waited += 25) {
+			if (!isAlive(pid)) break;
+			await sleep(25);
+		}
+		if (isAlive(pid)) {
+			try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+		}
+	}
+	let lastError = null;
+	for (let attempt = 0; attempt < 40; attempt += 1) {
+		try {
+			rmSync(dir, { recursive: true, force: true });
+			return;
+		} catch (error) {
+			lastError = error;
+			await sleep(50);
+		}
+	}
+	if (lastError) throw lastError;
+}
