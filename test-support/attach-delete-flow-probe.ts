@@ -13,6 +13,13 @@ import { createService } from "../src/runtime/service.mjs";
 import { createView } from "../src/core/store.mjs";
 import { dashboardAttachLoop } from "../src/commands/agent-board.ts";
 
+// This probe asserts the dashboard attach/delete flow, not coordinator
+// semantics. State commands through the real service below would lazily spawn
+// a detached coordinator whose boot replay recreates this temp root after the
+// teardown rmSync (issue #241); "off" makes them take the in-process fallback
+// instead, before any state write.
+process.env.AGENT_BOARD_COORDINATOR = "off";
+
 const root = mkdtempSync(join(tmpdir(), "agentview-del-flow-"));
 createView(root, { id: "v1", name: "one", cwd: root });
 createView(root, { id: "v2", name: "two", cwd: root });
