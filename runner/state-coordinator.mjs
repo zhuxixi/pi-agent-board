@@ -33,6 +33,11 @@
  *   replay is deterministic — no re-decision, no re-binding.
  * - Legacy adoption: a view without materializedRevision is stamped as part of
  *   its first applied command's single materialization write (no extra write).
+ * - Root guard (issue #241): a board root that disappears — or is REPLACED by a
+ *   write that recreates it in the delete window — makes the supervised
+ *   heartbeat step down with exit 0 and one stderr line. Neither path writes a
+ *   diagnostic or state: every append helper ensureDirs its parent and would
+ *   recreate the deleted root skeleton.
  * - AGENT_BOARD_COORDINATOR=off makes the process exit 0 immediately (tests and
  *   the client's degradation path).
  */
@@ -133,16 +138,60 @@ function rootVanished() {
 }
 
 /**
- * The one stderr line both "no board root" exits emit (issue #241): the boot
+ * Snapshot the board root directory's filesystem identity (issue #241).
+ * `{dev, ino}` identifies one exact directory: a delete-and-recreate at the same
+ * path gets a new inode, which is the only way to tell "the root came back" from
+ * "the root never left" once a write's ensureDir has recreated it. Returns null
+ * when the root is missing or the filesystem reports no usable identity (ino 0,
+ * or no dev/ino at all), which degrades the check to existence-only.
+ * @returns {{dev: number, ino: number}|null}
+ */
+function captureRootIdentity() {
+	try {
+		const st = statSync(root);
+		if (!Number.isFinite(st.dev) || !Number.isFinite(st.ino) || st.ino === 0) return null;
+		return { dev: st.dev, ino: st.ino };
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Whether the board root is gone or was replaced since boot (issue #241).
+ * Existence alone is not enough: `appendCommand`/`writeState`/lease acquisition
+ * ensureDir their parent, so a write landing after the delete RECREATES the path
+ * and a plain stat then reads "present" (final-review I1). Comparing against the
+ * identity captured at boot detects the replacement on the next supervised tick,
+ * including the boot-window race where lease acquisition recreates the root.
+ * Only `ENOENT` counts as missing; any other stat error (EACCES/EBUSY) reads as
+ * present so a transient access failure never kills a healthy coordinator. With
+ * no captured identity the check degrades to existence-only (never a false
+ * step-down).
+ * @param {{dev: number, ino: number}|null} identity
+ * @returns {"missing"|"replaced"|null}
+ */
+function rootVanishedOrReplaced(identity) {
+	try {
+		const st = statSync(root);
+		if (!identity) return null;
+		return st.dev !== identity.dev || st.ino !== identity.ino ? "replaced" : null;
+	} catch (err) {
+		return /** @type {NodeJS.ErrnoException} */ (err)?.code === "ENOENT" ? "missing" : null;
+	}
+}
+
+/**
+ * The one stderr line every "root is gone" exit emits (issue #241): the boot
  * guard and the supervised step-down. Neither writes a diagnostic: every
  * append helper ensures its parent directory (src/core/atomic.mjs), so a write
  * under <root>/views/_coordinator would recreate the deleted directory chain —
  * the throwaway-root residue this issue exists to remove. Detached callers
  * ignore stdio; a test pipes stderr and attributes the exit to this line.
+ * @param {"missing"|"replaced"} state
  * @param {string} outcome
  */
-function writeRootMissing(outcome) {
-	process.stderr.write(`state-coordinator: board root missing (${root}); ${outcome}\n`);
+function writeRootGone(state, outcome) {
+	process.stderr.write(`state-coordinator: board root ${state} (${root}); ${outcome}\n`);
 }
 
 async function main() {
@@ -150,13 +199,20 @@ async function main() {
 	const startedAt = Date.now();
 	const heartbeatMs = resolveTestMs(process.env, "AGENT_BOARD_TEST_COORDINATOR_HEARTBEAT_MS", HEARTBEAT_MS);
 
+	// Capture the root's identity BEFORE the boot guard (issue #241, final-review
+	// I1): a delete between the guard and lease acquisition would let that
+	// ensureDir recreate the root WITH a valid lease, and the process would then
+	// serve it forever. The tick compares against this snapshot, so the recreated
+	// directory is detected on the first heartbeat.
+	const rootIdentity = captureRootIdentity();
+
 	// 0. A root that is already gone must fail closed (issue #241 A3b). Lease
 	// acquisition runs ensureDir, which would happily REBUILD the deleted board
 	// and serve that empty root forever — the exact orphan shape this issue is
 	// about. "Nothing to serve" is an expected outcome like a lost lease, so it
 	// exits 0, writes no diagnostic, and logs the shared stderr line.
 	if (rootVanished()) {
-		writeRootMissing("nothing to serve; exiting");
+		writeRootGone("missing", "nothing to serve; exiting");
 		process.exit(0);
 	}
 
@@ -284,24 +340,35 @@ async function main() {
 		// preempted as stale, and stepping down before the socket exists would
 		// make the A14 endpoint cleanup a no-op.
 		heartbeatTimer = setInterval(() => {
-			// Step down when the board root is gone (issue #241): a detached
-			// coordinator that outlives its root serves nobody, and its lease can
-			// never be reclaimed while the pid is alive. Detection reuses this
-			// tick — no second timer — so the worst case is one heartbeat.
+			// Step down when the board root is gone or was REPLACED (issue #241):
+			// a detached coordinator that outlives its root serves nobody, and its
+			// lease can never be reclaimed while the pid is alive. Detection reuses
+			// this tick — no second timer — so the worst case is one heartbeat.
 			//
-			// No diagnostic is written on this path: every append helper
+			// Existence alone is not enough (final-review I1): a write landing after
+			// the delete (appendCommand / writeState → ensureDir) recreates the
+			// directory, so a plain stat would read "present" and the coordinator
+			// would serve a dead board. The boot-time dev/ino identity distinguishes
+			// the recreated directory from the original one, and the same guard
+			// catches a root deleted between the boot guard and lease acquisition
+			// (that ensureDir would recreate it WITH a lease).
+			//
+			// No diagnostic is written on either path: every append helper
 			// ensureDirs its parent (src/core/atomic.mjs), so appending to
 			// <root>/views/_coordinator/diagnostics.jsonl would RECREATE the
 			// deleted directory chain — reintroducing exactly the throwaway-root
 			// residue this issue measures (U1). The shared stderr line is the
 			// attribution instead; detached callers ignore stdio, while a test
-			// spawns with a stderr pipe.
+			// spawns with a stderr pipe. Residual accepted (spec §7): a write in
+			// the delete window may leave a skeleton directory (data, not a
+			// process); this tick bounds its lifetime.
 			//
 			// A missing root also makes the touch below fail, but that path needs
 			// three consecutive failures; checking first attributes the step-down
 			// to the real cause and vacates the root immediately.
-			if (rootVanished()) {
-				writeRootMissing("stepping down");
+			const rootState = rootVanishedOrReplaced(rootIdentity);
+			if (rootState) {
+				writeRootGone(rootState, "stepping down");
 				shutdown(0);
 				return;
 			}

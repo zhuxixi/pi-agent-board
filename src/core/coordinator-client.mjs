@@ -174,6 +174,12 @@ async function replaceStaleCoordinator(root, socketPath) {
  * If the stale instance cannot be replaced (unkillable, socket stuck), report
  * `coordinator_stale_protocol` instead of pretending it is healthy.
  *
+ * Root-lifetime note (issue #241): a root that does not exist yet is no longer
+ * lazily created — the boot guard makes the spawned coordinator exit 0, so a
+ * `ensureCoordinator` call on a missing root waits the full `ENSURE_WINDOW_MS`
+ * (~10 s) and returns `coordinator_unavailable`. No in-repo caller does that;
+ * external one-shot callers that relied on a lazily-created board are affected.
+ *
  * @param {string} root
  * @param {{ runnerScript?: string, node?: string, probeTimeoutMs?: number, ensureWindowMs?: number, pollMs?: number, connect?: (path: string) => import("node:net").Socket }} [opts]
  * @returns {Promise<EnsureResult>}

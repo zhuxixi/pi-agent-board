@@ -142,7 +142,9 @@ export function coordinatorSpawnPlan(root) {
  * Idempotent by lease — a second instance loses the coordinator lease and
  * exits silently, so callers may spawn freely on probe failure.
  * The child's cwd is the root's PARENT (issue #241): the coordinator derives
- * paths from argv and cwd must not pin the root on win32.
+ * paths from argv and cwd must not pin the root on win32. At a drive/filesystem
+ * root (win32 `C:\`, POSIX `/`) the parent is the root itself — see
+ * `coordinatorSpawnPlan`.
  * @param {string} root
  * @param {{ runnerScript: string, node?: string }} opts
  * @returns {{ pid: number|null }}
