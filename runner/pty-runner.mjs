@@ -22,6 +22,7 @@ import { lastVisibleLogLine } from "../src/core/heuristics.mjs";
 import { acquireOwnedViewLock } from "../src/core/locks.mjs";
 import * as P from "../src/core/paths.mjs";
 import { captureStartToken } from "../src/core/pid.mjs";
+import { readProcessStartToken } from "../src/core/process-identity-probe.mjs";
 import { appendBoundedScreenLog, reconcileScreenLog } from "../src/core/screen-log.mjs";
 import { createTerminalModel, feedOutput, resizeChildAndModel } from "../src/core/terminal-model.mjs";
 import { createTerminalSubscription } from "../src/core/terminal-attach-protocol.mjs";
@@ -544,6 +545,10 @@ function legacyMain(config) {
  * @param {import("../src/core/types.mjs").HostConfig & { instanceId: string }} config
  */
 async function ownedMain(config) {
+	// Self token for the published runner identity (issue #238): started before
+	// the start lease so the win32 creation-time probe (~390 ms) overlaps the
+	// lease, the yield check and endpoint binding. Never awaited here.
+	const selfTokenPromise = readProcessStartToken(process.pid);
 	if (!config.socketPath) failEarly("pty-runner: owned config missing socketPath");
 	const socketPath = config.socketPath;
 	const screenLog = P.screenLogPath(config.root, config.viewId);
@@ -931,10 +936,11 @@ async function ownedMain(config) {
 	}
 
 	// 4. Publish runner identity while still holding the lease.
+	const selfToken = await selfTokenPromise;
 	const claimedSelf = ownedUpdate((cur) => ({
 		...cur,
 		runnerPid: process.pid,
-		runnerIdentity: { pid: process.pid, startToken: captureStartToken(process.pid) },
+		runnerIdentity: { pid: process.pid, startToken: selfToken },
 		runnerSpawnedAt: cur.runnerSpawnedAt ?? Date.now(),
 		state: cur.state === "alive" ? "alive" : "starting",
 	}));
@@ -1021,10 +1027,13 @@ async function ownedMain(config) {
 	});
 
 	// 6. Re-check ownership after the child exists, then publish ready.
+	// The child's token is read asynchronously (win32 probe, issue #238); a
+	// failed read yields null, the same shape the record had before #238.
+	const childToken = await readProcessStartToken(childPid);
 	const ready = ownedUpdate((cur) => ({
 		...cur,
 		childPid,
-		childIdentity: { pid: childPid, startToken: captureStartToken(childPid) },
+		childIdentity: { pid: childPid, startToken: childToken },
 		childSpawnedAt: Date.now(),
 		state: "alive",
 		readyAt: Date.now(),
