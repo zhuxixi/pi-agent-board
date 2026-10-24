@@ -217,10 +217,10 @@ Inside the `setInterval` callback started in `server.listen` (`runner/state-coor
 ```js
 heartbeatTimer = setInterval(() => {
 	if (rootVanished()) {
-		// Root is gone, so the diagnostic write itself will fail; it is
-		// best-effort and must not block the step-down (same fence as the
-		// heartbeat-loss path, issue #224 D4).
-		try { appendCoordinatorDiagnostic("coordinator_root_missing", { root }, "error"); } catch { /* root is gone */ }
+		// No diagnostic: appendLine ensureDirs its parent and would recreate
+		// <root>/views/_coordinator, leaving the skeleton dir U1 measures
+		// (root-missing step-down is attributed on stderr only).
+		process.stderr.write(`state-coordinator: board root missing (${root}); stepping down\n`);
 		shutdown(0);
 		return;
 	}
@@ -232,9 +232,9 @@ heartbeatTimer = setInterval(() => {
 
 - [ ] **Step 5: Write A3b (boot with an already-missing root) and A4 (no false positive)**
 
-A3b: create a root with `mkdtempSync`, `rmSync` it, then `launchCoordinator(root, { runnerScript: COORDINATOR_SCRIPT })`; poll `isAlive(pid)` and assert it exits within 5 s; assert nothing remains bound (a probe connect fails). Boot fails lease acquisition (`shutdown` path is not involved) and must exit 0 without lingering.
+A3b: create a root with `mkdtempSync`, `rmSync` it, then spawn the runner directly (`spawn(process.execPath, [COORDINATOR_SCRIPT, plan.root], { cwd: plan.cwd, stdio: ["ignore", "pipe", "pipe"] })` with `plan = coordinatorSpawnPlan(root)`); await exit and assert `code === 0`, `signal === null`, stderr matches `/board root missing/`, and the root still does not exist. (The boot guard exists because lease acquisition `ensureDir`s and would recreate the root — "fails lease acquisition" is not a viable boot path.)
 
-A4: with the same 100 ms knob, launch on an existing root, wait ≥ 3 ticks (`await new Promise((r) => setTimeout(r, 500))`), then assert `isAlive(pid)` and a raw `ping`/`pong` round-trip on the endpoint; finally kill it. Assert the step-down diagnostic code is absent: read `views/_coordinator/diagnostics.jsonl` if present and assert no `"code":"coordinator_root_missing"` line.
+A4: with the same 100 ms knob, spawn the runner the same way with piped stderr on an existing root, wait ≥ 3 ticks (`await new Promise((r) => setTimeout(r, 500))`), then assert the child is alive and a raw `ping`/`pong` round-trip on the endpoint succeeds; assert stderr contains **no** `board root missing` line (the step-down's only observable — it writes no diagnostic). Finally kill it via the SIGTERM → poll → SIGKILL ladder.
 
 - [ ] **Step 6: Run A3, A3b, A4** — all PASS. If A4 fails because the coordinator was killed by the test's own knob, restore the env var before spawning (the knob is read at coordinator `main()` start).
 

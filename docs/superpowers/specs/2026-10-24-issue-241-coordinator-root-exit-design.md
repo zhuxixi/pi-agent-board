@@ -113,7 +113,9 @@ interval (started in the `server.listen` callback, `:237-272`, default 1000 ms,
 ```js
 heartbeatTimer = setInterval(() => {
 	if (rootVanished()) {
-		try { appendCoordinatorDiagnostic("coordinator_root_missing", { root }, "error"); } catch { /* root is gone */ }
+		// No diagnostic: appendLine ensureDirs its parent and would recreate
+		// <root>/views/_coordinator, leaving the skeleton dir U1 measures.
+		process.stderr.write(`state-coordinator: board root missing (${root}); stepping down\n`);
 		shutdown(0);
 		return;
 	}
