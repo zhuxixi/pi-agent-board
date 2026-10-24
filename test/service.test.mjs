@@ -2328,3 +2328,145 @@ test("markCompleted clears autoState in the run status so in-flight model passes
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+/** Minimal recoverable new-protocol host record for identity observation tests. */
+function identityHost(root, viewId, patch = {}) {
+	writeHost(root, {
+		version: 1,
+		viewId,
+		mode: "pty",
+		instanceId: "i1",
+		configPath: P.hostConfigPathFor(root, viewId, "i1"),
+		socketPath: P.hostEndpointPathFor(process.platform, root, viewId, "i1"),
+		claimAt: Date.now() - 60_000,
+		claimPid: null,
+		runnerPid: null,
+		runnerIdentity: null,
+		runnerSpawnedAt: null,
+		childPid: null,
+		childIdentity: null,
+		childSpawnedAt: null,
+		state: "alive",
+		startedAt: Date.now() - 60_000,
+		lastSeenAt: Date.now(),
+		endedAt: null,
+		exitCode: null,
+		error: null,
+		readyAt: Date.now() - 50_000,
+		cols: 80,
+		rows: 24,
+		attachedClients: 0,
+		stopRequestedAt: null,
+		revokeToken: null,
+		stopReason: null,
+		...patch,
+	});
+}
+
+test("observe: a matching win32 token is owned and a mismatching one is foreign", async () => {
+	/** Run one recovery against a runner identity recorded with `recordToken` and re-read as `observedToken`. */
+	async function run(recordToken, observedToken) {
+		const root = freshRoot();
+		const signals = [];
+		let alive = true;
+		try {
+			createView(root, { id: "v1", name: "a", cwd: "/r" });
+			identityHost(root, "v1", {
+				runnerPid: 4242,
+				runnerIdentity: { pid: 4242, startToken: recordToken },
+				runnerSpawnedAt: 1,
+			});
+			const svc = service(root, {
+				isAlive: () => alive,
+				readStartToken: async () => observedToken,
+				signalOwnedProcess: (identity, signal) => {
+					signals.push({ pid: identity.pid, signal });
+					alive = false;
+				},
+			});
+			const res = await svc.recoverHost("v1", "i1");
+			return { res, signals, host: readHost(root, "v1") };
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	}
+
+	// Equal tokens → "owned": the runner is escalated once, then observed dead.
+	const owned = await run("ct:111", "ct:111");
+	assert.equal(owned.res.ok, true);
+	assert.deepEqual(owned.signals, [{ pid: 4242, signal: "SIGTERM" }], "an owned runner receives the escalation");
+	assert.notEqual(owned.host.instanceId, "i1", "the owned-then-dead runner is replaced");
+
+	// A reused pid reads a different token → "foreign": ended but never signalled.
+	const foreign = await run("ct:111", "ct:222");
+	assert.equal(foreign.res.ok, true);
+	assert.equal(foreign.res.recovered, true);
+	assert.deepEqual(foreign.signals, [], "a foreign pid must never be signalled");
+});
+
+test("observe: a null record token never probes and stays unknown", async () => {
+	const root = freshRoot();
+	const signals = [];
+	let readCalls = 0;
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		identityHost(root, "v1", {
+			runnerPid: 4242,
+			runnerIdentity: { pid: 4242, startToken: null },
+			runnerSpawnedAt: 1,
+		});
+		const svc = service(root, {
+			isAlive: () => true,
+			readStartToken: async () => {
+				readCalls += 1;
+				return "ct:111";
+			},
+			probeProcessIdentity: async () => null,
+			signalOwnedProcess: (identity, signal) => signals.push({ pid: identity.pid, signal }),
+		});
+
+		const res = await svc.recoverHost("v1", "i1");
+
+		assert.equal(res.ok, false);
+		assert.equal(res.error, "recovery_pending");
+		assert.equal(readCalls, 0, "a null record token must not trigger a token read");
+		assert.deepEqual(signals, []);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("observe: tokenMemo probes each pid once per recovery", async () => {
+	const root = freshRoot();
+	const signals = [];
+	let readCalls = 0;
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		// Runner and child share one pid so two observations must share one token read.
+		identityHost(root, "v1", {
+			runnerPid: 4242,
+			runnerIdentity: { pid: 4242, startToken: "ct:222" },
+			runnerSpawnedAt: 1,
+			childPid: 4242,
+			childIdentity: { pid: 4242, startToken: "ct:222" },
+			childSpawnedAt: 1,
+		});
+		const svc = service(root, {
+			isAlive: () => true,
+			readStartToken: async () => {
+				readCalls += 1;
+				return "ct:111";
+			},
+			signalOwnedProcess: (identity, signal) => signals.push({ pid: identity.pid, signal }),
+		});
+
+		const res = await svc.recoverHost("v1", "i1");
+
+		assert.equal(res.ok, true);
+		assert.equal(res.recovered, true, "two foreign observations end both roles");
+		assert.deepEqual(signals, []);
+		assert.equal(readCalls, 1, "runner and child share one memoized token read for the same pid");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
