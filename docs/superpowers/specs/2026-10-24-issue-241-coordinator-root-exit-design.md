@@ -5,6 +5,7 @@ Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-24T18:04:00+08:00 (spec-cross-review round 2, degraded — converged; R2-D1..D3)
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-24T18:35:00+08:00 (task-2 review I1: the root-missing step-down must not write a diagnostic — `appendLine` recreates the root skeleton; stderr attribution only. A3/A4 updated, §3.2/§6/§7 corrected)
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-24T19:05:00+08:00 (task-3 verification ruling: A7 is a CI acceptance — the dev Windows box has 62 pre-existing environmental failures; local gate = 0 survivors + no new failure. U1 reworded to measure residue, not exit codes; §7 baseline row added)
+Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-24T19:20:00+08:00 (final-review MUST-FIX I1: writes recreate a deleted root, so existence-only detection is insufficient — add the boot-time dev/ino root-identity guard, A3c integration test, correct §7/G1; wrapper trailing-separator false-green gets a code+unit fix in the same wave)
 
 Status: step-4 root-cause report / spec draft (github-issue-driven). Cross-review:
 `research/spec-review-round-1.md` (round 1 not converged → this revision; round 2
@@ -47,7 +48,9 @@ Goals:
 
 - G1 A coordinator whose root was deleted exits on its own within a bounded,
   small window, releasing its lease. Covers test/probe roots and one-shot CLI
-  roots, not just this repo's suite.
+  roots, not just this repo's suite. A concurrent write that recreates the
+  directory is detected by the boot-time dev/ino identity guard and steps down on
+  the next tick (residual: a skeleton directory, never a surviving process).
 - G2 Throwaway roots become deletable on win32 while a coordinator serves them
   (the cwd handle is released), so test/probe cleanup stops leaving directories.
 - G3 The test suite fails loudly if it leaks a coordinator: after `node --test`
@@ -133,6 +136,35 @@ function rootVanished() {
 	catch (err) { return err?.code === "ENOENT"; }
 }
 ```
+
+**Root-replacement guard (final-review I1).** An existence-only check is not
+enough: a write that lands after the delete (`appendCommand` / `writeState` →
+`ensureDir`) *succeeds by recreating* the directory, so the next tick sees
+"present" and the coordinator serves a dead board — or, in the boot-window race
+(guard passes, then the root is deleted before lease acquisition `ensureDir`),
+it acquires a lease on the recreated root and serves forever. Capture the
+directory identity once at boot and step down when it changes:
+
+```js
+const rootIdentity = captureRootIdentity(); // {dev, ino} | null (null when the FS reports ino 0)
+function rootVanishedOrReplaced() {
+	try {
+		const st = statSync(root);
+		if (!rootIdentity) return null;
+		return st.dev !== rootIdentity.dev || st.ino !== rootIdentity.ino ? "replaced" : null;
+	} catch (err) {
+		return err?.code === "ENOENT" ? "missing" : null;
+	}
+}
+```
+
+The boot guard captures the identity before lease acquisition and compares the
+same way. Step-down stderr: `state-coordinator: board root missing (<root>);
+stepping down` or `state-coordinator: board root replaced (<root>); stepping
+down`. When `ino` is unavailable/0 the check degrades to existence-only (never a
+false step-down). Residual accepted: a write in the delete window may leave a
+skeleton directory (data, not a process); the guard bounds its lifetime to one
+tick.
 
 - `ENOENT` ⇒ step down. Any other error (EACCES/EBUSY) or success ⇒ keep
   serving — a transient access failure must not kill a healthy coordinator.
@@ -258,6 +290,7 @@ Verification commands assume repo root. `WT` = worktree absolute path (step 5).
 | A1 | spawn plan: absolute argv + parent-dir cwd | Automated (unit) — `test/coordinator-lifecycle.test.mjs` | `coordinatorSpawnPlan` on absolute, trailing-slash, dot-segment roots | `root` absolute, `cwd === dirname(resolve(root))`, no throw |
 | A2 | `launchCoordinator` actually spawns with that plan | Automated (integration, cross-platform) — same file | spawn a temp fake runner via `launchCoordinator(root, {runnerScript: fake})`; fake writes `{cwd: process.cwd(), arg: process.argv[2]}` under root; poll for the file | `arg === root` (absolute); both sides normalized with `path.resolve` and compared case-insensitively on win32 ⇒ `cwd === dirname(root)`; fails if cwd reverts to `root` |
 | A3 | root-vanished self-exit releases the process; root becomes and stays deletable | Automated (integration) — same file | set `AGENT_BOARD_TEST_COORDINATOR_HEARTBEAT_MS=100` before spawn (restore in `finally`); spawn the real runner directly with the `coordinatorSpawnPlan` argv/cwd and `stdio: ["ignore", "pipe", "pipe"]`; wait until the endpoint answers; assert lease `owner.json` exists at `<root>/views/_coordinator/state-coordinator.lock/owner.json` (`P.viewLockPath`, `paths.mjs:171`) and pid alive; `rmSync(root, {maxRetries: 5, retryDelay: 50})`; wait for exit | rmSync does not throw; root gone and stays absent after exit; exit code 0; stderr matches `board root missing`; "exists before gone" asserted first (win32 rmSync success is the cwd evidence, stderr the self-exit attribution) |
+| A3c | root recreated in the delete window does not defeat step-down | Automated (integration) — same file | start the real coordinator (direct spawn, stderr piped, 100 ms knob); wait ready; `rmSync(root)`; immediately send one valid `state_command` that is rejected but journaled (e.g. `patch_fields` on an unknown view) so the reply path recreates the root skeleton; await exit | exit code 0 within 2 s; stderr matches `/board root (missing\|replaced)/`; the directory may remain as a skeleton (data residue accepted) but no process survives |
 | A4 | root present ⇒ no step-down (no false positive) | Automated (integration) — same file | same knob; start via the same direct spawn (stderr piped), wait ≥ 3 ticks (≈ 500 ms), then `rawPing` the endpoint and assert pid alive | still alive and answering ping; stderr contains no `board root missing` line (the root-missing path is observable only on stderr — it writes no diagnostic by design) |
 | A5 | wrapper selection purity | Automated (unit) — `test/run-tests-wrapper.test.mjs` | win32 CIM array **and** single-object JSON samples + POSIX `ps` sample incl. a long (>200 char) command line; this-checkout vs other-checkout script path; temp vs production root; slash/case variants | exact pid sets, no throws, long line not truncated |
 | A6 | wrapper orchestration + import safety | Automated (unit, injected fakes) — same file | survivors present → kill called for each, exit 1; clean → no kill, test exit code passthrough; snapshot survivors warn-only; `exitCode === null` → failure; `import` of the module performs no I/O and starts nothing | behavior as specified; importing twice is safe |
@@ -305,7 +338,7 @@ reproduction of the report.
 |---|---|
 | Root-missing step-down | writes no diagnostic and no state: `appendLine` recreates the parent chain, so a write would resurrect the deleted root skeleton; the step-down logs one stderr line and `shutdown(0)` stays unblocked. |
 | `statSync` EACCES/EBUSY (transient) | treat as "root present", keep serving; only ENOENT steps down. |
-| Root removed while a command is being journaled | the write fails first; client sees the ambiguous `connection_reset`/`timeout` and must not retry with a fresh commandId (existing contract). |
+| Root removed while a command is being journaled | the write may **succeed by recreating the root** (`ensureDir`), so existence-only detection is insufficient; the boot-time dev/ino identity guard detects the replacement on the next tick and steps down, leaving at most a skeleton directory. The client still sees the ambiguous `connection_reset`/`timeout` and must not retry with a fresh commandId (existing contract). |
 | Wrapper kills another checkout's test coordinator | impossible: selection requires this checkout's absolute `runner/state-coordinator.mjs` path. |
 | Wrapper runs while a real board coordinator serves a temp root (user set `AGENT_BOARD_ROOT` to a temp dir) | temp predicate would match; acceptable known limit — such a setup is itself a throwaway. Documented, not guarded. |
 | Enumeration unavailable | warn + fail-open (skip residue check); A6 covers the failed-enumeration branch. |
