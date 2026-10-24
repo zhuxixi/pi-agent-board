@@ -41,13 +41,19 @@ export function isStartingWithinGrace(host, now, graceMs) {
  * Five states — `not_started` (never spawned) must never be conflated with
  * `dead`, and a missing stable token must never be guessed as alive-owned:
  * it degrades to `unknown` so recovery can only refuse, never misfire.
+ *
+ * `not_started` requires BOTH the identity and `spawnedAt` to be absent: a
+ * recorded identity is proof the spawn happened, so such a record is judged by
+ * the observation. Calling it `not_started` (a releasable state) on a
+ * spawned-but-incomplete record could release a still-live host and let a new
+ * host double-write the session file.
  * @param {{pid:number,startToken:string|null}|null|undefined} identity The recorded identity.
  * @param {{alive:boolean,startToken:string|null}|null|undefined} observed The observation.
  * @param {number|null|undefined} spawnedAt Non-null only after spawn was confirmed.
  * @returns {"not_started"|"dead"|"owned"|"foreign"|"unknown"}
  */
 export function processIdentityState(identity, observed, spawnedAt) {
-	if (spawnedAt == null) return "not_started";
+	if (spawnedAt == null && identity == null) return "not_started";
 	if (observed?.alive === false) return "dead";
 	if (identity?.startToken == null || observed?.startToken == null) return "unknown";
 	return identity.startToken === observed.startToken ? "owned" : "foreign";

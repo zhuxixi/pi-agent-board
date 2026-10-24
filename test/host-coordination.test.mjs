@@ -29,6 +29,18 @@ test("process identity states", () => {
 	assert.equal(processIdentityState({ pid: 1, startToken: null }, { alive: true }, 1), "unknown");
 });
 
+test("processIdentityState: an identity-bearing record is never not_started", () => {
+	assert.equal(processIdentityState({ pid: 1, startToken: "t" }, { alive: true, startToken: "t" }, null), "owned");
+	assert.equal(processIdentityState({ pid: 1, startToken: "t" }, { alive: true, startToken: "u" }, null), "foreign");
+	assert.equal(processIdentityState({ pid: 1, startToken: "t" }, { alive: false }, null), "dead");
+	assert.equal(processIdentityState({ pid: 1, startToken: "t" }, { alive: true, startToken: null }, null), "unknown");
+});
+
+test("processIdentityState: not_started needs both identity and spawnedAt to be absent", () => {
+	assert.equal(processIdentityState(null, null, null), "not_started");
+	assert.equal(processIdentityState(undefined, null, null), "not_started");
+});
+
 test("commandLineMentions normalizes slashes/case and respects path boundaries", () => {
 	assert.equal(commandLineMentions('node C:\\x\\cli.js --session "C:\\a b\\s.jsonl"', "C:/a b/s.jsonl"), true);
 	assert.equal(commandLineMentions("NODE --session c:\\A\\S.JSONL", "C:\\a\\s.jsonl"), true);
