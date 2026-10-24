@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
+	creationTimeToken,
 	parseProbeJson,
 	parsePsElapsedMs,
 	parsePsProbeLine,
@@ -102,4 +103,18 @@ test("resolveProbeCommand is platform- and pid-aware", () => {
 	assert.equal(resolveProbeCommand("linux", 123), null);
 	assert.equal(resolveProbeCommand("win32", 0), null);
 	assert.equal(resolveProbeCommand("win32", 1.5), null);
+});
+
+test("creationTimeToken formats only positive safe integers", () => {
+	assert.equal(creationTimeToken(1792811668715), "ct:1792811668715");
+	assert.equal(creationTimeToken(1), "ct:1");
+	assert.equal(creationTimeToken(0), null);
+	assert.equal(creationTimeToken(-1), null);
+	assert.equal(creationTimeToken(1.5), null);
+	assert.equal(creationTimeToken(NaN), null);
+	assert.equal(creationTimeToken(Infinity), null);
+	assert.equal(creationTimeToken(Number.MAX_SAFE_INTEGER + 1), null);
+	assert.equal(creationTimeToken("1792811668715"), null);
+	assert.equal(creationTimeToken(null), null);
+	assert.equal(creationTimeToken(undefined), null);
 });

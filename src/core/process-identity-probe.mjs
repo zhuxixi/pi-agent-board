@@ -19,6 +19,20 @@ export const PROBE_TIMEOUT_MS = 3_000;
 const PROBE_MAX_BUFFER = 64 * 1024;
 
 /**
+ * Format an absolute creation time as the comparable `ct:` identity token
+ * (issue #238): two reads of the same process yield the same token regardless
+ * of when they happen. Only positive safe integers format — anything else
+ * (missing creation time, a fractional or out-of-range value, a coerced
+ * string) would produce a token that can never match a recorded one.
+ * @param {number} creationTimeMs
+ * @returns {string|null}
+ */
+export function creationTimeToken(creationTimeMs) {
+	if (!Number.isSafeInteger(creationTimeMs) || creationTimeMs <= 0) return null;
+	return `ct:${creationTimeMs}`;
+}
+
+/**
  * Parse an epoch-milliseconds value from CIM JSON output. Accepts decimal
  * digits only: PowerShell can hand back an empty string or a negative number
  * for protected processes, neither of which is a usable creation time.
