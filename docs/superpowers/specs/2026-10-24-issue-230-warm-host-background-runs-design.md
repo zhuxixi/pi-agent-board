@@ -86,8 +86,8 @@ pi-dynamic-workflows 的 v2 run head `<workflowHome>/projects/<slug>-<sha12>/run
 service.pruneWarmHosts(pruneOpts)                                   [src/runtime/service.mjs:915]
  1. dry = selectIdleHostsToEvict(listRows(root), {ttl,maxWarm,grace,keepViewId})   // 纯，无保护
  2. dry 两列表都空 → return                                        // 无 IO，保持今天的快路径
- 3. scan = scanBackgroundRuns({ workflowHome, minMtimeMs })        // IO，一次
- 4. isProtected = (row) => classifyRunForRow(scan.heads, row, now) === "protecting"  // 纯
+ 3. scan = scanBackgroundRuns({ workflowHome, minMtimeMs })        // IO，一次；scan.ok === false → 该轮跳过保护（fail-open，D6），已读 head 仍参与选择，停前 fresh 探测失败时才报 warm_prune_probe_failed
+ 4. isProtected = (row) => classifyRunsForRow(scan.heads, { sessionFile: row.meta.sessionFile, hostStartedAt: row.host?.startedAt }).state === "protecting"  // 纯
  5. {ttlEvicted, excessEvicted} = selectIdleHostsToEvict(..., {isProtected})         // 纯
  6. for viewId in [...ttl, ...excess]:
       row = loadRow(root, viewId)                                   // 新鲜快照
@@ -105,8 +105,9 @@ service.reconcile()                                                 [src/runtime
         key = `${row.meta.id}:${row.host.endedAt ?? 0}`; if (noticeProbeMemo.has(key)) continue
         res = probeBackgroundRun({ sessionFile: row.meta.sessionFile, hostStartedAt: row.host.startedAt, workflowHome })
         if (!res.ok) continue                     // 探针失败不记 memo：下一 tick 重试（D12）
-        noticeProbeMemo.add(key)                  // 仅在成功探测后记忆；host.endedAt 变化才重探
-        if (!res.paused) continue
+        if (res.paused || (res.running == null && res.paused == null))   // 仅结论明确时记忆（paused 或 running/paused 皆空）
+            noticeProbeMemo.add(key)              // host.endedAt 变化才重探
+        if (!res.paused) continue                 // running 非空 → 不记 memo，下一 tick 重探（running 可能翻成 paused）
         paused = res.paused
         summary = `Background workflow ${paused.runId} was interrupted — resume it from this session`
         if (!row.state?.summary?.startsWith("Background workflow "))
@@ -117,7 +118,7 @@ service.reconcile()                                                 [src/runtime
 
 时序要点（复核视角②）：判定所需的 `row.host.startedAt` 与 `row.meta.sessionFile` 都在 `loadRow` 快照里（`src/core/types.mjs:139`）；`run.updatedAt` 在探测时刻从磁盘读；两者都在**触发时刻**可得，无"上一轮值"依赖。
 
-`minMtimeMs` 计算：`Math.min(...candidates.map(r => r.host?.startedAt ?? (now - ttlMs))) - CLOCK_EPSILON_MS`，`CLOCK_EPSILON_MS = 2000`（FS mtime 粒度容差）。
+`minMtimeMs` 计算：`Math.min(...candidates.map(r => r.host?.startedAt)) - CLOCK_EPSILON_MS`；任一候选行缺失 `host.startedAt` 时禁用预筛（`minMtimeMs = 0`），`CLOCK_EPSILON_MS = 2000`（FS mtime 粒度容差）。
 
 ---
 
@@ -192,7 +193,7 @@ if (isProtected && isProtected(row)) continue; // 后台 run 保护（issue #230
 | 逻辑 | 拆分方式 | 测试边界 |
 |---|---|---|
 | 记录解析（v2 / legacy / 垃圾） | 纯函数 `parseRunHead` | 表驱动单测，输入 JSON 字符串，零文件系统 |
-| 匹配与保护判定 | 纯函数 `classifyRunForRow` / `classifyScanForRow` | 表驱动单测：sessionFile 匹配、`updatedAt` vs `startedAt`、paused、path 归一 |
+| 匹配与保护判定 | 纯函数 `classifyRunForRow` / `classifyRunsForRow` | 表驱动单测：sessionFile 匹配、`updatedAt` vs `startedAt`、paused、path 归一 |
 | 工作流根目录解析 | 纯函数 `resolveWorkflowHome({env,home})` | 单测注入 `env`/`home`，不碰真实 homedir |
 | 目录枚举/预筛/坏文件容错 | IO shell `scanBackgroundRuns` | `mkdtempSync` fixture 造 `projects/*/runs/`，断言 heads 与 `ok` |
 | 淘汰纯判定 | `selectIdleHostsToEvict` + 注入谓词 | 既有文件追加用例；fake 谓词，零 IO |
