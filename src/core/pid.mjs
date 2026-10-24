@@ -45,8 +45,10 @@ export function killProcess(pid, graceMs = 4000) {
 /**
  * POSIX process start token — /proc/<pid>/stat field 22 (starttime), stable
  * across exec(2). Distinguishes an owned-live pid from a reused one; null on
- * failure or non-Linux platforms. Mirrors the runner's captureStartToken
- * (issue #70); shared here for host-meta lease identity (issue #112).
+ * failure or non-Linux platforms. This is the single synchronous implementation
+ * (issue #238 removed the runner copies); the cross-platform async reader in
+ * process-identity-probe.mjs layers a win32 creation-time token on top, and
+ * host-meta lease identity uses this function directly (issue #112).
  * @param {number|null|undefined} pid
  * @returns {string|null}
  */

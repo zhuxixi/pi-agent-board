@@ -2544,3 +2544,48 @@ test("revalidate: a failing re-read refuses the signal", async () => {
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("degradation: unreadable token and unavailable probe stay unknown and pend recovery", async () => {
+	const root = freshRoot();
+	const signals = [];
+	let tokenReads = 0;
+	let probeCalls = 0;
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		identityHost(root, "v1", {
+			state: "stopping",
+			stopRequestedAt: 1,
+			runnerPid: 4242,
+			runnerIdentity: { pid: 4242, startToken: "ct:111" },
+			runnerSpawnedAt: 1,
+		});
+		const svc = service(root, {
+			isAlive: () => true,
+			readStartToken: async () => {
+				tokenReads += 1;
+				return null;
+			},
+			probeProcessIdentity: async () => {
+				probeCalls += 1;
+				return null;
+			},
+			signalOwnedProcess: (identity, signal) => signals.push({ pid: identity.pid, signal }),
+		});
+
+		const res = await svc.recoverHost("v1", "i1");
+
+		assert.equal(res.ok, false);
+		assert.equal(res.error, "recovery_pending", "an unverifiable identity never releases or replaces the host");
+		assert.equal(tokenReads, 1, "the recorded token path was attempted");
+		assert.equal(probeCalls, 1, "the #217 probe fallback was attempted");
+		assert.deepEqual(signals, [], "an unverifiable process is never signalled");
+		const pending = readDiagnostics(root, "v1").filter((e) => e.code === "host_recovery_pending");
+		assert.ok(
+			pending.some((e) => e.details.role === "runner" && e.details.observation === "unknown"),
+			"the stranded runner was observed as unknown",
+		);
+		assert.equal(readHost(root, "v1")?.instanceId, "i1", "the record is untouched (no release, no replacement)");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
