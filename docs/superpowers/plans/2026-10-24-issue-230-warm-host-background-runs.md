@@ -365,18 +365,25 @@ test("A7: isProtected 跳过 ttl 与 maxWarm 两个分支", () => {
 		hostAlive: true,
 		host: { attachedClients: 0, startedAt },
 	});
-	const rows = [mk("a", now - 500_000), mk("b", now - 500_000), mk("c", now - 500_000), mk("d", now - 500_000), mk("e", now - 500_000)];
+	const rows = [
+		mk("a", now - 500_000),
+		mk("b", now - 500_000),
+		mk("c", now - 500_000),
+		mk("d", now - 500_000),
+		mk("e", now - 500_000),
+		mk("f", now - 400_000),
+	];
 	const base = { now, maxWarm: 1, ttlMs: 100_000 };
 
-	const unprotected = selectIdleHostsToEvict(rows, base);
-	assert.deepEqual(unprotected.ttlEvicted, ["a", "b", "c", "d", "e"]);
+	assert.deepEqual(selectIdleHostsToEvict(rows, base).ttlEvicted, ["a", "b", "c", "d", "e", "f"]);
 
 	const protectedIds = new Set(["a", "b", "c", "d"]);
-	const protectedRun = selectIdleHostsToEvict(rows, { ...base, isProtected: (row) => protectedIds.has(row.meta.id) });
-	assert.deepEqual(protectedRun.ttlEvicted, ["e"]);
-	assert.deepEqual(protectedRun.excessEvicted, []);
+	const withGuard = { ...base, isProtected: (row) => protectedIds.has(row.meta.id) };
+	assert.deepEqual(selectIdleHostsToEvict(rows, withGuard).ttlEvicted, ["e", "f"]);
 
+	// cap-only 分支：受保护行不进 survivors，也不占 maxWarm 名额
 	const capOnly = selectIdleHostsToEvict(rows, { now, maxWarm: 1, ttlMs: 0, isProtected: (row) => protectedIds.has(row.meta.id) });
+	assert.deepEqual(capOnly.ttlEvicted, []);
 	assert.deepEqual(capOnly.excessEvicted, ["e"]);
 });
 
@@ -715,7 +722,7 @@ test("A12: 探针失败不记 memo —— 恢复后下一个 tick 仍能写提�
 });
 ```
 
-`test/state-commands.test.mjs`：把 `PATCHABLE_FIELDS["service"]` 断言改为 `{ state: ["lastVisitedAt", "summary"], status: [] }`（两处：L118 与 L648 附近的同类断言）。
+`test/state-commands.test.mjs`：把 `PATCHABLE_FIELDS["service"]` 断言（L118）改为 `{ state: ["lastVisitedAt", "summary"], status: [] }`。
 
 - [ ] **Step 2: 运行确认失败**
 
