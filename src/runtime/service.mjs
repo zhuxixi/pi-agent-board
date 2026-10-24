@@ -1865,7 +1865,7 @@ export function createService(opts) {
 			noticeProbeMemo.add(key);
 			if (!probe.paused) continue;
 			const runId = probe.paused.runId;
-			const summary = `Background workflow ${runId} was interrupted when its host died; resume it from the board.`;
+			const summary = `Background workflow ${runId} was interrupted — resume it from this session`;
 			const alreadyAnnounced = typeof row.state?.summary === "string" && row.state.summary.startsWith("Background workflow ");
 			if (!alreadyAnnounced) {
 				const result = await sendLifecycleCommand({
@@ -1889,7 +1889,7 @@ export function createService(opts) {
 				level: "warn",
 				code: "background_run_interrupted",
 				message: `Background workflow ${runId} was interrupted when its host died`,
-				details: { runId, hostState: host.state },
+				details: { runId, hostState: host.state, exitCode: host.exitCode ?? null },
 			}, { match: ["runId"] });
 		}
 	}

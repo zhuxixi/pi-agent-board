@@ -23,7 +23,7 @@ function deadHostRow(root, id, { paused = true } = {}) {
 	s.currentRunId = null;
 	s.summary = "Turn finished";
 	writeState(root, s);
-	writeHost(root, { viewId: id, mode: "pty", state: "exited", runnerPid: null, startedAt: Date.now() - 3_600_000, endedAt: Date.now() - 60_000, attachedClients: 0, lastSeenAt: Date.now() });
+	writeHost(root, { viewId: id, mode: "pty", state: "exited", runnerPid: null, startedAt: Date.now() - 3_600_000, endedAt: Date.now() - 60_000, exitCode: 0, attachedClients: 0, lastSeenAt: Date.now() });
 	writeFileSync(
 		join(runsDir, "run-9.json"),
 		JSON.stringify({
@@ -47,10 +47,13 @@ test("A12: 生产真实态的死宿主 + paused run -> summary 写入提示，�
 		const service = makeService(root, { workflowHome: fx.wf, sendStateCommand: async () => ({ status: "rejected", reason: "coordinator_disabled" }) });
 		await service.reconcile();
 		const s = readState(root, "view_notice");
-		assert.match(s.summary, /Background workflow run-9 was interrupted/);
-		assert.match(s.summary, /resume/);
+		assert.equal(s.summary, "Background workflow run-9 was interrupted — resume it from this session");
 		const diags = readJsonl(P.diagnosticsPath(root, "view_notice"));
-		assert.equal(diags.filter((d) => d.code === "background_run_interrupted").length, 1);
+		const interrupted = diags.filter((d) => d.code === "background_run_interrupted");
+		assert.equal(interrupted.length, 1);
+		assert.equal(interrupted[0].details.runId, "run-9");
+		assert.equal(interrupted[0].details.hostState, "exited");
+		assert.equal(interrupted[0].details.exitCode, 0);
 		await service.reconcile();
 		assert.equal(readState(root, "view_notice").summary, s.summary);
 		assert.equal(readJsonl(P.diagnosticsPath(root, "view_notice")).filter((d) => d.code === "background_run_interrupted").length, 1);
