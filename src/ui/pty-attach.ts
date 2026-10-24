@@ -6,6 +6,7 @@ import { createConnection, type Socket } from "node:net";
 import type { Component, KeybindingsManager, RgbColor, TUI, TerminalColorScheme, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { resolveAttachDeleteKey } from "../core/attach-delete.mjs";
+import { createPtyKittyImages } from "../core/pty-kitty-images.mjs";
 import { findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
 import { createAttachOutputRenderScheduler, detectCursorDesync, isPtyCursorHidden, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
 import { evaluateAttachReconnect, shouldEscapeAttach } from "../core/pty-attach-reconnect.mjs";
@@ -223,6 +224,7 @@ export class PtyAttachComponent implements Component {
 	// the TUI's wheelDelta instead, which is already accelerated and line-quantified.
 	private readonly mouseWheelLines = resolveWheelLines();
 	private readonly term: XtermLike;
+	private readonly kittyImages: ReturnType<typeof createPtyKittyImages> | null;
 	private cols = 120;
 	private rows = 24;
 	// Absolute buffer line shown at the top of the viewport. null means follow bottom.
@@ -302,6 +304,9 @@ export class PtyAttachComponent implements Component {
 		// parameter property is set regardless of the TS loader's field-init semantics.
 		this.imeCoalesceUninstall = installImeCursorCoalesce(this.tui);
 		this.term = new Terminal({ cols: this.cols, rows: this.rows, scrollback: 2000, allowProposedApi: true });
+		this.kittyImages = process.env.AGENT_BOARD_FORWARD_IMAGES !== "0"
+			? createPtyKittyImages(this.term, () => { this.historyFloor = 0; })
+			: null;
 		// Keep mouse reporting enabled by default so wheel scrolling and local drag-to-copy
 		// selection can coexist inside the attach surface. Set AGENT_BOARD_ATTACH_MOUSE=0
 		// to fall back to terminal-native selection only.
@@ -1731,7 +1736,8 @@ export class PtyAttachComponent implements Component {
 		if (process.env.AGENT_BOARD_FORWARD_IMAGES !== "0") {
 			const { sequences, carry } = extractTerminalPassthroughSequences(this.passthroughCarry + data);
 			this.passthroughCarry = carry;
-			toWrite.push(...sequences);
+			// Kitty placements belong to projected grid rows, not the host's parked cursor.
+			toWrite.push(...sequences.filter((seq) => !seq.startsWith(KITTY_IMAGE_PREFIX)));
 		}
 		if (process.env.AGENT_BOARD_FORWARD_TERMINAL_QUERIES !== "0") {
 			// Issue #128 D1: forward the child's terminal capability queries
@@ -1808,7 +1814,7 @@ export class PtyAttachComponent implements Component {
 		// the initial resize-jiggle redraws would flash through the viewport. Each parsed
 		// chunk also defers the settle window, so the banner holds until output actually
 		// stops arriving (i.e. the redraw finished), not just until the resize jiggle ends.
-		this.term.write(data, () => {
+		this.term.write(this.kittyImages?.transform(data, opts.authoritative) ?? data, () => {
 			if (opts.forwardProtocols || opts.authoritative) this.flushPendingSchemeReport();
 			// Issue #205: baseY is only final once this chunk parsed, and the callback
 			// has no buffer binding — re-read it. Rows past the runner-vouched
@@ -1837,7 +1843,7 @@ export class PtyAttachComponent implements Component {
 			out.push(lineToAnsi(buf.getLine(i), reusable, this.term, i, selection, cursor, cursorHidden));
 		}
 		if (out.length === 0) out.push("Waiting for PTY output…");
-		return { lines: out.slice(-height), cursor };
+		return { lines: this.kittyImages?.project(out.slice(-height), start, height) ?? out.slice(-height), cursor };
 	}
 
 	private close(gracefulSocket = false): void {
@@ -1849,6 +1855,7 @@ export class PtyAttachComponent implements Component {
 		}
 		this.closed = true;
 		this.imeCoalesceUninstall?.();
+		this.kittyImages?.dispose();
 		this.detachColorSchemeBridge();
 		this.clearReplyGuardTimer();
 		this.replyGuard?.reset();
@@ -2091,9 +2098,9 @@ function clip(line: string, width: number): string {
 
 function clipTerminalLine(line: string, width: number): string {
 	// pi-tui's width helpers are ANSI-aware, but OSC sequences are terminal
-	// protocols rather than SGR styling. Avoid truncating inside OSC 8 hyperlinks;
-	// these lines are already projected from an xterm buffer sized to the viewport.
-	return line.includes("\x1b]") ? line : clip(line, width);
+	// protocols rather than SGR styling. Preserve complete OSC 8 links and Kitty
+	// APCs; these lines are projected from a buffer already sized to the viewport.
+	return line.includes("\x1b]") || line.includes(KITTY_IMAGE_PREFIX) ? line : clip(line, width);
 }
 
 function osc8UriForCell(term: XtermLike, cell: BufferCellLike): string {
