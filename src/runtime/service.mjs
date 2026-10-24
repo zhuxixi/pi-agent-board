@@ -1843,14 +1843,21 @@ export function createService(opts) {
 	 * interruption by patching `summary` (through patch_fields so the manual
 	 * fence still governs) and record one diagnostic per run.
 	 *
-	 * The memo key is `(viewId, host.endedAt)`: a host incarnation is probed at
-	 * most once, and the key is added ONLY after a conclusive observation — a
-	 * paused run (notice path) or a clean empty store. A transient read failure
-	 * (`ok:false`) and a still-running run both stay un-memoized so the next tick
-	 * re-probes: a running run can flip to paused later in the same host
-	 * incarnation and must not be silenced forever. This pre-pass deliberately
-	 * sits outside the looksActive-gated loop below: the target rows are already
-	 * at `processState: "exited"`.
+	 * Two guards keep the pre-pass cheap on hot paths that rebuild the service
+	 * per foreground event (issue #230 A1/A2):
+	 * - A row whose `summary` already starts with the announcement is skipped
+	 *   before any store probe, so a throwaway-service instance does not re-scan
+	 *   an already-announced dead-host row. The on-disk diagnostic dedupe below
+	 *   remains the second line of defence for rows whose summary write was
+	 *   fenced away.
+	 * - The memo key is `(viewId, host.endedAt)` and is added whenever the probe
+	 *   succeeds (`ok:true`), whatever it found. A dead host's run cannot flip
+	 *   state inside this incarnation, so a still-`running` record is memoized
+	 *   too instead of re-probing forever. `ok:false` stays un-memoized so a
+	 *   transient read failure retries next tick. A dead host whose record still
+	 *   says `running` stays silent — that boundary is covered by a follow-up.
+	 * This pre-pass deliberately sits outside the looksActive-gated loop below:
+	 * the target rows are already at `processState: "exited"`.
 	 * @param {number} now
 	 */
 	async function noticeInterruptedBackgroundRuns(now) {
@@ -1858,6 +1865,8 @@ export function createService(opts) {
 			const host = row.host;
 			if (!host || (host.state !== "exited" && host.state !== "failed") || row.hostAlive) continue;
 			const viewId = row.meta.id;
+			const alreadyAnnounced = typeof row.state?.summary === "string" && row.state.summary.startsWith("Background workflow ");
+			if (alreadyAnnounced) continue;
 			const key = `${viewId}:${host.endedAt ?? 0}`;
 			if (noticeProbeMemo.has(key)) continue;
 			const probe = backgroundRunsImpl.probeBackgroundRun({
@@ -1866,33 +1875,24 @@ export function createService(opts) {
 				workflowHome: workflowHomeImpl,
 			});
 			if (!probe.ok) continue; // incomplete scan: retry next tick, memo not written
-			// Memoize only conclusive observations: a paused run (notice path) or
-			// a clean empty store needs no re-probe. A still-running run may flip
-			// to paused later in this incarnation, so leave it un-memoized and let
-			// the next tick re-probe.
-			if (probe.paused || (probe.running == null && probe.paused == null)) {
-				noticeProbeMemo.add(key);
-			}
+			noticeProbeMemo.add(key);
 			if (!probe.paused) continue;
 			const runId = probe.paused.runId;
 			const summary = `Background workflow ${runId} was interrupted — resume it from this session`;
-			const alreadyAnnounced = typeof row.state?.summary === "string" && row.state.summary.startsWith("Background workflow ");
-			if (!alreadyAnnounced) {
-				const result = await sendLifecycleCommand({
-					type: "state_command",
-					viewId,
-					runId: null,
-					source: "service",
-					kind: "patch_fields",
-					expectedRevision: null,
-					payload: { state: { summary } },
-				}, viewId);
-				if (result.reason === "coordinator_disabled") {
-					const fresh = readState(root, viewId) ?? blankState(viewId);
-					fresh.summary = summary;
-					fresh.updatedAt = now;
-					writeState(root, fresh);
-				}
+			const result = await sendLifecycleCommand({
+				type: "state_command",
+				viewId,
+				runId: null,
+				source: "service",
+				kind: "patch_fields",
+				expectedRevision: null,
+				payload: { state: { summary } },
+			}, viewId);
+			if (result.reason === "coordinator_disabled") {
+				const fresh = readState(root, viewId) ?? blankState(viewId);
+				fresh.summary = summary;
+				fresh.updatedAt = now;
+				writeState(root, fresh);
 			}
 			appendDiagnosticOnce(root, viewId, {
 				source: "service",

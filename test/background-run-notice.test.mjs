@@ -6,6 +6,7 @@ import { test } from "node:test";
 import { createService } from "../src/runtime/service.mjs";
 import { createView, readState, writeHost, writeState } from "../src/core/store.mjs";
 import { readJsonl } from "../src/core/atomic.mjs";
+import { appendDiagnostic } from "../src/core/diagnostics.mjs";
 import * as P from "../src/core/paths.mjs";
 
 const makeService = (root, extra = {}) =>
@@ -149,25 +150,56 @@ test("A12: manual_fence 拒绝后仍写诊断、summary 不变", async () => {
 	}
 });
 
-test("A12: running 非空不记 memo —— running→paused 第二个 tick 写提示", async () => {
-	const root = mkdtempSync(join(tmpdir(), "agentboard-notice-flip-"));
-	const fx = deadHostRow(root, "view_flip");
+test("A12: probe 成功即记 memo —— running 记录的死宿主不再重复探测", async () => {
+	const root = mkdtempSync(join(tmpdir(), "agentboard-notice-stuck-running-"));
+	const fx = deadHostRow(root, "view_stuck_running");
 	try {
 		let calls = 0;
-		const flipping = {
+		const alwaysRunning = {
 			scanBackgroundRuns: () => ({ ok: true, heads: [], error: null }),
 			probeBackgroundRun: () => {
 				calls += 1;
-				if (calls === 1) return { ok: true, running: { runId: "run-9" }, paused: null, error: null };
+				return { ok: true, running: { runId: "run-9" }, paused: null, error: null };
+			},
+		};
+		const service = makeService(root, { backgroundRuns: alwaysRunning, sendStateCommand: async () => ({ status: "rejected", reason: "coordinator_disabled" }) });
+		await service.reconcile();
+		await service.reconcile();
+		assert.equal(calls, 1);
+		assert.equal(readState(root, "view_stuck_running").summary, "Turn finished");
+	} finally {
+		fx.cleanup();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("A12: 已通告的 summary 在探测前短路 —— 不探测、不追加第二条诊断", async () => {
+	const root = mkdtempSync(join(tmpdir(), "agentboard-notice-already-"));
+	const fx = deadHostRow(root, "view_already");
+	try {
+		const s = readState(root, "view_already");
+		s.summary = "Background workflow run-9 was interrupted — resume it from this session";
+		writeState(root, s);
+		appendDiagnostic(root, "view_already", {
+			source: "service",
+			level: "warn",
+			code: "background_run_interrupted",
+			message: "Background workflow run-9 was interrupted when its host died",
+			details: { runId: "run-9", hostState: "exited", exitCode: 0 },
+		});
+		let calls = 0;
+		const spying = {
+			scanBackgroundRuns: () => ({ ok: true, heads: [], error: null }),
+			probeBackgroundRun: () => {
+				calls += 1;
 				return { ok: true, running: null, paused: { runId: "run-9" }, error: null };
 			},
 		};
-		const service = makeService(root, { backgroundRuns: flipping, sendStateCommand: async () => ({ status: "rejected", reason: "coordinator_disabled" }) });
+		const service = makeService(root, { backgroundRuns: spying, sendStateCommand: async () => ({ status: "rejected", reason: "coordinator_disabled" }) });
 		await service.reconcile();
-		assert.equal(readState(root, "view_flip").summary, "Turn finished");
-		await service.reconcile();
-		assert.match(readState(root, "view_flip").summary, /run-9/);
-		assert.equal(calls, 2);
+		assert.equal(calls, 0);
+		const interrupted = readJsonl(P.diagnosticsPath(root, "view_already")).filter((d) => d.code === "background_run_interrupted");
+		assert.equal(interrupted.length, 1);
 	} finally {
 		fx.cleanup();
 		rmSync(root, { recursive: true, force: true });
