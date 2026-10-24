@@ -7,6 +7,14 @@ import test from "node:test";
 const ROOT_DIR = fileURLToPath(new URL("../", import.meta.url));
 const PROBE = join(ROOT_DIR, "test-support", "navigation-wrap.ts");
 
+test("crowded dashboard keeps the selected row visible above and below scroll markers", () => {
+	const out = execFileSync(process.execPath, ["--experimental-transform-types", join(ROOT_DIR, "test-support", "dashboard-scroll.ts")], {
+		encoding: "utf8",
+		timeout: 30_000,
+	});
+	assert.equal(JSON.parse(out).ok, true);
+});
+
 test("list arrow-key navigation wraps around at both ends (issue #52)", () => {
 	// dashboard.ts uses TS parameter properties, which strip-only mode rejects;
 	// --experimental-transform-types handles them (Node 22.7+ / 24).

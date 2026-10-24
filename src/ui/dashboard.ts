@@ -1781,13 +1781,19 @@ export class DashboardComponent implements Component {
 			const idx = body.findIndex((l) => l.includes("›"));
 			selLine = idx >= 0 ? idx : 0;
 		}
-		if (selLine < this.scrollTop) this.scrollTop = selLine;
-		if (selLine >= this.scrollTop + capacity - 1) this.scrollTop = selLine - capacity + 2;
+		// The boundary lines can become scroll markers, so keep selection inside
+		// them. On tiny viewports, prioritize the selected row over markers.
+		const margin = capacity >= 3 ? 1 : 0;
+		if (selLine < this.scrollTop + margin) this.scrollTop = selLine - margin;
+		if (selLine >= this.scrollTop + capacity - margin) this.scrollTop = selLine - capacity + margin + 1;
 		this.scrollTop = Math.max(0, Math.min(this.scrollTop, body.length - capacity));
+		// The first session can follow both a stage and a folder header. Those
+		// lines aren't selectable, so reveal them when the first session fits.
+		if (this.selectedId === this.orderedIds[0] && selLine < capacity) this.scrollTop = 0;
 		const slice = body.slice(this.scrollTop, this.scrollTop + capacity);
 		const more = body.length - this.scrollTop - capacity;
-		if (this.scrollTop > 0) slice[0] = this.theme.fg("dim", `  ↑ ${this.scrollTop} more`);
-		if (more > 0) slice[slice.length - 1] = this.theme.fg("dim", `  ↓ ${more} more`);
+		if (this.scrollTop > 0 && selLine !== this.scrollTop) slice[0] = this.theme.fg("dim", `  ↑ ${this.scrollTop + 1} more`);
+		if (more > 0 && selLine !== this.scrollTop + capacity - 1) slice[slice.length - 1] = this.theme.fg("dim", `  ↓ ${more + 1} more`);
 		return { lines: slice };
 	}
 
