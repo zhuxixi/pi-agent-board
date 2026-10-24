@@ -179,8 +179,10 @@ export function createService(opts) {
 	const backgroundRunsImpl = opts.backgroundRuns ?? { scanBackgroundRuns, probeBackgroundRun };
 	const workflowHomeImpl = opts.workflowHome ?? resolveWorkflowHome();
 	// Notice memo (issue #230): remember (viewId, host.endedAt) only after a
-	// successful probe, so a transient ok:false retries on the next tick instead
-	// of suppressing the paused-run notice for the service's lifetime.
+	// conclusive observation — a paused run (notice path) or a clean empty store.
+	// A transient ok:false and a still-running run both stay un-memoized so the
+	// next tick re-probes (a running run can flip to paused later in the same
+	// host incarnation).
 	const noticeProbeMemo = new Set();
 	// In-flight attach resolutions, keyed by viewId: concurrent resolver calls for
 	// the same view share one promise (issue #70 Task 12).
@@ -1842,11 +1844,13 @@ export function createService(opts) {
 	 * fence still governs) and record one diagnostic per run.
 	 *
 	 * The memo key is `(viewId, host.endedAt)`: a host incarnation is probed at
-	 * most once, and the key is added ONLY after a successful probe (ok === true)
-	 * so a transient read failure retries on the next tick instead of suppressing
-	 * the notice for the service's lifetime. This pre-pass deliberately sits
-	 * outside the looksActive-gated loop below: the target rows are already at
-	 * `processState: "exited"`.
+	 * most once, and the key is added ONLY after a conclusive observation — a
+	 * paused run (notice path) or a clean empty store. A transient read failure
+	 * (`ok:false`) and a still-running run both stay un-memoized so the next tick
+	 * re-probes: a running run can flip to paused later in the same host
+	 * incarnation and must not be silenced forever. This pre-pass deliberately
+	 * sits outside the looksActive-gated loop below: the target rows are already
+	 * at `processState: "exited"`.
 	 * @param {number} now
 	 */
 	async function noticeInterruptedBackgroundRuns(now) {
@@ -1862,7 +1866,13 @@ export function createService(opts) {
 				workflowHome: workflowHomeImpl,
 			});
 			if (!probe.ok) continue; // incomplete scan: retry next tick, memo not written
-			noticeProbeMemo.add(key);
+			// Memoize only conclusive observations: a paused run (notice path) or
+			// a clean empty store needs no re-probe. A still-running run may flip
+			// to paused later in this incarnation, so leave it un-memoized and let
+			// the next tick re-probe.
+			if (probe.paused || (probe.running == null && probe.paused == null)) {
+				noticeProbeMemo.add(key);
+			}
 			if (!probe.paused) continue;
 			const runId = probe.paused.runId;
 			const summary = `Background workflow ${runId} was interrupted — resume it from this session`;

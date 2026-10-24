@@ -99,3 +99,77 @@ test("A12: 探针失败不记 memo —— 恢复后下一个 tick 仍能写提�
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("A12: 协调器 applied 路径 —— 发送 patch_fields 命令且未走直写", async () => {
+	const root = mkdtempSync(join(tmpdir(), "agentboard-notice-applied-"));
+	const fx = deadHostRow(root, "view_applied");
+	try {
+		const commands = [];
+		const service = makeService(root, {
+			workflowHome: fx.wf,
+			sendStateCommand: async (_root, command) => {
+				commands.push(command);
+				return { status: "applied", reason: null };
+			},
+		});
+		await service.reconcile();
+		assert.equal(commands.length, 1);
+		const command = commands[0];
+		assert.equal(command.kind, "patch_fields");
+		assert.equal(command.source, "service");
+		assert.equal(command.viewId, "view_applied");
+		assert.equal(command.payload.state.summary, "Background workflow run-9 was interrupted — resume it from this session");
+		assert.equal(readState(root, "view_applied").summary, "Turn finished");
+	} finally {
+		fx.cleanup();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("A12: manual_fence 拒绝后仍写诊断、summary 不变", async () => {
+	const root = mkdtempSync(join(tmpdir(), "agentboard-notice-fence-"));
+	const fx = deadHostRow(root, "view_fence");
+	try {
+		const s = readState(root, "view_fence");
+		s.semanticState = "completed";
+		s.autoState = null;
+		s.summary = "Turn finished";
+		writeState(root, s);
+		const service = makeService(root, {
+			workflowHome: fx.wf,
+			sendStateCommand: async () => ({ status: "rejected", reason: "manual_fence" }),
+		});
+		await service.reconcile();
+		assert.equal(readState(root, "view_fence").summary, "Turn finished");
+		const diags = readJsonl(P.diagnosticsPath(root, "view_fence"));
+		assert.equal(diags.filter((d) => d.code === "background_run_interrupted").length, 1);
+	} finally {
+		fx.cleanup();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("A12: running 非空不记 memo —— running→paused 第二个 tick 写提示", async () => {
+	const root = mkdtempSync(join(tmpdir(), "agentboard-notice-flip-"));
+	const fx = deadHostRow(root, "view_flip");
+	try {
+		let calls = 0;
+		const flipping = {
+			scanBackgroundRuns: () => ({ ok: true, heads: [], error: null }),
+			probeBackgroundRun: () => {
+				calls += 1;
+				if (calls === 1) return { ok: true, running: { runId: "run-9" }, paused: null, error: null };
+				return { ok: true, running: null, paused: { runId: "run-9" }, error: null };
+			},
+		};
+		const service = makeService(root, { backgroundRuns: flipping, sendStateCommand: async () => ({ status: "rejected", reason: "coordinator_disabled" }) });
+		await service.reconcile();
+		assert.equal(readState(root, "view_flip").summary, "Turn finished");
+		await service.reconcile();
+		assert.match(readState(root, "view_flip").summary, /run-9/);
+		assert.equal(calls, 2);
+	} finally {
+		fx.cleanup();
+		rmSync(root, { recursive: true, force: true });
+	}
+});

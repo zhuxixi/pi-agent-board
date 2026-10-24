@@ -8,10 +8,10 @@
  * `workflow({ background: true })` returns `started` before the step finishes, so
  * the row falls back to `idle` and looks evictable.
  *
- * This module is the pure decision core: parse a run head record, match it to a
- * row's session file, and classify the protection outcome. All IO (directory
- * scan, mtime prefilter) belongs to the caller. Design:
- * docs/superpowers/specs/2026-10-24-issue-230-warm-host-background-runs-design.md
+ * This module is the decision core plus its thin IO shell: parse a run head
+ * record, match it to a row's session file, classify the protection outcome, and
+ * enumerate/probe the on-disk run store (`scanBackgroundRuns`/`probeBackgroundRun`).
+ * Design: docs/superpowers/specs/2026-10-24-issue-230-warm-host-background-runs-design.md
  */
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import * as os from "node:os";
