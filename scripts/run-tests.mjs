@@ -20,9 +20,17 @@
  *
  * Selection is deliberately narrow: the command line must contain THIS
  * checkout's absolute `runner/state-coordinator.mjs` and its root argument must
- * resolve under `os.tmpdir()`. A production board coordinator
- * (`~/.pi/agent/agent-board`) and another checkout's test coordinator never
- * match, so the gate cannot kill a live board.
+ * resolve under `os.tmpdir()`. Another checkout's test coordinator never
+ * matches (its script path differs), and a default production board
+ * (`~/.pi/agent/agent-board`) never matches either. Accepted limit (spec §7): a
+ * board whose `AGENT_BOARD_ROOT` points under `os.tmpdir()` and whose runner is
+ * this checkout is indistinguishable from a test coordinator, so the gate would
+ * kill that live board.
+ *
+ * Known limit (final-review m7): POSIX selection is token-based and `ps` output
+ * is unquoted, so a checkout path containing spaces splits and its coordinators
+ * are not selected (the gate silently no-ops instead of failing). win32 CIM
+ * output quotes paths with spaces, so the tokenizer handles it there.
  *
  * This module must stay import-side-effect free: `test/run-tests-wrapper.test.mjs`
  * imports the pure functions and `runSuite`, and a spurious `main()` at import
@@ -46,8 +54,12 @@ const SIGKILL = "SIGKILL";
 
 /**
  * Normalize a path for comparison without depending on the host platform:
- * forward slashes, dot segments removed, and (on win32) case-folded. The
- * platform is explicit so the unit tests can exercise win32 samples on POSIX CI.
+ * forward slashes, dot segments removed, no trailing separator (a `tmpRoot` like
+ * `C:\Temp\` or `/tmp/` must select exactly like its un-suffixed form), and (on
+ * win32) case-folded. Filesystem roots keep their separator (`/` stays `/`,
+ * `C:/` stays `C:/`): stripping it would turn a drive root into the
+ * drive-relative `C:`. The platform is explicit so the unit tests can exercise
+ * win32 samples on POSIX CI.
  * @param {string} value
  * @param {string} platform
  * @returns {string}
@@ -55,21 +67,27 @@ const SIGKILL = "SIGKILL";
 function canonicalPath(value, platform) {
 	const text = String(value ?? "").replace(/\\/g, "/");
 	if (!text) return "";
-	const normalized = posix.normalize(text);
+	let normalized = posix.normalize(text);
+	if (normalized.length > 1 && normalized.endsWith("/")) {
+		const trimmed = normalized.replace(/\/+$/, "");
+		normalized = trimmed.endsWith(":") ? `${trimmed}/` : trimmed;
+	}
 	return platform === "win32" ? normalized.toLowerCase() : normalized;
 }
 
 /**
  * True when `candidate` is `directory` itself or one of its descendants, using
  * the already-canonical spellings. The trailing-slash check keeps a sibling
- * such as `/tmpfoo` from matching `/tmp`.
+ * such as `/tmpfoo` from matching `/tmp`; a filesystem root already ends in the
+ * separator, so `${directory}/` would become `//` and match nothing there.
  * @param {string} candidate
  * @param {string} directory
  * @returns {boolean}
  */
 function isUnderDirectory(candidate, directory) {
 	if (!candidate || !directory) return false;
-	return candidate === directory || candidate.startsWith(`${directory}/`);
+	if (candidate === directory) return true;
+	return candidate.startsWith(directory.endsWith("/") ? directory : `${directory}/`);
 }
 
 /**

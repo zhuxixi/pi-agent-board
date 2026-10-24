@@ -82,6 +82,61 @@ test("A5 selection: POSIX", () => {
 	assert.deepEqual(got.map((x) => x.pid), [10]);
 });
 
+test("A5 selection: a trailing separator on tmpRoot selects exactly like the un-suffixed form", () => {
+	// I2 regression: posix.normalize keeps the trailing separator, so a raw
+	// `${tmpRoot}/` prefix check matched nothing and the gate false-greened.
+	const processes = [
+		proc(41, `${TMP}\\agentview-pty-trailing`),
+		proc(42, `${TMP}\\agentview-pty-nested\\view`),
+		proc(43, TMP), // the tmp root itself is a valid coordinator root
+	];
+	for (const tmpRoot of [TMP, `${TMP}\\`, `${TMP}/`]) {
+		assert.deepEqual(
+			selectOrphanCoordinators({ processes, repoRoot: REPO, tmpRoot, platform: "win32" }).map((x) => x.pid),
+			[41, 42, 43],
+			`win32 tmpRoot ${JSON.stringify(tmpRoot)}`,
+		);
+	}
+	const posixProcesses = [
+		{ pid: 51, commandLine: "/usr/bin/node /home/u/repo/runner/state-coordinator.mjs /tmp/agentview-pty-abc" },
+		{ pid: 52, commandLine: "/usr/bin/node /home/u/repo/runner/state-coordinator.mjs /tmpfoo/agentview-pty-abc" },
+	];
+	for (const tmpRoot of ["/tmp", "/tmp/"]) {
+		assert.deepEqual(
+			selectOrphanCoordinators({ processes: posixProcesses, repoRoot: "/home/u/repo", tmpRoot, platform: "linux" }).map((x) => x.pid),
+			[51],
+			`POSIX tmpRoot ${JSON.stringify(tmpRoot)}`,
+		);
+	}
+});
+
+test("A5 selection: filesystem-root tmpRoot keeps its separator", () => {
+	// Stripping the separator off a filesystem root would turn "/" into "" and
+	// "C:/" into the drive-relative "C:", and a `${directory}/` prefix check
+	// would produce "//"/"c://", matching nothing.
+	const winProcesses = [
+		proc(61, "C:\\Temp\\agentview-pty-root"),
+		proc(62, "D:\\Temp\\agentview-pty-other-drive"),
+	];
+	for (const tmpRoot of ["C:\\", "C:/", "C:\\\\"]) {
+		assert.deepEqual(
+			selectOrphanCoordinators({ processes: winProcesses, repoRoot: REPO, tmpRoot, platform: "win32" }).map((x) => x.pid),
+			[61],
+			`win32 tmpRoot ${JSON.stringify(tmpRoot)}`,
+		);
+	}
+	const posixProcesses = [
+		{ pid: 71, commandLine: "/usr/bin/node /home/u/repo/runner/state-coordinator.mjs /tmp/agentview-pty-abc" },
+	];
+	for (const tmpRoot of ["/", "//"]) {
+		assert.deepEqual(
+			selectOrphanCoordinators({ processes: posixProcesses, repoRoot: "/home/u/repo", tmpRoot, platform: "linux" }).map((x) => x.pid),
+			[71],
+			`POSIX tmpRoot ${JSON.stringify(tmpRoot)}`,
+		);
+	}
+});
+
 test("A5 selection: missing root argument and unrelated command lines are ignored", () => {
 	const processes = [
 		{ pid: 30, commandLine: `"node.exe" "${SCRIPT}"` },
