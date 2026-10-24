@@ -189,11 +189,11 @@ export function createService(opts) {
 	const backgroundRunsImpl = opts.backgroundRuns ?? { scanBackgroundRuns, probeBackgroundRun };
 	const workflowHomeImpl = opts.workflowHome ?? resolveWorkflowHome();
 	// Notice memo (issue #230): remember (viewId, host.endedAt) after a successful
-	// probe, except when it still reports a `running` run with no `paused` inside
-	// the flip grace window — the engine's last `paused` write can land after
-	// finalization, so that window stays un-memoized and re-probes next tick to
-	// catch the flip. `!probe.ok` stays un-memoized to retry transient read
-	// failures.
+	// probe, except while it still reports any `running` run inside the flip grace
+	// window — the engine's last `paused` write can land after finalization, so
+	// that window stays un-memoized and re-probes next tick to catch the flip
+	// even when an older `paused` run coexists with the running one. `!probe.ok`
+	// stays un-memoized to retry transient read failures.
 	const noticeProbeMemo = new Set();
 	// In-flight attach resolutions, keyed by viewId: concurrent resolver calls for
 	// the same view share one promise (issue #70 Task 12).
@@ -1860,9 +1860,10 @@ export function createService(opts) {
 	 * during SIGTERM shutdown, and that write can land after the board finalizes
 	 * `host.state = exited` (finalization waits for the runner and child pids to
 	 * die, not for the engine's last write). A probe in that window reports
-	 * `running`, so a `running`-with-no-`paused` result inside
-	 * `NOTICE_FLIP_GRACE_MS` stays un-memoized and re-probes next tick to catch
-	 * the flip. Re-probing stops after `NOTICE_FLIP_GRACE_MS`; a `running` record
+	 * `running`, so any still-`running` result inside `NOTICE_FLIP_GRACE_MS`
+	 * stays un-memoized and re-probes next tick to catch the flip — including
+	 * when it coexists with an older `paused` run, which stays idempotent to
+	 * announce. Re-probing stops after `NOTICE_FLIP_GRACE_MS`; a `running` record
 	 * that survives the grace window is treated as a hard-kill artifact with no
 	 * notice (issue #230 follow-up). `!probe.ok` stays un-memoized so a transient
 	 * read failure retries next tick. Notice fires only for `paused`.
@@ -1889,7 +1890,7 @@ export function createService(opts) {
 				workflowHome: workflowHomeImpl,
 			});
 			if (!probe.ok) continue; // incomplete scan: retry next tick, memo not written
-			const runningWithinGrace = probe.running != null && probe.paused == null && now - (host.endedAt ?? 0) < NOTICE_FLIP_GRACE_MS;
+			const runningWithinGrace = probe.running != null && now - (host.endedAt ?? 0) < NOTICE_FLIP_GRACE_MS;
 			if (!runningWithinGrace) {
 				noticeProbeMemo.add(key);
 			}

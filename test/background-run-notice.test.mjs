@@ -198,6 +198,31 @@ test("A12: grace 过期后 running 记录只探测一次且不写提示", async 
 	}
 });
 
+test("A12: 共存 running + 旧 paused 不关闭 grace 窗口 —— 两个 tick 依次写 run-8、run-9 且探测两次", async () => {
+	const root = mkdtempSync(join(tmpdir(), "agentboard-notice-coexist-"));
+	const fx = deadHostRow(root, "view_coexist", { endedAt: Date.now() });
+	try {
+		let calls = 0;
+		const coexisting = {
+			scanBackgroundRuns: () => ({ ok: true, heads: [], error: null }),
+			probeBackgroundRun: () => {
+				calls += 1;
+				if (calls === 1) return { ok: true, running: { runId: "run-9" }, paused: { runId: "run-8" }, error: null };
+				return { ok: true, running: null, paused: { runId: "run-9" }, error: null };
+			},
+		};
+		const service = makeService(root, { backgroundRuns: coexisting, sendStateCommand: async () => ({ status: "rejected", reason: "coordinator_disabled" }) });
+		await service.reconcile();
+		assert.equal(readState(root, "view_coexist").summary, "Background workflow run-8 was interrupted — resume it from this session");
+		await service.reconcile();
+		assert.equal(readState(root, "view_coexist").summary, "Background workflow run-9 was interrupted — resume it from this session");
+		assert.equal(calls, 2);
+	} finally {
+		fx.cleanup();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("A12: 已通告的同一 run 仍探测一次但不再写 summary、不追加第二条诊断", async () => {
 	const root = mkdtempSync(join(tmpdir(), "agentboard-notice-already-"));
 	const fx = deadHostRow(root, "view_already");
