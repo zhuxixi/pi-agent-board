@@ -3,6 +3,7 @@
 Drafted: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-24T17:48:00+08:00
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-24T17:59:00+08:00 (spec-cross-review round 1, degraded — findings R1-G1..G3, R1-D1..D8)
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-24T18:04:00+08:00 (spec-cross-review round 2, degraded — converged; R2-D1..D3)
+Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-24T18:35:00+08:00 (task-2 review I1: the root-missing step-down must not write a diagnostic — `appendLine` recreates the root skeleton; stderr attribution only. A3/A4 updated, §3.2/§6/§7 corrected)
 
 Status: step-4 root-cause report / spec draft (github-issue-driven). Cross-review:
 `research/spec-review-round-1.md` (round 1 not converged → this revision; round 2
@@ -132,12 +133,21 @@ function rootVanished() {
 
 - `ENOENT` ⇒ step down. Any other error (EACCES/EBUSY) or success ⇒ keep
   serving — a transient access failure must not kill a healthy coordinator.
-- The diagnostic write is best-effort and fenced exactly like the existing
-  step-down diagnostics (#224 D4, `:113-118`): a missing root means
-  `appendDiagnostic` will throw, and that must not block the exit.
+- **No diagnostic is written on the root-missing path.** Every append helper
+  `ensureDir`s its parent (`src/core/atomic.mjs:107-109`), so writing
+  `<root>/views/_coordinator/diagnostics.jsonl` would *succeed* by recreating the
+  deleted directory chain — reintroducing the skeleton-dir residue U1 measures.
+  The step-down is logged to stderr instead
+  (`state-coordinator: board root missing (<root>); stepping down`): detached
+  callers ignore stdio, while a test can spawn the runner with a stderr pipe and
+  attribute the exit deterministically. The boot-time guard (`rootVanished()`
+  before lease acquisition — lease acquisition also `ensureDir`s and would
+  recreate the root, so "fails lease acquisition" is not a viable boot path)
+  logs the same stderr line and writes nothing either.
 - `shutdown(0)` already clears the interval, closes the server, best-effort
   unlinks the POSIX socket, releases the lease, and exits — all cleanup is
-  try/catch guarded (`:278-293`).
+  try/catch guarded (`:278-293`). `shutdown` is idempotent via its `shuttingDown`
+  flag, and `lease.release()` no-ops when `owner.json` is gone (token-fenced).
 - A command in flight at the instant the root disappears fails its journal/write
   and the client observes the documented ambiguous outcome
   (`connection_reset`/`timeout`); it must not retry with a fresh commandId
@@ -244,8 +254,8 @@ Verification commands assume repo root. `WT` = worktree absolute path (step 5).
 |---|---|---|---|---|
 | A1 | spawn plan: absolute argv + parent-dir cwd | Automated (unit) — `test/coordinator-lifecycle.test.mjs` | `coordinatorSpawnPlan` on absolute, trailing-slash, dot-segment roots | `root` absolute, `cwd === dirname(resolve(root))`, no throw |
 | A2 | `launchCoordinator` actually spawns with that plan | Automated (integration, cross-platform) — same file | spawn a temp fake runner via `launchCoordinator(root, {runnerScript: fake})`; fake writes `{cwd: process.cwd(), arg: process.argv[2]}` under root; poll for the file | `arg === root` (absolute); both sides normalized with `path.resolve` and compared case-insensitively on win32 ⇒ `cwd === dirname(root)`; fails if cwd reverts to `root` |
-| A3 | root-vanished self-exit releases the process; root becomes deletable | Automated (integration) — same file | set `AGENT_BOARD_TEST_COORDINATOR_HEARTBEAT_MS=100` before spawn (restore in `finally`); real `launchCoordinator`; wait ready; assert lease `owner.json` exists at `<root>/views/_coordinator/state-coordinator.lock/owner.json` (`P.viewLockPath`, `paths.mjs:171`) and pid alive; `rmSync(root)`; poll pid | rmSync does not throw; root gone; pid gone ≤ 5 s; "exists before gone" asserted first (win32 rmSync success is the cwd evidence, Linux the self-exit evidence) |
-| A4 | root present ⇒ no step-down (no false positive) | Automated (integration) — same file | same knob; start, wait ≥ 3 ticks (≈ 500 ms), then `rawPing` the pipe and assert pid alive | still alive and answering ping; no `coordinator_root_missing` diagnostic in `views/_coordinator/diagnostics.jsonl` |
+| A3 | root-vanished self-exit releases the process; root becomes and stays deletable | Automated (integration) — same file | set `AGENT_BOARD_TEST_COORDINATOR_HEARTBEAT_MS=100` before spawn (restore in `finally`); spawn the real runner directly with the `coordinatorSpawnPlan` argv/cwd and `stdio: ["ignore", "pipe", "pipe"]`; wait until the endpoint answers; assert lease `owner.json` exists at `<root>/views/_coordinator/state-coordinator.lock/owner.json` (`P.viewLockPath`, `paths.mjs:171`) and pid alive; `rmSync(root, {maxRetries: 5, retryDelay: 50})`; wait for exit | rmSync does not throw; root gone and stays absent after exit; exit code 0; stderr matches `board root missing`; "exists before gone" asserted first (win32 rmSync success is the cwd evidence, stderr the self-exit attribution) |
+| A4 | root present ⇒ no step-down (no false positive) | Automated (integration) — same file | same knob; start via the same direct spawn (stderr piped), wait ≥ 3 ticks (≈ 500 ms), then `rawPing` the endpoint and assert pid alive | still alive and answering ping; stderr contains no `board root missing` line (the root-missing path is observable only on stderr — it writes no diagnostic by design) |
 | A5 | wrapper selection purity | Automated (unit) — `test/run-tests-wrapper.test.mjs` | win32 CIM array **and** single-object JSON samples + POSIX `ps` sample incl. a long (>200 char) command line; this-checkout vs other-checkout script path; temp vs production root; slash/case variants | exact pid sets, no throws, long line not truncated |
 | A6 | wrapper orchestration + import safety | Automated (unit, injected fakes) — same file | survivors present → kill called for each, exit 1; clean → no kill, test exit code passthrough; snapshot survivors warn-only; `exitCode === null` → failure; `import` of the module performs no I/O and starts nothing | behavior as specified; importing twice is safe |
 | A7 | suite is wired through the wrapper | Automated (build/suite) — `npm test` | `npm test` uses the wrapper and exits 0; `package.json` test script points at it | exit 0, no survivors reported |
@@ -269,6 +279,11 @@ reproduction of the report.
   it is a one-line predicate whose correctness is the timing/step-down sequence,
   so A3 (exit on delete) and A4 (no exit while present) are integration tests
   over the real runner. A pure predicate unit test would be tautological.
+  Because the step-down must not write inside the root (see §3.2), its
+  attribution is the **stderr line**: A3/A4 spawn the runner directly with
+  `stdio: [..., "pipe", "pipe"]` instead of going through the detached
+  `launchCoordinator` (whose stdio is ignored); A1/A2 already lock the
+  `launchCoordinator` spawn plan, so no production-path coverage is lost.
 - `scripts/run-tests.mjs` keeps two pure functions (`parseProcessList`,
   `selectOrphanCoordinators`) and one injectable orchestrator (`runSuite`) apart
   from `main()`'s real `spawn`/`execFileSync`/`process.kill`/timer shell, and is
@@ -285,7 +300,7 @@ reproduction of the report.
 
 | Risk | Handling |
 |---|---|
-| Coordinator writes a diagnostic on a missing root | best-effort try/catch; must not block `shutdown(0)` (same fence as #224 step-down). |
+| Root-missing step-down | writes no diagnostic and no state: `appendLine` recreates the parent chain, so a write would resurrect the deleted root skeleton; the step-down logs one stderr line and `shutdown(0)` stays unblocked. |
 | `statSync` EACCES/EBUSY (transient) | treat as "root present", keep serving; only ENOENT steps down. |
 | Root removed while a command is being journaled | the write fails first; client sees the ambiguous `connection_reset`/`timeout` and must not retry with a fresh commandId (existing contract). |
 | Wrapper kills another checkout's test coordinator | impossible: selection requires this checkout's absolute `runner/state-coordinator.mjs` path. |
