@@ -117,10 +117,36 @@ function appendCoordinatorDiagnostic(code, details, level = "info", source = "co
 	appendDiagnostic(root, "_coordinator", { source, level, code, details });
 }
 
+/**
+ * Whether the board root is provably gone. Only `ENOENT` counts (issue #241):
+ * a transient access failure (EACCES/EBUSY, e.g. a scanner holding the
+ * directory) must never kill a healthy coordinator, so it reads as "present".
+ * @returns {boolean}
+ */
+function rootVanished() {
+	try {
+		statSync(root);
+		return false;
+	} catch (err) {
+		return /** @type {NodeJS.ErrnoException} */ (err)?.code === "ENOENT";
+	}
+}
+
 async function main() {
 	const instanceId = randomBytes(8).toString("hex");
 	const startedAt = Date.now();
 	const heartbeatMs = resolveTestMs(process.env, "AGENT_BOARD_TEST_COORDINATOR_HEARTBEAT_MS", HEARTBEAT_MS);
+
+	// 0. A root that is already gone must fail closed (issue #241 A3b). Lease
+	// acquisition runs ensureDir, which would happily REBUILD the deleted board
+	// and serve that empty root forever — the exact orphan shape this issue is
+	// about. "Nothing to serve" is an expected outcome like a lost lease, so it
+	// exits 0 and writes no diagnostic (the write itself would recreate the
+	// root's parent chain).
+	if (rootVanished()) {
+		process.stderr.write(`state-coordinator: board root missing (${root}); nothing to serve; exiting\n`);
+		process.exit(0);
+	}
 
 	// 1. Lease first: a second coordinator is an expected, idempotent no-op.
 	// Identity carries a POSIX startToken (pty-runner pattern) so a SIGKILLed
@@ -246,6 +272,25 @@ async function main() {
 		// preempted as stale, and stepping down before the socket exists would
 		// make the A14 endpoint cleanup a no-op.
 		heartbeatTimer = setInterval(() => {
+			// Step down when the board root is gone (issue #241): a detached
+			// coordinator that outlives its root serves nobody, and its lease can
+			// never be reclaimed while the pid is alive. Detection reuses this
+			// tick — no second timer — so the worst case is one heartbeat.
+			//
+			// A missing root also makes the touch below fail, but that path needs
+			// three consecutive failures; checking first attributes the step-down
+			// to the real cause and vacates the root immediately.
+			//
+			// The diagnostic write throws when the disk is failing (and recreates
+			// the deleted directory chain otherwise), so it is fenced exactly like
+			// the heartbeat-loss step-down and must never block the exit (#224 D4).
+			if (rootVanished()) {
+				try {
+					appendCoordinatorDiagnostic("coordinator_root_missing", { root }, "error");
+				} catch { /* root is gone */ }
+				shutdown(0);
+				return;
+			}
 			let ok;
 			try {
 				ok = process.env.AGENT_BOARD_TEST_FORCE_TOUCH_FAILURE === "1" ? false : lease.touch();
