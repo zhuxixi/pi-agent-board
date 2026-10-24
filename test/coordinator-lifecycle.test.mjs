@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 import { isAbsolute, dirname, join, resolve } from "node:path";
@@ -114,21 +115,6 @@ async function waitForCoordinatorReady(root, timeoutMs = 10_000) {
 }
 
 /**
- * Poll a pid until the process is gone. Returns whether it is gone.
- * @param {number} pid
- * @param {number} [timeoutMs]
- * @returns {Promise<boolean>}
- */
-async function waitForPidGone(pid, timeoutMs = 5000) {
-	const start = Date.now();
-	while (Date.now() - start <= timeoutMs) {
-		if (!isAlive(pid)) return true;
-		await sleep(25);
-	}
-	return !isAlive(pid);
-}
-
-/**
  * One raw ping/pong round-trip against the coordinator's JSONL endpoint.
  * Resolves the parsed pong, or null on timeout/error.
  * @param {string} socketPath
@@ -171,58 +157,115 @@ function rawPing(socketPath, timeoutMs = 2000) {
 }
 
 /**
- * Cleanup for any coordinator that did NOT self-exit: SIGTERM → poll → SIGKILL,
- * then remove the root with rename-retry slack (win32 rejects a delete while a
- * heartbeat file is briefly open). Never throws, so a failing assertion keeps
- * its original error.
- * @param {number|null} pid
+ * Spawn the real coordinator directly, exactly as `coordinatorSpawnPlan` lays
+ * out (A1/A2 already lock `launchCoordinator`'s actual spawn shape), but with a
+ * piped stderr. `launchCoordinator` ignores stdio, and the root-missing
+ * step-down writes no diagnostic (it must not recreate the root), so stderr is
+ * the only in-band attribution for A3/A3b/A4.
+ * @param {string} root
+ * @returns {{ child: import("node:child_process").ChildProcess, stderr: () => string }}
+ */
+function spawnCoordinatorDirect(root) {
+	const plan = coordinatorSpawnPlan(root);
+	const child = spawn(process.execPath, [COORDINATOR_SCRIPT, plan.root], {
+		cwd: plan.cwd,
+		stdio: ["ignore", "pipe", "pipe"],
+	});
+	let stderr = "";
+	child.stderr.setEncoding("utf8");
+	child.stderr.on("data", (chunk) => { stderr += chunk; });
+	return { child, stderr: () => stderr };
+}
+
+/**
+ * Wait for a spawned child to exit. Resolves `{code, signal}` or null on
+ * timeout; the caller's `finally` still kills a timed-out child.
+ * @param {import("node:child_process").ChildProcess} child
+ * @param {number} [timeoutMs]
+ * @returns {Promise<{code: number|null, signal: string|null}|null>}
+ */
+function waitForChildExit(child, timeoutMs = 10_000) {
+	if (child.exitCode !== null || child.signalCode !== null) {
+		return Promise.resolve({ code: child.exitCode, signal: child.signalCode });
+	}
+	return new Promise((settle) => {
+		let settled = false;
+		const timer = setTimeout(() => finish(null), timeoutMs);
+		timer.unref?.();
+		function finish(value) {
+			if (settled) return;
+			settled = true;
+			clearTimeout(timer);
+			child.off("exit", onExit);
+			settle(value);
+		}
+		function onExit(code, signal) {
+			finish({ code, signal });
+		}
+		child.once("exit", onExit);
+	});
+}
+
+/**
+ * Cleanup for any coordinator that did NOT self-exit: SIGTERM → poll child exit
+ * → SIGKILL, then remove the root with rename-retry slack (win32 rejects a
+ * delete while a heartbeat file is briefly open). Best-effort throughout: it
+ * never throws, so a failing assertion keeps its original error.
+ * @param {import("node:child_process").ChildProcess|null} child
  * @param {string} root
  * @returns {Promise<void>}
  */
-async function stopCoordinatorAndCleanup(pid, root) {
-	if (pid && isAlive(pid)) {
-		try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
-		if (!await waitForPidGone(pid, 4000)) {
-			try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
-			await waitForPidGone(pid, 2000);
+async function stopCoordinatorAndCleanup(child, root) {
+	try {
+		const pid = child?.pid ?? null;
+		if (pid && isAlive(pid)) {
+			try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+			if (!await waitForChildExit(child, 4000)) {
+				try { process.kill(pid, "SIGKILL"); } catch { /* already gone */ }
+				await waitForChildExit(child, 2000);
+			}
 		}
-	}
-	rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+	} catch { /* best effort: cleanup must not mask the test failure */ }
+	try {
+		rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+	} catch { /* best effort: a pinned root must not mask the test failure */ }
 }
 
 test("A3 deleting the root makes the coordinator exit within the grace window", async () => {
 	const root = mkdtempSync(join(tmpdir(), "agentview-c241-exit-"));
 	const restoreKnob = setHeartbeatKnob(100);
-	/** @type {number|null} */
-	let pid = null;
+	/** @type {import("node:child_process").ChildProcess|null} */
+	let child = null;
+	/** @type {() => string} */
+	let stderrText = () => "";
 	try {
-		({ pid } = launchCoordinator(root, { runnerScript: COORDINATOR_SCRIPT }));
-		assert.ok(pid);
+		const spawned = spawnCoordinatorDirect(root);
+		child = spawned.child;
+		stderrText = spawned.stderr;
+		assert.ok(child.pid);
 		assert.ok(await waitForCoordinatorReady(root, 10_000), "coordinator binds its endpoint");
 		const lease = join(P.viewLockPath(root, "_coordinator", "state-coordinator"), "owner.json");
 		assert.ok(existsSync(lease), "lease exists BEFORE the delete (anti-vacuous precondition)");
-		assert.ok(isAlive(pid), "coordinator is alive before the delete");
-		rmSync(root, { recursive: true, force: true }); // must not throw: cwd no longer pins the root
-		assert.equal(existsSync(root), false);
-		await waitForPidGone(pid, 5000);
-		assert.equal(isAlive(pid), false, "coordinator exits after its root vanished");
-		// Discriminator (anti-vacuous): a vanished root ALSO makes `lease.touch()`
-		// fail, so the pre-#241 heartbeat-loss fallback (3 consecutive failures)
-		// already kills the process — the pid assertion above passes without any
-		// root check. The step-down must be attributed to the root check, which
-		// fires on the FIRST tick after the delete. The diagnostic write recreates
-		// the deleted directory chain, which is why the file is readable here.
-		const diagnostics = P.diagnosticsPath(root, "_coordinator");
-		assert.ok(existsSync(diagnostics), "the step-down diagnostic is recorded");
-		const codes = readFileSync(diagnostics, "utf8")
-			.split("\n")
-			.filter((line) => line.trim())
-			.map((line) => JSON.parse(line).code);
-		assert.ok(codes.includes("coordinator_root_missing"), `step-down is attributed to the root check (codes: ${codes.join(",")})`);
-		assert.equal(codes.includes("coordinator_heartbeat_lost"), false, "the heartbeat-loss fallback must not be what fired");
+		assert.ok(isAlive(child.pid), "coordinator is alive before the delete");
+		assert.doesNotMatch(stderrText(), /board root missing/, "no root-missing line before the delete");
+		// maxRetries: rmSync can overlap a heartbeat write holding a file handle.
+		// A cwd-pinned root fails every retry, so the cwd evidence is not weakened.
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+		assert.equal(existsSync(root), false, "the root is gone before the step-down");
+		const exit = await waitForChildExit(child, 10_000);
+		assert.ok(exit, "coordinator exits after its root vanished");
+		assert.equal(exit.signal, null, "the self-exit is not a signal death");
+		assert.equal(exit.code, 0, "the step-down is a clean exit");
+		// The step-down writes no diagnostic by design, so stderr is the
+		// attribution: it proves the root check fired (not a boot failure, and
+		// not the 3-failure heartbeat-loss fallback, which is later and noisy).
+		assert.match(stderrText(), /board root missing/, `step-down is attributed on stderr (got: ${JSON.stringify(stderrText())})`);
+		// I1 regression guard: the step-down itself must not recreate the root
+		// skeleton via a diagnostic append (appendLine ensureDirs its parent).
+		assert.equal(existsSync(root), false, "the root stays deleted after the self-exit");
 	} finally {
 		restoreKnob();
-		await stopCoordinatorAndCleanup(pid, root);
+		await stopCoordinatorAndCleanup(child, root);
 	}
 });
 
@@ -230,51 +273,57 @@ test("A3b a root deleted before boot makes the coordinator exit without lingerin
 	const root = mkdtempSync(join(tmpdir(), "agentview-c241-bootgone-"));
 	rmSync(root, { recursive: true, force: true });
 	const restoreKnob = setHeartbeatKnob(100);
-	/** @type {number|null} */
-	let pid = null;
+	/** @type {import("node:child_process").ChildProcess|null} */
+	let child = null;
+	/** @type {() => string} */
+	let stderrText = () => "";
 	try {
 		assert.equal(existsSync(root), false, "precondition: the root is already gone at spawn time");
-		({ pid } = launchCoordinator(root, { runnerScript: COORDINATOR_SCRIPT }));
-		assert.ok(pid, "detached child has a pid");
-		await waitForPidGone(pid, 5000);
-		assert.equal(isAlive(pid), false, "a coordinator with no board root exits instead of serving forever");
-		assert.equal(await waitForCoordinatorReady(root, 300), false, "nothing answers on the endpoint");
+		const spawned = spawnCoordinatorDirect(root);
+		child = spawned.child;
+		stderrText = spawned.stderr;
+		assert.ok(child.pid, "the direct child has a pid");
+		const exit = await waitForChildExit(child, 10_000);
+		assert.ok(exit, "a coordinator with no board root exits instead of serving forever");
+		assert.equal(exit.signal, null, "the boot guard is not a signal death");
+		assert.equal(exit.code, 0, "the boot guard exits 0");
+		assert.match(stderrText(), /board root missing/, `boot guard is attributed on stderr (got: ${JSON.stringify(stderrText())})`);
 		// Lease acquisition runs ensureDir, so an unguarded boot would recreate the
 		// deleted board and serve that empty root indefinitely. A throwaway root
 		// must stay deleted (issue #241 G2).
 		assert.equal(existsSync(root), false, "the boot path must not resurrect the deleted root");
 	} finally {
 		restoreKnob();
-		await stopCoordinatorAndCleanup(pid, root);
+		await stopCoordinatorAndCleanup(child, root);
 	}
 });
 
 test("A4 a present root keeps the coordinator serving (no false step-down)", async () => {
 	const root = mkdtempSync(join(tmpdir(), "agentview-c241-stays-"));
 	const restoreKnob = setHeartbeatKnob(100);
-	/** @type {number|null} */
-	let pid = null;
+	/** @type {import("node:child_process").ChildProcess|null} */
+	let child = null;
+	/** @type {() => string} */
+	let stderrText = () => "";
 	try {
-		({ pid } = launchCoordinator(root, { runnerScript: COORDINATOR_SCRIPT }));
-		assert.ok(pid);
+		const spawned = spawnCoordinatorDirect(root);
+		child = spawned.child;
+		stderrText = spawned.stderr;
+		assert.ok(child.pid);
 		assert.ok(await waitForCoordinatorReady(root, 10_000), "coordinator binds its endpoint");
 		const lease = join(P.viewLockPath(root, "_coordinator", "state-coordinator"), "owner.json");
 		assert.ok(existsSync(lease), "precondition: the lease a step-down would release is owned");
 		// ≥ 3 supervised ticks at the 100 ms knob.
 		await sleep(500);
-		assert.ok(isAlive(pid), "coordinator survives its ticks while the root is present");
+		assert.ok(isAlive(child.pid), "coordinator survives its ticks while the root is present");
 		const pong = await rawPing(P.coordinatorEndpointPathFor(process.platform, root));
 		assert.ok(pong, "coordinator still answers a ping");
 		assert.equal(pong.type, "pong");
-		// No false step-down. The file may legitimately not exist yet (nothing has
-		// logged), in which case there is nothing to contradict the absence.
-		const diagnostics = P.diagnosticsPath(root, "_coordinator");
-		if (existsSync(diagnostics)) {
-			const lines = readFileSync(diagnostics, "utf8").split("\n").filter((line) => line.trim());
-			assert.equal(lines.some((line) => line.includes('"code":"coordinator_root_missing"')), false, "no root-missing diagnostic while the root exists");
-		}
+		// No false step-down. The root-missing path is observable only on stderr
+		// (it writes no diagnostic by design), so a piped stderr is the evidence.
+		assert.doesNotMatch(stderrText(), /board root missing/, `no root-missing line while the root exists (got: ${JSON.stringify(stderrText())})`);
 	} finally {
 		restoreKnob();
-		await stopCoordinatorAndCleanup(pid, root);
+		await stopCoordinatorAndCleanup(child, root);
 	}
 });

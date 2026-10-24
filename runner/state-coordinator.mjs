@@ -132,6 +132,19 @@ function rootVanished() {
 	}
 }
 
+/**
+ * The one stderr line both "no board root" exits emit (issue #241): the boot
+ * guard and the supervised step-down. Neither writes a diagnostic: every
+ * append helper ensures its parent directory (src/core/atomic.mjs), so a write
+ * under <root>/views/_coordinator would recreate the deleted directory chain —
+ * the throwaway-root residue this issue exists to remove. Detached callers
+ * ignore stdio; a test pipes stderr and attributes the exit to this line.
+ * @param {string} outcome
+ */
+function writeRootMissing(outcome) {
+	process.stderr.write(`state-coordinator: board root missing (${root}); ${outcome}\n`);
+}
+
 async function main() {
 	const instanceId = randomBytes(8).toString("hex");
 	const startedAt = Date.now();
@@ -141,10 +154,9 @@ async function main() {
 	// acquisition runs ensureDir, which would happily REBUILD the deleted board
 	// and serve that empty root forever — the exact orphan shape this issue is
 	// about. "Nothing to serve" is an expected outcome like a lost lease, so it
-	// exits 0 and writes no diagnostic (the write itself would recreate the
-	// root's parent chain).
+	// exits 0, writes no diagnostic, and logs the shared stderr line.
 	if (rootVanished()) {
-		process.stderr.write(`state-coordinator: board root missing (${root}); nothing to serve; exiting\n`);
+		writeRootMissing("nothing to serve; exiting");
 		process.exit(0);
 	}
 
@@ -277,17 +289,19 @@ async function main() {
 			// never be reclaimed while the pid is alive. Detection reuses this
 			// tick — no second timer — so the worst case is one heartbeat.
 			//
+			// No diagnostic is written on this path: every append helper
+			// ensureDirs its parent (src/core/atomic.mjs), so appending to
+			// <root>/views/_coordinator/diagnostics.jsonl would RECREATE the
+			// deleted directory chain — reintroducing exactly the throwaway-root
+			// residue this issue measures (U1). The shared stderr line is the
+			// attribution instead; detached callers ignore stdio, while a test
+			// spawns with a stderr pipe.
+			//
 			// A missing root also makes the touch below fail, but that path needs
 			// three consecutive failures; checking first attributes the step-down
 			// to the real cause and vacates the root immediately.
-			//
-			// The diagnostic write throws when the disk is failing (and recreates
-			// the deleted directory chain otherwise), so it is fenced exactly like
-			// the heartbeat-loss step-down and must never block the exit (#224 D4).
 			if (rootVanished()) {
-				try {
-					appendCoordinatorDiagnostic("coordinator_root_missing", { root }, "error");
-				} catch { /* root is gone */ }
+				writeRootMissing("stepping down");
 				shutdown(0);
 				return;
 			}
