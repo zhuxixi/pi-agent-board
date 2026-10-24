@@ -2404,7 +2404,7 @@ test("observe: a matching win32 token is owned and a mismatching one is foreign"
 	assert.deepEqual(foreign.signals, [], "a foreign pid must never be signalled");
 });
 
-test("observe: a null record token never probes and stays unknown", async () => {
+test("observe: a null record token never reads a token and stays unknown", async () => {
 	const root = freshRoot();
 	const signals = [];
 	let readCalls = 0;
@@ -2436,7 +2436,7 @@ test("observe: a null record token never probes and stays unknown", async () => 
 	}
 });
 
-test("observe: tokenMemo probes each pid once per recovery", async () => {
+test("observe: tokenMemo reads each pid's token once per recovery", async () => {
 	const root = freshRoot();
 	const signals = [];
 	let readCalls = 0;

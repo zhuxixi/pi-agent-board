@@ -1030,6 +1030,12 @@ async function ownedMain(config) {
 	// The child's token is read asynchronously (win32 probe, issue #238); a
 	// failed read yields null, the same shape the record had before #238.
 	const childToken = await readProcessStartToken(childPid);
+	// The child may exit while the token probe is in flight; its terminal record
+	// must not be overwritten by a later "alive" publish (issue #238 review).
+	if (childExited || shutdownStarted) {
+		await finishHost("child_exit", exitCode ?? 0);
+		return;
+	}
 	const ready = ownedUpdate((cur) => ({
 		...cur,
 		childPid,

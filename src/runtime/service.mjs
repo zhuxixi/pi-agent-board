@@ -157,6 +157,9 @@ export function createService(opts) {
 	// only signal after observeProcess returned "owned" for that exact identity.
 	// The default assembles the observation snapshot (issue #238 D4) and hands the
 	// judgment to the pure `processIdentityState`.
+	// Injected observers are also called when the role has no identity (the default
+	// handles that and falls through to the probe path), so an injection must not
+	// assume `identity.pid` is present.
 	const observeProcessImpl = opts.observeProcess ?? observeProcessIdentity;
 	const signalOwnedProcessImpl = opts.signalOwnedProcess ?? defaultSignalOwnedProcess;
 	// Process liveness and cross-platform start-token reads (issue #238). Both are
