@@ -155,6 +155,9 @@ test("recoverHost escalates an owned runner once, then claims a replacement only
 				observations.push(identity.pid);
 				return runnerStates[Math.min(observations.length - 1, runnerStates.length - 1)];
 			},
+			// The owned identity carries a start token, so D6's pre-signal re-read
+			// must corroborate it before the escalation is sent.
+			readStartToken: async () => "t",
 			signalOwnedProcess: (identity, signal) => signals.push({ pid: identity.pid, signal }),
 		});
 

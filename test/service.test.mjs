@@ -2470,3 +2470,77 @@ test("observe: tokenMemo probes each pid once per recovery", async () => {
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("revalidate: a reused pid with a different token never receives a signal", async () => {
+	const root = freshRoot();
+	const signals = [];
+	let readCalls = 0;
+	let clock = 1_000_000;
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		identityHost(root, "v1", {
+			runnerPid: 4242,
+			runnerIdentity: { pid: 4242, startToken: "ct:111" },
+			runnerSpawnedAt: 1,
+		});
+		const svc = service(root, {
+			now: () => clock,
+			sleepFn: async () => {
+				clock += 1_000;
+			},
+			isAlive: () => true,
+			readStartToken: async () => {
+				readCalls += 1;
+				// First read is the observation; every later read is the pre-signal re-read.
+				return readCalls === 1 ? "ct:111" : "ct:222";
+			},
+			signalOwnedProcess: (identity, signal) => signals.push({ pid: identity.pid, signal }),
+		});
+
+		const res = await svc.recoverHost("v1", "i1");
+
+		assert.equal(res.ok, false);
+		assert.equal(res.error, "recovery_pending");
+		assert.deepEqual(signals, [], "a token that changed after observation must never be signalled");
+		assert.ok(readCalls >= 2, `expected a live re-read before signalling, got ${readCalls} read(s)`);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("revalidate: a failing re-read refuses the signal", async () => {
+	const root = freshRoot();
+	const signals = [];
+	let readCalls = 0;
+	let clock = 1_000_000;
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		identityHost(root, "v1", {
+			runnerPid: 4242,
+			runnerIdentity: { pid: 4242, startToken: "ct:111" },
+			runnerSpawnedAt: 1,
+		});
+		const svc = service(root, {
+			now: () => clock,
+			sleepFn: async () => {
+				clock += 1_000;
+			},
+			isAlive: () => true,
+			readStartToken: async () => {
+				readCalls += 1;
+				// The observation read succeeds; the pre-signal re-read is unverifiable.
+				return readCalls === 1 ? "ct:111" : null;
+			},
+			signalOwnedProcess: (identity, signal) => signals.push({ pid: identity.pid, signal }),
+		});
+
+		const res = await svc.recoverHost("v1", "i1");
+
+		assert.equal(res.ok, false);
+		assert.equal(res.error, "recovery_pending");
+		assert.deepEqual(signals, [], "an unreadable token must never authorise a signal");
+		assert.ok(readCalls >= 2, `expected a live re-read before signalling, got ${readCalls} read(s)`);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});

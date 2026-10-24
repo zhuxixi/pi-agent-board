@@ -1031,14 +1031,21 @@ export function createService(opts) {
 		});
 	}
 
-	/** Re-validate a probe-derived "owned" immediately before signalling: a pid reused
-	 *  mid-recovery must never receive an escalation signal (#240 CR). The token path
-	 *  is already live (`isAlive` + /proc), so it needs no re-probe. */
+	/** Re-validate an "owned" identity immediately before signalling: a pid reused
+	 *  mid-recovery must never receive an escalation signal (#240 CR). A recorded
+	 *  start token is re-read live, bypassing the observation memo — on win32 the
+	 *  observed token may be ~400 ms old, leaving a pid-reuse window — and any
+	 *  mismatch or unreadable token refuses the signal, which leaves the recovery
+	 *  pending (safe: never foreign, never signalled). Records without a token keep
+	 *  the probe-derived re-validation. */
 	async function revalidateProbeOwned(host, role, sessionFile, memo) {
 		const identity = host?.[`${role}Identity`] ?? null;
-		if (identity?.startToken != null) return true;
 		const pid = identity?.pid ?? host?.[`${role}Pid`] ?? null;
 		if (pid == null) return false;
+		if (identity?.startToken != null) {
+			const token = await readStartTokenImpl(pid);
+			return token != null && token === identity.startToken;
+		}
 		const probe = await probeProcessIdentityImpl(pid);
 		memo.set(pid, probe);
 		return classifyUnverifiableProcess({
