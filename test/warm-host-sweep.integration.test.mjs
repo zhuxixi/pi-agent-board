@@ -1,19 +1,20 @@
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { createService } from "../src/runtime/service.mjs";
 import { createView, readState, writeState, writeHost, writeHostPid } from "../src/core/store.mjs";
 import * as P from "../src/core/paths.mjs";
+import { readJsonl } from "../src/core/atomic.mjs";
 import { attachWarmHostSweeper } from "../src/core/warm-host-sweeper.mjs";
 
 function freshRoot() {
 	return mkdtempSync(join(tmpdir(), "agentboard-warmhost-"));
 }
 
-function makeService(root) {
+function makeService(root, extra = {}) {
 	return createService({
 		root,
 		runnerScript: "/no/runner.mjs",
@@ -23,6 +24,7 @@ function makeService(root) {
 		launch: () => ({ pid: null, configPath: "/no/config.json" }),
 		launchHost: () => ({ pid: null, configPath: "/no/host-config.json" }),
 		launchTitle: () => ({ pid: null, configPath: "/no/title-config.json" }),
+		...extra,
 	});
 }
 
@@ -161,6 +163,116 @@ test("A7: session_shutdown 触发 sweepNow（lifecycle 接线端到端）", asyn
 		else process.env.AGENT_BOARD_WARM_HOST_TTL_MS = oldTtl;
 		if (oldGrace === undefined) delete process.env.AGENT_BOARD_WARM_HOST_GRACE_MS;
 		else process.env.AGENT_BOARD_WARM_HOST_GRACE_MS = oldGrace;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+function wfFixture() {
+	const root = mkdtempSync(join(tmpdir(), "agentboard-wf-svc-"));
+	const runsDir = join(root, "projects", "proj-1", "runs");
+	mkdirSync(runsDir, { recursive: true });
+	return { root, runsDir, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+function writeRunningRun(runsDir, root, viewId, { runId = "run-1", status = "running", updatedAt = Date.now() } = {}) {
+	writeFileSync(
+		join(runsDir, `${runId}.json`),
+		JSON.stringify({
+			format: "pi-workflow-run-v2",
+			index: { runId, status, parentSessionFile: P.sessionFilePath(root, viewId), updatedAt: new Date(updatedAt).toISOString() },
+			summary: { checkpoint: null },
+		}),
+	);
+}
+
+test("A8: 有 running 后台 run 的 idle host 不被淘汰；无 run 的仍被淘汰", async () => {
+	const root = freshRoot();
+	const wf = wfFixture();
+	try {
+		const protectedId = "view_protected";
+		const plainId = "view_plain";
+		idleView(root, protectedId);
+		idleView(root, plainId);
+		writeRunningRun(wf.runsDir, root, protectedId);
+		const a = await captureHostSocket(root, protectedId);
+		const b = await captureHostSocket(root, plainId);
+		makeService(root, { workflowHome: wf.root }).pruneWarmHosts();
+		await waitFor(() => b.received.some((m) => m.type === "terminate"), 3000);
+		assert.equal(a.received.some((m) => m.type === "terminate"), false);
+		assert.equal(b.received.some((m) => m.type === "terminate"), true);
+		await closeServer(a.server);
+		await closeServer(b.server);
+	} finally {
+		wf.cleanup();
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("A9: 选择后被跳过——复查阶段看到 running run 则不驱逐，并留 warm_prune_during_background_run", async () => {
+	const root = freshRoot();
+	const id = "view_race";
+	try {
+		idleView(root, id);
+		const sock = await captureHostSocket(root, id);
+		// 选择阶段扫不到任何 run；停前复查探针看到刚启动的 run（模拟快照→停止的窗口）
+		const service = makeService(root, {
+			backgroundRuns: {
+				scanBackgroundRuns: () => ({ ok: true, heads: [], error: null }),
+				probeBackgroundRun: () => ({ ok: true, running: { runId: "run-late" }, paused: null, error: null }),
+			},
+		});
+		service.pruneWarmHosts();
+		await new Promise((r) => setTimeout(r, 150));
+		assert.equal(sock.received.some((m) => m.type === "terminate"), false);
+		const diags = readJsonl(P.diagnosticsPath(root, id));
+		assert.equal(diags.filter((d) => d.code === "warm_prune_during_background_run").length, 1);
+		assert.equal(diags.find((d) => d.code === "warm_prune_during_background_run").details.runId, "run-late");
+		await closeServer(sock.server);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("A10: 探测失败 fail-open（照常 terminate）+ 去重 warn 诊断", async () => {
+	const root = freshRoot();
+	const id = "view_probe_fail";
+	try {
+		idleView(root, id);
+		const sock = await captureHostSocket(root, id);
+		const failing = {
+			scanBackgroundRuns: () => ({ ok: false, heads: [], error: "EACCES" }),
+			probeBackgroundRun: () => ({ ok: false, running: null, paused: null, error: "EACCES" }),
+		};
+		const service = makeService(root, { backgroundRuns: failing });
+		service.pruneWarmHosts();
+		await waitFor(() => sock.received.some((m) => m.type === "terminate"), 3000);
+		assert.equal(sock.received.some((m) => m.type === "terminate"), true);
+		const diags = readJsonl(P.diagnosticsPath(root, id));
+		assert.equal(diags.filter((d) => d.code === "warm_prune_probe_failed").length, 1);
+		await closeServer(sock.server);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("A11: AGENT_BOARD_NO_BACKGROUND_RUN_GUARD=1 回到今天的行为", async () => {
+	const root = freshRoot();
+	const wf = wfFixture();
+	const prev = process.env.AGENT_BOARD_NO_BACKGROUND_RUN_GUARD;
+	try {
+		process.env.AGENT_BOARD_NO_BACKGROUND_RUN_GUARD = "1";
+		const id = "view_guard_off";
+		idleView(root, id);
+		writeRunningRun(wf.runsDir, root, id);
+		const sock = await captureHostSocket(root, id);
+		makeService(root, { workflowHome: wf.root }).pruneWarmHosts();
+		await waitFor(() => sock.received.some((m) => m.type === "terminate"), 3000);
+		assert.equal(sock.received.some((m) => m.type === "terminate"), true);
+		await closeServer(sock.server);
+	} finally {
+		if (prev === undefined) delete process.env.AGENT_BOARD_NO_BACKGROUND_RUN_GUARD;
+		else process.env.AGENT_BOARD_NO_BACKGROUND_RUN_GUARD = prev;
+		wf.cleanup();
 		rmSync(root, { recursive: true, force: true });
 	}
 });

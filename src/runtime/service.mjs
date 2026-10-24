@@ -10,6 +10,7 @@ import { createRequire } from "node:module";
 import { createConnection } from "node:net";
 import { resolve } from "node:path";
 import { applyAutoStateToStatus, autoStateEnabled, heuristicAutoState, isManualVerdict } from "../core/auto-state.mjs";
+import { CLOCK_EPSILON_MS, classifyRunsForRow, probeBackgroundRun, resolveWorkflowHome, scanBackgroundRuns } from "../core/background-runs.mjs";
 import { appendLine, atomicWriteJson, removeFile } from "../core/atomic.mjs";
 import { finalizeRun, projectViewState, reduceEvent } from "../core/events.mjs";
 import { clearDiagnostics, appendDiagnostic, appendDiagnosticOnce, tailDiagnostics } from "../core/diagnostics.mjs";
@@ -72,6 +73,16 @@ const HOST_RECOVERY_POLL_MS = 150;
 export const HOST_IDENTITY_CREATION_TOLERANCE_MS = 5_000;
 /** Default wall-clock budget for one attach resolution (issue #70 Task 12). */
 const ATTACH_RESOLVE_TIMEOUT_MS = 120_000;
+/**
+ * How long after a finalized host to keep re-probing a still-`running` run
+ * before treating it as a hard-kill artifact (issue #230). Finalization waits
+ * for the runner and child pids to die, not for the workflow engine's last
+ * write, so the `paused` head the engine writes while settling in-flight step
+ * children during SIGTERM shutdown can land after `host.state = exited`. A
+ * probe in that window reports `running` and, without this grace period, the
+ * interruption notice would be swallowed for that host incarnation.
+ */
+export const NOTICE_FLIP_GRACE_MS = 60_000;
 
 /**
  * Dynamic readers for the ladder constants above (issue #95 F4). Module-load-time
@@ -131,6 +142,11 @@ export function resolveAttachResolveTimeoutMs(env = process.env) {
  *   sleepFn?: (ms: number) => Promise<void>,
  *   sendStateCommand?: typeof sendStateCommand,
  *   availableModels?: () => Array<{ provider: string, id: string }> | undefined,
+ *   workflowHome?: string,
+ *   backgroundRuns?: {
+ *     scanBackgroundRuns: typeof scanBackgroundRuns,
+ *     probeBackgroundRun: typeof probeBackgroundRun,
+ *   },
  * }} opts
  */
 export function createService(opts) {
@@ -168,6 +184,17 @@ export function createService(opts) {
 	// at validation time (never cached at startup) and wrapped defensively by the
 	// caller; undefined/absent skips validation entirely.
 	const availableModelsImpl = opts.availableModels ?? null;
+	// Background-run protection (issue #230): the scan/probe pair and the workflow
+	// home are injectable for tests; the env guard flag is read at call time.
+	const backgroundRunsImpl = opts.backgroundRuns ?? { scanBackgroundRuns, probeBackgroundRun };
+	const workflowHomeImpl = opts.workflowHome ?? resolveWorkflowHome();
+	// Notice memo (issue #230): remember (viewId, host.endedAt) after a successful
+	// probe, except while it still reports any `running` run inside the flip grace
+	// window — the engine's last `paused` write can land after finalization, so
+	// that window stays un-memoized and re-probes next tick to catch the flip
+	// even when an older `paused` run coexists with the running one. `!probe.ok`
+	// stays un-memoized to retry transient read failures.
+	const noticeProbeMemo = new Set();
 	// In-flight attach resolutions, keyed by viewId: concurrent resolver calls for
 	// the same view share one promise (issue #70 Task 12).
 	const inflightAttachResolvers = new Map();
@@ -917,14 +944,42 @@ export function createService(opts) {
 		const ttlMs = envInt("AGENT_BOARD_WARM_HOST_TTL_MS", 10 * 60 * 1000, 0, 24 * 60 * 60 * 1000, "AGENT_VIEW_WARM_HOST_TTL_MS");
 		if (maxWarm === 0 && ttlMs === 0) return;
 		const graceMs = envInt("AGENT_BOARD_WARM_HOST_GRACE_MS", 30 * 1000, 0, 24 * 60 * 60 * 1000, "AGENT_VIEW_WARM_HOST_GRACE_MS");
-		const { ttlEvicted, excessEvicted } = selectIdleHostsToEvict(listRows(root), {
-			now: Date.now(),
-			maxWarm,
-			ttlMs,
-			graceMs,
-			keepViewId: pruneOpts.keepViewId ?? null,
-		});
-		for (const viewId of [...ttlEvicted, ...excessEvicted]) {
+		const keepViewId = pruneOpts.keepViewId ?? null;
+		const now = Date.now();
+		const rows = listRows(root);
+		const guardDisabled = process.env.AGENT_BOARD_NO_BACKGROUND_RUN_GUARD === "1";
+
+		// Phase 1 (dry): select without background-run protection. No candidates
+		// means no IO at all, preserving today's fast path for a full warm pool.
+		const dry = selectIdleHostsToEvict(rows, { now, maxWarm, ttlMs, graceMs, keepViewId });
+		const candidates = [...dry.ttlEvicted, ...dry.excessEvicted];
+		if (candidates.length === 0) return;
+
+		// One scan for the whole pass; the protection predicate stays pure
+		// in-memory (spec D5). minMtimeMs prefilters to heads that could belong
+		// to a live candidate host (spec D4); a candidate without startedAt
+		// falls back to 0, which disables the prefilter.
+		let scan = { ok: true, heads: [], error: null };
+		if (!guardDisabled) {
+			const candidateStartedAts = candidates.map((viewId) => rows.find((r) => r.meta.id === viewId)?.host?.startedAt ?? null);
+			const minStartedAt = candidateStartedAts.some((v) => v == null) ? 0 : Math.min(...candidateStartedAts);
+			scan = backgroundRunsImpl.scanBackgroundRuns({
+				workflowHome: workflowHomeImpl,
+				minMtimeMs: minStartedAt - CLOCK_EPSILON_MS,
+			});
+		}
+		const isProtected = (row) => {
+			if (guardDisabled) return false;
+			return classifyRunsForRow(scan.heads, {
+				sessionFile: row.meta.sessionFile,
+				hostStartedAt: row.host?.startedAt,
+			}).state === "protecting";
+		};
+
+		// Phase 2: re-select with the protection predicate so both eviction
+		// branches (TTL and maxWarm) exempt hosts running a background workflow.
+		const selected = selectIdleHostsToEvict(rows, { now, maxWarm, ttlMs, graceMs, keepViewId, isProtected });
+		for (const viewId of [...selected.ttlEvicted, ...selected.excessEvicted]) {
 			// Re-verify against fresh state before terminating: the selection ran
 			// on a listRows snapshot, and the host may have been dispatched (busy)
 			// or attached (attachedClients > 0) since. Never kill a busy/attached
@@ -934,6 +989,42 @@ export function createService(opts) {
 			if (isAgentBusy(row)) continue;
 			if ((row.host?.attachedClients ?? 0) !== 0) continue;
 			if (graceMs > 0 && row.host?.startedAt != null && Date.now() - row.host.startedAt < graceMs) continue;
+			if (isProtected(row)) continue;
+
+			if (guardDisabled) {
+				stopHostRow(row, "warm_prune");
+				continue;
+			}
+			// Fresh protection probe (A9): a run started between the snapshot and
+			// this stop decision still blocks the eviction. Fail-open: a probe
+			// error logs a deduped warning and proceeds without protection (D6).
+			const fresh = backgroundRunsImpl.probeBackgroundRun({
+				sessionFile: row.meta.sessionFile ?? null,
+				hostStartedAt: row.host?.startedAt ?? null,
+				workflowHome: workflowHomeImpl,
+			});
+			if (fresh.running) {
+				const runId = fresh.running.runId;
+				appendDiagnosticOnce(root, viewId, {
+					source: "service",
+					level: "warn",
+					code: "warm_prune_during_background_run",
+					message: `Skipped warm-host eviction: background workflow ${runId} started after selection`,
+					details: { runId, hostStartedAt: row.host?.startedAt ?? null },
+				}, { match: ["runId"] });
+				continue;
+			}
+			if (!fresh.ok) {
+				appendDiagnosticOnce(root, viewId, {
+					source: "service",
+					level: "warn",
+					code: "warm_prune_probe_failed",
+					message: "Could not read the workflow run store; warm-host eviction proceeded without background-run protection",
+					details: { error: String(fresh.error ?? "unknown") },
+				}, { match: ["error"] });
+				stopHostRow(row, "warm_prune");
+				continue;
+			}
 			stopHostRow(row, "warm_prune");
 		}
 	}
@@ -1756,6 +1847,84 @@ export function createService(opts) {
 		return false;
 	}
 
+	/**
+	 * Reconcile pre-pass (issue #230): when a warm host has died (state
+	 * `exited`/`failed` and no longer alive) while its session owns a paused
+	 * background workflow run, the row otherwise stays silent. Announce the
+	 * interruption by patching `summary` (through patch_fields so the manual
+	 * fence still governs) and record one diagnostic per run.
+	 *
+	 * The memo key is `(viewId, host.endedAt)`. A successful probe is memoized
+	 * except for the grace window right after the host ended: the workflow
+	 * engine writes the `paused` head while settling in-flight step children
+	 * during SIGTERM shutdown, and that write can land after the board finalizes
+	 * `host.state = exited` (finalization waits for the runner and child pids to
+	 * die, not for the engine's last write). A probe in that window reports
+	 * `running`, so any still-`running` result inside `NOTICE_FLIP_GRACE_MS`
+	 * stays un-memoized and re-probes next tick to catch the flip — including
+	 * when it coexists with an older `paused` run, which stays idempotent to
+	 * announce. Re-probing stops after `NOTICE_FLIP_GRACE_MS`; a `running` record
+	 * that survives the grace window is treated as a hard-kill artifact with no
+	 * notice (issue #230 follow-up). `!probe.ok` stays un-memoized so a transient
+	 * read failure retries next tick. Notice fires only for `paused`.
+	 *
+	 * An already-announced row still costs one probe per reconcile so a later
+	 * host incarnation can surface a new interrupted run; the summary write is
+	 * skipped only when it already names this same runId, and diagnostics stay
+	 * deduped per runId.
+	 *
+	 * This pre-pass deliberately sits outside the looksActive-gated loop below:
+	 * the target rows are already at `processState: "exited"`.
+	 * @param {number} now
+	 */
+	async function noticeInterruptedBackgroundRuns(now) {
+		for (const row of listRows(root)) {
+			const host = row.host;
+			if (!host || (host.state !== "exited" && host.state !== "failed") || row.hostAlive) continue;
+			const viewId = row.meta.id;
+			const key = `${viewId}:${host.endedAt ?? 0}`;
+			if (noticeProbeMemo.has(key)) continue;
+			const probe = backgroundRunsImpl.probeBackgroundRun({
+				sessionFile: row.meta.sessionFile ?? null,
+				hostStartedAt: host.startedAt ?? null,
+				workflowHome: workflowHomeImpl,
+			});
+			if (!probe.ok) continue; // incomplete scan: retry next tick, memo not written
+			const runningWithinGrace = probe.running != null && now - (host.endedAt ?? 0) < NOTICE_FLIP_GRACE_MS;
+			if (!runningWithinGrace) {
+				noticeProbeMemo.add(key);
+			}
+			if (!probe.paused) continue;
+			const runId = probe.paused.runId;
+			const summary = `Background workflow ${runId} was interrupted — resume it from this session`;
+			const alreadyAnnounced = typeof row.state?.summary === "string" && row.state.summary.startsWith(`Background workflow ${runId} `);
+			if (!alreadyAnnounced) {
+				const result = await sendLifecycleCommand({
+					type: "state_command",
+					viewId,
+					runId: null,
+					source: "service",
+					kind: "patch_fields",
+					expectedRevision: null,
+					payload: { state: { summary } },
+				}, viewId);
+				if (result.reason === "coordinator_disabled") {
+					const fresh = readState(root, viewId) ?? blankState(viewId);
+					fresh.summary = summary;
+					fresh.updatedAt = now;
+					writeState(root, fresh);
+				}
+			}
+			appendDiagnosticOnce(root, viewId, {
+				source: "service",
+				level: "warn",
+				code: "background_run_interrupted",
+				message: `Background workflow ${runId} was interrupted when its host died`,
+				details: { runId, hostState: host.state, exitCode: host.exitCode ?? null },
+			}, { match: ["runId"] });
+		}
+	}
+
 	return {
 		root,
 		/**
@@ -2268,6 +2437,7 @@ export function createService(opts) {
 		 */
 		async reconcile() {
 			const now = Date.now();
+			await noticeInterruptedBackgroundRuns(now);
 			let fixed = 0;
 			for (const row of listRows(root)) {
 				const s = row.state;

@@ -115,7 +115,7 @@ test("validateCommand accepts a well-formed command and exposes frozen vocabular
 		status: ["evidenceSummary", "summary", "latestAssistantPreview"],
 	});
 	assert.deepEqual(PATCHABLE_FIELDS["state-runner"], { state: ["review", "evidenceSummary"], status: ["evidenceSummary"] });
-	assert.deepEqual(PATCHABLE_FIELDS["service"], { state: ["lastVisitedAt"], status: [] });
+	assert.deepEqual(PATCHABLE_FIELDS["service"], { state: ["lastVisitedAt", "summary"], status: [] });
 });
 
 test("validateCommand rejects bad type, kind, source, and revision shapes", () => {

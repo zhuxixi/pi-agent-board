@@ -115,7 +115,11 @@ export const PATCHABLE_FIELDS = Object.freeze({
 	// through patch_fields (controller ruling R1 — plan oversight, Task 3).
 	"job-runner": Object.freeze({ state: Object.freeze(["review", "evidenceSummary", "summary", "latestAssistantPreview"]), status: Object.freeze(["evidenceSummary", "summary", "latestAssistantPreview"]) }),
 	"state-runner": Object.freeze({ state: Object.freeze(["review", "evidenceSummary"]), status: Object.freeze(["evidenceSummary"]) }),
-	"service": Object.freeze({ state: Object.freeze(["lastVisitedAt"]), status: Object.freeze([]) }),
+	// summary (issue #230): a warm host that died with a paused background
+	// workflow run leaves the row silent — reconcile announces the interruption
+	// by patching summary. lastVisitedAt (markVisited) is the visit-recency
+	// stamp. Both are metadata mirrors; semantic fields keep their own kinds.
+	"service": Object.freeze({ state: Object.freeze(["lastVisitedAt", "summary"]), status: Object.freeze([]) }),
 	// lastVisitedAt (markVisited): visiting is a user action, so it routes as
 	// dashboard-user — the manual fence only fences non-human sources, and
 	// legacy stamped lastVisitedAt unconditionally (visit-recency tracking
