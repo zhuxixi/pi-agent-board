@@ -68,7 +68,7 @@ pi-dynamic-workflows 的 v2 run head `<workflowHome>/projects/<slug>-<sha12>/run
 | D1 | 保护条件 = `status === "running"` **且** `run.updatedAt >= host.startedAt`（`host.startedAt` 缺失时只按 status 保护） | ① 文件新鲜度窗口：长 step 期间不落盘，短窗口复现 bug、长窗口让陈旧记录长期豁免（host 泄漏回归）；② 只看 status：上一次宿主崩溃遗留的 running 记录会永久豁免该行 | A2, A3, A4 |
 | D2 | `paused` 不保护（paused 无需 host 即可 resume），仅用于 G3 的提示判定 | 连 paused 一起保护：paused run 可能永不被 resume，host 永久不回收 | A4, A13 |
 | D3 | 探测方式：遍历 `<workflowHome>/projects/*/runs/*.json`，按 `parentSessionFile` 全量匹配 | 复刻上游 `projectKey = slug + sha256(cwd)[:12]`：上游改算法即静默失效，且需读 `row.meta.cwd` 之外的隐式约定 | A1, A6 |
-| D4 | mtime 预筛 `mtimeMs >= min(候选行 host.startedAt) - 2s`；任一候选行缺失 `startedAt` 时禁用预筛（`minMtimeMs = 0`），因为按时间兜底会丢掉分类规则（`hostStartedAt == null → protecting`）本应保护的 head（预筛与分类不一致的 bug）；预筛只是性能优化，判定仍走 D1 | 无预筛：每次 sweep 全量读 head（可接受但没必要）；用 `updatedAt` 预筛：逻辑重复 | A6 |
+| D4 | mtime 预筛 `mtimeMs >= min(候选行 host.startedAt) - 2s`；任一候选行缺失 `startedAt` 时禁用预筛（实现传 `0 - CLOCK_EPSILON_MS`，对真实 mtime 等价），因为按时间兜底会丢掉分类规则（`hostStartedAt == null → protecting`）本应保护的 head（预筛与分类不一致的 bug）；预筛只是性能优化，判定仍走 D1 | 无预筛：每次 sweep 全量读 head（可接受但没必要）；用 `updatedAt` 预筛：逻辑重复 | A6 |
 | D5 | 纯判定与 IO 分离：`selectIdleHostsToEvict` 接受可选 `isProtected(row)` 谓词（默认不保护，行为与今天一致），service 注入真实探测结果 | 在纯函数里读盘：破坏既有 17 个单测的可测性，且违背仓内 pure-core/IO-shell 约定（AGENTS.md） | A7 |
 | D6 | 探测失败（目录缺失 / 坏 JSON / 读错误）→ `ok:false` → 按未保护处理（fail-open）+ `appendDiagnosticOnce(code:"warm_prune_probe_failed", level:"warn")` | fail-closed：一次格式变更就会让 warm host 永不回收 | A10 |
 | D7 | 逃生门 `AGENT_BOARD_NO_BACKGROUND_RUN_GUARD=1` 关闭保护（与 `AGENT_BOARD_NO_SWEEP` 同款命名），默认开启 | 无开关：出问题只能回滚版本 | A11 |
@@ -86,7 +86,7 @@ pi-dynamic-workflows 的 v2 run head `<workflowHome>/projects/<slug>-<sha12>/run
 service.pruneWarmHosts(pruneOpts)                                   [src/runtime/service.mjs:915]
  1. dry = selectIdleHostsToEvict(listRows(root), {ttl,maxWarm,grace,keepViewId})   // 纯，无保护
  2. dry 两列表都空 → return                                        // 无 IO，保持今天的快路径
- 3. scan = scanBackgroundRuns({ workflowHome, minMtimeMs })        // IO，一次；scan.ok === false → 该轮跳过保护（fail-open，D6），已读 head 仍参与选择，停前 fresh 探测失败时才报 warm_prune_probe_failed
+ 3. scan = scanBackgroundRuns({ workflowHome, minMtimeMs })        // IO，一次；scan.ok === false 仅表示覆盖不完整，不取消保护：已读 head 仍参与选择（run 可读 → 该宿主受保护），读不到的 run 无证据、照旧淘汰；覆盖不完整在停前 fresh 探测失败时经 warm_prune_probe_failed 报给用户
  4. isProtected = (row) => classifyRunsForRow(scan.heads, { sessionFile: row.meta.sessionFile, hostStartedAt: row.host?.startedAt }).state === "protecting"  // 纯
  5. {ttlEvicted, excessEvicted} = selectIdleHostsToEvict(..., {isProtected})         // 纯
  6. for viewId in [...ttl, ...excess]:
@@ -118,7 +118,7 @@ service.reconcile()                                                 [src/runtime
 
 时序要点（复核视角②）：判定所需的 `row.host.startedAt` 与 `row.meta.sessionFile` 都在 `loadRow` 快照里（`src/core/types.mjs:139`）；`run.updatedAt` 在探测时刻从磁盘读；两者都在**触发时刻**可得，无"上一轮值"依赖。
 
-`minMtimeMs` 计算：`Math.min(...candidates.map(r => r.host?.startedAt)) - CLOCK_EPSILON_MS`；任一候选行缺失 `host.startedAt` 时禁用预筛（`minMtimeMs = 0`），`CLOCK_EPSILON_MS = 2000`（FS mtime 粒度容差）。
+`minMtimeMs` 计算：`Math.min(...candidates.map(r => r.host?.startedAt)) - CLOCK_EPSILON_MS`；任一候选行缺失 `host.startedAt` 时禁用预筛（实现传 `0 - CLOCK_EPSILON_MS`，对真实 mtime 等价），`CLOCK_EPSILON_MS = 2000`（FS mtime 粒度容差）。
 
 ---
 
@@ -148,7 +148,7 @@ IO shell（可用 temp dir 直测）：
 
 | 导出 | 签名 | 语义 |
 |---|---|---|
-| `scanBackgroundRuns({ workflowHome, minMtimeMs })` | `=> { ok, heads, error }` | 遍历 `<home>/projects/*/runs/`，只收 `*.json`（排除 `.bak`、`.events.jsonl`、`.log`、`.result-*`）；`stat.mtimeMs < minMtimeMs` 跳过。`ok === (error === null)`：目录不可读 / runs 目录不可读 / 文件不可读 / 坏 JSON → 记 `error` 并 `ok:false`（已读到的 head 仍返回，仅作诊断）；store 缺失 → `ok:true, heads:[]`。`workflowHome` 先 `stat`：缺失 → 视为无 store（`ok:true`）；存在但不是目录 → `ok:false` |
+| `scanBackgroundRuns({ workflowHome, minMtimeMs })` | `=> { ok, heads, error }` | 遍历 `<home>/projects/*/runs/`，只收 `*.json`（排除 `.bak`、`.events.jsonl`、`.log`、`.result-*`）；`stat.mtimeMs < minMtimeMs` 跳过。`ok === (error === null)`：目录不可读 / runs 目录不可读 / 文件不可读 / 坏 JSON → 记 `error` 并 `ok:false`（已读到的 head 仍返回并继续参与保护判定；`ok:false` 仅表示覆盖不完整）；store 缺失 → `ok:true, heads:[]`。`workflowHome` 先 `stat`：缺失 → 视为无 store（`ok:true`）；存在但不是目录 → `ok:false` |
 | `probeBackgroundRun({ sessionFile, hostStartedAt, workflowHome })` | `=> { ok, running: RunHead\|null, paused: RunHead\|null, error }` | 同一份 scan 上**独立**计算 `running` 与 `paused`（同一会话可同时持有一个旧 paused run 与当前 running run）；`paused` 取 `updatedAtMs` 最大者（并列按 `path` 排序）；`ok:false` 仅表示读失败（D6） |
 
 ### 5.2 `src/core/warm-host-sweeper.mjs`

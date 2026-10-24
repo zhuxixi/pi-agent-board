@@ -157,9 +157,10 @@ export function classifyRunsForRow(runs, o) {
  * diagnostic instead of silently guessing. An incomplete scan is any unreadable
  * directory or head file, including corrupt JSON — the eviction outcome is the
  * same either way (a run that cannot be read protects nothing), but only
- * `ok:false` tells the caller that protection was lost. Heads that were read
- * successfully are still returned for diagnostics; callers ignore them when
- * `ok` is false. A head file that parses but is not a run head
+ * `ok:false` marks the coverage as incomplete (it does not disable protection).
+ * Heads that were read successfully are still returned and still participate in
+ * the protection classification; a run that could not be read simply has no
+ * evidence and protects nothing. A head file that parses but is not a run head
  * (`parseRunHead` → null) is not an error: it is simply not a candidate.
  * The store root is stat-ed before the child paths are enumerated because on
  * win32 a child path under a regular file reports `ENOENT` exactly like a
