@@ -177,17 +177,33 @@ test("A6: minMtimeMs prefilter drops old heads", () => {
 	}
 });
 
-test("A6: corrupt JSON does not throw and does not change the verdict", () => {
+test("A6: corrupt JSON marks the scan incomplete but still returns readable heads", () => {
 	const fx = fixtureTree();
 	try {
 		writeHead(fx.runsDir, "run-1.json", V2());
 		writeFileSync(join(fx.runsDir, "broken.json"), "{ not json");
 		const res = scanBackgroundRuns({ workflowHome: fx.root });
-		assert.equal(res.ok, true);
+		assert.equal(res.ok, false);
 		assert.equal(res.heads.length, 1);
-		assert.ok(res.error);
+		assert.ok(res.error.includes("broken.json"));
 	} finally {
 		fx.cleanup();
+	}
+});
+
+test("A6: runs dir that is a regular file marks the scan incomplete", () => {
+	const root = mkdtempSync(join(tmpdir(), "agentboard-wf-runsfile-"));
+	try {
+		const projectDir = join(root, "projects", "p1");
+		mkdirSync(projectDir, { recursive: true });
+		const runsPath = join(projectDir, "runs");
+		writeFileSync(runsPath, "x");
+		const res = scanBackgroundRuns({ workflowHome: root });
+		assert.equal(res.ok, false);
+		assert.deepEqual(res.heads, []);
+		assert.ok(res.error.includes(runsPath));
+	} finally {
+		rmSync(root, { recursive: true, force: true });
 	}
 });
 

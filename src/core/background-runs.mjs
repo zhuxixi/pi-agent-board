@@ -152,11 +152,15 @@ export function classifyRunsForRow(runs, o) {
  * `minMtimeMs` drops heads too old to belong to a live host — a prefilter only,
  * the protection verdict still comes from `classifyRunsForRow`.
  *
- * Failure policy (spec D6): an absent store is normal and yields `ok:true`; a
- * store that exists but cannot be read yields `ok:false` so the caller can log a
- * `warm_prune_probe_failed` diagnostic and fail open. Per-file trouble (bad JSON,
- * unreadable head) keeps the scan usable: the first message lands in `error` and
- * the remaining heads are still returned.
+ * Failure policy (spec D6): an absent store is normal and yields `ok:true`; any
+ * incomplete scan yields `ok:false` so the caller logs a `warm_prune_probe_failed`
+ * diagnostic instead of silently guessing. An incomplete scan is any unreadable
+ * directory or head file, including corrupt JSON — the eviction outcome is the
+ * same either way (a run that cannot be read protects nothing), but only
+ * `ok:false` tells the caller that protection was lost. Heads that were read
+ * successfully are still returned for diagnostics; callers ignore them when
+ * `ok` is false. A head file that parses but is not a run head
+ * (`parseRunHead` → null) is not an error: it is simply not a candidate.
  * The store root is stat-ed before the child paths are enumerated because on
  * win32 a child path under a regular file reports `ENOENT` exactly like a
  * missing directory does: a missing `workflowHome` is "no store yet", a
@@ -206,7 +210,7 @@ export function scanBackgroundRuns({ workflowHome, minMtimeMs = 0 }) {
 		}
 	}
 
-	return { ok: true, heads, error };
+	return { ok: error === null, heads, error };
 }
 
 /**
