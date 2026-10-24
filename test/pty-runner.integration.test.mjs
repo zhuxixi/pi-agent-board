@@ -883,9 +883,58 @@ test("owned runner publishes proc start tokens for runner and child identities (
 			return h?.state === "alive" && h?.readyAt != null ? h : false;
 		});
 		childPid = host.childPid;
-		assert.match(String(host.runnerIdentity?.startToken), /^\d+$/, "runnerIdentity.startToken from /proc");
-		assert.match(String(host.childIdentity?.startToken), /^\d+$/, "childIdentity.startToken from /proc");
+		const tokenPattern = process.platform === "win32" ? /^ct:\d+$/ : /^\d+$/;
+		assert.match(String(host.runnerIdentity?.startToken), tokenPattern, "runnerIdentity.startToken from /proc");
+		assert.match(String(host.childIdentity?.startToken), tokenPattern, "childIdentity.startToken from /proc");
 		assert.equal(host.childIdentity?.pid, childPid);
+	} finally {
+		try { runner?.kill("SIGKILL"); } catch {}
+		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }
+		await new Promise((r) => setTimeout(r, 50));
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
+
+test("owned runner never republishes alive after a child exits during startup", async () => {
+	const root = freshRoot();
+	let runner;
+	let childPid = null;
+	try {
+		// Reused fast-exit fixture (issue #90): boot output, then exit after 150 ms —
+		// inside the ready path's token probe window (issue #238: a microtask on
+		// linux, a PowerShell round trip on win32).
+		({ runner } = await launchOwnedRunner(root, "v1", "i238", {
+			config: { piArgsPrefix: [resolve("test-support/fake-failing-pty-pi.mjs")] },
+		}));
+		// Poll the record through the whole startup/finalize window. The guard's
+		// contract is an ordering one — a terminal record must never be overwritten
+		// by a later "alive" publish — so collect the observed sequence, not just
+		// the end value.
+		const observed = [];
+		const deadline = Date.now() + 10000;
+		while (Date.now() < deadline) {
+			const h = readHost(root, "v1");
+			if (h) {
+				if (h.childPid) childPid = h.childPid;
+				observed.push(h.state);
+			}
+			if (runner.exitCode !== null || runner.signalCode !== null) break;
+			await new Promise((r) => setTimeout(r, 2));
+		}
+		const trace = observed.filter((s, i) => i === 0 || s !== observed[i - 1]).join(" → ");
+		assert.equal(await waitForExit(runner, 8000), true, "runner exits after the child exits during startup");
+		const final = readHost(root, "v1");
+		assert.ok(final, `host record survives the runner; observed ${trace}`);
+		assert.equal(final.state, "exited", `child_exit is not a FAILED_REASONS entry; observed ${trace}`);
+		assert.equal(final.exitCode, 1);
+		assert.equal(final.childPid, null, "a terminal record records no live child");
+		assert.equal(final.readyAt, null, "a terminal record records no readyAt");
+		assert.ok(final.endedAt != null, "terminal record carries endedAt");
+		const firstTerminal = observed.findIndex((s) => s === "exited" || s === "failed");
+		assert.ok(
+			firstTerminal === -1 || !observed.slice(firstTerminal + 1).includes("alive"),
+			`no alive publish after the terminal state; observed ${trace}`,
+		);
 	} finally {
 		try { runner?.kill("SIGKILL"); } catch {}
 		if (childPid) { try { process.kill(childPid, "SIGKILL"); } catch {} }

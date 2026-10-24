@@ -4,6 +4,8 @@ import {
 	canFinalizeLegacyHost,
 	canReplaceHost,
 	classifyProbeResult,
+	classifyUnverifiableProcess,
+	commandLineMentions,
 	isStartingWithinGrace,
 	ownsEndpoint,
 	processIdentityState,
@@ -25,6 +27,45 @@ test("process identity states", () => {
 	assert.equal(processIdentityState({ pid: 1, startToken: "t" }, { alive: true, startToken: "t" }, 1), "owned");
 	assert.equal(processIdentityState({ pid: 1, startToken: "t" }, { alive: true, startToken: "u" }, 1), "foreign");
 	assert.equal(processIdentityState({ pid: 1, startToken: null }, { alive: true }, 1), "unknown");
+});
+
+test("processIdentityState: an identity-bearing record is never not_started", () => {
+	assert.equal(processIdentityState({ pid: 1, startToken: "t" }, { alive: true, startToken: "t" }, null), "owned");
+	assert.equal(processIdentityState({ pid: 1, startToken: "t" }, { alive: true, startToken: "u" }, null), "foreign");
+	assert.equal(processIdentityState({ pid: 1, startToken: "t" }, { alive: false }, null), "dead");
+	assert.equal(processIdentityState({ pid: 1, startToken: "t" }, { alive: true, startToken: null }, null), "unknown");
+});
+
+test("processIdentityState: not_started needs both identity and spawnedAt to be absent", () => {
+	assert.equal(processIdentityState(null, null, null), "not_started");
+	assert.equal(processIdentityState(undefined, null, null), "not_started");
+});
+
+test("commandLineMentions normalizes slashes/case and respects path boundaries", () => {
+	assert.equal(commandLineMentions('node C:\\x\\cli.js --session "C:\\a b\\s.jsonl"', "C:/a b/s.jsonl"), true);
+	assert.equal(commandLineMentions("NODE --session c:\\A\\S.JSONL", "C:\\a\\s.jsonl"), true);
+	// prefix trap: view_abc must not match view_abcd
+	assert.equal(commandLineMentions("node x --session C:\\v\\view_abcd.jsonl", "C:\\v\\view_abc.jsonl"), false);
+	assert.equal(commandLineMentions("node x --session C:\\v\\session-2.jsonl", "C:\\v\\session.jsonl"), false);
+	// suffix trap: the fragment must not match as a prefix of a longer file name
+	assert.equal(commandLineMentions("node x --session C:\\v\\s.jsonl.bak", "C:\\v\\s.jsonl"), false);
+	assert.equal(commandLineMentions("", "C:\\v\\s.jsonl"), false);
+});
+
+test("classifyUnverifiableProcess truth table", () => {
+	const probe = (creationTimeMs, commandLine) => ({ creationTimeMs, commandLine });
+	const base = { spawnedAt: 1_000_000, expectedCommandFragment: "C:\\v\\s.jsonl", toleranceMs: 5_000 };
+	assert.equal(classifyUnverifiableProcess({ ...base, probe: null }), "unknown");
+	assert.equal(classifyUnverifiableProcess({ ...base, probe: probe(9_999_999, "node --session C:\\v\\s.jsonl") }), "owned");
+	assert.equal(classifyUnverifiableProcess({ ...base, probe: probe(9_999_999, "node other.js") }), "foreign");
+	assert.equal(classifyUnverifiableProcess({ ...base, probe: probe(1_002_000, null) }), "owned");
+	assert.equal(classifyUnverifiableProcess({ ...base, probe: probe(900_000, null) }), "foreign");
+	assert.equal(classifyUnverifiableProcess({ ...base, probe: probe(1_020_000, null) }), "foreign");
+	// command line wins over a null spawnedAt
+	assert.equal(classifyUnverifiableProcess({ ...base, spawnedAt: null, probe: probe(5, "node --session C:\\v\\s.jsonl") }), "owned");
+	// no signal at all
+	assert.equal(classifyUnverifiableProcess({ ...base, spawnedAt: null, probe: probe(1_000_000, null) }), "unknown");
+	assert.equal(classifyUnverifiableProcess({ ...base, expectedCommandFragment: null, probe: probe(1_000_000, "node x") }), "owned");
 });
 
 test("canReplaceHost refuses unknown observations", () => {

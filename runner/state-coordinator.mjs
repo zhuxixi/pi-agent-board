@@ -33,10 +33,15 @@
  *   replay is deterministic — no re-decision, no re-binding.
  * - Legacy adoption: a view without materializedRevision is stamped as part of
  *   its first applied command's single materialization write (no extra write).
+ * - Root guard (issue #241): a board root that disappears — or is REPLACED by a
+ *   write that recreates it in the delete window — makes the supervised
+ *   heartbeat step down with exit 0 and one stderr line. Neither path writes a
+ *   diagnostic or state: every append helper ensureDirs its parent and would
+ *   recreate the deleted root skeleton.
  * - AGENT_BOARD_COORDINATOR=off makes the process exit 0 immediately (tests and
  *   the client's degradation path).
  */
-import { existsSync, readdirSync, readFileSync, statSync, unlinkSync } from "node:fs";
+import { existsSync, readdirSync, statSync, unlinkSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { createServer } from "node:net";
 import { readJson } from "../src/core/atomic.mjs";
@@ -50,7 +55,10 @@ import {
 	writeCheckpoint,
 } from "../src/core/coordinator-journal.mjs";
 import { ownsEndpoint } from "../src/core/host-coordination.mjs";
-import { acquireOwnedViewLock, withViewLockSync } from "../src/core/locks.mjs";
+import { appendDiagnostic } from "../src/core/diagnostics.mjs";
+import { acquireOwnedViewLock, describeLeaseConflict, heartbeatFailureAction, withViewLockSync } from "../src/core/locks.mjs";
+import { captureStartToken } from "../src/core/pid.mjs";
+import { resolveTestMs } from "../src/core/test-knobs.mjs";
 import * as P from "../src/core/paths.mjs";
 import { readState, readStatus, writeState, writeStatus } from "../src/core/store.mjs";
 import { TRANSIENT_KINDS, decideStateTransition, validateCommand } from "../src/core/state-commands.mjs";
@@ -97,28 +105,148 @@ main().catch((err) => {
 	process.exit(1);
 });
 
+/**
+ * Append a coordinator-scoped diagnostic. `appendDiagnostic` throws when the
+ * disk is failing, so callers fence the write where a crash would be worse
+ * than a lost diagnostic (issue #224 D4). The AGENT_BOARD_TEST_FAIL_DIAGNOSTIC
+ * knob forces that throw so A14b can prove the step-down survives it.
+ * @param {string} code
+ * @param {Record<string, any>} details
+ * @param {"info"|"warn"|"error"} [level]
+ * @param {string} [source]
+ */
+function appendCoordinatorDiagnostic(code, details, level = "info", source = "coordinator") {
+	if (process.env.AGENT_BOARD_TEST_FAIL_DIAGNOSTIC === "1") {
+		throw new Error(`forced coordinator diagnostic failure (${code})`);
+	}
+	appendDiagnostic(root, "_coordinator", { source, level, code, details });
+}
+
+/**
+ * Whether the board root is provably gone. Only `ENOENT` counts (issue #241):
+ * a transient access failure (EACCES/EBUSY, e.g. a scanner holding the
+ * directory) must never kill a healthy coordinator, so it reads as "present".
+ * @returns {boolean}
+ */
+function rootVanished() {
+	try {
+		statSync(root);
+		return false;
+	} catch (err) {
+		return /** @type {NodeJS.ErrnoException} */ (err)?.code === "ENOENT";
+	}
+}
+
+/**
+ * Snapshot the board root directory's filesystem identity (issue #241).
+ * `{dev, ino}` identifies one exact directory: a delete-and-recreate at the same
+ * path gets a new inode, which is the only way to tell "the root came back" from
+ * "the root never left" once a write's ensureDir has recreated it. Returns null
+ * when the root is missing or the filesystem reports no usable identity (ino 0,
+ * or no dev/ino at all), which degrades the check to existence-only.
+ * @returns {{dev: number, ino: number}|null}
+ */
+function captureRootIdentity() {
+	try {
+		const st = statSync(root);
+		if (!Number.isFinite(st.dev) || !Number.isFinite(st.ino) || st.ino === 0) return null;
+		return { dev: st.dev, ino: st.ino };
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Whether the board root is gone or was replaced since boot (issue #241).
+ * Existence alone is not enough: `appendCommand`/`writeState`/lease acquisition
+ * ensureDir their parent, so a write landing after the delete RECREATES the path
+ * and a plain stat then reads "present" (final-review I1). Comparing against the
+ * identity captured at boot detects the replacement on the next supervised tick,
+ * including the boot-window race where lease acquisition recreates the root.
+ * Only `ENOENT` counts as missing; any other stat error (EACCES/EBUSY) reads as
+ * present so a transient access failure never kills a healthy coordinator. With
+ * no captured identity the check degrades to existence-only (never a false
+ * step-down).
+ * @param {{dev: number, ino: number}|null} identity
+ * @returns {"missing"|"replaced"|null}
+ */
+function rootVanishedOrReplaced(identity) {
+	try {
+		const st = statSync(root);
+		if (!identity) return null;
+		return st.dev !== identity.dev || st.ino !== identity.ino ? "replaced" : null;
+	} catch (err) {
+		return /** @type {NodeJS.ErrnoException} */ (err)?.code === "ENOENT" ? "missing" : null;
+	}
+}
+
+/**
+ * The one stderr line every "root is gone" exit emits (issue #241): the boot
+ * guard and the supervised step-down. Neither writes a diagnostic: every
+ * append helper ensures its parent directory (src/core/atomic.mjs), so a write
+ * under <root>/views/_coordinator would recreate the deleted directory chain —
+ * the throwaway-root residue this issue exists to remove. Detached callers
+ * ignore stdio; a test pipes stderr and attributes the exit to this line.
+ * @param {"missing"|"replaced"} state
+ * @param {string} outcome
+ */
+function writeRootGone(state, outcome) {
+	process.stderr.write(`state-coordinator: board root ${state} (${root}); ${outcome}\n`);
+}
+
 async function main() {
 	const instanceId = randomBytes(8).toString("hex");
 	const startedAt = Date.now();
+	const heartbeatMs = resolveTestMs(process.env, "AGENT_BOARD_TEST_COORDINATOR_HEARTBEAT_MS", HEARTBEAT_MS);
+
+	// Capture the root's identity BEFORE the boot guard (issue #241, final-review
+	// I1): a delete between the guard and lease acquisition would let that
+	// ensureDir recreate the root WITH a valid lease, and the process would then
+	// serve it forever. The tick compares against this snapshot, so the recreated
+	// directory is detected on the first heartbeat.
+	const rootIdentity = captureRootIdentity();
+
+	// 0. A root that is already gone must fail closed (issue #241 A3b). Lease
+	// acquisition runs ensureDir, which would happily REBUILD the deleted board
+	// and serve that empty root forever — the exact orphan shape this issue is
+	// about. "Nothing to serve" is an expected outcome like a lost lease, so it
+	// exits 0, writes no diagnostic, and logs the shared stderr line.
+	if (rootVanished()) {
+		writeRootGone("missing", "nothing to serve; exiting");
+		process.exit(0);
+	}
 
 	// 1. Lease first: a second coordinator is an expected, idempotent no-op.
 	// Identity carries a POSIX startToken (pty-runner pattern) so a SIGKILLed
 	// coordinator's lease can be reclaimed by the next instance after pid reuse.
+	// heartbeatMs declares the staleness contract (issue #224): a holder that
+	// stops heartbeating becomes reclaimable on its own staleness.
 	/** @type {import("../src/core/locks.mjs").Lease} */
 	let lease;
 	try {
 		lease = acquireOwnedViewLock(root, "_coordinator", "state-coordinator", {
 			waitMs: 500,
 			identity: { pid: process.pid, startToken: captureStartToken(process.pid) },
+			heartbeatMs,
 		});
 	} catch (err) {
+		// Record the conflict instead of exiting silently (issue #224 D6). The
+		// diagnostic write is best-effort: it must never turn the expected
+		// idempotent exit into a crash.
+		const summary = describeLeaseConflict(root, "_coordinator", "state-coordinator");
+		if (summary) {
+			try { appendCoordinatorDiagnostic("coordinator_lease_unavailable", summary, "error"); } catch { /* best effort */ }
+		}
 		process.stderr.write(`state-coordinator: lease unavailable (${err?.code ?? err?.message ?? "unknown"}); another instance may own it; exiting\n`);
 		process.exit(0);
 	}
-	const startTouchTimer = setInterval(() => {
-		try { lease?.touch(); } catch { /* best effort */ }
-	}, HEARTBEAT_MS);
-	startTouchTimer.unref?.();
+	// Leave a trace when this acquire reclaimed a stale lease (issue #224 D6).
+	if (lease.reclaimed) {
+		try { appendCoordinatorDiagnostic("lease_reclaimed", { ...lease.reclaimed }, "info", "lock"); } catch { /* best effort */ }
+	}
+	// Boot-edge touch (issue #224 D5): reflect acquisition progress before the
+	// supervised interval starts. Never counted toward the failure counter.
+	try { lease.touch(); } catch { /* best effort */ }
 
 	// 2. Boot state: journal summary, processed-command ring, replay, counter init.
 	// Repair a crash-torn tail FIRST: without it the first post-restart append
@@ -161,6 +289,10 @@ async function main() {
 	}
 	let lastCheckpointBytes = 0;
 
+	// Boot-edge touch (issue #224 D5): replay is done; the heartbeat now
+	// reflects live progress before the endpoint binds. Never counted.
+	try { lease.touch(); } catch { /* best effort */ }
+
 	// 3. Control socket (JSONL, pty-runner's line-buffered server shape).
 	const socketPath = P.coordinatorEndpointPathFor(process.platform, root);
 	if (process.platform !== "win32" && existsSync(socketPath)) {
@@ -186,6 +318,16 @@ async function main() {
 		shutdown(1);
 	});
 
+	// Boot-edge touch (issue #224 D5): the endpoint bind is the last boot
+	// boundary; the supervised interval takes over once listen succeeds.
+	// Never counted toward the failure counter.
+	try { lease.touch(); } catch { /* best effort */ }
+
+	// Consecutive supervised heartbeat failures. Only interval touches count;
+	// the boot-edge touches above are deliberately ignored (issue #224 D4/D5).
+	let consecutiveTouchFailures = 0;
+	let heartbeatTimer = null;
+
 	server.listen(socketPath, () => {
 		if (process.platform !== "win32") {
 			try {
@@ -193,6 +335,66 @@ async function main() {
 				boundSocketIdentity = { dev: st.dev, ino: st.ino };
 			} catch { /* without the identity, cleanup degrades to no-op */ }
 		}
+		// Supervision starts only after the endpoint is bound (issue #224 D4):
+		// a live-but-stuck holder must step down before its lease can be
+		// preempted as stale, and stepping down before the socket exists would
+		// make the A14 endpoint cleanup a no-op.
+		heartbeatTimer = setInterval(() => {
+			// Step down when the board root is gone or was REPLACED (issue #241):
+			// a detached coordinator that outlives its root serves nobody, and its
+			// lease can never be reclaimed while the pid is alive. Detection reuses
+			// this tick — no second timer — so the worst case is one heartbeat.
+			//
+			// Existence alone is not enough (final-review I1): a write landing after
+			// the delete (appendCommand / writeState → ensureDir) recreates the
+			// directory, so a plain stat would read "present" and the coordinator
+			// would serve a dead board. The boot-time dev/ino identity distinguishes
+			// the recreated directory from the original one, and the same guard
+			// catches a root deleted between the boot guard and lease acquisition
+			// (that ensureDir would recreate it WITH a lease).
+			//
+			// No diagnostic is written on either path: every append helper
+			// ensureDirs its parent (src/core/atomic.mjs), so appending to
+			// <root>/views/_coordinator/diagnostics.jsonl would RECREATE the
+			// deleted directory chain — reintroducing exactly the throwaway-root
+			// residue this issue measures (U1). The shared stderr line is the
+			// attribution instead; detached callers ignore stdio, while a test
+			// spawns with a stderr pipe. Residual accepted (spec §7): a write in
+			// the delete window may leave a skeleton directory (data, not a
+			// process); this tick bounds its lifetime.
+			//
+			// A missing root also makes the touch below fail, but that path needs
+			// three consecutive failures; checking first attributes the step-down
+			// to the real cause and vacates the root immediately.
+			const rootState = rootVanishedOrReplaced(rootIdentity);
+			if (rootState) {
+				writeRootGone(rootState, "stepping down");
+				shutdown(0);
+				return;
+			}
+			let ok;
+			try {
+				ok = process.env.AGENT_BOARD_TEST_FORCE_TOUCH_FAILURE === "1" ? false : lease.touch();
+			} catch {
+				ok = false;
+			}
+			if (!ok) {
+				consecutiveTouchFailures += 1;
+				if (heartbeatFailureAction(consecutiveTouchFailures) === "abandon") {
+					// Count → diagnostic → shutdown, in that order. The
+					// diagnostic write throws when the disk is failing (the
+					// exact step-down scenario), so it is fenced and must not
+					// block the exit.
+					try {
+						appendCoordinatorDiagnostic("coordinator_heartbeat_lost", { consecutiveFailures: consecutiveTouchFailures }, "error");
+					} catch { /* a failing diagnostic must not block the step-down */ }
+					shutdown(0);
+				}
+			} else {
+				consecutiveTouchFailures = 0;
+			}
+		}, heartbeatMs);
+		heartbeatTimer.unref?.();
 	});
 
 	let shuttingDown = false;
@@ -202,7 +404,7 @@ async function main() {
 	function shutdown(code) {
 		if (shuttingDown) return;
 		shuttingDown = true;
-		try { clearInterval(startTouchTimer); } catch { /* best effort */ }
+		try { clearInterval(heartbeatTimer); } catch { /* best effort */ }
 		try { server.close(); } catch { /* already closed */ }
 		if (process.platform !== "win32" && boundSocketIdentity) {
 			try {
@@ -408,22 +610,5 @@ async function main() {
 		if (journalBytes - lastCheckpointBytes < CHECKPOINT_THRESHOLD_BYTES) return;
 		if (!writeCheckpoint(root, { materializedRevision: revisionCounter, journalBytes })) return;
 		lastCheckpointBytes = gcJournal(root);
-	}
-}
-
-/** POSIX process start token — /proc/<pid>/stat field 22 (starttime), stable
- *  across exec(2). Same recipe as pty-runner: lets locks.mjs reclaim this
- *  coordinator's lease after a SIGKILL even if the pid was reused. null on
- *  failure or non-Linux platforms (reclaim degrades to "blocked" there — same
- *  platform parity as PTY hosts). */
-function captureStartToken(pid) {
-	if (process.platform !== "linux" || !pid) return null;
-	try {
-		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-		const afterComm = stat.slice(stat.lastIndexOf(")") + 1).trimStart();
-		const fields = afterComm.split(/\s+/);
-		return fields[19] ?? null;
-	} catch {
-		return null;
 	}
 }

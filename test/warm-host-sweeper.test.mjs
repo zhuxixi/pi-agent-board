@@ -225,3 +225,40 @@ test("F5: AGENT_BOARD_NO_SWEEP=1 时 no-op（board worker 不 sweep）", () => {
 		else process.env.AGENT_BOARD_NO_SWEEP = prev;
 	}
 });
+
+test("A7: isProtected 跳过 ttl 与 maxWarm 两个分支", () => {
+	const now = 1_000_000;
+	const mk = (id, startedAt) => ({
+		meta: { id, updatedAt: now - 10_000 },
+		state: { semanticState: "idle", lastActivityAt: startedAt },
+		alive: true,
+		hostAlive: true,
+		host: { attachedClients: 0, startedAt },
+	});
+	const rows = [
+		mk("a", now - 500_000),
+		mk("b", now - 500_000),
+		mk("c", now - 500_000),
+		mk("d", now - 500_000),
+		mk("e", now - 500_000),
+		mk("f", now - 400_000),
+	];
+	const base = { now, maxWarm: 1, ttlMs: 100_000 };
+
+	assert.deepEqual(selectIdleHostsToEvict(rows, base).ttlEvicted, ["a", "b", "c", "d", "e", "f"]);
+
+	const protectedIds = new Set(["a", "b", "c", "d"]);
+	const withGuard = { ...base, isProtected: (row) => protectedIds.has(row.meta.id) };
+	assert.deepEqual(selectIdleHostsToEvict(rows, withGuard).ttlEvicted, ["e", "f"]);
+
+	// cap-only 分支：受保护行不进 survivors，也不占 maxWarm 名额
+	const capOnly = selectIdleHostsToEvict(rows, { now, maxWarm: 1, ttlMs: 0, isProtected: (row) => protectedIds.has(row.meta.id) });
+	assert.deepEqual(capOnly.ttlEvicted, []);
+	assert.deepEqual(capOnly.excessEvicted, ["e"]);
+});
+
+test("A7: isProtected 默认不生效（null / undefined 与既有行为一致）", () => {
+	const now = 1_000_000;
+	const rows = [{ meta: { id: "a", updatedAt: now }, state: { semanticState: "idle", lastActivityAt: now - 500_000 }, alive: true, hostAlive: true, host: { attachedClients: 0, startedAt: now - 500_000 } }];
+	assert.deepEqual(selectIdleHostsToEvict(rows, { now, maxWarm: 4, ttlMs: 100_000, isProtected: undefined }), { ttlEvicted: ["a"], excessEvicted: [] });
+});

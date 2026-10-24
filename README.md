@@ -127,10 +127,10 @@ Shortcuts are scoped to the view where they are available:
 
 | Key | Action |
 | --- | --- |
-| `Up` / `Down` | Move the selection. |
+| `Up` / `Down` / `j` / `k` | Move the selection. |
 | `i` | Enter INSERT mode for a new task. |
 | `Enter` | Open Start session for a draft, or attach/resume when the input is empty. |
-| `Right` / `>` | Attach to the selected session. |
+| `Right` / `>` / `l` | Attach to the selected session. |
 | `Space` | Open Peek. |
 | `v` | Open the read-only transcript. |
 | `e` | Open Evidence / Diagnostics. |
@@ -156,12 +156,12 @@ Peek shows the selected session's summary, blocker or question, latest output, a
 | Key | Action |
 | --- | --- |
 | `r` or `Enter` | Enter reply mode; type a follow-up and press `Enter` to send it without attaching. |
-| `a`, `Right`, or `>` | Attach to the session. |
+| `a`, `Right`, `>`, or `l` | Attach to the session. |
 | `v` | Open the read-only transcript. |
 | `e` | Open Evidence / Diagnostics. |
 | `d` | Confirm marking the inactive session Done. |
 | `h` | Hold or unhold the session. |
-| `Up` / `Down` | Move to the previous or next session. |
+| `Up` / `Down` / `j` / `k` | Move to the previous or next session. |
 | `Esc` | Return to the main list. |
 
 When a Pi question or questionnaire tool is pending, inline reply is rejected; attach to answer that interactive question in the real Pi session.
@@ -172,7 +172,7 @@ The `v` view is a read-only projection of the durable Pi session JSONL. It does 
 
 | Key | Action |
 | --- | --- |
-| `Up` / `Down` | Scroll one line. |
+| `Up` / `Down` / `j` / `k` | Scroll one line. |
 | `PageUp` / `PageDown` | Scroll one page. |
 | `Space` | Open Peek. |
 | `r` | Enter reply mode. |
@@ -188,11 +188,11 @@ The `e` view shows durable session evidence, including changed files, commands a
 
 | Key | Action |
 | --- | --- |
-| `Up` / `Down` | Scroll one line. |
+| `Up` / `Down` / `j` / `k` | Scroll one line. |
 | `PageUp` / `PageDown` | Scroll one page. |
 | `r` | Enter reply mode. |
 | `v` | Open the read-only transcript. |
-| `Enter`, `a`, or `Right` | Attach to the session. |
+| `Enter`, `a`, `Right`, or `l` | Attach to the session. |
 | `x` | Clear diagnostics; evidence is preserved. |
 | `Left` / `Esc` / `<` | Return to the main list. |
 

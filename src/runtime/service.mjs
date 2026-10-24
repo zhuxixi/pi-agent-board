@@ -4,15 +4,16 @@
  * safety rule. Pure node + core modules; the Pi-coupled bits (attach, dialogs) live in
  * the command handler. The pi invocation + runner path are injected (resolved in index.ts).
  */
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { createConnection } from "node:net";
 import { resolve } from "node:path";
 import { applyAutoStateToStatus, autoStateEnabled, heuristicAutoState, isManualVerdict } from "../core/auto-state.mjs";
+import { CLOCK_EPSILON_MS, classifyRunsForRow, probeBackgroundRun, resolveWorkflowHome, scanBackgroundRuns } from "../core/background-runs.mjs";
 import { appendLine, atomicWriteJson, removeFile } from "../core/atomic.mjs";
 import { finalizeRun, projectViewState, reduceEvent } from "../core/events.mjs";
-import { clearDiagnostics, appendDiagnostic, tailDiagnostics } from "../core/diagnostics.mjs";
+import { clearDiagnostics, appendDiagnostic, appendDiagnosticOnce, tailDiagnostics } from "../core/diagnostics.mjs";
 import { emptyEvidenceSnapshot, finalizeEvidence, readEvidence, reduceEvidence, summarizeEvidence, writeEvidence } from "../core/evidence.mjs";
 import { updateCodeRefsFromEvidence } from "../core/code-refs-store.mjs";
 import { claimNextFollowUp, completeFollowUp, enqueueFollowUp, failFollowUp, readFollowUpQueue, releaseFollowUp, summarizeFollowUpQueue, clearQueuedFollowUps, removeLastFollowUp } from "../core/follow-up-queue.mjs";
@@ -25,9 +26,10 @@ import { firstSentence, truncate } from "../core/heuristics.mjs";
 import { newRunId, newViewId, slugifyTask } from "../core/ids.mjs";
 import { launchAutoState as launchAutoStateProcess, launchHost as launchHostProcess, launchRun, launchTitle as launchTitleProcess } from "../core/launch.mjs";
 import { gitRepoRoot } from "../core/repo.mjs";
-import { isAlive, killProcess } from "../core/pid.mjs";
+import { captureStartToken, isAlive, killProcess } from "../core/pid.mjs";
 import { acquireOwnedViewLock, tryAcquireOwnedViewLock } from "../core/locks.mjs";
-import { canFinalizeLegacyHost, canReplaceHost } from "../core/host-coordination.mjs";
+import { canFinalizeLegacyHost, canReplaceHost, classifyUnverifiableProcess, processIdentityState } from "../core/host-coordination.mjs";
+import { readProcessIdentityProbe, readProcessStartToken } from "../core/process-identity-probe.mjs";
 import { modelRefAvailable } from "../core/launch-options.mjs";
 import { ensureCoordinator, sendStateCommand, coordinatorDisabled } from "../core/coordinator-client.mjs";
 import { createDesyncEpisodeThrottle, rereadPair, statusRevisionDesynced } from "../core/status-consistency.mjs";
@@ -67,8 +69,20 @@ export const HOST_START_LOCK_WAIT_MS = 500;
 export const HOST_RECOVERY_GRACE_MS = 5_000;
 /** Poll cadence while waiting out a host recovery window. */
 const HOST_RECOVERY_POLL_MS = 150;
+/** Creation-time tolerance when a host role can only be corroborated by process creation time (issue #217). */
+export const HOST_IDENTITY_CREATION_TOLERANCE_MS = 5_000;
 /** Default wall-clock budget for one attach resolution (issue #70 Task 12). */
 const ATTACH_RESOLVE_TIMEOUT_MS = 120_000;
+/**
+ * How long after a finalized host to keep re-probing a still-`running` run
+ * before treating it as a hard-kill artifact (issue #230). Finalization waits
+ * for the runner and child pids to die, not for the workflow engine's last
+ * write, so the `paused` head the engine writes while settling in-flight step
+ * children during SIGTERM shutdown can land after `host.state = exited`. A
+ * probe in that window reports `running` and, without this grace period, the
+ * interruption notice would be swallowed for that host incarnation.
+ */
+export const NOTICE_FLIP_GRACE_MS = 60_000;
 
 /**
  * Dynamic readers for the ladder constants above (issue #95 F4). Module-load-time
@@ -89,6 +103,11 @@ export function resolveHostRecoveryGraceMs(env = process.env) {
 /** @param {NodeJS.ProcessEnv} [env] @returns {number} */
 export function resolveHostRecoveryPollMs(env = process.env) {
 	return resolveTestMs(env, "AGENT_BOARD_TEST_HOST_RECOVERY_POLL_MS", HOST_RECOVERY_POLL_MS);
+}
+
+/** @param {NodeJS.ProcessEnv} [env] @returns {number} */
+export function resolveIdentityCreationToleranceMs(env = process.env) {
+	return resolveTestMs(env, "AGENT_BOARD_TEST_IDENTITY_CREATION_TOLERANCE_MS", HOST_IDENTITY_CREATION_TOLERANCE_MS);
 }
 
 /** @param {NodeJS.ProcessEnv} [env] @returns {number} */
@@ -116,12 +135,20 @@ export function resolveAttachResolveTimeoutMs(env = process.env) {
  *   now?: () => number,
  *   acquireLock?: typeof acquireOwnedViewLock,
  *   tryAcquireLock?: typeof tryAcquireOwnedViewLock,
- *   observeProcess?: (identity: {pid: number, startToken: string|null}|null) => "not_started"|"dead"|"owned"|"foreign"|"unknown",
+ *   observeProcess?: (identity: {pid: number, startToken: string|null}|null, observation: {spawnedAt: number|null, pid: number|null, tokenMemo: Map<number, Promise<string|null>>}) => "not_started"|"dead"|"owned"|"foreign"|"unknown"|Promise<"not_started"|"dead"|"owned"|"foreign"|"unknown">,
+ *   isAlive?: (pid: number) => boolean,
+ *   readStartToken?: (pid: number) => Promise<string|null>,
+ *   probeProcessIdentity?: (pid: number) => Promise<{creationTimeMs: number|null, commandLine: string|null}|null>,
  *   signalOwnedProcess?: (identity: {pid: number, startToken: string|null}, signal: string) => void,
  *   probeHostFn?: typeof probeHost,
  *   sleepFn?: (ms: number) => Promise<void>,
  *   sendStateCommand?: typeof sendStateCommand,
  *   availableModels?: () => Array<{ provider: string, id: string }> | undefined,
+ *   workflowHome?: string,
+ *   backgroundRuns?: {
+ *     scanBackgroundRuns: typeof scanBackgroundRuns,
+ *     probeBackgroundRun: typeof probeBackgroundRun,
+ *   },
  * }} opts
  */
 export function createService(opts) {
@@ -144,8 +171,21 @@ export function createService(opts) {
 	const desyncThrottle = createDesyncEpisodeThrottle();
 	// Identity-aware observation/signalling for host recovery (issue #70). Callers must
 	// only signal after observeProcess returned "owned" for that exact identity.
-	const observeProcessImpl = opts.observeProcess ?? defaultObserveProcess;
+	// The default assembles the observation snapshot (issue #238 D4) and hands the
+	// judgment to the pure `processIdentityState`.
+	// Injected observers are also called when the role has no identity (the default
+	// handles that and falls through to the probe path), so an injection must not
+	// assume `identity.pid` is present.
+	const observeProcessImpl = opts.observeProcess ?? observeProcessIdentity;
 	const signalOwnedProcessImpl = opts.signalOwnedProcess ?? defaultSignalOwnedProcess;
+	// Process liveness and cross-platform start-token reads (issue #238). Both are
+	// injectable so token-path judgment is unit-testable without real processes.
+	const isAliveImpl = opts.isAlive ?? isAlive;
+	const readStartTokenImpl = opts.readStartToken ?? readProcessStartToken;
+	// Corroborating process identity probe for platforms without a start token
+	// (issue #217). Callers inject it in tests; the default reads platform-
+	// specific creation time + command line for one pid.
+	const probeProcessIdentityImpl = opts.probeProcessIdentity ?? readProcessIdentityProbe;
 	// Attach-resolver dependencies (issue #70 Task 12): a real socket probe and an
 	// awaitable sleep. The resolver runs on the UI thread, so its waits MUST go
 	// through sleepFn (never a blocking acquire / Atomics.wait).
@@ -155,6 +195,17 @@ export function createService(opts) {
 	// at validation time (never cached at startup) and wrapped defensively by the
 	// caller; undefined/absent skips validation entirely.
 	const availableModelsImpl = opts.availableModels ?? null;
+	// Background-run protection (issue #230): the scan/probe pair and the workflow
+	// home are injectable for tests; the env guard flag is read at call time.
+	const backgroundRunsImpl = opts.backgroundRuns ?? { scanBackgroundRuns, probeBackgroundRun };
+	const workflowHomeImpl = opts.workflowHome ?? resolveWorkflowHome();
+	// Notice memo (issue #230): remember (viewId, host.endedAt) after a successful
+	// probe, except while it still reports any `running` run inside the flip grace
+	// window — the engine's last `paused` write can land after finalization, so
+	// that window stays un-memoized and re-probes next tick to catch the flip
+	// even when an older `paused` run coexists with the running one. `!probe.ok`
+	// stays un-memoized to retry transient read failures.
+	const noticeProbeMemo = new Set();
 	// In-flight attach resolutions, keyed by viewId: concurrent resolver calls for
 	// the same view share one promise (issue #70 Task 12).
 	const inflightAttachResolvers = new Map();
@@ -904,14 +955,42 @@ export function createService(opts) {
 		const ttlMs = envInt("AGENT_BOARD_WARM_HOST_TTL_MS", 10 * 60 * 1000, 0, 24 * 60 * 60 * 1000, "AGENT_VIEW_WARM_HOST_TTL_MS");
 		if (maxWarm === 0 && ttlMs === 0) return;
 		const graceMs = envInt("AGENT_BOARD_WARM_HOST_GRACE_MS", 30 * 1000, 0, 24 * 60 * 60 * 1000, "AGENT_VIEW_WARM_HOST_GRACE_MS");
-		const { ttlEvicted, excessEvicted } = selectIdleHostsToEvict(listRows(root), {
-			now: Date.now(),
-			maxWarm,
-			ttlMs,
-			graceMs,
-			keepViewId: pruneOpts.keepViewId ?? null,
-		});
-		for (const viewId of [...ttlEvicted, ...excessEvicted]) {
+		const keepViewId = pruneOpts.keepViewId ?? null;
+		const now = Date.now();
+		const rows = listRows(root);
+		const guardDisabled = process.env.AGENT_BOARD_NO_BACKGROUND_RUN_GUARD === "1";
+
+		// Phase 1 (dry): select without background-run protection. No candidates
+		// means no IO at all, preserving today's fast path for a full warm pool.
+		const dry = selectIdleHostsToEvict(rows, { now, maxWarm, ttlMs, graceMs, keepViewId });
+		const candidates = [...dry.ttlEvicted, ...dry.excessEvicted];
+		if (candidates.length === 0) return;
+
+		// One scan for the whole pass; the protection predicate stays pure
+		// in-memory (spec D5). minMtimeMs prefilters to heads that could belong
+		// to a live candidate host (spec D4); a candidate without startedAt
+		// falls back to 0, which disables the prefilter.
+		let scan = { ok: true, heads: [], error: null };
+		if (!guardDisabled) {
+			const candidateStartedAts = candidates.map((viewId) => rows.find((r) => r.meta.id === viewId)?.host?.startedAt ?? null);
+			const minStartedAt = candidateStartedAts.some((v) => v == null) ? 0 : Math.min(...candidateStartedAts);
+			scan = backgroundRunsImpl.scanBackgroundRuns({
+				workflowHome: workflowHomeImpl,
+				minMtimeMs: minStartedAt - CLOCK_EPSILON_MS,
+			});
+		}
+		const isProtected = (row) => {
+			if (guardDisabled) return false;
+			return classifyRunsForRow(scan.heads, {
+				sessionFile: row.meta.sessionFile,
+				hostStartedAt: row.host?.startedAt,
+			}).state === "protecting";
+		};
+
+		// Phase 2: re-select with the protection predicate so both eviction
+		// branches (TTL and maxWarm) exempt hosts running a background workflow.
+		const selected = selectIdleHostsToEvict(rows, { now, maxWarm, ttlMs, graceMs, keepViewId, isProtected });
+		for (const viewId of [...selected.ttlEvicted, ...selected.excessEvicted]) {
 			// Re-verify against fresh state before terminating: the selection ran
 			// on a listRows snapshot, and the host may have been dispatched (busy)
 			// or attached (attachedClients > 0) since. Never kill a busy/attached
@@ -921,6 +1000,42 @@ export function createService(opts) {
 			if (isAgentBusy(row)) continue;
 			if ((row.host?.attachedClients ?? 0) !== 0) continue;
 			if (graceMs > 0 && row.host?.startedAt != null && Date.now() - row.host.startedAt < graceMs) continue;
+			if (isProtected(row)) continue;
+
+			if (guardDisabled) {
+				stopHostRow(row, "warm_prune");
+				continue;
+			}
+			// Fresh protection probe (A9): a run started between the snapshot and
+			// this stop decision still blocks the eviction. Fail-open: a probe
+			// error logs a deduped warning and proceeds without protection (D6).
+			const fresh = backgroundRunsImpl.probeBackgroundRun({
+				sessionFile: row.meta.sessionFile ?? null,
+				hostStartedAt: row.host?.startedAt ?? null,
+				workflowHome: workflowHomeImpl,
+			});
+			if (fresh.running) {
+				const runId = fresh.running.runId;
+				appendDiagnosticOnce(root, viewId, {
+					source: "service",
+					level: "warn",
+					code: "warm_prune_during_background_run",
+					message: `Skipped warm-host eviction: background workflow ${runId} started after selection`,
+					details: { runId, hostStartedAt: row.host?.startedAt ?? null },
+				}, { match: ["runId"] });
+				continue;
+			}
+			if (!fresh.ok) {
+				appendDiagnosticOnce(root, viewId, {
+					source: "service",
+					level: "warn",
+					code: "warm_prune_probe_failed",
+					message: "Could not read the workflow run store; warm-host eviction proceeded without background-run protection",
+					details: { error: String(fresh.error ?? "unknown") },
+				}, { match: ["error"] });
+				stopHostRow(row, "warm_prune");
+				continue;
+			}
 			stopHostRow(row, "warm_prune");
 		}
 	}
@@ -955,13 +1070,127 @@ export function createService(opts) {
 		return { ok: true, requested: wasRequested };
 	}
 
-	/** Observe one host role: a recorded identity goes through identity-aware
-	 *  observation; a missing identity means `not_started` (never spawned) or
-	 *  `unknown` (spawn attempted, identity unavailable) — never `dead`. */
-	function observeHostRole(host, role) {
+	/**
+	 * Assemble one host-role observation snapshot and let the pure state machine
+	 * judge it (issue #238 D4). The recorded start token is only read when the
+	 * record carries one, so legacy records (token `null`, or platforms without a
+	 * token) keep the zero-token-read path. `tokenMemo` deduplicates the (async,
+	 * expensive on win32) token read per pid, so one recovery pass reads each
+	 * process at most once.
+	 * @param {{pid:number,startToken:string|null}|null} identity recorded identity
+	 * @param {{spawnedAt:number|null, pid:number|null, tokenMemo:Map<number, Promise<string|null>>}} observation
+	 * @returns {Promise<"not_started"|"dead"|"owned"|"foreign"|"unknown">}
+	 */
+	async function observeProcessIdentity(identity, { spawnedAt, pid, tokenMemo }) {
+		if (identity == null && spawnedAt == null) return "not_started";
+		if (pid == null) return "unknown";
+		const alive = isAliveImpl(pid);
+		const observed = { alive, startToken: null };
+		if (alive && identity != null && identity.startToken != null) {
+			if (!tokenMemo.has(pid)) tokenMemo.set(pid, readStartTokenImpl(pid));
+			observed.startToken = await tokenMemo.get(pid);
+		}
+		return processIdentityState(identity, observed, spawnedAt);
+	}
+
+	/**
+	 * Observe one host role: a recorded identity goes through identity-aware
+	 * observation (token comparison first); a missing identity means `not_started`
+	 * (never spawned). An `unknown` observation (no stable token, or the token
+	 * path unavailable) is then corroborated by the process identity probe before
+	 * recovery decides (issue #217). The caller's `memo` deduplicates probes per
+	 * pid and `tokenMemo` deduplicates token reads per pid so one recovery pass
+	 * never observes the same process twice.
+	 * @param {any} host host record holding this role's identity/pid/spawn fields
+	 * @param {"runner"|"child"} role which host process to observe
+	 * @param {{ sessionFile: string|null, memo: Map<number, any>, tokenMemo: Map<number, Promise<string|null>> }} opts
+	 *   session file used as the child command fragment, and the per-call
+	 *   probe/token memos (kept separate: probe values are objects, token values
+	 *   are strings or null)
+	 */
+	async function observeHostRole(host, role, { sessionFile, memo, tokenMemo }) {
 		const identity = host?.[`${role}Identity`] ?? null;
-		if (identity) return observeProcessImpl(identity);
-		return host?.[`${role}SpawnedAt`] == null ? "not_started" : "unknown";
+		const spawnedAt = host?.[`${role}SpawnedAt`] ?? null;
+		if (identity == null && spawnedAt == null) return "not_started";
+		const pid = identity?.pid ?? host?.[`${role}Pid`] ?? null;
+		if (pid == null) return "unknown";
+		const observation = await observeProcessImpl(identity, { spawnedAt, pid, tokenMemo });
+		if (observation !== "unknown") return observation;
+		if (!memo.has(pid)) memo.set(pid, await probeProcessIdentityImpl(pid));
+		return classifyUnverifiableProcess({
+			spawnedAt,
+			probe: memo.get(pid),
+			expectedCommandFragment: role === "child" ? sessionFile : host?.configPath ?? null,
+			toleranceMs: resolveIdentityCreationToleranceMs(),
+		});
+	}
+
+	/** Re-validate an "owned" identity immediately before signalling: a pid reused
+	 *  mid-recovery must never receive an escalation signal (#240 CR). A recorded
+	 *  start token is re-read live, bypassing the observation memo — on win32 the
+	 *  observed token may be ~400 ms old, leaving a pid-reuse window — and any
+	 *  mismatch or unreadable token refuses the signal, which leaves the recovery
+	 *  pending (safe: never foreign, never signalled). Records without a token keep
+	 *  the probe-derived re-validation. */
+	async function revalidateProbeOwned(host, role, sessionFile, memo) {
+		const identity = host?.[`${role}Identity`] ?? null;
+		const pid = identity?.pid ?? host?.[`${role}Pid`] ?? null;
+		if (pid == null) return false;
+		if (identity?.startToken != null) {
+			const token = await readStartTokenImpl(pid);
+			return token != null && token === identity.startToken;
+		}
+		const probe = await probeProcessIdentityImpl(pid);
+		memo.set(pid, probe);
+		return classifyUnverifiableProcess({
+			spawnedAt: host?.[`${role}SpawnedAt`] ?? null,
+			probe,
+			expectedCommandFragment: role === "child" ? sessionFile : host?.configPath ?? null,
+			toleranceMs: resolveIdentityCreationToleranceMs(),
+		}) === "owned";
+	}
+
+	/** A host role observation is "ended" when it is provably not running:
+	 *  never-spawned, confirmed dead, or a reused PID (foreign). */
+	const hostRoleEnded = (o) => o === "not_started" || o === "dead" || o === "foreign";
+
+	/**
+	 * Record the host roles that stranded a recovery (issue #217 D4).
+	 * Only roles whose identity is unverifiable (`"unknown"`) are recorded: an
+	 * `"owned"` role is alive and verified, so flagging it as unverifiable would
+	 * contradict the observation that stranded recovery. Only the producing side
+	 * writes: one event per instance+role, so repeated attach clicks on the same
+	 * stranded host never flood the diagnostics tail.
+	 * @param {string} viewId
+	 * @param {any} host host record the observations came from
+	 * @param {{ runner: string, child?: string|null }} observations `null` = not observed
+	 * @param {Map<number, any>} memo probe memo of the pass that produced `observations`
+	 * @param {"recover"|"attach"} path which call site stranded
+	 */
+	function noteRecoveryPending(viewId, host, observations, memo, path) {
+		for (const role of ["runner", "child"]) {
+			const observation = observations[role];
+			if (observation !== "unknown") continue;
+			const pid = host?.[`${role}Identity`]?.pid ?? host?.[`${role}Pid`] ?? null;
+			appendDiagnosticOnce(
+				root,
+				viewId,
+				{
+					source: "service",
+					level: "warn",
+					code: "host_recovery_pending",
+					message: "Host recovery is pending: process identity unverifiable",
+					details: {
+						instanceId: host?.instanceId ?? null,
+						role,
+						observation,
+						probe: (pid == null ? null : memo.get(pid)) ? "available" : "unavailable",
+						path,
+					},
+				},
+				{ match: ["instanceId", "role"] },
+			);
+		}
 	}
 
 	/**
@@ -973,14 +1202,16 @@ export function createService(opts) {
 	 * after runner and child are both confirmed ended.
 	 * @param {string} viewId
 	 * @param {string} expectedInstanceId
+	 * @param {string|null} [sessionFile] session whose file identifies the child
+	 *   process; defaults to the row's meta session file
 	 * @returns {Promise<{ ok: boolean, recovered?: boolean, instanceId?: string, socketPath?: string|null, error?: string }>}
 	 */
-	/** A host role observation is "ended" when it is provably not running:
-	 *  never-spawned, confirmed dead, or a reused PID (foreign). */
-	const hostRoleEnded = (o) => o === "not_started" || o === "dead" || o === "foreign";
-
-	async function recoverHost(viewId, expectedInstanceId) {
+	async function recoverHost(viewId, expectedInstanceId, sessionFile = loadRow(root, viewId)?.meta.sessionFile ?? null) {
 		const ended = hostRoleEnded;
+		const probeMemo = new Map();
+		// Token reads are memoized separately from probes: probe values are objects,
+		// token values are strings/null. One recovery pass reads each pid once.
+		const tokenMemo = new Map();
 		const instanceStillExpected = () => {
 			const h = readHost(root, viewId);
 			return h != null && h.instanceId === expectedInstanceId;
@@ -1011,31 +1242,42 @@ export function createService(opts) {
 		while (nowImpl() - startedAt < resolveHostRecoveryGraceMs()) {
 			const host = readHost(root, viewId);
 			if (!host || host.instanceId !== expectedInstanceId) return { ok: false, error: "already_recovered" };
-			const runnerObservation = observeHostRole(host, "runner");
-			const childObservation = observeHostRole(host, "child");
+			const runnerObservation = await observeHostRole(host, "runner", { sessionFile, memo: probeMemo, tokenMemo });
+			const childObservation = await observeHostRole(host, "child", { sessionFile, memo: probeMemo, tokenMemo });
 			if (ended(runnerObservation) && ended(childObservation)) break;
 			// Alive-but-unverifiable: never signal, never claim — stay pending.
-			if (runnerObservation === "unknown" || childObservation === "unknown") return { ok: false, error: "recovery_pending" };
+			if (runnerObservation === "unknown" || childObservation === "unknown") {
+				noteRecoveryPending(viewId, host, { runner: runnerObservation, child: childObservation }, probeMemo, "recover");
+				return { ok: false, error: "recovery_pending" };
+			}
 			if (!instanceStillExpected()) return { ok: false, error: "already_recovered" };
 			const elapsed = nowImpl() - startedAt;
 			if (runnerObservation === "owned") {
 				if (!runnerTermSent) {
-					signalOwnedProcessImpl(host.runnerIdentity, "SIGTERM");
-					runnerTermSent = true;
+					if (await revalidateProbeOwned(host, "runner", sessionFile, probeMemo)) {
+						signalOwnedProcessImpl(host.runnerIdentity, "SIGTERM");
+						runnerTermSent = true;
+					}
 				} else if (elapsed >= resolveHostRecoveryGraceMs() / 2 && !runnerKillSent) {
-					signalOwnedProcessImpl(host.runnerIdentity, "SIGKILL");
-					runnerKillSent = true;
+					if (await revalidateProbeOwned(host, "runner", sessionFile, probeMemo)) {
+						signalOwnedProcessImpl(host.runnerIdentity, "SIGKILL");
+						runnerKillSent = true;
+					}
 				}
 			}
 			// The child is only escalated once its runner is confirmed gone.
 			if (childObservation === "owned" && runnerObservation !== "owned") {
 				if (!childTermSent) {
-					signalOwnedProcessImpl(host.childIdentity, "SIGTERM");
-					childTermSent = true;
-					childTermAt = elapsed;
+					if (await revalidateProbeOwned(host, "child", sessionFile, probeMemo)) {
+						signalOwnedProcessImpl(host.childIdentity, "SIGTERM");
+						childTermSent = true;
+						childTermAt = elapsed;
+					}
 				} else if (elapsed - childTermAt >= 1_000 && !childKillSent) {
-					signalOwnedProcessImpl(host.childIdentity, "SIGKILL");
-					childKillSent = true;
+					if (await revalidateProbeOwned(host, "child", sessionFile, probeMemo)) {
+						signalOwnedProcessImpl(host.childIdentity, "SIGKILL");
+						childKillSent = true;
+					}
 				}
 			}
 			await sleepFnImpl(resolveHostRecoveryPollMs());
@@ -1043,7 +1285,12 @@ export function createService(opts) {
 		// Grace exhausted or loop broke — verify both roles are confirmed ended before claiming.
 		const finalHost = readHost(root, viewId);
 		if (!finalHost || finalHost.instanceId !== expectedInstanceId) return { ok: false, error: "already_recovered" };
-		if (!ended(observeHostRole(finalHost, "runner")) || !ended(observeHostRole(finalHost, "child"))) {
+		const finalRunnerObservation = await observeHostRole(finalHost, "runner", { sessionFile, memo: probeMemo, tokenMemo });
+		// Decision order preserved: the child is observed only once the runner is ended,
+		// and `null` means "not observed" so no diagnostic claims an unlooked-at role.
+		const finalChildObservation = ended(finalRunnerObservation) ? await observeHostRole(finalHost, "child", { sessionFile, memo: probeMemo, tokenMemo }) : null;
+		if (!ended(finalRunnerObservation) || !ended(finalChildObservation)) {
+			noteRecoveryPending(viewId, finalHost, { runner: finalRunnerObservation, child: finalChildObservation }, probeMemo, "recover");
 			return { ok: false, error: "recovery_pending" };
 		}
 
@@ -1301,16 +1548,20 @@ export function createService(opts) {
 			if (host.state === "stopping") {
 				const staleStop = host.instanceId != null && nowImpl() - (host.stopRequestedAt ?? host.claimAt ?? 0) >= resolveHostRecoveryGraceMs();
 				if (staleStop && !recovered) {
-					const runnerObs = observeHostRole(host, "runner");
-					const childObs = observeHostRole(host, "child");
+					const probeMemo = new Map();
+					// Fresh token memo per branch entry; never shared with probeMemo.
+					const tokenMemo = new Map();
+					const runnerObs = await observeHostRole(host, "runner", { sessionFile, memo: probeMemo, tokenMemo });
+					const childObs = await observeHostRole(host, "child", { sessionFile, memo: probeMemo, tokenMemo });
 					if (runnerObs === "unknown" || childObs === "unknown") {
 						// Unverifiable processes on a stranded record — never force.
+						noteRecoveryPending(viewId, host, { runner: runnerObs, child: childObs }, probeMemo, "attach");
 						return pending(sessionFile, "recovery_pending: host identity unverifiable");
 					}
 					if (hostRoleEnded(runnerObs) && hostRoleEnded(childObs)) {
 						recovered = true;
 						try {
-							const rec = await recoverHost(viewId, /** @type {string} */ (host.instanceId));
+							const rec = await recoverHost(viewId, /** @type {string} */ (host.instanceId), sessionFile);
 							if (!rec.ok && rec.error === "recovery_pending") {
 								return pending(sessionFile, "recovery_pending: host identity unverifiable");
 							}
@@ -1378,7 +1629,7 @@ export function createService(opts) {
 			if (!recovered) {
 				recovered = true;
 				try {
-					const rec = await recoverHost(viewId, /** @type {string} */ (host.instanceId));
+					const rec = await recoverHost(viewId, /** @type {string} */ (host.instanceId), sessionFile);
 					if (!rec.ok && rec.error === "recovery_pending") {
 						return pending(sessionFile, "recovery_pending: host identity unverifiable");
 					}
@@ -1641,6 +1892,84 @@ export function createService(opts) {
 			return true;
 		}
 		return false;
+	}
+
+	/**
+	 * Reconcile pre-pass (issue #230): when a warm host has died (state
+	 * `exited`/`failed` and no longer alive) while its session owns a paused
+	 * background workflow run, the row otherwise stays silent. Announce the
+	 * interruption by patching `summary` (through patch_fields so the manual
+	 * fence still governs) and record one diagnostic per run.
+	 *
+	 * The memo key is `(viewId, host.endedAt)`. A successful probe is memoized
+	 * except for the grace window right after the host ended: the workflow
+	 * engine writes the `paused` head while settling in-flight step children
+	 * during SIGTERM shutdown, and that write can land after the board finalizes
+	 * `host.state = exited` (finalization waits for the runner and child pids to
+	 * die, not for the engine's last write). A probe in that window reports
+	 * `running`, so any still-`running` result inside `NOTICE_FLIP_GRACE_MS`
+	 * stays un-memoized and re-probes next tick to catch the flip — including
+	 * when it coexists with an older `paused` run, which stays idempotent to
+	 * announce. Re-probing stops after `NOTICE_FLIP_GRACE_MS`; a `running` record
+	 * that survives the grace window is treated as a hard-kill artifact with no
+	 * notice (issue #230 follow-up). `!probe.ok` stays un-memoized so a transient
+	 * read failure retries next tick. Notice fires only for `paused`.
+	 *
+	 * An already-announced row still costs one probe per reconcile so a later
+	 * host incarnation can surface a new interrupted run; the summary write is
+	 * skipped only when it already names this same runId, and diagnostics stay
+	 * deduped per runId.
+	 *
+	 * This pre-pass deliberately sits outside the looksActive-gated loop below:
+	 * the target rows are already at `processState: "exited"`.
+	 * @param {number} now
+	 */
+	async function noticeInterruptedBackgroundRuns(now) {
+		for (const row of listRows(root)) {
+			const host = row.host;
+			if (!host || (host.state !== "exited" && host.state !== "failed") || row.hostAlive) continue;
+			const viewId = row.meta.id;
+			const key = `${viewId}:${host.endedAt ?? 0}`;
+			if (noticeProbeMemo.has(key)) continue;
+			const probe = backgroundRunsImpl.probeBackgroundRun({
+				sessionFile: row.meta.sessionFile ?? null,
+				hostStartedAt: host.startedAt ?? null,
+				workflowHome: workflowHomeImpl,
+			});
+			if (!probe.ok) continue; // incomplete scan: retry next tick, memo not written
+			const runningWithinGrace = probe.running != null && now - (host.endedAt ?? 0) < NOTICE_FLIP_GRACE_MS;
+			if (!runningWithinGrace) {
+				noticeProbeMemo.add(key);
+			}
+			if (!probe.paused) continue;
+			const runId = probe.paused.runId;
+			const summary = `Background workflow ${runId} was interrupted — resume it from this session`;
+			const alreadyAnnounced = typeof row.state?.summary === "string" && row.state.summary.startsWith(`Background workflow ${runId} `);
+			if (!alreadyAnnounced) {
+				const result = await sendLifecycleCommand({
+					type: "state_command",
+					viewId,
+					runId: null,
+					source: "service",
+					kind: "patch_fields",
+					expectedRevision: null,
+					payload: { state: { summary } },
+				}, viewId);
+				if (result.reason === "coordinator_disabled") {
+					const fresh = readState(root, viewId) ?? blankState(viewId);
+					fresh.summary = summary;
+					fresh.updatedAt = now;
+					writeState(root, fresh);
+				}
+			}
+			appendDiagnosticOnce(root, viewId, {
+				source: "service",
+				level: "warn",
+				code: "background_run_interrupted",
+				message: `Background workflow ${runId} was interrupted when its host died`,
+				details: { runId, hostState: host.state, exitCode: host.exitCode ?? null },
+			}, { match: ["runId"] });
+		}
 	}
 
 	return {
@@ -2155,6 +2484,7 @@ export function createService(opts) {
 		 */
 		async reconcile() {
 			const now = Date.now();
+			await noticeInterruptedBackgroundRuns(now);
 			let fixed = 0;
 			for (const row of listRows(root)) {
 				const s = row.state;
@@ -2426,26 +2756,9 @@ function compactSummary(text) {
 	return truncate(first.length >= 12 ? first : cleaned, 80);
 }
 
-/** POSIX process start token — /proc/<pid>/stat field 22 (starttime). Mirrors the
- *  runner's captureStartToken (issue #70) so both sides publish comparable
- *  identities; null on failure or non-Linux platforms. Task 11 may promote this
- *  to a shared module when identity-aware observation lands. */
-function readProcStartToken(pid) {
-	if (process.platform !== "linux" || !pid) return null;
-	try {
-		const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-		// comm (field 2) may contain spaces and parens — fields resume AFTER the
-		// last ')'. fields[0] is state (field 3) → starttime (field 22) is [19].
-		const afterComm = stat.slice(stat.lastIndexOf(")") + 1).trimStart();
-		return afterComm.split(/\s+/)[19] ?? null;
-	} catch {
-		return null;
-	}
-}
-
 /** Launch-time identity this service process stamps on leases and claims. */
 function serviceIdentity() {
-	return { pid: process.pid, startToken: readProcStartToken(process.pid) };
+	return { pid: process.pid, startToken: captureStartToken(process.pid) };
 }
 
 /**
@@ -2502,18 +2815,6 @@ function finalizeDeadLegacyHost(root, viewId, host, probeClassification, now, ac
 function conservativeObservation(pid) {
 	if (pid == null) return "dead";
 	return isAlive(pid) ? "unknown" : "dead";
-}
-
-/** Identity-aware process observation (issue #70): a live pid whose /proc start
- *  token matches the recorded identity is `owned` (safe to signal); a mismatch is
- *  `foreign` (pid reused — the original is gone); alive-but-unverifiable is
- *  `unknown` (recovery must stay pending, never signal). */
-function defaultObserveProcess(identity) {
-	if (!identity || identity.pid == null) return "unknown";
-	if (!isAlive(identity.pid)) return "dead";
-	const token = readProcStartToken(identity.pid);
-	if (identity.startToken == null || token == null) return "unknown";
-	return token === identity.startToken ? "owned" : "foreign";
 }
 
 /** Signal an identity previously observed as "owned". ESRCH is tolerated (the

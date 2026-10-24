@@ -358,6 +358,7 @@ test("resolver never downgrades to session while an unknown host may be alive", 
 			probeHostFn: probe.fn,
 			sleepFn: instantSleep,
 			observeProcess: () => "unknown",
+			probeProcessIdentity: async () => null,
 			launchHost: (_root, config) => {
 				spawns.push({ config });
 				return { pid: process.pid, configPath: config.configPath };
@@ -368,6 +369,39 @@ test("resolver never downgrades to session while an unknown host may be alive", 
 		assert.match(result.reason, /recovery_pending/);
 		assert.equal(probe.calls.length, 1);
 		assert.equal(spawns.length, 0, "identity-unverifiable hosts are never replaced or attached");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("resolver diagnoses the attach path when a stranded stopping record is unverifiable", async () => {
+	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		// A stranded `stopping` record: the revoke never finalized, its recovery
+		// grace is long past, and the runner identity cannot be verified (issue #217).
+		aliveHost(root, "v1", "i1", { state: "stopping", stopRequestedAt: 1 });
+		const spawns = [];
+		const svc = resolverService(root, {
+			probeHostFn: scriptProbe(["unknown"]).fn,
+			sleepFn: instantSleep,
+			observeProcess: () => "unknown",
+			probeProcessIdentity: async () => null,
+			launchHost: (_root, config) => {
+				spawns.push({ config });
+				return { pid: process.pid, configPath: config.configPath };
+			},
+		});
+		const result = await svc.resolveAttachTarget("v1", { timeoutMs: 250 });
+		assert.equal(result.kind, "pending");
+		assert.match(result.reason, /recovery_pending/);
+		// Spec A10: the resolver-side producer must leave a trail naming the attach path.
+		const recorded = readDiagnostics(root, "v1").filter((e) => e.code === "host_recovery_pending");
+		const attachEvent = recorded.find((e) => e.details.path === "attach");
+		assert.ok(attachEvent, `expected a host_recovery_pending event on the attach path, got ${JSON.stringify(recorded)}`);
+		assert.equal(attachEvent.details.role, "runner");
+		assert.equal(attachEvent.details.instanceId, "i1");
+		assert.equal(spawns.length, 0, "unverifiable identities are never replaced");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
@@ -557,6 +591,48 @@ test("resolver finalizes a stale stopping host with provably-dead processes (CR 
 		const finalHost = readHost(root, "v1");
 		assert.equal(finalHost.instanceId, result.instanceId, "stale stopping record was finalized and replaced");
 		assert.ok(finalHost.runnerSpawnedAt != null, "replacement claim carries the adopted spawn");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("resolver advances a stranded stopping host when the child command line is foreign (issue #217)", async () => {
+	const root = freshRoot();
+	try {
+		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeFileSync(meta.sessionFile, "");
+		aliveHost(root, "v1", "i1", {
+			state: "stopping",
+			stopRequestedAt: 1_000_000 - 30_000,
+			revokeToken: "rev-217",
+			stopReason: "user",
+			configPath: P.hostConfigPathFor(root, "v1", "i1"),
+			runnerIdentity: { pid: 999999, startToken: null },
+			runnerSpawnedAt: 1,
+			childPid: 999998,
+			childIdentity: { pid: 999998, startToken: null },
+			childSpawnedAt: 1,
+		});
+		let clock = 1_000_000;
+		const probe = scriptProbe(["missing", "ready"]);
+		const spawns = [];
+		const svc = resolverService(root, {
+			now: () => clock,
+			probeHostFn: probe.fn,
+			sleepFn: async () => {
+				clock += 20_000;
+			},
+			observeProcess: () => "unknown",
+			probeProcessIdentity: async () => ({ creationTimeMs: 9, commandLine: "node other.js" }),
+			launchHost: (_root, config) => {
+				spawns.push({ config });
+				return { pid: process.pid, configPath: config.configPath };
+			},
+		});
+		const result = await svc.resolveAttachTarget("v1");
+		assert.equal(result.kind, "pty", `expected replacement attach, got ${JSON.stringify(result)}`);
+		assert.ok(result.instanceId && result.instanceId !== "i1", "attaches to a replacement instance");
+		assert.equal(spawns.length, 1, "adopt-and-spawn runs exactly once for the recovered claim");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}

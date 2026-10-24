@@ -2328,3 +2328,264 @@ test("markCompleted clears autoState in the run status so in-flight model passes
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+/** Minimal recoverable new-protocol host record for identity observation tests. */
+function identityHost(root, viewId, patch = {}) {
+	writeHost(root, {
+		version: 1,
+		viewId,
+		mode: "pty",
+		instanceId: "i1",
+		configPath: P.hostConfigPathFor(root, viewId, "i1"),
+		socketPath: P.hostEndpointPathFor(process.platform, root, viewId, "i1"),
+		claimAt: Date.now() - 60_000,
+		claimPid: null,
+		runnerPid: null,
+		runnerIdentity: null,
+		runnerSpawnedAt: null,
+		childPid: null,
+		childIdentity: null,
+		childSpawnedAt: null,
+		state: "alive",
+		startedAt: Date.now() - 60_000,
+		lastSeenAt: Date.now(),
+		endedAt: null,
+		exitCode: null,
+		error: null,
+		readyAt: Date.now() - 50_000,
+		cols: 80,
+		rows: 24,
+		attachedClients: 0,
+		stopRequestedAt: null,
+		revokeToken: null,
+		stopReason: null,
+		...patch,
+	});
+}
+
+test("observe: a matching win32 token is owned and a mismatching one is foreign", async () => {
+	/** Run one recovery against a runner identity recorded with `recordToken` and re-read as `observedToken`. */
+	async function run(recordToken, observedToken) {
+		const root = freshRoot();
+		const signals = [];
+		let alive = true;
+		try {
+			createView(root, { id: "v1", name: "a", cwd: "/r" });
+			identityHost(root, "v1", {
+				runnerPid: 4242,
+				runnerIdentity: { pid: 4242, startToken: recordToken },
+				runnerSpawnedAt: 1,
+			});
+			const svc = service(root, {
+				isAlive: () => alive,
+				readStartToken: async () => observedToken,
+				signalOwnedProcess: (identity, signal) => {
+					signals.push({ pid: identity.pid, signal });
+					alive = false;
+				},
+			});
+			const res = await svc.recoverHost("v1", "i1");
+			return { res, signals, host: readHost(root, "v1") };
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	}
+
+	// Equal tokens → "owned": the runner is escalated once, then observed dead.
+	const owned = await run("ct:111", "ct:111");
+	assert.equal(owned.res.ok, true);
+	assert.deepEqual(owned.signals, [{ pid: 4242, signal: "SIGTERM" }], "an owned runner receives the escalation");
+	assert.notEqual(owned.host.instanceId, "i1", "the owned-then-dead runner is replaced");
+
+	// A reused pid reads a different token → "foreign": ended but never signalled.
+	const foreign = await run("ct:111", "ct:222");
+	assert.equal(foreign.res.ok, true);
+	assert.equal(foreign.res.recovered, true);
+	assert.deepEqual(foreign.signals, [], "a foreign pid must never be signalled");
+});
+
+test("observe: a null record token never reads a token and stays unknown", async () => {
+	const root = freshRoot();
+	const signals = [];
+	let readCalls = 0;
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		identityHost(root, "v1", {
+			runnerPid: 4242,
+			runnerIdentity: { pid: 4242, startToken: null },
+			runnerSpawnedAt: 1,
+		});
+		const svc = service(root, {
+			isAlive: () => true,
+			readStartToken: async () => {
+				readCalls += 1;
+				return "ct:111";
+			},
+			probeProcessIdentity: async () => null,
+			signalOwnedProcess: (identity, signal) => signals.push({ pid: identity.pid, signal }),
+		});
+
+		const res = await svc.recoverHost("v1", "i1");
+
+		assert.equal(res.ok, false);
+		assert.equal(res.error, "recovery_pending");
+		assert.equal(readCalls, 0, "a null record token must not trigger a token read");
+		assert.deepEqual(signals, []);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("observe: tokenMemo reads each pid's token once per recovery", async () => {
+	const root = freshRoot();
+	const signals = [];
+	let readCalls = 0;
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		// Runner and child share one pid so two observations must share one token read.
+		identityHost(root, "v1", {
+			runnerPid: 4242,
+			runnerIdentity: { pid: 4242, startToken: "ct:222" },
+			runnerSpawnedAt: 1,
+			childPid: 4242,
+			childIdentity: { pid: 4242, startToken: "ct:222" },
+			childSpawnedAt: 1,
+		});
+		const svc = service(root, {
+			isAlive: () => true,
+			readStartToken: async () => {
+				readCalls += 1;
+				return "ct:111";
+			},
+			signalOwnedProcess: (identity, signal) => signals.push({ pid: identity.pid, signal }),
+		});
+
+		const res = await svc.recoverHost("v1", "i1");
+
+		assert.equal(res.ok, true);
+		assert.equal(res.recovered, true, "two foreign observations end both roles");
+		assert.deepEqual(signals, []);
+		assert.equal(readCalls, 1, "runner and child share one memoized token read for the same pid");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("revalidate: a reused pid with a different token never receives a signal", async () => {
+	const root = freshRoot();
+	const signals = [];
+	let readCalls = 0;
+	let clock = 1_000_000;
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		identityHost(root, "v1", {
+			runnerPid: 4242,
+			runnerIdentity: { pid: 4242, startToken: "ct:111" },
+			runnerSpawnedAt: 1,
+		});
+		const svc = service(root, {
+			now: () => clock,
+			sleepFn: async () => {
+				clock += 1_000;
+			},
+			isAlive: () => true,
+			readStartToken: async () => {
+				readCalls += 1;
+				// First read is the observation; every later read is the pre-signal re-read.
+				return readCalls === 1 ? "ct:111" : "ct:222";
+			},
+			signalOwnedProcess: (identity, signal) => signals.push({ pid: identity.pid, signal }),
+		});
+
+		const res = await svc.recoverHost("v1", "i1");
+
+		assert.equal(res.ok, false);
+		assert.equal(res.error, "recovery_pending");
+		assert.deepEqual(signals, [], "a token that changed after observation must never be signalled");
+		assert.ok(readCalls >= 2, `expected a live re-read before signalling, got ${readCalls} read(s)`);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("revalidate: a failing re-read refuses the signal", async () => {
+	const root = freshRoot();
+	const signals = [];
+	let readCalls = 0;
+	let clock = 1_000_000;
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		identityHost(root, "v1", {
+			runnerPid: 4242,
+			runnerIdentity: { pid: 4242, startToken: "ct:111" },
+			runnerSpawnedAt: 1,
+		});
+		const svc = service(root, {
+			now: () => clock,
+			sleepFn: async () => {
+				clock += 1_000;
+			},
+			isAlive: () => true,
+			readStartToken: async () => {
+				readCalls += 1;
+				// The observation read succeeds; the pre-signal re-read is unverifiable.
+				return readCalls === 1 ? "ct:111" : null;
+			},
+			signalOwnedProcess: (identity, signal) => signals.push({ pid: identity.pid, signal }),
+		});
+
+		const res = await svc.recoverHost("v1", "i1");
+
+		assert.equal(res.ok, false);
+		assert.equal(res.error, "recovery_pending");
+		assert.deepEqual(signals, [], "an unreadable token must never authorise a signal");
+		assert.ok(readCalls >= 2, `expected a live re-read before signalling, got ${readCalls} read(s)`);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("degradation: unreadable token and unavailable probe stay unknown and pend recovery", async () => {
+	const root = freshRoot();
+	const signals = [];
+	let tokenReads = 0;
+	let probeCalls = 0;
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		identityHost(root, "v1", {
+			state: "stopping",
+			stopRequestedAt: 1,
+			runnerPid: 4242,
+			runnerIdentity: { pid: 4242, startToken: "ct:111" },
+			runnerSpawnedAt: 1,
+		});
+		const svc = service(root, {
+			isAlive: () => true,
+			readStartToken: async () => {
+				tokenReads += 1;
+				return null;
+			},
+			probeProcessIdentity: async () => {
+				probeCalls += 1;
+				return null;
+			},
+			signalOwnedProcess: (identity, signal) => signals.push({ pid: identity.pid, signal }),
+		});
+
+		const res = await svc.recoverHost("v1", "i1");
+
+		assert.equal(res.ok, false);
+		assert.equal(res.error, "recovery_pending", "an unverifiable identity never releases or replaces the host");
+		assert.equal(tokenReads, 1, "the recorded token path was attempted");
+		assert.equal(probeCalls, 1, "the #217 probe fallback was attempted");
+		assert.deepEqual(signals, [], "an unverifiable process is never signalled");
+		const pending = readDiagnostics(root, "v1").filter((e) => e.code === "host_recovery_pending");
+		assert.ok(
+			pending.some((e) => e.details.role === "runner" && e.details.observation === "unknown"),
+			"the stranded runner was observed as unknown",
+		);
+		assert.equal(readHost(root, "v1")?.instanceId, "i1", "the record is untouched (no release, no replacement)");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});

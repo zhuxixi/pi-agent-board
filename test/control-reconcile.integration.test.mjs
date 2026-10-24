@@ -163,7 +163,10 @@ test("recorder window: since(mark) excludes everything before the mark", () => {
 	assert.equal(rec.messages.length, 2); // live arrays: legacy accessors keep working
 });
 
-let instanceCounter = 0;
+// Start at 1000, not 0: on win32 the instance control pipe name embeds only the
+// viewId and a hash of the instance id (not the board root), so a per-file offset
+// keeps concurrently running suites in separate pipe namespaces.
+let instanceCounter = 1000;
 
 /** Spawn the OWNED main (instance-scoped endpoint) — same shape as the
  *  control-lifecycle harness. Steady mode gives a continuous tick stream so a
