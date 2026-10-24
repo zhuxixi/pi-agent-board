@@ -429,6 +429,25 @@ Record before/after `npm test`: count `Get-CimInstance Win32_Process -Filter "Na
 
 ---
 
+## Task 5: pre-existing win32 `launch.test.mjs` cleanup failures (gate exposure)
+
+**Why:** `node --test test/launch.test.mjs` fails 4/5 on win32 on `main` @2815469 (verified before this branch). Its fixtures build `config.cwd = root` and spawn `test-support/fake-pi.mjs` as a detached runner but never kill it, so `rmSync(root)` fails `EPERM` at cleanup — the same root-pinning and fake-runner-orphan class this issue fixes. A7 requires `npm test` green on Windows, so this must be repaired in the same PR (spec §7 "a test that never deletes its root: fix that test's cleanup in the same PR").
+
+**Files:**
+- Modify: `test/launch.test.mjs` only (no product code, per the Why).
+
+- [ ] **Step 1: Reproduce** — `node --test test/launch.test.mjs` → 4 failures with `EPERM ... agentview-launch-*`.
+
+- [ ] **Step 2: Add a local `killAndRemove(pid, dir)` helper** at the bottom of the file: SIGTERM the pid (ignore errors), poll `isAlive(pid)` every 25 ms up to 2 s, SIGKILL if still alive, then `rmSync(dir, { recursive: true, force: true })` retried every 50 ms up to 40 attempts (rethrow the last error). `isAlive` can be a local `try { process.kill(pid, 0); return true; } catch { return false; }`.
+
+- [ ] **Step 3: Use it in the four failing tests' `finally`** — replace `rmSync(root, ...)` with `await killAndRemove(res.pid, root)` (hoist `res` above the `try`). Keep every assertion unchanged.
+
+- [ ] **Step 4: Verify** — `node --test test/launch.test.mjs` → 5/5 pass; run it twice and confirm no `agentview-launch-*` dirs and no lingering `fake-pi.mjs` processes are left behind.
+
+- [ ] **Step 5: Commit** — `test: kill launched fake runners before removing launch roots (issue #241)`.
+
+Execution order note (ledger): Task 5 runs after Tasks 1–3 and **before Task 4**, because Task 4's gate must see a green suite.
+
 ## Self-Review
 
 **Spec coverage:** §3.1 → Task 1 (A1, A2); §3.2 → Task 2 (A3, A3b, A4); §3.3 → Task 3 (A5, A6, A7); §3.4 ordering honored (wrapper wired after 1–2); §5 A8 + U1 → Task 4; §7 risks mapped to Review Focus + tests; §8 deployment unchanged by design (no bump, no migration).
