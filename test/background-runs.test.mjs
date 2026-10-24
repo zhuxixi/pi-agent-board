@@ -25,6 +25,17 @@ test("A1: v2 head -> status/parentSessionFile/updatedAt", () => {
 	assert.equal(h.hasCheckpoint, false);
 });
 
+test("A1: v2 checkpoint in root summary -> hasCheckpoint true", () => {
+	const raw = V2();
+	raw.summary = { checkpoint: { checkpointId: "cp1", stepIndex: 1 } };
+	assert.equal(parseRunHead(raw).hasCheckpoint, true);
+});
+
+test("A1: legacy flat top-level checkpoint -> hasCheckpoint true", () => {
+	const h = parseRunHead({ runId: "old-2", status: "paused", checkpoint: { checkpointId: "cp2" } });
+	assert.equal(h.hasCheckpoint, true);
+});
+
 test("A1: v2 head without parentSessionFile -> null parent", () => {
 	const raw = V2();
 	delete raw.index.parentSessionFile;

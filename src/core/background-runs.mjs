@@ -51,9 +51,11 @@ export function resolveWorkflowHome({ env = process.env, home = os.homedir() } =
 
 /**
  * Parse a run head record into the fields the protection decision needs, or
- * `null` when it is not a workflow run. v2 heads nest the payload under `index`;
- * legacy flat records are still parsed but can never match a row because they
- * have no `parentSessionFile` (spec non-goal: no legacy session matching).
+ * `null` when it is not a workflow run. A v2 record nests the run fields under
+ * `index` but keeps `summary` (and therefore the checkpoint) as a sibling at the
+ * record root; legacy flat records carry `checkpoint` at the root themselves and
+ * can never match a row because they have no `parentSessionFile` (spec non-goal:
+ * no legacy session matching).
  * Never throws: the input is external, unversioned JSON.
  * @param {unknown} raw parsed JSON
  * @returns {RunHead|null}
@@ -70,7 +72,7 @@ export function parseRunHead(raw) {
 		parentSessionFile: typeof source.parentSessionFile === "string" ? source.parentSessionFile : null,
 		startedAtMs: toMs(source.startedAt),
 		updatedAtMs: toMs(source.updatedAt),
-		hasCheckpoint: Boolean(source.summary?.checkpoint ?? source.checkpoint),
+		hasCheckpoint: Boolean(record.summary?.checkpoint ?? source.checkpoint),
 	};
 }
 
