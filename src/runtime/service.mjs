@@ -73,6 +73,16 @@ const HOST_RECOVERY_POLL_MS = 150;
 export const HOST_IDENTITY_CREATION_TOLERANCE_MS = 5_000;
 /** Default wall-clock budget for one attach resolution (issue #70 Task 12). */
 const ATTACH_RESOLVE_TIMEOUT_MS = 120_000;
+/**
+ * How long after a finalized host to keep re-probing a still-`running` run
+ * before treating it as a hard-kill artifact (issue #230). Finalization waits
+ * for the runner and child pids to die, not for the workflow engine's last
+ * write, so the `paused` head the engine writes while settling in-flight step
+ * children during SIGTERM shutdown can land after `host.state = exited`. A
+ * probe in that window reports `running` and, without this grace period, the
+ * interruption notice would be swallowed for that host incarnation.
+ */
+export const NOTICE_FLIP_GRACE_MS = 60_000;
 
 /**
  * Dynamic readers for the ladder constants above (issue #95 F4). Module-load-time
@@ -178,11 +188,12 @@ export function createService(opts) {
 	// home are injectable for tests; the env guard flag is read at call time.
 	const backgroundRunsImpl = opts.backgroundRuns ?? { scanBackgroundRuns, probeBackgroundRun };
 	const workflowHomeImpl = opts.workflowHome ?? resolveWorkflowHome();
-	// Notice memo (issue #230): remember (viewId, host.endedAt) only after a
-	// conclusive observation — a paused run (notice path) or a clean empty store.
-	// A transient ok:false and a still-running run both stay un-memoized so the
-	// next tick re-probes (a running run can flip to paused later in the same
-	// host incarnation).
+	// Notice memo (issue #230): remember (viewId, host.endedAt) after a successful
+	// probe, except when it still reports a `running` run with no `paused` inside
+	// the flip grace window — the engine's last `paused` write can land after
+	// finalization, so that window stays un-memoized and re-probes next tick to
+	// catch the flip. `!probe.ok` stays un-memoized to retry transient read
+	// failures.
 	const noticeProbeMemo = new Set();
 	// In-flight attach resolutions, keyed by viewId: concurrent resolver calls for
 	// the same view share one promise (issue #70 Task 12).
@@ -1843,19 +1854,24 @@ export function createService(opts) {
 	 * interruption by patching `summary` (through patch_fields so the manual
 	 * fence still governs) and record one diagnostic per run.
 	 *
-	 * Two guards keep the pre-pass cheap on hot paths that rebuild the service
-	 * per foreground event (issue #230 A1/A2):
-	 * - A row whose `summary` already starts with the announcement is skipped
-	 *   before any store probe, so a throwaway-service instance does not re-scan
-	 *   an already-announced dead-host row. The on-disk diagnostic dedupe below
-	 *   remains the second line of defence for rows whose summary write was
-	 *   fenced away.
-	 * - The memo key is `(viewId, host.endedAt)` and is added whenever the probe
-	 *   succeeds (`ok:true`), whatever it found. A dead host's run cannot flip
-	 *   state inside this incarnation, so a still-`running` record is memoized
-	 *   too instead of re-probing forever. `ok:false` stays un-memoized so a
-	 *   transient read failure retries next tick. A dead host whose record still
-	 *   says `running` stays silent — that boundary is covered by a follow-up.
+	 * The memo key is `(viewId, host.endedAt)`. A successful probe is memoized
+	 * except for the grace window right after the host ended: the workflow
+	 * engine writes the `paused` head while settling in-flight step children
+	 * during SIGTERM shutdown, and that write can land after the board finalizes
+	 * `host.state = exited` (finalization waits for the runner and child pids to
+	 * die, not for the engine's last write). A probe in that window reports
+	 * `running`, so a `running`-with-no-`paused` result inside
+	 * `NOTICE_FLIP_GRACE_MS` stays un-memoized and re-probes next tick to catch
+	 * the flip. Re-probing stops after `NOTICE_FLIP_GRACE_MS`; a `running` record
+	 * that survives the grace window is treated as a hard-kill artifact with no
+	 * notice (issue #230 follow-up). `!probe.ok` stays un-memoized so a transient
+	 * read failure retries next tick. Notice fires only for `paused`.
+	 *
+	 * An already-announced row still costs one probe per reconcile so a later
+	 * host incarnation can surface a new interrupted run; the summary write is
+	 * skipped only when it already names this same runId, and diagnostics stay
+	 * deduped per runId.
+	 *
 	 * This pre-pass deliberately sits outside the looksActive-gated loop below:
 	 * the target rows are already at `processState: "exited"`.
 	 * @param {number} now
@@ -1865,8 +1881,6 @@ export function createService(opts) {
 			const host = row.host;
 			if (!host || (host.state !== "exited" && host.state !== "failed") || row.hostAlive) continue;
 			const viewId = row.meta.id;
-			const alreadyAnnounced = typeof row.state?.summary === "string" && row.state.summary.startsWith("Background workflow ");
-			if (alreadyAnnounced) continue;
 			const key = `${viewId}:${host.endedAt ?? 0}`;
 			if (noticeProbeMemo.has(key)) continue;
 			const probe = backgroundRunsImpl.probeBackgroundRun({
@@ -1875,24 +1889,30 @@ export function createService(opts) {
 				workflowHome: workflowHomeImpl,
 			});
 			if (!probe.ok) continue; // incomplete scan: retry next tick, memo not written
-			noticeProbeMemo.add(key);
+			const runningWithinGrace = probe.running != null && probe.paused == null && now - (host.endedAt ?? 0) < NOTICE_FLIP_GRACE_MS;
+			if (!runningWithinGrace) {
+				noticeProbeMemo.add(key);
+			}
 			if (!probe.paused) continue;
 			const runId = probe.paused.runId;
 			const summary = `Background workflow ${runId} was interrupted — resume it from this session`;
-			const result = await sendLifecycleCommand({
-				type: "state_command",
-				viewId,
-				runId: null,
-				source: "service",
-				kind: "patch_fields",
-				expectedRevision: null,
-				payload: { state: { summary } },
-			}, viewId);
-			if (result.reason === "coordinator_disabled") {
-				const fresh = readState(root, viewId) ?? blankState(viewId);
-				fresh.summary = summary;
-				fresh.updatedAt = now;
-				writeState(root, fresh);
+			const alreadyAnnounced = typeof row.state?.summary === "string" && row.state.summary.startsWith(`Background workflow ${runId} `);
+			if (!alreadyAnnounced) {
+				const result = await sendLifecycleCommand({
+					type: "state_command",
+					viewId,
+					runId: null,
+					source: "service",
+					kind: "patch_fields",
+					expectedRevision: null,
+					payload: { state: { summary } },
+				}, viewId);
+				if (result.reason === "coordinator_disabled") {
+					const fresh = readState(root, viewId) ?? blankState(viewId);
+					fresh.summary = summary;
+					fresh.updatedAt = now;
+					writeState(root, fresh);
+				}
 			}
 			appendDiagnosticOnce(root, viewId, {
 				source: "service",
