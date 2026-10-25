@@ -265,15 +265,19 @@ const REPLACE_POLL_MS = 50;
 /** @typedef {"lease_unreadable"|"lease_owner_mismatch"|"pid_reused"|"identity_unverified"|"lease_changed"|"instance_unresponsive"|"replacement_raced"|"replace_timeout"} SkipReason */
 
 /**
- * Await `ms` with an unref'd timer, so waiting for a coordinator to exit never
- * keeps a one-shot CLI process alive on its own.
+ * Await `ms` with a ref'd timer, deliberately NOT unref'd (issue #239 D4).
+ * `ensureCoordinator` is awaited by detached one-shot callers whose send point
+ * holds no other ref'd handle; an unref'd sleep lets such a process exit with
+ * code 0 mid-wait, so `ensureCoordinator` never returns, the replacement is
+ * never spawned and the queued state command is silently dropped. The wait is
+ * bounded by `replaceTimeoutMs` (≤3s), so a ref'd timer cannot keep a caller
+ * alive beyond the replacement budget.
  * @param {number} ms
  * @returns {Promise<void>}
  */
 function replaceSleep(ms) {
 	return new Promise((resolve) => {
-		const timer = setTimeout(resolve, ms);
-		timer.unref?.();
+		setTimeout(resolve, ms);
 	});
 }
 

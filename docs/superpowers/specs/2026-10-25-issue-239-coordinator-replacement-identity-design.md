@@ -186,7 +186,7 @@ kill(pid, SIGTERM)
 |---|---|---|
 | `src/core/coordinator-client.mjs` | `readCoordinatorLeaseRecord(root)` | **新增并导出**（供 A2 直接单测）；返回 `{token, pid, instanceId, startToken} \| null`；替换私有 `readCoordinatorLeasePid` |
 | 同上 | `judgeReplacementTarget(args)` | **新增并导出**纯函数 |
-| 同上 | `replaceStaleCoordinator(root, socketPath, expectedInstanceId, opts)` | **导出**（供 A3）；签名扩展；返回 `ReplaceOutcome`；`opts` 全部可注入，默认值：`probe`=`probeOnce`、`readLease`=`readCoordinatorLeaseRecord`、`kill`=`process.kill`、`isAlive`=`pid.mjs` 的 `isAlive`、`readStartToken`=`readProcessStartToken`（**async，J3 路径必须 await**）、`clock`=`Date.now`、`sleep`=可取消的 setTimeout promise、`replaceTimeoutMs`=3000、`reportSkip`=D5 默认实现 |
+| 同上 | `replaceStaleCoordinator(root, socketPath, expectedInstanceId, opts)` | **导出**（供 A3）；签名扩展；返回 `ReplaceOutcome`；`opts` 全部可注入，默认值：`probe`=`probeOnce`、`readLease`=`readCoordinatorLeaseRecord`、`kill`=`process.kill`、`isAlive`=`pid.mjs` 的 `isAlive`、`readStartToken`=`readProcessStartToken`（**async，J3 路径必须 await**）、`clock`=`Date.now`、`sleep`=**ref'd** 的 setTimeout promise（等待不可取消，由 `replaceTimeoutMs` 封顶；ref 而非 unref：detached 一次性调用方的完成依赖该 promise resolve，unref 会让进程在等待中退出）、`replaceTimeoutMs`=3000、`reportSkip`=D5 默认实现 |
 | 同上 | `ensureCoordinator` | 传 `first.instanceId` 与 `connect`/`probeTimeoutMs`；按 `ReplaceOutcome.replaced` 决定继续/返回 `coordinator_stale_protocol` |
 | `runner/state-coordinator.mjs` | `main()` 租约获取 | `identity` 增加 `instanceId` |
 | `test/coordinator-client.test.mjs` | `STALE_COORDINATOR_CJS` | owner.json 增 `identity.instanceId`（与 pong 同值）；新增反向 fixture（不匹配 / 缺失） |
@@ -241,7 +241,7 @@ kill(pid, SIGTERM)
 | A3h | 诊断写失败不影响结果 | 自动化（unit，T3） | 注入抛错的 `reportSkip` | `replaceStaleCoordinator` 返回同一 `ReplaceOutcome` 且不抛（不设 ensure 级断言：`ensureCoordinator` 没有 reportSkip 注入点，never-throws 由 D5 的调用点 catch + reportSkip 自身 catch 保证） |
 | A3i | 重 ping 返回另一**健康**实例 | 自动化（unit，T3） | 第二次 probe `instanceId` 不同且 `protocolVersion >= 当前` | 不 kill；`replaced:true`（ensure 继续 launch，不返回 stale_protocol） |
 | A3j | 重 ping null + 二次租约不可读 | 自动化（unit，T3） | `probe` 第二次 null、`readLease` 第二次 null | 不 kill；`skip("lease_unreadable")` |
-| A3k | root 已删时不重建目录 | 自动化（unit，T3） | 注入 `probe` null、`readLease` 一条记录、`isAlive` true；调用前 `rmSync(root)` | 调用后 `existsSync(root) === false`（未写诊断）；`skip("instance_unresponsive")` |
+| A3k | root 缺失/已删时不重建目录 | 自动化（unit，T3） | 注入 `readLease` 一条 `instanceId` 与 pong 不匹配的记录（走 `skip("lease_owner_mismatch")`）；`reportSkip` 用默认实现并以一个**从未创建**的 root 调用 | 调用后 `existsSync(root) === false`（未写诊断）；`replaced:false`。守卫与触发原因无关：任何 skip reason 都不重建 root，故等价覆盖「已删 root + `instance_unresponsive`」形态 |
 | A3l | kill 抛错不改变结果 | 自动化（unit，T3） | 注入抛 `ESRCH` 的 `kill` → 期望 `replaced:true`；注入抛 `EPERM` 的 `kill` + `isAlive` true | ESRCH：不抛、`replaced:true`；EPERM：不抛、`skip("replace_timeout")` |
 | A4 | 记录侧 instanceId | 自动化（integration，T4） | 真实 spawn 用例 | owner.json `identity.instanceId` 非空且 == pong.instanceId |
 | A5 | 匹配替换端到端 | 自动化（integration，T5） | stale-v1 fixture（owner.json 带匹配 instanceId） | 旧进程退出；新实例接管；`sendStateCommand` → `applied` |
@@ -318,6 +318,7 @@ kill(pid, SIGTERM)
 7. **诊断消费端（UI 呈现）不在范围**。
 8. **真实安装形态的跨版本升级无法自动验收**：需要旧版本 detached coordinator 跨越安装升级存活，CI 与本机难以稳定复现；U1 用隔离 root 复现同一代码路径，不覆盖该现场。语义由 A5-A7 的真实子进程 fixture 覆盖。
 9. **J3 是对 issue 建议 2 的显式偏离**：Linux legacy 在实时 startToken 相等（同一性可证）后仍发信号；win32/darwin 严格按建议 2 skip。若复核/评审不接受该偏离，回退方式是删除 J3（Linux 升级路径退化为人工恢复，恢复步骤见第 3 条）。
+10. **null-probe 分支的存活判定用重读后的 lease pid，而非 §3 D3 字面的 `recorded.pid`**：重 ping 返回 null 时先重读租约，对 `fresh.pid` 调 `isAlive`；重读记录不可读 → `lease_unreadable`。这是有意接受的偏离：fail-closed 且比字面实现更保守——绝不因旧快照而少判一次「仍活」，语义边界不变。
 
 ## 10. 参考
 

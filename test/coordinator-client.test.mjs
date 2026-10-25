@@ -686,6 +686,7 @@ test("ensureCoordinator forwards the legacy/wait seams into the replacement", as
 	// never-exits branch deterministic: the fake lease pid never dies.
 	plantLease(fake.root, { pid: 99_999_999, startToken: "1" });
 	const seen = { tokens: [], kills: [], sleeps: 0 };
+	let now = 0;
 	const ensured = await ensureCoordinator(fake.root, {
 		runnerScript: COORDINATOR_SCRIPT,
 		readStartToken: async (pid) => {
@@ -694,8 +695,8 @@ test("ensureCoordinator forwards the legacy/wait seams into the replacement", as
 		},
 		kill: (pid, signal) => seen.kills.push([pid, signal]),
 		isAlive: () => true,
-		clock: () => 0,
-		sleep: async () => { seen.sleeps += 1; },
+		clock: () => now,
+		sleep: async () => { seen.sleeps += 1; now += 50; },
 		replaceTimeoutMs: 100,
 	});
 	if (ensured.pid) track(ensured.pid);
@@ -703,7 +704,28 @@ test("ensureCoordinator forwards the legacy/wait seams into the replacement", as
 	assert.deepEqual(ensured, { ok: false, error: "coordinator_stale_protocol" });
 	assert.deepEqual(seen.tokens, [99_999_999], "readStartToken is forwarded (legacy J3)");
 	assert.deepEqual(seen.kills, [[99_999_999, "SIGTERM"]], "kill is forwarded and used exactly once");
-	assert.ok(seen.sleeps > 0, "the injected sleep drives the never-exits wait");
+	// Forwarding check, not merely "sleep happened": a 100ms budget over the
+	// 50ms poll is exactly 2 ticks, so the default 3000ms budget (60 ticks) fails.
+	assert.equal(seen.sleeps, 2, "replaceTimeoutMs=100 bounds the wait to 2 polls");
+
+	// The injected clock must be able to end the wait early: a jump past the
+	// deadline stops after one poll even though the tick budget is 60. A real
+	// Date.now would not advance 3000ms instantly and would run all 60 ticks.
+	let jumped = 0;
+	const early = await ensureCoordinator(fake.root, {
+		runnerScript: COORDINATOR_SCRIPT,
+		readStartToken: async () => "1",
+		kill: (pid, signal) => seen.kills.push([pid, signal]),
+		isAlive: () => true,
+		clock: () => jumped,
+		sleep: async () => { seen.sleeps += 1; jumped += 3000; },
+		replaceTimeoutMs: 3000,
+	});
+	if (early.pid) track(early.pid);
+
+	assert.deepEqual(early, { ok: false, error: "coordinator_stale_protocol" });
+	assert.equal(seen.sleeps, 3, "the injected clock ends the wait after a single poll");
+	assert.equal(seen.kills.length, 2);
 });
 
 // --- fixture helpers (mirrors state-coordinator.integration.test.mjs) ---
@@ -822,9 +844,16 @@ test("judgeReplacementTarget: malformed records are never signalled (J7)", () =>
 		{ action: "skip", reason: "lease_unreadable" });
 });
 
-test("judgeReplacementTarget: empty-string fields count as missing", () => {
+test("judgeReplacementTarget: empty-string and non-string identity fields count as missing", () => {
 	assert.deepEqual(judgeReplacementTarget({ recorded: mkRecord({ instanceId: "" }), probedInstanceId: "abc" }),
 		{ action: "skip", reason: "identity_unverified" });
+	// Spec §6 A1 / §4 T1 "non-string": neither field can prove an identity.
+	assert.deepEqual(judgeReplacementTarget({ recorded: mkRecord({ instanceId: 42, startToken: null }), probedInstanceId: "abc" }),
+		{ action: "skip", reason: "identity_unverified" }, "a non-string instanceId is missing, never a match");
+	assert.deepEqual(judgeReplacementTarget({ recorded: mkRecord({ instanceId: null, startToken: 42 }), probedInstanceId: "abc" }),
+		{ action: "skip", reason: "identity_unverified" }, "a non-string startToken is unverifiable");
+	assert.deepEqual(judgeReplacementTarget({ recorded: mkRecord({ instanceId: null, startToken: "777" }), probedInstanceId: "x", currentStartToken: "" }),
+		{ action: "skip", reason: "identity_unverified" }, "an empty live token is not a usable proof");
 });
 
 test("readCoordinatorLeaseRecord parses identity / legacy / top-level instanceId (A2)", () => {
@@ -848,6 +877,12 @@ test("readCoordinatorLeaseRecord parses identity / legacy / top-level instanceId
 
 	writeFileSync(ownerPath, JSON.stringify({ token: "d", identity: null }), "utf8");
 	assert.equal(readCoordinatorLeaseRecord(root).pid, null);
+
+	// Non-string identity fields are "missing", never a verified identity (§4 T2 / A2).
+	writeFileSync(ownerPath, JSON.stringify({ token: "e", pid: 10, identity: { pid: 10, instanceId: 42 } }), "utf8");
+	assert.equal(readCoordinatorLeaseRecord(root).instanceId, null, "non-string instanceId");
+	writeFileSync(ownerPath, JSON.stringify({ token: "f", pid: 11, identity: { pid: 11, startToken: 42 } }), "utf8");
+	assert.equal(readCoordinatorLeaseRecord(root).startToken, null, "non-string startToken");
 	rmSync(root, { recursive: true, force: true });
 });
 
