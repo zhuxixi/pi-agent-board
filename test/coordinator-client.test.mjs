@@ -14,9 +14,11 @@ import { writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { once } from "node:events";
 import { test } from "node:test";
+import { readJsonl } from "../src/core/atomic.mjs";
 import { COORDINATOR_PROTOCOL_VERSION } from "../src/core/coordinator-protocol.mjs";
 import { ensureCoordinator, judgeReplacementTarget, readCoordinatorLeaseRecord, replaceStaleCoordinator, sendStateCommand } from "../src/core/coordinator-client.mjs";
 import * as P from "../src/core/paths.mjs";
+import { captureStartToken, isAlive } from "../src/core/pid.mjs";
 import { createView, readState } from "../src/core/store.mjs";
 
 const COORDINATOR_SCRIPT = fileURLToPath(new URL("../runner/state-coordinator.mjs", import.meta.url));
@@ -313,53 +315,107 @@ function rawPing(socketPath, timeoutMs = 1000) {
 
 /** Inline CJS body for the stale pre-#107 coordinator fixture. Binds the
  *  socket, answers pings with a pong that has NO protocolVersion field (the
- *  v1 wire format), publishes a coordinator lease owner.json like the real
- *  process, and on SIGTERM unlinks the socket + releases the lease. */
+ *  v1 wire format), publishes the coordinator lease record described by the
+ *  JSON template, and on SIGTERM unlinks the socket + releases the lease.
+ *  argv: socketPath, lockDir, ownerTemplateJson, pongInstanceId, pidModuleUrl.
+ *  A templated pid/startToken of "@self" resolves to this child and its REAL
+ *  live `/proc` token via the runtime's own captureStartToken, so a legacy
+ *  scenario can record the live lease owner without racing the spawn. */
 const STALE_COORDINATOR_CJS = `
 const fs = require("node:fs");
 const net = require("node:net");
 const path = require("node:path");
 const socketPath = process.argv[2];
 const lockDir = process.argv[3];
-fs.mkdirSync(lockDir, { recursive: true });
-fs.writeFileSync(path.join(lockDir, "owner.json"), JSON.stringify({ token: "stale", pid: process.pid, identity: { pid: process.pid, startToken: "1", instanceId: "stale-v1" }, startedAt: 1 }));
-const server = net.createServer((socket) => {
-	let buffer = "";
-	socket.on("data", (chunk) => {
-		buffer += chunk.toString("utf8");
-		const lines = buffer.split("\\n");
-		buffer = lines.pop() ?? "";
-		for (const line of lines) {
-			if (!line.trim()) continue;
-			const msg = JSON.parse(line);
-			if (msg.type === "ping") socket.write(JSON.stringify({ type: "pong", instanceId: "stale-v1", startedAt: 1 }) + "\\n");
-		}
+const ownerTemplate = JSON.parse(process.argv[4]);
+const pongInstanceId = process.argv[5];
+const pidModuleUrl = process.argv[6];
+
+function resolveSelf(value) {
+	return value === "@self" ? process.pid : value;
+}
+
+(async () => {
+	const owner = JSON.parse(JSON.stringify(ownerTemplate));
+	owner.pid = resolveSelf(owner.pid);
+	owner.identity.pid = resolveSelf(owner.identity.pid);
+	if (owner.identity.startToken === "@self") {
+		const { captureStartToken } = await import(pidModuleUrl);
+		owner.identity.startToken = captureStartToken(process.pid);
+	}
+	fs.mkdirSync(lockDir, { recursive: true });
+	fs.writeFileSync(path.join(lockDir, "owner.json"), JSON.stringify(owner));
+	const server = net.createServer((socket) => {
+		let buffer = "";
+		socket.on("data", (chunk) => {
+			buffer += chunk.toString("utf8");
+			const lines = buffer.split("\\n");
+			buffer = lines.pop() ?? "";
+			for (const line of lines) {
+				if (!line.trim()) continue;
+				const msg = JSON.parse(line);
+				if (msg.type === "ping") socket.write(JSON.stringify({ type: "pong", instanceId: pongInstanceId, startedAt: 1 }) + "\\n");
+			}
+		});
 	});
-});
-process.on("SIGTERM", () => {
-	try { server.close(); } catch {}
-	try { fs.unlinkSync(socketPath); } catch {}
-	try { fs.rmSync(lockDir, { recursive: true, force: true }); } catch {}
-	process.exit(0);
-});
-server.listen(socketPath);
+	process.on("SIGTERM", () => {
+		try { server.close(); } catch {}
+		try { fs.unlinkSync(socketPath); } catch {}
+		try { fs.rmSync(lockDir, { recursive: true, force: true }); } catch {}
+		process.exit(0);
+	});
+	server.listen(socketPath);
+})();
 `;
 
 /**
- * Spawn a fake "old-build" coordinator as a REAL child process so the client's
- * SIGTERM-via-lease-pid replacement path can be exercised end to end.
+ * Build the lease record the fixture publishes. The default record is the
+ * post-#239 shape: the fixture's own pid and an `instanceId` matching the
+ * default pong ("stale-v1"). A caller-supplied `identity` replaces that default
+ * field set (so a legacy scenario can omit `instanceId` entirely, and
+ * `startToken: "@self"` records the child's live token); a top-level
+ * `instanceId` override always wins (pass null for an instanceId-less record).
+ * @param {{ pid?: number|string, instanceId?: string|null, identity?: object }} [ownerOverrides]
  */
-async function spawnStaleV1Coordinator(root) {
+function staleLeaseRecord(ownerOverrides = {}) {
+	const pid = ownerOverrides.pid ?? "@self";
+	const identity = ownerOverrides.identity
+		? { pid, startToken: "1", ...ownerOverrides.identity }
+		: { pid, startToken: "1", instanceId: "stale-v1" };
+	if (ownerOverrides.instanceId !== undefined) identity.instanceId = ownerOverrides.instanceId;
+	return { token: "stale", pid, identity, startedAt: 1 };
+}
+
+/**
+ * Spawn a fake "old-build" coordinator as a REAL child process so the client's
+ * identity-gated SIGTERM-via-lease-pid replacement path can be exercised end to
+ * end. The lease the fixture publishes is parameterized per scenario; the
+ * defaults keep the pre-#239 matching scenario (own pid, own pong instanceId).
+ * @param {string} root
+ * @param {{ pid?: number|string, instanceId?: string|null, identity?: object }} [ownerOverrides]
+ * @param {string} [pongInstanceId]
+ */
+async function spawnStaleV1Coordinator(root, ownerOverrides = {}, pongInstanceId = "stale-v1") {
 	const socketPath = P.coordinatorEndpointPathFor(process.platform, root);
 	const lockDir = P.viewLockPath(root, "_coordinator", "state-coordinator");
 	const scriptPath = join(root, "stale-coordinator.cjs");
 	writeFileSync(scriptPath, STALE_COORDINATOR_CJS);
-	const child = spawn(process.execPath, [scriptPath, socketPath, lockDir], { stdio: "ignore" });
+	const child = spawn(process.execPath, [
+		scriptPath,
+		socketPath,
+		lockDir,
+		JSON.stringify(staleLeaseRecord(ownerOverrides)),
+		pongInstanceId,
+		new URL("../src/core/pid.mjs", import.meta.url).href,
+	], { stdio: "ignore" });
 	const deadline = Date.now() + 3000;
 	for (;;) {
 		const pong = await rawPing(socketPath, 300);
 		if (pong) break;
-		if (Date.now() >= deadline) throw new Error("stale coordinator fixture failed to bind");
+		if (Date.now() >= deadline) {
+			try { child.kill("SIGKILL"); } catch { /* already gone */ }
+			throw new Error("stale coordinator fixture failed to bind");
+		}
 		await new Promise((r) => setTimeout(r, 50));
 	}
 	return {
@@ -372,6 +428,40 @@ async function spawnStaleV1Coordinator(root) {
 			try { child.kill("SIGTERM"); } catch { /* already gone */ }
 		},
 	};
+}
+
+/**
+ * Spawn a live, unrelated node process and register its cleanup. Its pid is the
+ * bait planted in a lease: no identity gate may ever signal it.
+ * @param {import("node:test").TestContext} t
+ */
+function spawnUnrelatedProcess(t) {
+	const child = spawn(process.execPath, ["-e", "setInterval(()=>{},1000)"], { stdio: "ignore" });
+	child.unref?.();
+	t.after(() => {
+		try { child.kill("SIGKILL"); } catch { /* already gone */ }
+	});
+	return child;
+}
+
+/**
+ * Plant a coordinator lease owner.json under `root` for the ensure-level
+ * pass-through tests, which need an exact lease shape rather than the fixture's
+ * own writer.
+ * @param {string} root
+ * @param {{ pid: number, token?: string, instanceId?: string|null, startToken?: string|null }} record
+ */
+function plantLease(root, record) {
+	const lockPath = P.viewLockPath(root, "_coordinator", "state-coordinator");
+	mkdirSync(lockPath, { recursive: true });
+	const identity = { pid: record.pid, startToken: record.startToken ?? null };
+	if (record.instanceId !== undefined) identity.instanceId = record.instanceId;
+	writeFileSync(join(lockPath, "owner.json"), JSON.stringify({
+		token: record.token ?? "planted",
+		pid: record.pid,
+		identity,
+		startedAt: 1,
+	}), "utf8");
 }
 
 test("coordinator pong carries the current protocol version", async (t) => {
@@ -395,19 +485,23 @@ test("protocol version gates the holding command kinds (issue #145)", () => {
 	assert.ok(COORDINATOR_PROTOCOL_VERSION >= 3, `expected >= 3, got ${COORDINATOR_PROTOCOL_VERSION}`);
 });
 
-test("ensureCoordinator replaces a stale pre-protocol coordinator via its lease pid", async (t) => {
+test("A5: a matching-instanceId stale coordinator is replaced (end-to-end)", async (t) => {
 	const root = freshRoot();
 	t.after(async () => {
 		await cleanupRoot(root);
 	});
 	const stale = await spawnStaleV1Coordinator(root);
 	t.after(() => stale.cleanup());
-	createView(root, { id: "v1", name: "stale-replace", cwd: root });
+	createView(root, { id: "v1", name: "a5", cwd: root });
 
-	// sanity: the stale instance answers the v1 wire format (no version field)
+	// sanity: the fixture serves the v1 wire format (no version field) and its
+	// lease names the SAME instance that answered the ping — the premise of the
+	// identity gate.
 	const stalePong = await rawPing(stale.socketPath);
 	assert.equal(stalePong?.instanceId, "stale-v1");
 	assert.equal(stalePong?.protocolVersion, undefined);
+	assert.equal(readCoordinatorLeaseRecord(root)?.instanceId, stalePong?.instanceId,
+		"the lease must name the instance that answered the ping");
 
 	const ensured = await ensureCoordinator(root, { runnerScript: COORDINATOR_SCRIPT });
 	assert.equal(ensured.ok, true);
@@ -417,6 +511,128 @@ test("ensureCoordinator replaces a stale pre-protocol coordinator via its lease 
 
 	const result = await sendStateCommand(root, markCompleted(), { timeoutMs: 5000 });
 	assert.equal(result.status, "applied");
+
+	// A matching replacement takes the signal path; only a deliberate skip
+	// reports, so no replacement-skip diagnostic may exist for this root.
+	const skips = readJsonl(P.diagnosticsPath(root, "_coordinator"))
+		.filter((event) => event.code === "coordinator_replacement_skipped");
+	assert.equal(skips.length, 0, "a matching replacement must not report a skip");
+});
+
+test("A6: a mismatched lease identity never kills the unrelated pid (core)", async (t) => {
+	const root = freshRoot();
+	t.after(async () => {
+		await cleanupRoot(root);
+	});
+	const unrelated = spawnUnrelatedProcess(t);
+	// The lease names a DIFFERENT instance than the pong and its pid belongs to
+	// the unrelated process: the identity gate must skip before any signal.
+	const stale = await spawnStaleV1Coordinator(root, { pid: unrelated.pid, instanceId: "not-the-pong-instance" });
+	t.after(() => stale.cleanup());
+	const diagnostics = P.diagnosticsPath(root, "_coordinator");
+
+	assert.equal((await rawPing(stale.socketPath))?.instanceId, "stale-v1");
+
+	const ensured = await ensureCoordinator(root, { runnerScript: COORDINATOR_SCRIPT });
+	if (ensured.pid) track(ensured.pid);
+	assert.deepEqual(ensured, { ok: false, error: "coordinator_stale_protocol" });
+	assert.equal(isAlive(unrelated.pid), true, "the unrelated process must survive");
+	assert.equal(stale.alive(), true, "the stale fixture must survive too");
+
+	const events = readJsonl(diagnostics).filter((event) => event.code === "coordinator_replacement_skipped");
+	assert.equal(events.length, 1);
+	assert.equal(events[0].details.reason, "lease_owner_mismatch");
+	assert.equal(events[0].details.recordedInstanceId, "not-the-pong-instance");
+	assert.equal(events[0].details.probedInstanceId, "stale-v1");
+});
+
+test("A7: a legacy record without instanceId/token is not signalled", async (t) => {
+	const root = freshRoot();
+	t.after(async () => {
+		await cleanupRoot(root);
+	});
+	const unrelated = spawnUnrelatedProcess(t);
+	// Legacy (pre-#239) record shape: no instanceId and no recorded startToken,
+	// with the lease pid pointing at an unrelated live process. Nothing proves
+	// ownership, so the record must never be signalled.
+	const stale = await spawnStaleV1Coordinator(root, {
+		pid: unrelated.pid,
+		identity: { pid: unrelated.pid, startToken: null },
+	}, "legacy-pong");
+	t.after(() => stale.cleanup());
+	const diagnostics = P.diagnosticsPath(root, "_coordinator");
+
+	assert.equal((await rawPing(stale.socketPath))?.instanceId, "legacy-pong");
+	const lease = readCoordinatorLeaseRecord(root);
+	assert.equal(lease?.instanceId, null, "the legacy lease carries no instanceId");
+	assert.equal(lease?.startToken, null, "and no recorded startToken to fall back on");
+
+	const ensured = await ensureCoordinator(root, { runnerScript: COORDINATOR_SCRIPT });
+	if (ensured.pid) track(ensured.pid);
+	assert.deepEqual(ensured, { ok: false, error: "coordinator_stale_protocol" });
+	assert.equal(isAlive(unrelated.pid), true, "the unrelated lease pid must survive");
+	assert.equal(stale.alive(), true);
+
+	const events = readJsonl(diagnostics).filter((event) => event.code === "coordinator_replacement_skipped");
+	assert.equal(events.length, 1);
+	assert.equal(events[0].details.reason, "identity_unverified");
+});
+
+test("A7b: Linux legacy live-token wiring kills the real lease owner", { skip: process.platform !== "linux" }, async (t) => {
+	const root = freshRoot();
+	t.after(async () => {
+		await cleanupRoot(root);
+	});
+	// The fixture records ITS OWN pid and the real live /proc start token (the
+	// client's default readStartToken must read back the same value); the pong
+	// instanceId is arbitrary because a legacy record carries none.
+	const stale = await spawnStaleV1Coordinator(root, { identity: { startToken: "@self" } }, "legacy-pong");
+	t.after(() => stale.cleanup());
+	createView(root, { id: "v1", name: "a7b", cwd: root });
+
+	const lease = readCoordinatorLeaseRecord(root);
+	assert.equal(lease?.instanceId, null);
+	assert.equal(lease?.pid, stale.child.pid, "the lease names the fixture child");
+	assert.equal(lease?.startToken, captureStartToken(stale.child.pid),
+		"the recorded token is the child's real live start token");
+
+	const ensured = await ensureCoordinator(root, { runnerScript: COORDINATOR_SCRIPT });
+	assert.equal(ensured.ok, true);
+	assert.notEqual(ensured.instanceId, "legacy-pong");
+	if (ensured.pid) track(ensured.pid);
+	assert.equal(stale.alive(), false, "the verified live lease owner was terminated");
+
+	const result = await sendStateCommand(root, markCompleted(), { timeoutMs: 5000 });
+	assert.equal(result.status, "applied");
+});
+
+test("A8: repeated ensures keep exactly one skip diagnostic", async (t) => {
+	const root = freshRoot();
+	t.after(async () => {
+		await cleanupRoot(root);
+	});
+	const unrelated = spawnUnrelatedProcess(t);
+	// The A6 configuration: a lease whose identity mismatches the pong.
+	const stale = await spawnStaleV1Coordinator(root, { pid: unrelated.pid, instanceId: "not-the-pong-instance" });
+	t.after(() => stale.cleanup());
+	const diagnostics = P.diagnosticsPath(root, "_coordinator");
+
+	for (let attempt = 0; attempt < 5; attempt++) {
+		assert.deepEqual(await ensureCoordinator(root, { runnerScript: COORDINATOR_SCRIPT }),
+			{ ok: false, error: "coordinator_stale_protocol" }, `ensure #${attempt + 1} keeps reporting the stale protocol`);
+	}
+	const countSkips = () => readJsonl(diagnostics)
+		.filter((event) => event.code === "coordinator_replacement_skipped").length;
+	assert.equal(countSkips(), 1, "five ensures at the same stale state write exactly one diagnostic");
+	assert.equal(isAlive(unrelated.pid), true);
+
+	// The process-local dedup Set must short-circuit BEFORE any disk access:
+	// deleting the file and ensuring again must not recreate it. A fresh root per
+	// test keeps the module-level Set from masking this scenario.
+	rmSync(diagnostics);
+	assert.deepEqual(await ensureCoordinator(root, { runnerScript: COORDINATOR_SCRIPT }),
+		{ ok: false, error: "coordinator_stale_protocol" });
+	assert.equal(existsSync(diagnostics), false, "the Set hit must not touch or recreate the diagnostics file");
 });
 
 test("ensureCoordinator reports coordinator_stale_protocol instead of trusting an irreplaceable stale instance", async (t) => {
@@ -425,6 +641,69 @@ test("ensureCoordinator reports coordinator_stale_protocol instead of trusting a
 
 	const ensured = await ensureCoordinator(fake.root, { runnerScript: COORDINATOR_SCRIPT });
 	assert.deepEqual(ensured, { ok: false, error: "coordinator_stale_protocol" });
+});
+
+// --- issue #239: ensure-level pass-through of the replacement seams (D5) ---
+
+test("ensureCoordinator forwards probe/connect/probeTimeoutMs/reportSkip into the replacement", async (t) => {
+	const fake = await startFakeServer({ protocolVersion: 1 }); // pong instanceId "fake-1"
+	t.after(() => fake.close());
+	// Matching identity: the judge signals, so the injected re-probe decides the
+	// outcome. A DIFFERENT old-protocol instance means the replacement raced; the
+	// skip must go to the injected writer, never to the default diagnostics file.
+	plantLease(fake.root, { pid: 99_999_999, instanceId: "fake-1" });
+	const seen = { probes: [], connects: [], timeouts: [], skips: [] };
+	const connect = (path) => createConnection(path);
+	const ensured = await ensureCoordinator(fake.root, {
+		runnerScript: COORDINATOR_SCRIPT,
+		connect,
+		probeTimeoutMs: 1234,
+		probe: async (socketPath, probeConnect, timeoutMs) => {
+			seen.probes.push(socketPath);
+			seen.connects.push(probeConnect);
+			seen.timeouts.push(timeoutMs);
+			return { instanceId: "other-old", protocolVersion: 1 };
+		},
+		reportSkip: (details) => seen.skips.push(details),
+	});
+	if (ensured.pid) track(ensured.pid);
+
+	assert.deepEqual(ensured, { ok: false, error: "coordinator_stale_protocol" });
+	assert.equal(seen.probes.length, 1, "the injected probe replaces the real re-probe");
+	assert.equal(seen.connects[0], connect, "connect is forwarded into the re-probe");
+	assert.equal(seen.timeouts[0], 1234, "probeTimeoutMs is forwarded into the re-probe");
+	assert.equal(seen.skips.length, 1);
+	assert.equal(seen.skips[0].reason, "replacement_raced");
+	assert.equal(existsSync(P.diagnosticsPath(fake.root, "_coordinator")), false,
+		"the injected writer replaces the default diagnostic writer");
+});
+
+test("ensureCoordinator forwards the legacy/wait seams into the replacement", async (t) => {
+	const fake = await startFakeServer({ protocolVersion: 1 });
+	t.after(() => fake.close());
+	// Legacy record: no instanceId and a recorded token, so only the injected
+	// live read proves ownership. The injected kill/isAlive/clock/sleep keep the
+	// never-exits branch deterministic: the fake lease pid never dies.
+	plantLease(fake.root, { pid: 99_999_999, startToken: "1" });
+	const seen = { tokens: [], kills: [], sleeps: 0 };
+	const ensured = await ensureCoordinator(fake.root, {
+		runnerScript: COORDINATOR_SCRIPT,
+		readStartToken: async (pid) => {
+			seen.tokens.push(pid);
+			return "1";
+		},
+		kill: (pid, signal) => seen.kills.push([pid, signal]),
+		isAlive: () => true,
+		clock: () => 0,
+		sleep: async () => { seen.sleeps += 1; },
+		replaceTimeoutMs: 100,
+	});
+	if (ensured.pid) track(ensured.pid);
+
+	assert.deepEqual(ensured, { ok: false, error: "coordinator_stale_protocol" });
+	assert.deepEqual(seen.tokens, [99_999_999], "readStartToken is forwarded (legacy J3)");
+	assert.deepEqual(seen.kills, [[99_999_999, "SIGTERM"]], "kill is forwarded and used exactly once");
+	assert.ok(seen.sleeps > 0, "the injected sleep drives the never-exits wait");
 });
 
 // --- fixture helpers (mirrors state-coordinator.integration.test.mjs) ---

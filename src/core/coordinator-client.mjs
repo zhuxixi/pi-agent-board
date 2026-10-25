@@ -449,6 +449,13 @@ export async function replaceStaleCoordinator(root, socketPath, expectedInstance
  * If the stale instance cannot be replaced (unkillable, socket stuck), report
  * `coordinator_stale_protocol` instead of pretending it is healthy.
  *
+ * Replacement seams (issue #239): the identity-gated replacement accepts every
+ * injectable dependency of `replaceStaleCoordinator` (`probe`, `kill`,
+ * `isAlive`, `readStartToken`, `clock`, `sleep`, `replaceTimeoutMs`,
+ * `reportSkip`) plus the re-probe plumbing (`connect`, `probeTimeoutMs`); this
+ * function forwards them verbatim. Defaults live in `replaceStaleCoordinator`,
+ * so an omitted option keeps the production behaviour.
+ *
  * Root-lifetime note (issue #241): a root that does not exist yet is no longer
  * lazily created — the boot guard makes the spawned coordinator exit 0, so a
  * `ensureCoordinator` call on a missing root waits the full `ENSURE_WINDOW_MS`
@@ -456,7 +463,22 @@ export async function replaceStaleCoordinator(root, socketPath, expectedInstance
  * external one-shot callers that relied on a lazily-created board are affected.
  *
  * @param {string} root
- * @param {{ runnerScript?: string, node?: string, probeTimeoutMs?: number, ensureWindowMs?: number, pollMs?: number, connect?: (path: string) => import("node:net").Socket }} [opts]
+ * @param {{
+ *   runnerScript?: string,
+ *   node?: string,
+ *   probeTimeoutMs?: number,
+ *   ensureWindowMs?: number,
+ *   pollMs?: number,
+ *   connect?: (path: string) => import("node:net").Socket,
+ *   probe?: (socketPath: string, connect: (path: string) => import("node:net").Socket, timeoutMs: number) => Promise<{instanceId: string, protocolVersion: number}|null>,
+ *   kill?: (pid: number, signal: string) => void,
+ *   isAlive?: (pid: number) => boolean,
+ *   readStartToken?: (pid: number) => Promise<string|null>,
+ *   clock?: () => number,
+ *   sleep?: (ms: number) => Promise<void>,
+ *   replaceTimeoutMs?: number,
+ *   reportSkip?: (details: { reason: SkipReason, recordedInstanceId: string|null, probedInstanceId: string }) => void,
+ * }} [opts]
  * @returns {Promise<EnsureResult>}
  */
 export async function ensureCoordinator(root, opts = {}) {
@@ -473,7 +495,18 @@ export async function ensureCoordinator(root, opts = {}) {
 		// Issue #239: only the instance that answered our ping may be replaced —
 		// its instanceId is the identity the lease must prove. A skip is already
 		// reported with its reason by the replacement orchestration itself.
-		const outcome = await replaceStaleCoordinator(root, socketPath, first.instanceId);
+		const outcome = await replaceStaleCoordinator(root, socketPath, first.instanceId, {
+			connect,
+			probeTimeoutMs,
+			probe: opts.probe,
+			kill: opts.kill,
+			isAlive: opts.isAlive,
+			readStartToken: opts.readStartToken,
+			clock: opts.clock,
+			sleep: opts.sleep,
+			replaceTimeoutMs: opts.replaceTimeoutMs,
+			reportSkip: opts.reportSkip,
+		});
 		if (!outcome.replaced) return { ok: false, error: "coordinator_stale_protocol" };
 	}
 
