@@ -26,6 +26,7 @@
 import { createConnection } from "node:net";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { appendDiagnosticOnce } from "./diagnostics.mjs";
 import { newRunId } from "./ids.mjs";
 import { launchCoordinator } from "./launch.mjs";
 import * as P from "./paths.mjs";
@@ -204,6 +205,53 @@ export function judgeReplacementTarget({ recorded, probedInstanceId, currentStar
 	}
 	if (currentStartToken !== recordedStartToken) return { action: "skip", reason: "pid_reused" };
 	return { action: "signal" };
+}
+
+/**
+ * Process-local dedup keys for the replacement-skip diagnostic (issue #239 D5).
+ * A stale coordinator that cannot be replaced keeps failing on every
+ * `sendStateCommand` ensure, and `appendDiagnosticOnce` tails the whole JSONL
+ * file (`readJsonlTail` → `readJsonl`), so a repeat must return before any disk
+ * access. One entry per root × reason × identity pair for the process lifetime;
+ * the key space is small and bounded by the board roots in use.
+ * @type {Set<string>}
+ */
+const reportedReplacementSkips = new Set();
+
+/**
+ * Record that the coordinator replacement was deliberately skipped (issue #239
+ * D5). `reason` is one of the spec's `SkipReason` values. Best-effort by
+ * contract: the skip paths run inside `ensureCoordinator`, which
+ * `sendStateCommand` does not wrap, so every error here (malformed args,
+ * unreadable/unwritable JSONL) is swallowed instead of thrown.
+ *
+ * Two-layer dedup: this process-local Set filters the hot path without touching
+ * disk, then `appendDiagnosticOnce` dedupes across processes/restarts. The root
+ * existence check comes before the append because appending creates parent
+ * directories — a diagnostic must never resurrect a deleted root (issue #241
+ * class of leftovers). The key is recorded even when the write is skipped, so a
+ * state that was already handled never probes the disk again.
+ * @param {string} root
+ * @param {{ reason: string, recordedInstanceId?: string|null, probedInstanceId: string }} details
+ * @returns {void}
+ */
+function reportReplacementSkip(root, details) {
+	try {
+		const { reason, recordedInstanceId = null, probedInstanceId } = details;
+		const key = `${root}|${reason}|${recordedInstanceId ?? "null"}|${probedInstanceId}`;
+		if (reportedReplacementSkips.has(key)) return;
+		reportedReplacementSkips.add(key);
+		if (!existsSync(root)) return;
+		appendDiagnosticOnce(root, "_coordinator", {
+			source: "coordinator-client",
+			level: "warn",
+			code: "coordinator_replacement_skipped",
+			message: `coordinator replacement skipped: ${reason}`,
+			details: { reason, recordedInstanceId: recordedInstanceId ?? null, probedInstanceId },
+		}, { match: ["reason", "recordedInstanceId", "probedInstanceId"] });
+	} catch {
+		// Diagnostics are best-effort: a failed write must never break the caller.
+	}
 }
 
 /** Grace window for a SIGTERMed stale coordinator to unlink its socket. */
