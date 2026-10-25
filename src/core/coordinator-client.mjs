@@ -29,6 +29,8 @@ import { fileURLToPath } from "node:url";
 import { appendDiagnosticOnce } from "./diagnostics.mjs";
 import { newRunId } from "./ids.mjs";
 import { launchCoordinator } from "./launch.mjs";
+import { isAlive } from "./pid.mjs";
+import { readProcessStartToken } from "./process-identity-probe.mjs";
 import * as P from "./paths.mjs";
 import { COORDINATOR_PROTOCOL_VERSION } from "./coordinator-protocol.mjs";
 
@@ -254,31 +256,184 @@ function reportReplacementSkip(root, details) {
 	}
 }
 
-/** Grace window for a SIGTERMed stale coordinator to unlink its socket. */
+/** Grace window for a SIGTERMed stale coordinator to exit (issue #239 D4). */
 const REPLACE_TIMEOUT_MS = 3_000;
+/** Liveness poll interval while waiting for a SIGTERMed coordinator to exit. */
 const REPLACE_POLL_MS = 50;
 
+/** @typedef {{ replaced: true } | { replaced: false, reason: SkipReason }} ReplaceOutcome */
+/** @typedef {"lease_unreadable"|"lease_owner_mismatch"|"pid_reused"|"identity_unverified"|"lease_changed"|"instance_unresponsive"|"replacement_raced"|"replace_timeout"} SkipReason */
+
 /**
- * Terminate a stale-protocol coordinator (issue #108) and wait for its socket
- * to disappear so a fresh instance can bind. SIGTERM triggers the
- * coordinator's graceful shutdown (socket unlink + lease release); its crash
- * safety (fsync-before-materialize journal + boot replay) makes the kill safe
- * even mid-command — an in-flight reply is the documented ambiguous outcome.
+ * Await `ms` with an unref'd timer, so waiting for a coordinator to exit never
+ * keeps a one-shot CLI process alive on its own.
+ * @param {number} ms
+ * @returns {Promise<void>}
+ */
+function replaceSleep(ms) {
+	return new Promise((resolve) => {
+		const timer = setTimeout(resolve, ms);
+		timer.unref?.();
+	});
+}
+
+/**
+ * Whether a lease record names a pid that may be signalled. Mirrors the
+ * `lease_unreadable` boundary of `judgeReplacementTarget` for the records read
+ * outside the decision itself.
+ * @param {LeaseRecord|null} record
+ * @returns {boolean}
+ */
+function hasUsableLeasePid(record) {
+	return Boolean(record)
+		&& typeof record.pid === "number"
+		&& Number.isFinite(record.pid)
+		&& record.pid > 0;
+}
+
+/**
+ * Terminate a stale-protocol coordinator and wait for it to exit (issue #108),
+ * with the signal gated on a proven lease identity (issue #239). SIGTERM
+ * triggers the coordinator's graceful shutdown; its crash safety
+ * (fsync-before-materialize journal + boot replay) makes the kill safe even
+ * mid-command — an in-flight reply is the documented ambiguous outcome.
+ *
+ * Identity contract: the pong that proved the endpoint stale came from one
+ * process, while `owner.json` names the lease owner. They are the same process
+ * only when the recorded `identity.instanceId` matches `expectedInstanceId`
+ * (D2) — a mismatch or an unverifiable legacy record never signals. Before
+ * signalling, the endpoint is re-probed and the lease re-read (D3), so a
+ * takeover or lease handover that happened between judging and signalling wins
+ * over the kill. After the signal the caller waits, bounded by
+ * `replaceTimeoutMs`, for the pid to exit (D4): a successor must not be spawned
+ * while the old owner can still hold the lease.
+ *
+ * Every skip return reports through `reportSkip` (D5) and resolves a
+ * `ReplaceOutcome`. The function never throws: the diagnostic writer and the
+ * `kill` call are both wrapped (the latter routes ESRCH to "already replaced"
+ * and other errors into wait-for-exit).
  * @param {string} root
  * @param {string} socketPath
- * @returns {Promise<boolean>} whether the socket is gone (replacement can proceed)
+ * @param {string} expectedInstanceId `instanceId` from the pong that was judged
+ *   stale — the only identity whose process may be signalled
+ * @param {{
+ *   probe?: (socketPath: string, connect: (path: string) => import("node:net").Socket, timeoutMs: number) => Promise<{instanceId: string, protocolVersion: number}|null>,
+ *   connect?: (path: string) => import("node:net").Socket,
+ *   probeTimeoutMs?: number,
+ *   readLease?: (root: string) => LeaseRecord|null,
+ *   kill?: (pid: number, signal: string) => void,
+ *   isAlive?: (pid: number) => boolean,
+ *   readStartToken?: (pid: number) => Promise<string|null>,
+ *   clock?: () => number,
+ *   sleep?: (ms: number) => Promise<void>,
+ *   replaceTimeoutMs?: number,
+ *   reportSkip?: (details: { reason: SkipReason, recordedInstanceId: string|null, probedInstanceId: string }) => void,
+ * }} [opts]
+ * @returns {Promise<ReplaceOutcome>}
  */
-async function replaceStaleCoordinator(root, socketPath) {
-	const pid = readCoordinatorLeaseRecord(root)?.pid ?? null;
-	if (pid != null) {
-		try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+export async function replaceStaleCoordinator(root, socketPath, expectedInstanceId, opts = {}) {
+	const connect = opts.connect ?? createConnection;
+	const probeTimeoutMs = opts.probeTimeoutMs ?? PROBE_TIMEOUT_MS;
+	const probe = opts.probe ?? probeOnce;
+	const readLease = opts.readLease ?? readCoordinatorLeaseRecord;
+	const kill = opts.kill ?? process.kill;
+	const isAliveFn = opts.isAlive ?? isAlive;
+	const readStartToken = opts.readStartToken ?? readProcessStartToken;
+	const clock = opts.clock ?? Date.now;
+	const sleep = opts.sleep ?? replaceSleep;
+	const replaceTimeoutMs = opts.replaceTimeoutMs ?? REPLACE_TIMEOUT_MS;
+	const reportSkip = opts.reportSkip ?? ((details) => reportReplacementSkip(root, details));
+
+	const recorded = readLease(root);
+	const recordedInstanceId = firstNonEmptyString(recorded?.instanceId);
+	/**
+	 * Report a deliberate skip and resolve the matching outcome. Best-effort by
+	 * contract: a throwing writer must never escape into `ensureCoordinator`,
+	 * which does not wrap this call.
+	 * @param {SkipReason} reason
+	 * @param {string|null} [instanceId] lease-owner instance at decision time
+	 * @returns {ReplaceOutcome}
+	 */
+	const skip = (reason, instanceId = recordedInstanceId) => {
+		try {
+			reportSkip({
+				reason,
+				recordedInstanceId: instanceId,
+				probedInstanceId: expectedInstanceId,
+			});
+		} catch {
+			// Diagnostics are best-effort: a failed write never changes the outcome.
+		}
+		return { replaced: false, reason };
+	};
+
+	// Legacy records (pre-#239) carry no instanceId; on Linux the live /proc
+	// start token is then the only proof that the lease pid is still the process
+	// the endpoint served (D6 / J3). The read is async by contract: an injected
+	// implementation returning a Promise that is not awaited would compare as
+	// unequal, so the judge normalizes a non-string token to
+	// `identity_unverified` rather than `pid_reused`.
+	const currentStartToken = recordedInstanceId === null && firstNonEmptyString(recorded?.startToken) !== null
+		? await readStartToken(/** @type {LeaseRecord} */ (recorded).pid)
+		: null;
+
+	const verdict = judgeReplacementTarget({ recorded, probedInstanceId: expectedInstanceId, currentStartToken });
+	if (verdict.action === "skip") return skip(verdict.reason);
+	const target = /** @type {LeaseRecord} */ (recorded);
+	const pid = /** @type {number} */ (target.pid);
+
+	// D3 step 1: re-probe the endpoint. A pong proves the instance that was
+	// judged stale is still serving, so its pid cannot have been reused yet.
+	// A DIFFERENT instance means the replacement raced with another client: a
+	// current-protocol instance already took over (nothing left to replace — the
+	// caller may continue), an old-protocol one must not be killed by us.
+	const reprobed = await probe(socketPath, connect, probeTimeoutMs);
+	if (reprobed && reprobed.instanceId !== expectedInstanceId) {
+		if (reprobed.protocolVersion >= COORDINATOR_PROTOCOL_VERSION) return { replaced: true };
+		return skip("replacement_raced");
 	}
-	const deadline = Date.now() + REPLACE_TIMEOUT_MS;
-	while (Date.now() < deadline) {
-		if (!existsSync(socketPath)) return true;
-		await new Promise((r) => setTimeout(r, REPLACE_POLL_MS));
+	if (!reprobed) {
+		// No valid pong within the timeout is NOT proof the process is gone.
+		// Re-read the lease: no usable record means no evidence to signal, a
+		// live owner is a slow instance we must not race, and a dead owner lets
+		// the next launch take the lease through the normal reclaim path.
+		const fresh = readLease(root);
+		if (!hasUsableLeasePid(fresh)) return skip("lease_unreadable", null);
+		const freshRecord = /** @type {LeaseRecord} */ (fresh);
+		if (isAliveFn(/** @type {number} */ (freshRecord.pid))) {
+			return skip("instance_unresponsive", firstNonEmptyString(freshRecord.instanceId));
+		}
+		return { replaced: true };
 	}
-	return false;
+
+	// D3 step 2: the lease must still describe the owner we judged. A changed
+	// token or instanceId means another coordinator (or a recovery) owns the
+	// lease now — signalling the old pid could hit an unrelated process.
+	const confirmed = readLease(root);
+	if (!confirmed || confirmed.token !== target.token || firstNonEmptyString(confirmed.instanceId) !== recordedInstanceId) {
+		return skip("lease_changed");
+	}
+
+	// D4: the last fallible system call. ESRCH means the target exited between
+	// the checks — already replaced. EPERM and anything else leave the target
+	// possibly alive, so fail closed into wait-for-exit below.
+	try {
+		kill(pid, "SIGTERM");
+	} catch (err) {
+		if (/** @type {NodeJS.ErrnoException} */ (err)?.code === "ESRCH") return { replaced: true };
+	}
+
+	// D4: wait for the old process to actually exit before the caller spawns a
+	// successor. The tick budget keeps the wait finite even when an injected
+	// clock never advances; `clock` ends it early when wall time runs out first.
+	const deadline = clock() + replaceTimeoutMs;
+	const maxTicks = Math.max(1, Math.ceil(replaceTimeoutMs / REPLACE_POLL_MS));
+	for (let tick = 0; tick < maxTicks; tick++) {
+		if (!isAliveFn(pid)) return { replaced: true };
+		if (clock() >= deadline) break;
+		await sleep(REPLACE_POLL_MS);
+	}
+	return skip("replace_timeout");
 }
 
 /**
@@ -315,9 +470,11 @@ export async function ensureCoordinator(root, opts = {}) {
 	const first = await probeOnce(socketPath, connect, probeTimeoutMs);
 	if (first) {
 		if (first.protocolVersion >= COORDINATOR_PROTOCOL_VERSION) return { ok: true, instanceId: first.instanceId };
-		if (!await replaceStaleCoordinator(root, socketPath)) {
-			return { ok: false, error: "coordinator_stale_protocol" };
-		}
+		// Issue #239: only the instance that answered our ping may be replaced —
+		// its instanceId is the identity the lease must prove. A skip is already
+		// reported with its reason by the replacement orchestration itself.
+		const outcome = await replaceStaleCoordinator(root, socketPath, first.instanceId);
+		if (!outcome.replaced) return { ok: false, error: "coordinator_stale_protocol" };
 	}
 
 	const launched = launchCoordinator(root, { runnerScript: opts.runnerScript ?? COORDINATOR_SCRIPT, node: opts.node });

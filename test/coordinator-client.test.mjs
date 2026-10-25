@@ -5,7 +5,7 @@
  * ensure/spawn path (mirrors the state-coordinator integration fixture).
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createConnection, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { once } from "node:events";
 import { test } from "node:test";
 import { COORDINATOR_PROTOCOL_VERSION } from "../src/core/coordinator-protocol.mjs";
-import { ensureCoordinator, judgeReplacementTarget, readCoordinatorLeaseRecord, sendStateCommand } from "../src/core/coordinator-client.mjs";
+import { ensureCoordinator, judgeReplacementTarget, readCoordinatorLeaseRecord, replaceStaleCoordinator, sendStateCommand } from "../src/core/coordinator-client.mjs";
 import * as P from "../src/core/paths.mjs";
 import { createView, readState } from "../src/core/store.mjs";
 
@@ -322,7 +322,7 @@ const path = require("node:path");
 const socketPath = process.argv[2];
 const lockDir = process.argv[3];
 fs.mkdirSync(lockDir, { recursive: true });
-fs.writeFileSync(path.join(lockDir, "owner.json"), JSON.stringify({ token: "stale", pid: process.pid, identity: { pid: process.pid, startToken: "1" }, startedAt: 1 }));
+fs.writeFileSync(path.join(lockDir, "owner.json"), JSON.stringify({ token: "stale", pid: process.pid, identity: { pid: process.pid, startToken: "1", instanceId: "stale-v1" }, startedAt: 1 }));
 const server = net.createServer((socket) => {
 	let buffer = "";
 	socket.on("data", (chunk) => {
@@ -570,4 +570,119 @@ test("readCoordinatorLeaseRecord parses identity / legacy / top-level instanceId
 	writeFileSync(ownerPath, JSON.stringify({ token: "d", identity: null }), "utf8");
 	assert.equal(readCoordinatorLeaseRecord(root).pid, null);
 	rmSync(root, { recursive: true, force: true });
+});
+
+// --- issue #239: replacement orchestration (T3) ---
+
+/** Build injected dependencies for replaceStaleCoordinator; `calls` records kills. */
+function mkReplacementDeps(overrides = {}) {
+	const calls = { kill: [], probe: 0, report: [] };
+	const deps = {
+		readLease: () => mkRecord(),
+		probe: async () => { calls.probe += 1; return { instanceId: "abc", protocolVersion: COORDINATOR_PROTOCOL_VERSION }; },
+		kill: (pid, sig) => { calls.kill.push([pid, sig]); },
+		isAlive: () => false,
+		readStartToken: async () => null,
+		clock: () => 0,
+		sleep: async () => {},
+		replaceTimeoutMs: 3000,
+		reportSkip: (details) => { calls.report.push(details); },
+		...overrides,
+	};
+	return { deps, calls };
+}
+
+test("A3a: matching instanceId signals once and reports replaced", async () => {
+	const { deps, calls } = mkReplacementDeps();
+	const out = await replaceStaleCoordinator("/root", "/sock", "abc", deps);
+	assert.deepEqual(out, { replaced: true });
+	assert.deepEqual(calls.kill, [[4242, "SIGTERM"]]);
+});
+
+test("A3b: mismatched instanceId never signals", async () => {
+	const { deps, calls } = mkReplacementDeps({ readLease: () => mkRecord({ instanceId: "other" }) });
+	const out = await replaceStaleCoordinator("/root", "/sock", "abc", deps);
+	assert.deepEqual(out, { replaced: false, reason: "lease_owner_mismatch" });
+	assert.deepEqual(calls.kill, []);
+	assert.equal(calls.report.at(-1).reason, "lease_owner_mismatch");
+});
+
+test("A3c/A3d: re-probe null with dead pid replaces; with live pid skips", async () => {
+	const dead = mkReplacementDeps({ probe: async () => null, isAlive: () => false });
+	assert.deepEqual(await replaceStaleCoordinator("/root", "/sock", "abc", dead.deps), { replaced: true });
+	assert.deepEqual(dead.calls.kill, []);
+
+	const live = mkReplacementDeps({ probe: async () => null, isAlive: () => true });
+	assert.deepEqual(await replaceStaleCoordinator("/root", "/sock", "abc", live.deps),
+		{ replaced: false, reason: "instance_unresponsive" });
+	assert.deepEqual(live.calls.kill, []);
+});
+
+test("A3e: another old-protocol instance taking over skips; a healthy one replaces", async () => {
+	const stale = mkReplacementDeps({ probe: async () => ({ instanceId: "newer-old", protocolVersion: 1 }) });
+	assert.deepEqual(await replaceStaleCoordinator("/root", "/sock", "abc", stale.deps),
+		{ replaced: false, reason: "replacement_raced" });
+
+	const healthy = mkReplacementDeps({ probe: async () => ({ instanceId: "new", protocolVersion: COORDINATOR_PROTOCOL_VERSION }) });
+	assert.deepEqual(await replaceStaleCoordinator("/root", "/sock", "abc", healthy.deps), { replaced: true });
+	assert.deepEqual(healthy.calls.kill, []);
+});
+
+test("A3f: lease changing between judge and signal skips", async () => {
+	let reads = 0;
+	const { deps, calls } = mkReplacementDeps({ readLease: () => (++reads === 1 ? mkRecord() : mkRecord({ token: "t2" })) });
+	assert.deepEqual(await replaceStaleCoordinator("/root", "/sock", "abc", deps),
+		{ replaced: false, reason: "lease_changed" });
+	assert.deepEqual(calls.kill, []);
+});
+
+test("A3g: a process that never exits times out after the kill", async () => {
+	let now = 0;
+	const { deps, calls } = mkReplacementDeps({ isAlive: () => true, clock: () => now, sleep: async () => { now += 100; } });
+	assert.deepEqual(await replaceStaleCoordinator("/root", "/sock", "abc", deps),
+		{ replaced: false, reason: "replace_timeout" });
+	assert.equal(calls.kill.length, 1);
+});
+
+test("A3h: a throwing reportSkip does not throw or change the outcome", async () => {
+	const { deps } = mkReplacementDeps({
+		readLease: () => mkRecord({ instanceId: "other" }),
+		reportSkip: () => { throw new Error("disk full"); },
+	});
+	assert.deepEqual(await replaceStaleCoordinator("/root", "/sock", "abc", deps),
+		{ replaced: false, reason: "lease_owner_mismatch" });
+});
+
+test("A3j: unreadable lease on the null-probe re-read skips", async () => {
+	let reads = 0;
+	const { deps, calls } = mkReplacementDeps({
+		probe: async () => null,
+		readLease: () => (++reads === 1 ? mkRecord() : null),
+	});
+	assert.deepEqual(await replaceStaleCoordinator("/root", "/sock", "abc", deps),
+		{ replaced: false, reason: "lease_unreadable" });
+	assert.deepEqual(calls.kill, []);
+});
+
+test("A3l: kill errors are contained (ESRCH replaces, EPERM times out)", async () => {
+	const esrch = Object.assign(new Error("gone"), { code: "ESRCH" });
+	const a = mkReplacementDeps({ kill: () => { throw esrch; } });
+	assert.deepEqual(await replaceStaleCoordinator("/root", "/sock", "abc", a.deps), { replaced: true });
+
+	const eperm = Object.assign(new Error("denied"), { code: "EPERM" });
+	const b = mkReplacementDeps({ kill: () => { throw eperm; }, isAlive: () => true, clock: () => 0, sleep: async () => {} });
+	assert.deepEqual(await replaceStaleCoordinator("/root", "/sock", "abc", b.deps),
+		{ replaced: false, reason: "replace_timeout" });
+});
+
+test("A3k: a removed root is not resurrected by the skip diagnostic", async () => {
+	const root = join(freshRoot(), "removed-root"); // never created on disk
+	const { deps } = mkReplacementDeps({
+		readLease: () => mkRecord({ instanceId: "other" }),
+		reportSkip: undefined, // default writer -> existsSync guard
+	});
+	// default reportSkip is not injectable here; instead assert the default writer's guard:
+	const out = await replaceStaleCoordinator(root, "/sock", "abc", { ...deps, reportSkip: undefined });
+	assert.deepEqual(out, { replaced: false, reason: "lease_owner_mismatch" });
+	assert.equal(existsSync(root), false, "a deleted/missing root must not be recreated");
 });
