@@ -28,7 +28,7 @@ try {
 		terminal: { rows: 24, cols: 120, columns: 120, write: () => {} },
 		requestRender: () => {},
 	};
-	const theme = { fg: (_c, text) => text, bold: (text) => text };
+	const theme = { fg: (_c, text) => text, bold: (text) => text, bg: (_c, text) => text };
 	dashboard = new DashboardComponent(tui, theme, {}, () => {}, {
 		service, root, defaultCwd: root, availableModels: [],
 		currentModel: null, currentThinkingLevel: "off",
