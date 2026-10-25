@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { once } from "node:events";
 import { test } from "node:test";
 import { COORDINATOR_PROTOCOL_VERSION } from "../src/core/coordinator-protocol.mjs";
-import { ensureCoordinator, sendStateCommand } from "../src/core/coordinator-client.mjs";
+import { ensureCoordinator, judgeReplacementTarget, readCoordinatorLeaseRecord, sendStateCommand } from "../src/core/coordinator-client.mjs";
 import * as P from "../src/core/paths.mjs";
 import { createView, readState } from "../src/core/store.mjs";
 
@@ -509,3 +509,65 @@ async function cleanupRoot(root) {
 	spawnedPids.clear();
 	await rmTreeWithRetry(root);
 }
+
+// --- issue #239: lease record + pure judge (T1/T2) ---
+
+function mkRecord(overrides = {}) {
+	return { token: "t1", pid: 4242, instanceId: "abc", startToken: null, ...overrides };
+}
+
+test("judgeReplacementTarget: instanceId equality decides (J1/J2)", () => {
+	assert.deepEqual(judgeReplacementTarget({ recorded: mkRecord(), probedInstanceId: "abc" }), { action: "signal" });
+	assert.deepEqual(judgeReplacementTarget({ recorded: mkRecord(), probedInstanceId: "other" }),
+		{ action: "skip", reason: "lease_owner_mismatch" });
+});
+
+test("judgeReplacementTarget: legacy startToken fallback (J3/J4/J5/J6)", () => {
+	const legacy = mkRecord({ instanceId: null, startToken: "777" });
+	assert.deepEqual(judgeReplacementTarget({ recorded: legacy, probedInstanceId: "x", currentStartToken: "777" }), { action: "signal" });
+	assert.deepEqual(judgeReplacementTarget({ recorded: legacy, probedInstanceId: "x", currentStartToken: "888" }),
+		{ action: "skip", reason: "pid_reused" });
+	assert.deepEqual(judgeReplacementTarget({ recorded: legacy, probedInstanceId: "x", currentStartToken: null }),
+		{ action: "skip", reason: "identity_unverified" });
+	assert.deepEqual(judgeReplacementTarget({ recorded: legacy, probedInstanceId: "x", currentStartToken: Promise.resolve("777") }),
+		{ action: "skip", reason: "identity_unverified" }, "a missed await must not read as pid_reused");
+	const noToken = mkRecord({ instanceId: null, startToken: null });
+	assert.deepEqual(judgeReplacementTarget({ recorded: noToken, probedInstanceId: "x" }),
+		{ action: "skip", reason: "identity_unverified" });
+});
+
+test("judgeReplacementTarget: malformed records are never signalled (J7)", () => {
+	assert.deepEqual(judgeReplacementTarget({ recorded: null, probedInstanceId: "x" }),
+		{ action: "skip", reason: "lease_unreadable" });
+	assert.deepEqual(judgeReplacementTarget({ recorded: mkRecord({ pid: 0 }), probedInstanceId: "abc" }),
+		{ action: "skip", reason: "lease_unreadable" });
+});
+
+test("judgeReplacementTarget: empty-string fields count as missing", () => {
+	assert.deepEqual(judgeReplacementTarget({ recorded: mkRecord({ instanceId: "" }), probedInstanceId: "abc" }),
+		{ action: "skip", reason: "identity_unverified" });
+});
+
+test("readCoordinatorLeaseRecord parses identity / legacy / top-level instanceId (A2)", () => {
+	const root = freshRoot();
+	const lockPath = P.viewLockPath(root, "_coordinator", "state-coordinator");
+	mkdirSync(lockPath, { recursive: true });
+	const ownerPath = join(lockPath, "owner.json");
+
+	assert.equal(readCoordinatorLeaseRecord(root), null, "missing owner.json");
+	writeFileSync(ownerPath, "{not json", "utf8");
+	assert.equal(readCoordinatorLeaseRecord(root), null, "corrupt json");
+
+	writeFileSync(ownerPath, JSON.stringify({ token: "a", pid: 7, identity: { pid: 7, startToken: "9", instanceId: "i" } }), "utf8");
+	assert.deepEqual(readCoordinatorLeaseRecord(root), { token: "a", pid: 7, instanceId: "i", startToken: "9" });
+
+	writeFileSync(ownerPath, JSON.stringify({ token: "b", pid: 8, identity: { pid: 8, startToken: null } }), "utf8");
+	assert.deepEqual(readCoordinatorLeaseRecord(root), { token: "b", pid: 8, instanceId: null, startToken: null });
+
+	writeFileSync(ownerPath, JSON.stringify({ token: "c", pid: 9, instanceId: "top" }), "utf8");
+	assert.equal(readCoordinatorLeaseRecord(root).instanceId, "top", "top-level compatibility");
+
+	writeFileSync(ownerPath, JSON.stringify({ token: "d", identity: null }), "utf8");
+	assert.equal(readCoordinatorLeaseRecord(root).pid, null);
+	rmSync(root, { recursive: true, force: true });
+});

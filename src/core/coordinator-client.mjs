@@ -42,6 +42,7 @@ const COMMAND_TIMEOUT_MS = 5_000;
 
 /** @typedef {{ status: "applied"|"rejected", reason: string|null, materializedRevision: number }} StateCommandResult */
 /** @typedef {{ ok: boolean, instanceId?: string, pid?: number|null, error?: "coordinator_disabled"|"coordinator_unavailable"|"coordinator_stale_protocol" }} EnsureResult */
+/** @typedef {{ token: string|null, pid: number|null, instanceId: string|null, startToken: string|null }} LeaseRecord */
 
 /**
  * Whether the coordinator is switched off for this process (tests/legacy
@@ -117,21 +118,92 @@ function probeOnce(socketPath, connect, timeoutMs) {
 }
 
 /**
- * Read the coordinator lease's owner.json and return the owning pid. The
- * lease is written by whichever process owns the "_coordinator" lock, so it
- * identifies the live coordinator even when its pong predates the pid field.
- * @param {string} root
- * @returns {number|null}
+ * First argument that is a non-empty string, else null. Only a non-empty
+ * string identifies a process instance — "" and non-strings are treated as
+ * "field missing" so a malformed record can never read as a verified identity.
+ * @param {...unknown} values
+ * @returns {string|null}
  */
-function readCoordinatorLeasePid(root) {
+function firstNonEmptyString(...values) {
+	for (const value of values) {
+		if (typeof value === "string" && value.length > 0) return value;
+	}
+	return null;
+}
+
+/**
+ * Read the coordinator lease's owner.json in a decision-friendly shape. The
+ * lease is written by whichever process owns the "_coordinator" lock, so it
+ * identifies the live coordinator — but its pid alone is NOT proof that the
+ * lease owner is the endpoint that answered our ping (issue #239): the pid may
+ * have been reused by an unrelated process. `instanceId` (written since issue
+ * #239, same value as the coordinator's pong) is what
+ * `judgeReplacementTarget` compares to close that gap.
+ *
+ * Tolerates every historical record shape: the lock layer passes `identity`
+ * through verbatim, so records written before #239 have no `instanceId` and
+ * non-Linux records carry `startToken: null`. `instanceId` is read from
+ * `identity` first, then from the top level (compatibility path for a future
+ * shape).
+ * @param {string} root
+ * @returns {LeaseRecord|null} null when the lease is missing, unparsable, or
+ *   not a JSON object
+ */
+export function readCoordinatorLeaseRecord(root) {
 	try {
 		const lockPath = P.viewLockPath(root, "_coordinator", "state-coordinator");
 		const owner = JSON.parse(readFileSync(`${lockPath}/owner.json`, "utf8"));
-		const pid = Number(owner?.identity?.pid ?? owner?.pid ?? 0);
-		return Number.isFinite(pid) && pid > 0 ? pid : null;
+		if (!owner || typeof owner !== "object" || Array.isArray(owner)) return null;
+		const identity = owner.identity;
+		const pid = Number(identity?.pid ?? owner.pid);
+		return {
+			token: typeof owner.token === "string" ? owner.token : null,
+			pid: Number.isFinite(pid) && pid > 0 ? pid : null,
+			instanceId: firstNonEmptyString(identity?.instanceId, owner.instanceId),
+			startToken: firstNonEmptyString(identity?.startToken),
+		};
 	} catch {
 		return null;
 	}
+}
+
+/**
+ * Decide whether the lease owner may be signalled, given the lease record and
+ * the instanceId from the pong we just received (issue #239). Pure: no fs, no
+ * process, no platform checks — the caller injects the legacy live-token read.
+ *
+ * Decision order (first match wins):
+ *   1. unreadable record / invalid pid  → skip("lease_unreadable")
+ *   2. recorded instanceId present      → equal: signal, else skip("lease_owner_mismatch")
+ *   3. legacy record without startToken → skip("identity_unverified")
+ *   4. currentStartToken not a usable
+ *      string (unreadable, or a missed
+ *      await handing us a Promise)      → skip("identity_unverified")
+ *   5. startToken differs               → skip("pid_reused")
+ *   6. otherwise                        → signal
+ *
+ * Empty-string instanceId/startToken count as missing, so a malformed record
+ * stays on the skip side instead of matching an empty probe value.
+ * @param {{ recorded: LeaseRecord|null, probedInstanceId: string, currentStartToken?: string|null }} args
+ * @returns {{ action: "signal" } | { action: "skip", reason: "lease_unreadable"|"lease_owner_mismatch"|"pid_reused"|"identity_unverified" }}
+ */
+export function judgeReplacementTarget({ recorded, probedInstanceId, currentStartToken = null }) {
+	if (!recorded || typeof recorded.pid !== "number" || !Number.isFinite(recorded.pid) || recorded.pid <= 0) {
+		return { action: "skip", reason: "lease_unreadable" };
+	}
+	const recordedInstanceId = firstNonEmptyString(recorded.instanceId);
+	if (recordedInstanceId !== null) {
+		return recordedInstanceId === probedInstanceId
+			? { action: "signal" }
+			: { action: "skip", reason: "lease_owner_mismatch" };
+	}
+	const recordedStartToken = firstNonEmptyString(recorded.startToken);
+	if (recordedStartToken === null) return { action: "skip", reason: "identity_unverified" };
+	if (typeof currentStartToken !== "string" || currentStartToken.length === 0) {
+		return { action: "skip", reason: "identity_unverified" };
+	}
+	if (currentStartToken !== recordedStartToken) return { action: "skip", reason: "pid_reused" };
+	return { action: "signal" };
 }
 
 /** Grace window for a SIGTERMed stale coordinator to unlink its socket. */
@@ -149,7 +221,7 @@ const REPLACE_POLL_MS = 50;
  * @returns {Promise<boolean>} whether the socket is gone (replacement can proceed)
  */
 async function replaceStaleCoordinator(root, socketPath) {
-	const pid = readCoordinatorLeasePid(root);
+	const pid = readCoordinatorLeaseRecord(root)?.pid ?? null;
 	if (pid != null) {
 		try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
 	}
