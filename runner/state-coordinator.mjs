@@ -218,7 +218,9 @@ async function main() {
 
 	// 1. Lease first: a second coordinator is an expected, idempotent no-op.
 	// Identity carries a POSIX startToken (pty-runner pattern) so a SIGKILLed
-	// coordinator's lease can be reclaimed by the next instance after pid reuse.
+	// coordinator's lease can be reclaimed by the next instance after pid reuse,
+	// plus the in-process instanceId the pong reports (issue #239 A4) so a client
+	// can tell whether the live endpoint is still the lease's owner.
 	// heartbeatMs declares the staleness contract (issue #224): a holder that
 	// stops heartbeating becomes reclaimable on its own staleness.
 	/** @type {import("../src/core/locks.mjs").Lease} */
@@ -226,7 +228,7 @@ async function main() {
 	try {
 		lease = acquireOwnedViewLock(root, "_coordinator", "state-coordinator", {
 			waitMs: 500,
-			identity: { pid: process.pid, startToken: captureStartToken(process.pid) },
+			identity: { pid: process.pid, startToken: captureStartToken(process.pid), instanceId },
 			heartbeatMs,
 		});
 	} catch (err) {

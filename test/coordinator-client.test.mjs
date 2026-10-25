@@ -185,6 +185,24 @@ test("ensureCoordinator spawns the real coordinator; sendStateCommand happy path
 	assert.ok(state.materializedRevision >= 1);
 });
 
+test("coordinator records its instanceId in the lease identity (issue #239 A4)", async (t) => {
+	const root = freshRoot();
+	t.after(async () => {
+		await cleanupRoot(root);
+	});
+	createView(root, { id: "v1", name: "a4", cwd: root });
+
+	const ensured = await ensureCoordinator(root, { runnerScript: COORDINATOR_SCRIPT });
+	assert.equal(ensured.ok, true);
+	if (ensured.pid) track(ensured.pid);
+
+	const owner = JSON.parse(readFileSync(
+		join(P.viewLockPath(root, "_coordinator", "state-coordinator"), "owner.json"), "utf8"));
+	assert.equal(typeof owner.identity?.instanceId, "string");
+	assert.notEqual(owner.identity.instanceId.length, 0);
+	assert.equal(owner.identity.instanceId, ensured.instanceId);
+});
+
 test("ensureCoordinator reclaims a stale identity-less orphan lease (issue #114)", async (t) => {
 	const root = freshRoot();
 	t.after(async () => {
