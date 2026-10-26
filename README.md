@@ -117,7 +117,7 @@ Session actions are deliberately confirmation-aware:
 - `h` toggles the on-hold state (manual verdict — automated writers are fenced).
 - Press `x`, then `y` to confirm deleting the selected row. `Ctrl+X` twice quickly still deletes without confirmation. Archiving removes the row from the board but preserves its underlying Pi session file.
 - `X` archives inactive rows in the selected state; live work is skipped.
-- `m` enters multi-select mode. Use `Space` to toggle rows, `a` to select all visible rows, `u` to clear the selection, `d` to mark inactive rows Done, or `Ctrl+X` to delete selected Done rows.
+- `m` enters multi-select mode; see [Multi-select](#multi-select) for its keys.
 
 ## Views and Actions
 
@@ -149,6 +149,22 @@ Shortcuts are scoped to the view where they are available:
 | `?` | Open the help overlay. |
 | `Esc` | Clear a draft, or exit when the input is empty. |
 
+### Multi-select
+
+Press `m` in the main list to act on several sessions at once.
+
+| Key | Action |
+| --- | --- |
+| `Up` / `Down` / `j` / `k` | Move the selection. |
+| `Space` | Toggle the current row. |
+| `a` | Select all visible rows. |
+| `u` | Clear the selection. |
+| `d` | Confirm marking the selected inactive rows Done. |
+| `Ctrl+X` | Delete the selected Done rows (confirmation prompt). |
+| `m` / `Esc` / `Ctrl+C` | Leave multi-select mode. |
+| `?` | Open the help overlay. |
+| `!` | Open node-pty diagnostics and repair hints. |
+
 ### Peek
 
 Peek shows the selected session's summary, blocker or question, latest output, and available issue/PR references.
@@ -161,6 +177,7 @@ Peek shows the selected session's summary, blocker or question, latest output, a
 | `e` | Open Evidence / Diagnostics. |
 | `d` | Confirm marking the inactive session Done. |
 | `h` | Hold or unhold the session. |
+| `!` | Open node-pty diagnostics and repair hints. |
 | `Up` / `Down` / `j` / `k` | Move to the previous or next session. |
 | `Esc` | Return to the main list. |
 
@@ -180,6 +197,7 @@ The `v` view is a read-only projection of the durable Pi session JSONL. It does 
 | `e` | Open Evidence / Diagnostics. |
 | `d` | Confirm marking the inactive session Done. |
 | `h` | Hold or unhold the session. |
+| `!` | Open node-pty diagnostics and repair hints. |
 | `Left` / `Esc` / `<` | Return to the main list. |
 
 ### Evidence / Diagnostics
