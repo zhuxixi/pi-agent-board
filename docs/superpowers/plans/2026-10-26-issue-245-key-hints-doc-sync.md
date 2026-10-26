@@ -181,9 +181,9 @@ cd $WT
 # 9 rows in the multi-select table (excluding header + separator)
 sed -n '/^### Multi-select/,/^### Peek/p' README.md | grep -c '^| `'
 # expect: 9
-# `!` documented three times: main list, peek, transcript — and NOT in evidence
+# `!` documented four times: main list, multi-select, peek, transcript — and NOT in evidence
 grep -c '^| `!`' README.md
-# expect: 3
+# expect: 4
 sed -n '/^### Evidence/,/^### PTY attach/p' README.md | grep -c '^| `!`'
 # expect: 0
 ```
