@@ -136,8 +136,14 @@ dash.mode = "session";
 const sessionRender = dash.render(120).join("\n");
 dash.mode = "evidence";
 const evidenceRender = dash.render(120).join("\n");
+// Peek footer: raise the height first — fitToHeight slices the tail, and the
+// footer is renderPeek's last line (cross-review R1-D3).
+tui.terminal.rows = 40;
+dash.mode = "peek"; dash.peekId = ids[0]; dash.selectedId = ids[0];
+const peekRender = dash.render(120).join("\n");
+tui.terminal.rows = 24;
 dash.mode = "list";
-out.copy = { help120, listRender, selectRender, sessionRender, evidenceRender, help80Lines: help80.length };
+out.copy = { help120, listRender, selectRender, sessionRender, evidenceRender, peekRender, help80Lines: help80.length };
 
 dash.dispose();
 console.log(JSON.stringify(out));

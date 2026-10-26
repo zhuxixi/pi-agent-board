@@ -38,7 +38,7 @@ test("vim j/k/l bindings mirror the arrow keys across board modes (issue #229)",
 
 test("help overlay and hint lines document j/k/l (issue #229 A7)", () => {
 	const out = JSON.parse(execFileSync(process.execPath, ["--experimental-transform-types", PROBE], { encoding: "utf8", timeout: 30_000 }));
-	const { help120, listRender, selectRender, sessionRender, evidenceRender, help80Lines } = out.copy;
+	const { help120, listRender, selectRender, sessionRender, evidenceRender, peekRender, help80Lines } = out.copy;
 	assert.match(help120, /↑\/↓ or j\/k/);
 	assert.match(help120, /→ \/ > \/ l/);
 	assert.match(help120, /In select.*j\/k/);
@@ -55,5 +55,9 @@ test("help overlay and hint lines document j/k/l (issue #229 A7)", () => {
 	assert.match(selectRender, /↑↓\/j\/k move/);
 	assert.match(sessionRender, /↑↓\/j\/k scroll/);
 	assert.match(evidenceRender, /↑↓\/j\/k scroll/);
+	// #245 A1/A3: the peek footer advertises j/k and l, and the old wording is gone.
+	assert.match(peekRender, /↑↓\/j\/k prev\/next/);
+	assert.match(peekRender, /→\/l attach/);
+	assert.doesNotMatch(peekRender, /↑↓ prev\/next · →\/> attach/);
 	assert.ok(help80Lines > 0, "80-col help render must not throw (RF3)");
 });

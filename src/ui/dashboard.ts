@@ -1540,7 +1540,7 @@ export class DashboardComponent implements Component {
 			const notice = this.currentInputNotice();
 			if (notice) out.push(clip(t.fg(notice.color, `ⓘ ${notice.text}`), width));
 		} else {
-			out.push(clip(t.fg("dim", "↑↓ prev/next · →/> attach · d done · v transcript · e evidence · r reply · esc back"), width));
+			out.push(clip(t.fg("dim", "↑↓/j/k prev/next · →/l attach · d done · v transcript · e evidence · r reply · esc back"), width));
 		}
 		return out;
 	}
