@@ -145,7 +145,7 @@ Shortcuts are scoped to the view where they are available:
 | `Ctrl+X` twice quickly | Archive/delete the selected row without confirmation. |
 | `X` | Delete inactive rows in the selected state. |
 | `m` | Enter multi-select mode. |
-| `!` | Open node-pty diagnostics and repair hints. |
+| `!` | Open node-pty diagnostics and fix steps. |
 | `?` | Open the help overlay. |
 | `Esc` | Clear a draft, or exit when the input is empty. |
 
@@ -163,7 +163,7 @@ Press `m` in the main list to act on several sessions at once.
 | `Ctrl+X` | Delete the selected Done rows (confirmation prompt). |
 | `m` / `Esc` / `Ctrl+C` | Leave multi-select mode. |
 | `?` | Open the help overlay. |
-| `!` | Open node-pty diagnostics and repair hints. |
+| `!` | Open node-pty diagnostics and fix steps. |
 
 ### Peek
 
@@ -177,7 +177,7 @@ Peek shows the selected session's summary, blocker or question, latest output, a
 | `e` | Open Evidence / Diagnostics. |
 | `d` | Confirm marking the inactive session Done. |
 | `h` | Hold or unhold the session. |
-| `!` | Open node-pty diagnostics and repair hints. |
+| `!` | Open node-pty diagnostics and fix steps. |
 | `Up` / `Down` / `j` / `k` | Move to the previous or next session. |
 | `Esc` | Return to the main list. |
 
@@ -197,7 +197,7 @@ The `v` view is a read-only projection of the durable Pi session JSONL. It does 
 | `e` | Open Evidence / Diagnostics. |
 | `d` | Confirm marking the inactive session Done. |
 | `h` | Hold or unhold the session. |
-| `!` | Open node-pty diagnostics and repair hints. |
+| `!` | Open node-pty diagnostics and fix steps. |
 | `Left` / `Esc` / `<` | Return to the main list. |
 
 ### Evidence / Diagnostics
@@ -286,7 +286,7 @@ For internal code platforms (non-github/gitlab hosts) or custom CLIs, add a per-
 
 ## Attach and Fallback Behavior
 
-When PTY support is healthy, Agent Board uses an interactive PTY host for attach and start-and-attach. If PTY support is unavailable, eligible managed sessions can still run in the background through the JSON runner; start-and-attach falls back to background launch with a warning. Adopted external foreground sessions require PTY to continue safely. Press `!` in the dashboard for diagnosis and repair hints.
+When PTY support is healthy, Agent Board uses an interactive PTY host for attach and start-and-attach. If PTY support is unavailable, eligible managed sessions can still run in the background through the JSON runner; start-and-attach falls back to background launch with a warning. Adopted external foreground sessions require PTY to continue safely. Press `!` in the dashboard for diagnosis and fix steps.
 
 On Windows, PTY host control uses a named pipe and spawned child console windows are hidden. Terminal behavior can still vary between terminal emulators.
 
@@ -365,7 +365,7 @@ The command should emit an assistant reply, then an `agent_end` event, and exit.
 
 ### `node-pty unavailable`
 
-Press `!` in the dashboard to open the diagnostic panel and follow its repair hints. Common causes include a missing native `node-pty` binary, a Node/architecture mismatch, a missing or non-executable macOS `spawn-helper`, or macOS quarantine. You can temporarily set `AGENT_BOARD_DISABLE_PTY=1` to use background JSON-runner behavior where supported.
+Press `!` in the dashboard to open the diagnostic panel and follow its fix steps. Common causes include a missing native `node-pty` binary, a Node/architecture mismatch, a missing or non-executable macOS `spawn-helper`, or macOS quarantine. You can temporarily set `AGENT_BOARD_DISABLE_PTY=1` to use background JSON-runner behavior where supported.
 
 ### Attach is slow or keeps reconnecting
 
