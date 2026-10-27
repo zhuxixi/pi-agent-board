@@ -128,6 +128,10 @@ dash.mode = "list";
 const listRender = dash.render(120).join("\n");
 dash.mode = "select";
 const selectRender = dash.render(120).join("\n");
+// The SELECT hint line is >120 columns; render wider so the tail is observable.
+tui.terminal.rows = 40;
+const selectWide = dash.render(160).join("\n");
+tui.terminal.rows = 24;
 // A5's filter run leaves the list filtered to zero rows; clear it so the
 // session/evidence view captures render a selected row (and its footer).
 dash.filterQuery = "";
@@ -143,7 +147,7 @@ dash.mode = "peek"; dash.peekId = ids[0]; dash.selectedId = ids[0];
 const peekRender = dash.render(120).join("\n");
 tui.terminal.rows = 24;
 dash.mode = "list";
-out.copy = { help120, listRender, selectRender, sessionRender, evidenceRender, peekRender, help80Lines: help80.length };
+out.copy = { help120, listRender, selectRender, selectWide, sessionRender, evidenceRender, peekRender, help80Lines: help80.length };
 
 dash.dispose();
 console.log(JSON.stringify(out));
