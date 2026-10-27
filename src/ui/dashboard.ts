@@ -1352,9 +1352,11 @@ export class DashboardComponent implements Component {
 				"space toggle",
 				"a all visible",
 				"u clear",
-				"d move done",
-				"ctrl+x delete done",
-				"esc cancel",
+				"d done",
+				"ctrl+x delete",
+				"m/esc cancel",
+				"? help",
+				"! pty",
 			]);
 		}
 		const primary = this.input.trim() ? "enter launch" : live ? "enter attach live" : "enter resume";
@@ -1713,6 +1715,7 @@ export class DashboardComponent implements Component {
 			["space", "Peek when input is empty; in multi-select: toggle current row"],
 			["e", "Open evidence / diagnostics panel for selected session"],
 			["/", "Filter in normal mode; use i then / for slash commands"],
+			["?", "Open the key help overlay (list and multi-select)"],
 			["!", "Open node-pty diagnostics and fix steps"],
 			["ctrl+n", "Open the new-session launch dialog (prompt pre-filled)"],
 			["ctrl+r/t/s", "Rename · pin · stop selected"],
@@ -1720,7 +1723,7 @@ export class DashboardComponent implements Component {
 			["ctrl+x x2", "Delete selected session (quick double-press, no confirm)"],
 			["X", "Delete all inactive sessions in selected state"],
 			["v", "Open read-only transcript view"],
-			["In select", "j/k move · a select all · u clear · d move done · ctrl+x delete · esc cancel"],
+			["In select", "↑↓/j/k move · space toggle · a all · u clear · d done · ctrl+x delete · m/esc cancel"],
 			["In peek", "→/l attach · v transcript · e evidence · r reply · ↑↓/j/k adjacent"],
 			["In session", "← back · ↑↓/j/k scroll · e evidence · enter attach · r reply"],
 			["In evidence", "← back · ↑↓/j/k scroll · →/l attach · r reply · v transcript · x clear diag"],

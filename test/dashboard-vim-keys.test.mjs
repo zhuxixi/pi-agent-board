@@ -61,3 +61,28 @@ test("help overlay and hint lines document j/k/l (issue #229 A7)", () => {
 	assert.doesNotMatch(peekRender, /↑↓ prev\/next · →\/> attach/);
 	assert.ok(help80Lines > 0, "80-col help render must not throw (RF3)");
 });
+
+test("SELECT surfaces document every binding and the help overlay gains a ? row (issue #252)", () => {
+	const out = JSON.parse(execFileSync(process.execPath, ["--experimental-transform-types", PROBE], { encoding: "utf8", timeout: 30_000 }));
+	const { selectWide, help120 } = out.copy;
+	// A1: the SELECT hint line names every binding, not just five.
+	for (const token of ["↑↓/j/k move", "space toggle", "a all visible", "u clear", "d done", "ctrl+x delete", "m/esc cancel", "? help", "! pty"]) {
+		assert.ok(selectWide.includes(token), `SELECT hint line must name ${token}`);
+	}
+	assert.match(selectWide, /· \? help · ! pty/);
+	// A2: the stale wording is gone.
+	assert.doesNotMatch(selectWide, /d move done/);
+	assert.doesNotMatch(selectWide, /ctrl\+x delete done/);
+	// A3: the line stays inside its width budget (131 columns today).
+	const selectLine = selectWide.split("\n").find((line) => line.includes("[SELECT]"));
+	assert.ok(selectLine, "SELECT hint line must be present");
+	assert.ok(selectLine.trimEnd().length <= 132, `SELECT hint line grew to ${selectLine.trimEnd().length}`);
+	// A4: the overlay's In select row catches up with the handler.
+	assert.match(help120, /In select\s+↑↓\/j\/k move · space toggle · a all · u clear · d done · ctrl\+x delete · m\/esc cancel/);
+	assert.doesNotMatch(help120, /a select all/);
+	// A5: the overlay finally explains ?.
+	assert.match(help120, /\?\s+Open the key help overlay \(list and multi-select\)/);
+	// A6: one canonical ! wording in-app.
+	assert.match(help120, /Open node-pty diagnostics and fix steps/);
+	assert.doesNotMatch(help120, /repair hints/);
+});
