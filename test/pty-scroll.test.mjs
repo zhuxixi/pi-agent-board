@@ -17,7 +17,7 @@ import {
 	scrollViewportTop,
 	selectionDragScrollLines,
 	selectionReleaseIsDrag,
-	shouldMirrorSelectionToPrimary,
+	isFullscreenSelectionEnd,
 	shouldOwnOuterMouseMode,
 	splitAttachInput,
 	fullscreenMouseEnableSequence,
@@ -241,11 +241,9 @@ test("resolvePasteSelectionSource: clipboard opt-in, everything else primary", (
 	assert.equal(resolvePasteSelectionSource("garbage"), "primary");
 });
 
-test("shouldMirrorSelectionToPrimary: only selection endings of the left button with paste enabled", () => {
-	assert.equal(shouldMirrorSelectionToPrimary(ev("release", "left"), { nativePasteEnabled: true }), "mirror-primary");
-	assert.equal(shouldMirrorSelectionToPrimary(ev("click", "left"), { nativePasteEnabled: true }), "mirror-primary");
-	assert.equal(shouldMirrorSelectionToPrimary(ev("release", "left"), { nativePasteEnabled: false }), null);
-	assert.equal(shouldMirrorSelectionToPrimary(ev("click", "left"), { nativePasteEnabled: false }), null);
+test("isFullscreenSelectionEnd: only the left button's release/click ends a fullscreen selection", () => {
+	assert.equal(isFullscreenSelectionEnd(ev("release", "left")), true);
+	assert.equal(isFullscreenSelectionEnd(ev("click", "left")), true);
 	const cases = [
 		["press", "left"],
 		["move", "left"],
@@ -256,9 +254,10 @@ test("shouldMirrorSelectionToPrimary: only selection endings of the left button 
 		["release", "none"],
 		["click", "middle"],
 		["click", "none"],
+		["press", "middle"],
 	];
 	for (const [type, button] of cases) {
-		assert.equal(shouldMirrorSelectionToPrimary(ev(type, button), { nativePasteEnabled: true }), null, `${type}/${button}`);
+		assert.equal(isFullscreenSelectionEnd(ev(type, button)), false, `${type}/${button}`);
 	}
 });
 
