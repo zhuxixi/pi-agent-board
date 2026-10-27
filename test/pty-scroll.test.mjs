@@ -3,6 +3,7 @@ import test from "node:test";
 import {
 	encodeWheelReport,
 	historyFloorAfterHydrate,
+	isFullscreenSelectionEnd,
 	mouseWheelDirection,
 	parseMouseEvent,
 	parseMouseInputChunk,
@@ -17,7 +18,6 @@ import {
 	scrollViewportTop,
 	selectionDragScrollLines,
 	selectionReleaseIsDrag,
-	isFullscreenSelectionEnd,
 	shouldOwnOuterMouseMode,
 	splitAttachInput,
 	fullscreenMouseEnableSequence,
@@ -254,6 +254,7 @@ test("isFullscreenSelectionEnd: only the left button's release/click ends a full
 		["release", "none"],
 		["click", "middle"],
 		["click", "none"],
+		["click", "right"],
 		["press", "middle"],
 	];
 	for (const [type, button] of cases) {

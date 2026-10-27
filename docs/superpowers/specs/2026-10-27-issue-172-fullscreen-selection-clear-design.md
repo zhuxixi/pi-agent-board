@@ -1,6 +1,7 @@
 Drafted: ollama/deepseek-v4.1-flash:1017-cloud (selected) · ollama/deepseek-v4.1-flash:1017-cloud (physical) @ 2026-10-27T00:16:00Z
 Revised: ollama/deepseek-v4.1-flash:1017-cloud (selected) · ollama/deepseek-v4.1-flash:1017-cloud (physical) @ 2026-10-27T00:41:00Z — R1-G1 (U1 deployment preconditions), R1-D1 (README decision), R1-D2 (follow-up issue #250)
 Revised: ollama/deepseek-v4.1-flash:1017-cloud (selected) · ollama/deepseek-v4.1-flash:1017-cloud (physical) @ 2026-10-27T00:52:00Z — R2-D1 (U1 sequencing), R2-D2 (supersession note), R2-D3 (baseline)
+Revised: ollama/deepseek-v4.1-flash:1017-cloud (selected) · ollama/deepseek-v4.1-flash:1017-cloud (physical) @ 2026-10-27T01:25:00Z — local code review F1 (gesture-generation guard) + F3 (deferral pin) + F4 (predicate table)
 
 # Spec: #172 — attach view keeps the fullscreen selection highlight after copy-on-release
 
@@ -89,6 +90,14 @@ remaining purpose.
 press-release, click on a link) — nothing to clear, and pi's own click handling is left
 untouched.
 
+**D5 — a settle may not consume the next gesture.**
+pi-tui emits batched mouse reports synchronously in one loop, so a `release` and the next
+left `press` can land in the same stdin chunk. Without a guard, the deferred settle would
+run after that press has already started a new (word/line) selection, mirror it, and clear
+it — the double-click would then copy nothing. A monotonic `selectionGestureSerial`,
+bumped on every left press, is captured when the settle is scheduled; a mismatch on the
+next tick drops the settle.
+
 ## Design
 
 ### 1. Pure predicate (`src/core/pty-scroll.mjs`)
@@ -119,10 +128,16 @@ place that honours `AGENT_BOARD_ATTACH_NATIVE_PASTE`.
 
 ```ts
 const nativePasteEnabled = process.env.AGENT_BOARD_ATTACH_NATIVE_PASTE !== "0";
+// D5: a press starts a new gesture; see the serial check below.
+if (event.type === "press" && event.button === "left") this.selectionGestureSerial += 1;
 if (isFullscreenSelectionEnd(event)) {
     // Overlays are dispatched before TuiAltScreen finalizes (and copies) the
     // selection for this event, so settle on the next tick (issue #174).
-    process.nextTick(() => this.settleFullscreenSelection(nativePasteEnabled));
+    const serial = this.selectionGestureSerial;
+    process.nextTick(() => {
+        if (serial !== this.selectionGestureSerial) return;   // D5: next gesture started
+        this.settleFullscreenSelection(nativePasteEnabled);
+    });
     return undefined;   // observe only — pi keeps the gesture
 }
 ```
@@ -178,6 +193,7 @@ private settleFullscreenSelection(nativePasteEnabled: boolean): void {
 | A5 | `NATIVE_PASTE=0`：不写 PRIMARY 但仍清高亮 | 自动化验证（同上） | 同场景，env 覆盖 | `killSwitchWrites === 0`，`killSwitchClears === 1` |
 | A6 | 旧 pi（无 `clearTextSelection`）：降级不抛错 | 自动化验证（同上） | 同场景，fake TUI 省略该方法 | 无异常，PRIMARY 写 1 次，`clearCalls` 不可用（不适用） |
 | A7 | 类型与构建 | 自动化验证（static/build） | `npm run typecheck`、`npm run verify` | 全部通过（含既有套件、覆盖率阈值、perf gate、pack:dry） |
+| A8 | release + 下一次 press 同 tick 合并：排队中的 settle 不得读/清新选区 | 自动化验证（同上） | 同场景：`handleMouse(release)` 后立即 `handleMouse(press)`，再等 tick | `coalescedWrites === 0` 且 `coalescedClears === 0`；另在 release 后同步断言 `releaseSyncWrites === 0`（deferral 钉死） |
 | U1 | 真机 fullscreen 体验 | 用户实测 | **前置**：① 合并后把 pi 实际加载的 git checkout 更新到 main —— 扩展在 `~/.pi/agent/settings.json` 以 `git:github.com/zhuxixi/pi-agent-board` 注册，路径为 `~/.pi/agent/git/github.com/zhuxixi/pi-agent-board`，入口 `./index.ts`（免构建）；执行 `git -C ~/.pi/agent/git/github.com/zhuxixi/pi-agent-board pull --ff-only`，若因本地 `package-lock.json` 改动被拒就先 `git stash push -- package-lock.json`、测完 `git stash pop`；② 完全退出并重启 pi（扩展启动时加载；fullscreen 是默认模式，必要时用 `pi --tui-mode fullscreen` 显式指定）；③ 确认 X11 会话且 `which xclip` 有输出。**步骤**：① fullscreen attach 内拖选一段文字并松开 → 高亮立即消失；② 中键粘贴仍粘贴刚选内容；③ 双击选词 → 高亮消失且双击仍能选词；④ 三击选行仍生效；⑤ 把 `~/.pi/agent/settings.json` 的 `"fullscreenCopyOnSelect"` 设为 `false` 并重启，拖选松开 → 高亮保留、`Ctrl+X` 可复制；测完恢复默认并重启 | ①–⑤ 全部符合 |
 
 ## Testability split design (hard constraint for implementation)
@@ -186,7 +202,9 @@ private settleFullscreenSelection(nativePasteEnabled: boolean): void {
   event-shape decision table at unit level (A1).
 - **I/O shell**: `handleMouse` maps the predicate to one `process.nextTick` schedule;
   `settleFullscreenSelection()` owns the ordering (`getActiveSelectionText` →
-  `writePrimarySelection` → clear → `scheduleRender`). The only xclip touch point stays
+  `writePrimarySelection` → clear → `scheduleRender`). The gesture serial lives on the
+  component (`handleMouse` bumps it on left press, the scheduled closure compares it) and
+  needs no separate unit test: A8 drives it through the public seam. The only xclip touch point stays
   `writePrimarySelection`; the only pi-selection touch points stay `getActiveSelectionText`
   / `getCopyOnSelect` / `clearTextSelection`, all through the structural cast.
 - **Fake TUI seams** (component scenario): `getActiveSelectionText`, `getCopyOnSelect`,
@@ -209,6 +227,9 @@ private settleFullscreenSelection(nativePasteEnabled: boolean): void {
   copy-on-select, the clear is skipped and `Ctrl+X` still works.
 - The highlight for gestures ending outside the overlay remains (same as #174's mirror
   limitation).
+- A release followed by another press inside one stdin chunk is guarded by the gesture
+  serial (D5/A8). A press that lands outside the overlay does not touch the serial, but
+  pi's own press path has already reset its selection, so the settle reads nothing.
 - Updating the issue's Root cause / Environment text is part of the PR narrative, not of
   the code change.
 

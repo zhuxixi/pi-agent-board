@@ -132,6 +132,9 @@ const result = {
 	copyOnSelectOffClears: -1,
 	fallbackError: null as string | null,
 	fallbackWrites: -1,
+	releaseSyncWrites: -1,
+	coalescedWrites: -1,
+	coalescedClears: -1,
 	middleHandled: false,
 	clipboardReads: -1,
 	clipboardReadSource: null as string | null,
@@ -144,6 +147,7 @@ try {
 		const before = writes().length;
 		const r = (c as any).handleMouse(leftEvent("release"));
 		result.releaseResultUndefined = r === undefined;
+		result.releaseSyncWrites = writes().length - before; // deferral pin: nothing may happen synchronously
 		await sleep(80); // nextTick + xclip spawn
 		const ws = writes();
 		result.mirrorWrites = ws.length - before;
@@ -223,7 +227,19 @@ try {
 		result.fallbackWrites = writes().length - before;
 	});
 
-	// 8. Paste source override: middle paste reads CLIPBOARD when configured.
+	// 8. A release and the next left press coalesced into one tick (pi-tui emits batched
+	// reports synchronously): the queued settle must not read/clear the new gesture.
+	await withComponent(undefined, async (c) => {
+		resetFixture();
+		const before = writes().length;
+		(c as any).handleMouse(leftEvent("release"));
+		(c as any).handleMouse({ ...leftEvent("press"), x: 9, screenX: 9 });
+		await sleep(80);
+		result.coalescedWrites = writes().length - before;
+		result.coalescedClears = clearCalls;
+	});
+
+	// 9. Paste source override: middle paste reads CLIPBOARD when configured.
 	await withComponent({ AGENT_BOARD_ATTACH_PASTE_SOURCE: "clipboard" }, async (c) => {
 		resetFixture();
 		const before = reads().length;

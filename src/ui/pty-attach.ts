@@ -249,6 +249,9 @@ export class PtyAttachComponent implements Component {
 	/** Injectable clock for desync gating (tests override this). */
 	private nowFn: () => number = () => Date.now();
 	private selection: MouseSelection | null = null;
+	/** Issue #172: bumped on every left press so a settle still queued for the previous
+	 * gesture cannot read or clear a selection the next press has already started. */
+	private selectionGestureSerial = 0;
 	private selectionDragging = false;
 	private selectionAutoScrollTimer: ReturnType<typeof setInterval> | null = null;
 	private selectionAutoScrollLines = 0;
@@ -530,11 +533,19 @@ export class PtyAttachComponent implements Component {
 			return { handled: true, render: false };
 		}
 		const nativePasteEnabled = process.env.AGENT_BOARD_ATTACH_NATIVE_PASTE !== "0";
+		// Issue #172: a press starts a new gesture. Two reports can share one stdin chunk
+		// (pi-tui emits them synchronously in a loop), so the settle queued by the previous
+		// release must not consume the selection this press just started.
+		if (event.type === "press" && event.button === "left") this.selectionGestureSerial += 1;
 		if (isFullscreenSelectionEnd(event)) {
 			// Observe only — pi's fullscreen selection keeps the event. Overlays are
 			// dispatched before TuiAltScreen finalizes (and copies) the selection for this
 			// event, so settling must run deferred (issue #174).
-			process.nextTick(() => this.settleFullscreenSelection(nativePasteEnabled));
+			const serial = this.selectionGestureSerial;
+			process.nextTick(() => {
+				if (serial !== this.selectionGestureSerial) return;
+				this.settleFullscreenSelection(nativePasteEnabled);
+			});
 			return undefined;
 		}
 		const action = resolveAttachMouseAction(event, { nativePasteEnabled });

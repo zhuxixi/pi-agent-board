@@ -41,4 +41,7 @@ test("attach selection mirror: left release/click mirrors pi's selection into PR
 	assert.equal(parsed.copyOnSelectOffClears, 0, "copy-on-select off keeps the selection for Ctrl+X");
 	assert.equal(parsed.fallbackError, null, "a missing clearTextSelection must degrade, not throw");
 	assert.equal(parsed.fallbackWrites, 1, "the PRIMARY mirror still runs without the clear method");
+	assert.equal(parsed.releaseSyncWrites, 0, "the settle must be deferred, never synchronous");
+	assert.equal(parsed.coalescedWrites, 0, "a release+press in one tick must not mirror the new gesture");
+	assert.equal(parsed.coalescedClears, 0, "a release+press in one tick must not clear the new gesture");
 });

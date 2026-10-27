@@ -255,6 +255,80 @@ git commit -m "fix(attach): clear the fullscreen selection highlight after copy-
 
 ---
 
+### Task 2b: Guard the settle against the next gesture (local CR F1/F3/F4)
+
+**Files:**
+- Modify: `src/ui/pty-attach.ts` (field + `handleMouse` bump + serial check)
+- Test: `test-support/pty-attach-selection-mirror-scenario.ts`, `test/pty-attach-selection-mirror.test.mjs`, `test/pty-scroll.test.mjs`
+
+**Interfaces:**
+- Produces: `private selectionGestureSerial = 0` (bumped on left press).
+
+- [ ] **Step 1: Add the failing scenario case**
+
+```ts
+	// 8. A release and the next left press coalesced into one tick (pi-tui emits batched
+	// reports synchronously): the queued settle must not read/clear the new gesture.
+	await withComponent(undefined, async (c) => {
+		resetFixture();
+		const before = writes().length;
+		(c as any).handleMouse(leftEvent("release"));
+		(c as any).handleMouse({ ...leftEvent("press"), x: 9, screenX: 9 });
+		await sleep(80);
+		result.coalescedWrites = writes().length - before;
+		result.coalescedClears = clearCalls;
+	});
+```
+
+Also pin the deferral in case 1: `result.releaseSyncWrites = writes().length - before;` immediately after `handleMouse` returns.
+
+- [ ] **Step 2: Run the scenario test to verify it fails**
+
+Run: `node --test test/pty-attach-selection-mirror.test.mjs`
+Expected: FAIL — `coalescedWrites` is 1 (the queued settle mirrored the new gesture).
+
+- [ ] **Step 3: Implement the guard**
+
+Field next to `private selection`:
+
+```ts
+private selectionGestureSerial = 0;
+```
+
+In `handleMouse`, before the settle branch:
+
+```ts
+if (event.type === "press" && event.button === "left") this.selectionGestureSerial += 1;
+```
+
+In the settle branch, capture and compare:
+
+```ts
+const serial = this.selectionGestureSerial;
+process.nextTick(() => {
+	if (serial !== this.selectionGestureSerial) return;
+	this.settleFullscreenSelection(nativePasteEnabled);
+});
+```
+
+- [ ] **Step 4: Complete the predicate table (F4) and fix the import order (F5)**
+
+Add `["click", "right"]` to the false-cases list in `test/pty-scroll.test.mjs` and move `isFullscreenSelectionEnd` into alphabetical position.
+
+- [ ] **Step 5: Run the tests to verify they pass**
+
+Run: `node --test test/pty-scroll.test.mjs test/pty-attach-selection-mirror.test.mjs`
+Expected: PASS (35 tests).
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add src/ui/pty-attach.ts test-support/pty-attach-selection-mirror-scenario.ts test/pty-attach-selection-mirror.test.mjs test/pty-scroll.test.mjs
+git commit -m "fix(attach): keep a queued settle from consuming the next gesture (issue #172)"
+```
+
+---
+
 ### Task 3: Full verification
 
 **Files:** none.
