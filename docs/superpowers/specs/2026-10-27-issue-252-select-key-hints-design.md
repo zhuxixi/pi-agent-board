@@ -3,7 +3,7 @@
 Drafted: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-27T23:28:00+08:00
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-10-27T23:47:00+08:00 — cross-review R2（收敛轮，0 真缺口）：R2-D1 接受（§5 残留的 `rg` 改为 `grep -c`，与 §4 A8 一致）；R2-D2 接受（`pty-support.mjs:155` → `src/core/pty-support.mjs:155`）；R2-D3 接受（U1 前置补 checkout 加载出处 + 重开 pi 会话）
 
-基线：`main @ 3fcc2a4`（#249 之后）。调研留档：`research/01-surfaces-audit.md`、`02-wording-evidence.md`、`03-test-harness.md`。
+基线：`main @ 3fcc2a4`（#249 之后）。调研留档（仓外，不随 PR 提交）：`~/.github-issue-driven/zhuxixi/pi-agent-board/issue-252/research/` 下的 `01-surfaces-audit.md`、`02-wording-evidence.md`、`03-test-harness.md`。
 授权：`authorization.md` → `Gate: auto`（合并前仍需用户明确批准）。
 
 ## 1. 背景
@@ -24,7 +24,7 @@ Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical
 | # | 决策 | 依据 |
 |---|---|---|
 | D1 | SELECT hint 行改为 11 个 token 的紧凑形态：`${n} selected` · [`•${u} unread`] · `↑↓/j/k move` · `space toggle` · `a all visible` · `u clear` · `d done` · `ctrl+x delete` · `m/esc cancel` · `? help` · `! pty`（131 可见字符；带 unread 143） | 9 项全在；相对现状只长 9 字符。压缩方式：`d move done`→`d done`、`ctrl+x delete done`→`ctrl+x delete`、`esc cancel`→`m/esc cancel`。保留 `all visible` 的语义精度（过滤态下 `a` 只选可见行） |
-| D2 | `In select` 行改为：`↑↓/j/k move · space toggle · a all · u clear · d done · ctrl+x delete · m/esc cancel`（渲染 101 列） | 只写本模式专属语义；`?`/`!` 由 D3 的全局行覆盖，不在本行重复。**该行决定整个帮助盒子的宽度**（`renderCenteredBox` 取最长行）：9 项全塞会渲染 126 列，超过 120 列终端的 `width-6=114` 上限，在 120 列也照样被裁（research/01 §B） |
+| D2 | `In select` 行改为：`↑↓/j/k move · space toggle · a all · u clear · d done · ctrl+x delete · m/esc cancel`（渲染 101 列） | 只写本模式专属语义；`?`/`!` 由 D3 的全局行覆盖，不在本行重复。**该行决定整个帮助盒子的宽度**（`renderCenteredBox` 取最长行）：在 D2 行基础上再补 `? help`/`! pty` 为 118 列（若保留原 `a all visible` 写法则为 126 列），两种形态都超过 120 列终端的 `width-6=114` 上限，在 120 列也照样被裁（research/01 §B） |
 | D3 | 覆盖层新增一行 `["?", "Open the key help overlay (list and multi-select)"]`，位置在 `/` 行与 `!` 行之间 | `?` 只绑在 list（`:373`）与 select（`:421`），覆盖层 26 行里一句都没有——这是 issue 未点明的第三处缺口。`!` 已有全局行，故 D2 不重复它 |
 | D4 | `!` 的 canonical 措辞 = `fix steps`：README 六处改齐（4 张表 + `:289` + `:368`）；覆盖层 `:1716` 不动 | 面板自己写 `Fix:` / `Suggested steps`，字段名 `fixHint`/`steps`，代码注释（`src/core/pty-support.mjs:155`）也是 `fix steps`；反向对齐要改运行时代码且与面板自相矛盾（research/02） |
 | D5 | 不动 handler、不动键位、不动 `#246` 的高度适配、不新增 README 表格、不回改历史 spec/plan | 范围纪律。#245 的 D5 是「in-app 三处就其 j/k/l 范围而言已正确，故不动」，并非把 in-app 侧 defer 给后续 issue；本 issue 处理的是 #245 范围**之外**的 SELECT 表面（hint 行的 `m`/`?`/`!`、`In select` 行、`!` 措辞），两者不冲突 |
@@ -34,7 +34,7 @@ Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical
 11 个 token 在任何布局下都塞不进 80 列，131 字符在 120 列仍会裁掉尾部（`? help`/`! pty`）。三个理由支撑这个取舍：
 
 1. 仓库既有行为就是裁尾：NORMAL hint 行 **238 字符**，240 列才完整（实测，research/01 §A）。
-2. 裁掉的恰好是辅助键，保留的是本模式的主操作与**退出键**（`m/esc cancel` 在 131 字符内、120 列可见到 `m/esc canc`）——安全优先。
+2. 裁掉的恰好是两个辅助键：`m/esc cancel` 止于第 114 列，在 120 列终端**完整可见**，被裁的只有尾部 `? help` / `! pty`——安全优先。
 3. `?`/`!` 在覆盖层（D3 + `!` 全局行）与 README 里都有完整说明，不依赖 hint 行发现。
 
 **被否决的替代方案**：SELECT footer 折成两行（改 `renderFooter`，让 select 模式多占一行）。它能让 80 列也全可见，但会改变 footer 高度、且仓库没有任何多行 hint 先例，属于布局变更而非文案同步——留给 `#246` 的高度适配一并考虑。

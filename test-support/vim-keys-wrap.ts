@@ -117,7 +117,7 @@ out.busyL = { mode: dash2.mode, done: done2.length, prompt: dash2.pending?.promp
 dash2.dispose();
 
 // A7: help overlay + hint lines copy.
-// The help box is 32 lines; the probe terminal is 24 rows, so render() would
+// The help box is 33 lines; the probe terminal is 24 rows, so render() would
 // clip the bottom rows. Bump the height for the help capture only.
 tui.terminal.rows = 40;
 dash.mode = "help"; dash.helpReturnMode = "list";
