@@ -31,4 +31,14 @@ test("attach selection mirror: left release/click mirrors pi's selection into PR
 	assert.equal(parsed.middleHandled, true, "middle press still pastes (handled)");
 	assert.equal(parsed.clipboardReads, 1, "PASTE_SOURCE=clipboard: exactly one clipboard read");
 	assert.equal(parsed.clipboardReadSource, "read -o -selection clipboard", "the read targets the clipboard selection");
+	// Issue #172: the copy-on-release highlight must not outlive the copy.
+	assert.equal(parsed.releaseClears, 1, "a drag release must clear pi's selection once");
+	assert.equal(parsed.clickClears, 1, "a click ending with a live selection clears too");
+	assert.equal(parsed.emptyClears, 0, "an empty selection must not clear");
+	assert.equal(parsed.killSwitchClears, 1, "the clear is not governed by AGENT_BOARD_ATTACH_NATIVE_PASTE");
+	assert.equal(parsed.nonEndingClears, 0, "press/move must not clear");
+	assert.equal(parsed.copyOnSelectOffWrites, 1, "the PRIMARY mirror still runs with copy-on-select off");
+	assert.equal(parsed.copyOnSelectOffClears, 0, "copy-on-select off keeps the selection for Ctrl+X");
+	assert.equal(parsed.fallbackError, null, "a missing clearTextSelection must degrade, not throw");
+	assert.equal(parsed.fallbackWrites, 1, "the PRIMARY mirror still runs without the clear method");
 });

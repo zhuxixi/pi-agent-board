@@ -14,7 +14,7 @@ import { createJiggleRetryController } from "../core/pty-attach-jiggle-controlle
 import { createTerminalAttachClient } from "../core/terminal-attach-client.mjs";
 import { backgroundRgbFromTerminalColors, buildSettleSchemePatch, colorSchemeForBackgroundRgb, extractOscQuerySequences, resolveProbeApi, toColorSchemeReport } from "../core/terminal-query-sequences.mjs";
 import { REPLY_GUARD_WINDOW_MS, createReplyGuard, isReplyGuardEnabled } from "../core/terminal-reply-guard.mjs";
-import { clampInt, encodeWheelReport, fullscreenMouseEnableSequence, historyFloorAfterHydrate, resolveAttachMouseAction, resolveAttachWheelRoute, resolvePasteSelectionSource, resolveWheelLines, sameMousePoint, scrollableHistoryLines, scrollViewportTop, selectionDragScrollLines, selectionReleaseIsDrag, shouldMirrorSelectionToPrimary, shouldOwnOuterMouseMode, splitAttachInput, wheelScrollLinesUp } from "../core/pty-scroll.mjs";
+import { clampInt, encodeWheelReport, fullscreenMouseEnableSequence, historyFloorAfterHydrate, isFullscreenSelectionEnd, resolveAttachMouseAction, resolveAttachWheelRoute, resolvePasteSelectionSource, resolveWheelLines, sameMousePoint, scrollableHistoryLines, scrollViewportTop, selectionDragScrollLines, selectionReleaseIsDrag, shouldOwnOuterMouseMode, splitAttachInput, wheelScrollLinesUp } from "../core/pty-scroll.mjs";
 
 export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null } | { action: "delete" };
 
@@ -22,6 +22,16 @@ type ThemeLike = {
 	fg(color: string, text: string): string;
 	bold(text: string): string;
 };
+
+/** The pi-tui members the attach view reads without a public typing contract:
+ * getActiveSelectionText / clearTextSelection are private in TuiAltScreen's d.ts
+ * (runtime-reachable plain methods), getCopyOnSelect is public. Every access is
+ * feature-detected so an older or newer pi-tui degrades instead of throwing. */
+interface FullscreenSelectionHost {
+	getActiveSelectionText?: () => string | undefined;
+	getCopyOnSelect?: () => boolean;
+	clearTextSelection?: () => void;
+}
 
 /** Diagnostic patch emitted at attach settle (DiagnosticEvent-compatible; built by buildSettleSchemePatch). */
 export interface AttachSettleDiagnosticPatch {
@@ -520,11 +530,11 @@ export class PtyAttachComponent implements Component {
 			return { handled: true, render: false };
 		}
 		const nativePasteEnabled = process.env.AGENT_BOARD_ATTACH_NATIVE_PASTE !== "0";
-		if (shouldMirrorSelectionToPrimary(event, { nativePasteEnabled })) {
-			// Observe only — pi's fullscreen selection keeps the event. Mirroring must
-			// run after TuiAltScreen finalizes the selection for this event (overlays
-			// are dispatched before the selection logic), hence the deferred tick.
-			process.nextTick(() => this.mirrorFullscreenSelectionToPrimary());
+		if (isFullscreenSelectionEnd(event)) {
+			// Observe only — pi's fullscreen selection keeps the event. Overlays are
+			// dispatched before TuiAltScreen finalizes (and copies) the selection for this
+			// event, so settling must run deferred (issue #174).
+			process.nextTick(() => this.settleFullscreenSelection(nativePasteEnabled));
 			return undefined;
 		}
 		const action = resolveAttachMouseAction(event, { nativePasteEnabled });
@@ -1367,17 +1377,24 @@ export class PtyAttachComponent implements Component {
 		}
 	}
 
-	/** Issue #174 (B2): after a selection gesture ends inside this overlay, copy
-	 * pi's final selection text into the X11 PRIMARY selection so the classic
-	 * select-then-middle-click-paste loop works in fullscreen. Runs on nextTick
-	 * because overlays are dispatched before TuiAltScreen finalizes the
-	 * selection for the same event. No-op in regular mode (no
-	 * getActiveSelectionText) and under the native-paste kill switch. */
-	private mirrorFullscreenSelectionToPrimary(): void {
+	/** Issue #174 (B2) + #172: a selection gesture ended inside this overlay and pi has
+	 * finalized (and copied) its selection. Mirror the text into X11 PRIMARY so
+	 * middle-click paste closes the loop, then drop pi's selection so the inverse-video
+	 * highlight does not outlive the copy. Clearing is skipped when copy-on-select is
+	 * off (the user copies later with pi's Ctrl+X) and when the pi-tui method is absent
+	 * (older/newer runtime) — both degrade to the previous behaviour instead of throwing.
+	 * clearTextSelection preserves pi's multi-click history; resetTextSelection would
+	 * clear lastClick and break double-click word / triple-click line selection. */
+	private settleFullscreenSelection(nativePasteEnabled: boolean): void {
 		if (this.closed) return;
-		const alt = this.tui as { getActiveSelectionText?: () => string | undefined };
+		const alt = this.tui as FullscreenSelectionHost;
 		const text = alt.getActiveSelectionText?.();
-		if (typeof text === "string" && text.length > 0) this.writePrimarySelection(text);
+		if (typeof text !== "string" || text.length === 0) return;
+		if (nativePasteEnabled) this.writePrimarySelection(text);
+		if (alt.getCopyOnSelect?.() === false) return;
+		if (typeof alt.clearTextSelection !== "function") return;
+		alt.clearTextSelection();
+		this.scheduleRender();
 	}
 
 	/** Write `text` to the X11 PRIMARY selection so other apps can middle-click-paste it. */
