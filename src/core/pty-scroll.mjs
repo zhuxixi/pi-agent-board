@@ -269,15 +269,15 @@ export function resolvePasteSelectionSource(value) {
 }
 
 /**
- * Issue #174 (B2): whether a normalized mouse event ends a selection gesture
- * we should mirror into the X11 PRIMARY selection. Only release/click of the
- * left button with native paste enabled (pi's fullscreen selection owns the
- * gesture; we observe without consuming). Pure by contract.
+ * Issue #174 (B2) / #172: whether a normalized mouse event ends a fullscreen text
+ * selection gesture the attach overlay must settle — mirror the selection into X11
+ * PRIMARY (#174) and drop pi's highlight once copy-on-select has run (#172). Only
+ * release/click of the left button ends a selection in TuiAltScreen; pi owns the
+ * gesture, so the overlay observes without consuming. Pure: the native-paste kill
+ * switch is applied by writePrimarySelection, not here.
  */
-export function shouldMirrorSelectionToPrimary(event, { nativePasteEnabled }) {
-	if (!nativePasteEnabled) return null;
-	if ((event.type === "release" || event.type === "click") && event.button === "left") return "mirror-primary";
-	return null;
+export function isFullscreenSelectionEnd(event) {
+	return (event.type === "release" || event.type === "click") && event.button === "left";
 }
 
 /**

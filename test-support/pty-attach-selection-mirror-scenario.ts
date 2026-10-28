@@ -35,6 +35,18 @@ process.env.PATH = `${binDir}:${process.env.PATH}`;
 
 // The selection pi would have finalized by the time the deferred mirror runs.
 let selectionText: string | undefined = "mirror-fixture-text";
+// Issue #172 knobs. clearTextSelection invalidates the fixture so a read-after-clear
+// order would produce no PRIMARY write — that is what pins the ordering, not the count.
+let copyOnSelect = true;
+let clearAvailable = true;
+let clearCalls = 0;
+
+const resetFixture = (text: string | undefined = "mirror-fixture-text") => {
+	selectionText = text;
+	copyOnSelect = true;
+	clearAvailable = true;
+	clearCalls = 0;
+};
 
 const writes = () =>
 	readFileSync(logPath, "utf8")
@@ -67,6 +79,15 @@ async function withComponent(env: Record<string, string> | undefined, fn: (c: Pt
 	const tui = {
 		mode: "fullscreen",
 		getActiveSelectionText: () => selectionText,
+		getCopyOnSelect: () => copyOnSelect,
+		...(clearAvailable
+			? {
+					clearTextSelection: () => {
+						clearCalls += 1;
+						selectionText = undefined;
+					},
+				}
+			: {}),
 		terminal: { rows: 24, cols: 80, columns: 80, write: () => {} },
 		requestRender: () => {},
 	};
@@ -102,64 +123,125 @@ const result = {
 	emptyWrites: -1,
 	killSwitchWrites: -1,
 	nonEndingWrites: -1,
+	releaseClears: -1,
+	clickClears: -1,
+	emptyClears: -1,
+	killSwitchClears: -1,
+	nonEndingClears: -1,
+	copyOnSelectOffWrites: -1,
+	copyOnSelectOffClears: -1,
+	fallbackError: null as string | null,
+	fallbackWrites: -1,
+	releaseSyncWrites: -1,
+	coalescedWrites: -1,
+	coalescedClears: -1,
 	middleHandled: false,
 	clipboardReads: -1,
 	clipboardReadSource: null as string | null,
 };
 
 try {
-	// 1. Drag-style release mirrors the selection exactly once, unconsumed.
+	// 1. Drag-style release mirrors the selection exactly once, unconsumed, and clears.
 	await withComponent(undefined, async (c) => {
+		resetFixture();
 		const before = writes().length;
 		const r = (c as any).handleMouse(leftEvent("release"));
 		result.releaseResultUndefined = r === undefined;
+		result.releaseSyncWrites = writes().length - before; // deferral pin: nothing may happen synchronously
 		await sleep(80); // nextTick + xclip spawn
 		const ws = writes();
 		result.mirrorWrites = ws.length - before;
 		const line = ws.length > before ? ws[ws.length - 1] : null;
 		result.mirrorText = line ? line.replace(/^write .*?text=/, "") : null;
 		result.mirrorWriteArgs = line ? line.slice(0, line.indexOf("text=")) : null;
+		result.releaseClears = clearCalls;
 	});
 
-	// 2. Click ending (non-empty selection) mirrors too, unconsumed.
+	// 2. Click ending (non-empty selection) mirrors too, unconsumed, and clears.
 	await withComponent(undefined, async (c) => {
+		resetFixture();
 		const before = writes().length;
 		const r = (c as any).handleMouse(leftEvent("click"));
 		result.clickResultUndefined = r === undefined;
 		await sleep(80);
 		result.clickMirrorWrites = writes().length - before;
+		result.clickClears = clearCalls;
 	});
 
-	// 3. Empty selection: no write.
+	// 3. Empty selection: no write, no clear.
 	await withComponent(undefined, async (c) => {
-		const prev = selectionText;
+		resetFixture();
 		selectionText = undefined;
 		const before = writes().length;
 		(c as any).handleMouse(leftEvent("release"));
 		await sleep(80);
 		result.emptyWrites = writes().length - before;
-		selectionText = prev;
+		result.emptyClears = clearCalls;
 	});
 
-	// 4. Kill switch: no write.
+	// 4. Kill switch: no PRIMARY write (writePrimarySelection self-gates), but the
+	// highlight is still cleared — the switch governs X11 copy/paste, not UI state.
 	await withComponent({ AGENT_BOARD_ATTACH_NATIVE_PASTE: "0" }, async (c) => {
+		resetFixture();
 		const before = writes().length;
 		(c as any).handleMouse(leftEvent("release"));
 		await sleep(80);
 		result.killSwitchWrites = writes().length - before;
+		result.killSwitchClears = clearCalls;
 	});
 
-	// 5. Non-endings (press/move): no write.
+	// 5. Non-endings (press/move): no write, no clear.
 	await withComponent(undefined, async (c) => {
+		resetFixture();
 		const before = writes().length;
 		(c as any).handleMouse(leftEvent("press"));
 		(c as any).handleMouse(leftEvent("move"));
 		await sleep(80);
 		result.nonEndingWrites = writes().length - before;
+		result.nonEndingClears = clearCalls;
 	});
 
-	// 6. Paste source override: middle paste reads CLIPBOARD when configured.
+	// 6. copy-on-select off: the user keeps the selection for pi's Ctrl+X, so the
+	// mirror still runs (the text exists) but the highlight must stay.
+	await withComponent(undefined, async (c) => {
+		resetFixture();
+		copyOnSelect = false;
+		const before = writes().length;
+		(c as any).handleMouse(leftEvent("release"));
+		await sleep(80);
+		result.copyOnSelectOffWrites = writes().length - before;
+		result.copyOnSelectOffClears = clearCalls;
+	});
+
+	// 7. Older/newer pi without the private clear method: degrade, never throw.
+	await withComponent(undefined, async (c) => {
+		resetFixture();
+		clearAvailable = false;
+		const before = writes().length;
+		try {
+			(c as any).handleMouse(leftEvent("release"));
+			await sleep(80);
+		} catch (err) {
+			result.fallbackError = err instanceof Error ? err.message : String(err);
+		}
+		result.fallbackWrites = writes().length - before;
+	});
+
+	// 8. A release and the next left press coalesced into one tick (pi-tui emits batched
+	// reports synchronously): the queued settle must not read/clear the new gesture.
+	await withComponent(undefined, async (c) => {
+		resetFixture();
+		const before = writes().length;
+		(c as any).handleMouse(leftEvent("release"));
+		(c as any).handleMouse({ ...leftEvent("press"), x: 9, screenX: 9 });
+		await sleep(80);
+		result.coalescedWrites = writes().length - before;
+		result.coalescedClears = clearCalls;
+	});
+
+	// 9. Paste source override: middle paste reads CLIPBOARD when configured.
 	await withComponent({ AGENT_BOARD_ATTACH_PASTE_SOURCE: "clipboard" }, async (c) => {
+		resetFixture();
 		const before = reads().length;
 		const r = (c as any).handleMouse({ type: "press", button: "middle", x: 3, y: 3, screenX: 3, screenY: 3, width: 80, height: 22, shift: false });
 		result.middleHandled = r?.handled === true;
