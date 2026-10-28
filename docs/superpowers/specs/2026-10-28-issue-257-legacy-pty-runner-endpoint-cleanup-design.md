@@ -77,9 +77,12 @@ Two ways the successor's socket dies:
        update({ socketPath, state: "alive" });
    });
    ```
-3. **Do not call `server.close()`** in `shutdown()` — with no close there is no libuv
+3. **Do not call `server.close()` on POSIX** in `shutdown()` — with no close there is no libuv
    close-time unlink. (`shutdown` still awaits child exit up to ~5 s afterwards; that is
    unrelated — the deletion vector is the close itself.) Add the nodejs/node#19729 comment.
+   **win32 exception:** keep `server?.close()` there — named pipes are kernel objects with no
+   close-time unlink, and the close preserves the historical prompt refusal of new
+   connections during the shutdown window.
 4. **Gate the explicit unlink** exactly like the owned path's `:736-743`:
    ```js
    if (process.platform !== "win32" && boundSocketIdentity) {
@@ -101,7 +104,7 @@ Behaviour matrix:
 | SIGTERM/SIGINT on a normal legacy host with captured identity | yes | yes → G2 |
 | Shutdown after the path was replaced by a successor | no | no → G1 |
 | Path already gone at shutdown | stat ENOENT | no-op |
-| win32 (named pipe) | n/a (no identity) | no unlink, no close |
+| win32 (named pipe) | n/a (no identity) | no unlink; keeps the historical prompt close (no close-time unlink on pipes) |
 | identity capture failed at boot | null | no unlink (degrade, §7-1 backstop) |
 
 ### 4.2 What this does NOT cover (boundaries)
