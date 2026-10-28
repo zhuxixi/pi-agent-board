@@ -5,6 +5,20 @@ conventional commits by `scripts/release_helper.mjs`. Entries are
 forward-only: they begin with the first release after this file landed —
 for earlier history, see the git log and the pull-request list.
 
+## [0.13.1] - 2026-10-28
+
+### Fixes
+
+- **attach**: clear the fullscreen selection highlight after copy-on-release (issue #172) (#251)
+- **coordinator**: self-supervise the endpoint and restore the #70 cleanup gate (issue #255) (#256)
+
+### Changes
+
+- **ui**: align SELECT hints, help overlay and ! wording with the handler (issue #252) (#253)
+- sync key hints with the implemented bindings — peek footer, README ! rows, multi-select table (issue #245) (#249)
+
+[0.13.1]: https://github.com/zhuxixi/pi-agent-board/compare/v0.13.0...v0.13.1
+
 ## [0.13.0] - 2026-10-26
 
 ### Features
