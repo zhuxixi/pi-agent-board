@@ -53,39 +53,35 @@ issue's `views/_coordinator/diagnostics.jsonl` timeline:
 2. **The old owner stays up for 3 more seconds.** `heartbeatFailureAction` only steps down
    after `MAX_CONSECUTIVE_TOUCH_FAILURES = 3` supervised failures at 1 s cadence
    (locks.mjs:155, 472). Deterministic: the observed 3.001 s is D4's designed behaviour.
-3. **The successor boots and unlinks the old owner's socket** at the *boot-time site*
-   (state-coordinator.mjs:298-303) — justified in the comment as "any leftover socket file
-   belongs to a dead coordinator", which stale reclaim does *not* prove. It then binds its
-   own socket at the same path.
-4. **The shutdown-time site is unguarded.** At state-coordinator.mjs:411-418 the deposed
-   owner stats the path and unlinks when `ownsEndpoint(boundSocketIdentity, current)`
-   matches; `ownsEndpoint` is dev+ino equality only (host-coordination.mjs:160-162), with no
-   owner-token condition. **This is a real unguarded path, but it is not claimed as the
-   proven trigger** — see §3.2 for the physical objection raised in review.
+3. **The successor boots and binds its own socket at the same path** (state-coordinator.mjs:298-303
+   unlinks the leftover first; libuv's `uv_pipe_bind` additionally pre-unlinks an existing path).
+4. **The deposed owner's `shutdown()` deletes the successor's socket through libuv.** The old
+   code calls `server.close()` on exit; libuv unlinks the unix-socket path captured at
+   `bind()` time, unconditionally (`nodejs/node#19729`: "if your old process calls
+   `server.close()` afterwards, it will unlink your *new* socket"). The deposed owner's dev+ino
+   comparison never enters into it — the deletion happens inside libuv. **This is the root
+   cause**, and it explains the evidence that looked like inode reuse: `lsof` shows the
+   successor listening on an inode that `ls` no longer shows.
 5. **Nothing heals it.** `ensureCoordinator` probes the missing path (null) → spawns one
    replacement → the replacement loses the lease race to the zombie (fresh heartbeat ⇒
    `busy`) → writes `coordinator_lease_unavailable` → exits 0 → the ~10 s poll window
    expires → `coordinator_unavailable`. `launchCoordinator` never re-spawns, and the
    client has no "endpoint unreachable while the lease looks healthy" shape detector.
 
-The structural asymmetry (confirmed): inside `shutdown()`, `lease.release()` is
-token-fenced, but the endpoint unlink directly above it is not. Same function, two
-cleanup resources, one guarded, one not.
+Two structural gaps (confirmed): inside `shutdown()`, `lease.release()` is token-fenced but
+the endpoint cleanup is not; and the cleanup leans on `server.close()`, whose libuv side
+effect deletes whatever occupies the bind path. One guarded resource, one unguarded, one
+implicit and unobservable from the project code.
 
 ### 3.2 Inferred vs unknown
 
-- **How the socket actually disappeared in the report is NOT established.** The inode-reuse
-  story has a physical problem (raised in round-2 review): after the successor's boot-time
-  unlink, the deposed owner's listener fd still keeps its old inode alive; POSIX does not
-  release an inode while any fd references it, so the successor's `bind()` gets a **new**
-  inode and the deposed owner's `ownsEndpoint` comparison cannot match it. The only
-  same-inode window would be inside `shutdown()` between `server.close()` and `statSync()`
-  — microseconds, single-threaded, no interleaving. So step 4 is physically implausible as
-  the observed trigger.
-  Remaining candidates, all unproven: an external unlink (cleanup tooling, root
-  re-creation), an unguarded unlink path somewhere not covered by the current checkout, or
-  a platform-specific filesystem behaviour. **R2 heals the symptom regardless of cause; R1
-  closes one unguarded path in defence.**
+- **Root cause: libuv's close-time unlink (`nodejs/node#19729`).** A coordinator that closes
+  its listener deletes whatever currently occupies its bind path — including a successor's
+  endpoint. No inode reuse is needed, and the earlier inode-reuse hypothesis is superseded: it
+  is physically implausible (round-2 review: the deposed owner's listener fd keeps the old
+  inode alive, so the successor's `bind()` cannot reuse it). The Linux CI run of the new A3/A5
+  cases confirmed the libuv mechanism — both failed with the endpoint gone while the code
+  under test had already gated its own explicit unlink.
 - **The two reclaims in the issue timeline have different (and partly mundane) readings:**
   - `11:10:22, heartbeatAgeMs: 338, lockAgeMs: 346, eligibility: "declared"` — the declared
     heartbeat branch cannot fire at 338 ms (`>= 60_000` required), but `eligibility` only
@@ -112,14 +108,22 @@ cleanup resources, one guarded, one not.
 
 | # | Candidate | Verdict | Why |
 | --- | --- | --- | --- |
-| R2 | Supervise the bound endpoint in the existing 1 s heartbeat tick; step down when missing/replaced | **Do — primary** | Heals socket loss from any cause, including the unproven one; reuses the #241 tick, no new timer; POSIX-only (§4.3) |
-| R1 | Restore the #70 cleanup contract: unlink only when the lease is still ours **and** the path still carries the inode we bound | **Do — defence in depth / contract restoration** | Closes a real unguarded unlink path and restores an existing spec'd invariant; not claimed as the proven trigger (§3.2) |
+| R2 | Supervise the bound endpoint in the existing 1 s heartbeat tick; step down when missing/replaced | **Do — primary self-heal** | Heals socket loss from any cause; reuses the #241 tick, no new timer; POSIX-only (§4.3) |
+| R1 | Stop the implicit libuv unlink (never call `server.close()`) **and** restore the #70 cleanup contract (unlink only when the lease is still ours **and** the path still carries the inode we bound) | **Do — root-cause fix** | Removes the deletion path that actually created the zombie (§3.1 step 4); restores an existing spec'd invariant |
 | R3 | Client kills a zombie lease owner before respawn | **No (non-goal)** | R2 caps the zombie window at one tick; #239 established `probe null ≠ dead`, so a client kill needs a boot-grace heuristic that would race the normal 1-3 s boot |
-| R4 | Identify the actual unlink cause / audit reclaim eligibility | **No (follow-up issue)** | Needs the reporter's raw JSONL, pid liveness, and filesystem evidence; changing #224 D3 is a separate contract decision |
-| R5 | Same guard in `runner/pty-runner.mjs` (ownedMain finishHost `:736-743` has dev+ino only; legacy `shutdown()` `:512` is unconditional) | **No (follow-up issue)** | Different ownership model (per-view host record; `startLease` already released before finishHost); own design + tests |
+| R4 | Audit reclaim eligibility (declared fallback, torn heartbeat read) | **No (follow-up issue)** | Needs the reporter's raw JSONL + pid liveness; changing #224 D3 is a separate contract decision |
+| R5 | Same guard in `runner/pty-runner.mjs` (ownedMain finishHost `:736-743` has dev+ino only; legacy `shutdown()` `:512` is unconditional; both close their listener → same libuv issue) | **No (follow-up issue)** | Different ownership model (per-view host record); own design + tests |
 | R6 | Re-derive dropped `agent_end` projections at reconcile | **No (follow-up issue)** | Orthogonal recovery gap |
 
-### 4.2 R1 — restore the cleanup contract
+### 4.2 R1 — stop the implicit unlink, restore the cleanup contract
+
+Two changes in `shutdown()`:
+
+1. **Do not call `server.close()`.** libuv unlinks the bind path when the listening handle
+   closes (`nodejs/node#19729`). The process exits immediately afterwards, and
+   `process.exit()` skips the uv handle cleanup, so the implicit unlink never runs. Cleanup
+   becomes explicit.
+2. **Gate the explicit unlink** with `shouldUnlinkEndpoint`.
 
 Pure function, added next to `ownsEndpoint` in `src/core/host-coordination.mjs`:
 
@@ -140,7 +144,9 @@ export function shouldUnlinkEndpoint({ stillOwner, compromised, bound, current }
 `state-coordinator.mjs` shell changes:
 
 - add `let endpointCompromised = false;` next to `boundSocketIdentity`;
-- in `shutdown(code)`, before the *shutdown-time site* unlink:
+- **remove `try { server.close(); } catch {}`** from `shutdown()` (with the nodejs/node#19729
+  comment), so no implicit libuv unlink can run;
+- before the explicit unlink:
   ```js
   const stillOwner = safeIsOwner();        // lease.isOwner(); false on any throw
   if (process.platform !== "win32" && stillOwner && !endpointCompromised && boundSocketIdentity) {

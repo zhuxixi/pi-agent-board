@@ -455,15 +455,15 @@ async function main() {
 		if (shuttingDown) return;
 		shuttingDown = true;
 		try { clearInterval(heartbeatTimer); } catch { /* best effort */ }
-		try { server.close(); } catch { /* already closed */ }
-		// Restore the #70 cleanup contract (issue #255): an instance that no longer
-		// holds the lease — or whose supervised tick detected that its endpoint is
-		// gone/replaced (endpointCompromised) — must clean nothing. Without the
-		// owner-token condition a deposed instance can unlink an endpoint it does
-		// not own (inode reuse defeats the dev+ino comparison alone).
-		// `endpointCompromised` is defence in depth: with a genuinely different inode
-		// the dev+ino comparison already refuses the unlink; the flag only bites when
-		// inode reuse makes that comparison match the deposited path.
+		// Do NOT call server.close() (issue #255, nodejs/node#19729): libuv unlinks the
+		// unix-socket bind path when the handle closes, so a deposed coordinator closing
+		// after a successor bound would delete the successor's endpoint. The process is
+		// exiting anyway, and process.exit() skips the uv handle cleanup, so the implicit
+		// unlink never runs. Cleanup is explicit and ownership-gated below — the #70
+		// contract: unlink only while this instance still holds the lease AND the path
+		// still carries the inode it bound.
+		// `endpointCompromised` (set by the supervised tick) vetoes that explicit unlink
+		// as well; it is defence in depth on top of the dev+ino comparison.
 		const stillOwner = safeIsOwner();
 		if (process.platform !== "win32" && stillOwner && !endpointCompromised && boundSocketIdentity) {
 			try {
