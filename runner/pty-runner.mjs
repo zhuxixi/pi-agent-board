@@ -151,6 +151,8 @@ function legacyMain(config) {
 	let shutdownStarted = false;
 	let shutdownExitCode = null;
 	let childExited = false;
+	/** {dev,ino} recorded at bind time; cleanup unlinks only this exact inode. */
+	let boundSocketIdentity = null;
 	let resolveChildExit;
 	const childExitPromise = new Promise((resolve) => {
 		resolveChildExit = resolve;
@@ -406,7 +408,17 @@ function legacyMain(config) {
 		update({ state: "failed", endedAt: Date.now(), error: err instanceof Error ? err.message : String(err), exitCode: 1 });
 		void shutdown(1);
 	});
-	server.listen(socketPath, () => update({ socketPath, state: "alive" }));
+	server.listen(socketPath, () => {
+		// Capture the identity BEFORE publishing readiness: "host ready" must imply
+		// "identity recorded", or a shutdown could run with a stale/null identity.
+		if (process.platform !== "win32") {
+			try {
+				const st = statSync(socketPath);
+				boundSocketIdentity = { dev: st.dev, ino: st.ino };
+			} catch { /* without the identity, cleanup degrades to a no-op */ }
+		}
+		update({ socketPath, state: "alive" });
+	});
 
 	function handleClientLine(line, socket) {
 		if (!line.trim()) return;
@@ -508,8 +520,24 @@ function legacyMain(config) {
 		// runner-finalizing evidence before sockets end (exit-confirm flush in
 		// child.onExit covers the natural path; this covers deliberate shutdown).
 		control.flushTerminateObservations(null, true);
-		try { server?.close(); } catch {}
-		try { if (existsSync(socketPath)) unlinkSync(socketPath); } catch {}
+		// Do NOT call server.close() (issue #257, nodejs/node#19729): libuv unlinks the
+		// unix-socket bind path when the listening handle closes, so a shutdown after a
+		// successor bound would delete the successor's endpoint. With no close there is
+		// no implicit unlink. Cleanup is explicit and identity-gated below — the legacy
+		// path has no lease, so dev+ino is its only ownership proof.
+		// Windows has no close-time unlink (named pipes are kernel objects), so keep the
+		// historical prompt refusal of new connections there.
+		if (process.platform === "win32") {
+			try { server?.close(); } catch { /* already closed */ }
+		}
+		if (process.platform !== "win32" && boundSocketIdentity) {
+			try {
+				const st = statSync(socketPath);
+				if (ownsEndpoint(boundSocketIdentity, { dev: st.dev, ino: st.ino })) {
+					try { unlinkSync(socketPath); } catch { /* best effort */ }
+				}
+			} catch { /* path gone — nothing to clean */ }
+		}
 		for (const client of clients) {
 			try { client.end(); } catch {}
 		}
