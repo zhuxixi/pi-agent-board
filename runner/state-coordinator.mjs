@@ -54,7 +54,7 @@ import {
 	repairJournalTail,
 	writeCheckpoint,
 } from "../src/core/coordinator-journal.mjs";
-import { ownsEndpoint } from "../src/core/host-coordination.mjs";
+import { shouldUnlinkEndpoint } from "../src/core/host-coordination.mjs";
 import { appendDiagnostic } from "../src/core/diagnostics.mjs";
 import { acquireOwnedViewLock, describeLeaseConflict, heartbeatFailureAction, withViewLockSync } from "../src/core/locks.mjs";
 import { captureStartToken } from "../src/core/pid.mjs";
@@ -303,6 +303,10 @@ async function main() {
 	}
 	/** {dev,ino} recorded at bind time; cleanup unlinks only this exact inode. */
 	let boundSocketIdentity = null;
+	/** Set by the supervised tick when the bound endpoint is gone or replaced:
+	 *  shutdown must then leave the path alone even while the lease still looks
+	 *  ours (issue #255). */
+	let endpointCompromised = false;
 
 	const server = createServer((socket) => {
 		let buffer = "";
@@ -403,15 +407,26 @@ async function main() {
 	process.on("SIGTERM", () => shutdown(0));
 	process.on("SIGINT", () => shutdown(0));
 
+	/** Lease ownership at cleanup time; a read failure fails closed (no unlink). */
+	function safeIsOwner() {
+		try { return lease.isOwner(); } catch { return false; }
+	}
+
 	function shutdown(code) {
 		if (shuttingDown) return;
 		shuttingDown = true;
 		try { clearInterval(heartbeatTimer); } catch { /* best effort */ }
 		try { server.close(); } catch { /* already closed */ }
-		if (process.platform !== "win32" && boundSocketIdentity) {
+		// Restore the #70 cleanup contract (issue #255): an instance that no longer
+		// holds the lease — or whose supervised tick detected that its endpoint is
+		// gone/replaced (endpointCompromised) — must clean nothing. Without the
+		// owner-token condition a deposed instance can unlink an endpoint it does
+		// not own (inode reuse defeats the dev+ino comparison alone).
+		const stillOwner = safeIsOwner();
+		if (process.platform !== "win32" && stillOwner && !endpointCompromised && boundSocketIdentity) {
 			try {
 				const st = statSync(socketPath);
-				if (ownsEndpoint(boundSocketIdentity, { dev: st.dev, ino: st.ino })) {
+				if (shouldUnlinkEndpoint({ stillOwner, compromised: endpointCompromised, bound: boundSocketIdentity, current: { dev: st.dev, ino: st.ino } })) {
 					try { unlinkSync(socketPath); } catch { /* best effort */ }
 				}
 			} catch { /* path gone — nothing to clean */ }

@@ -1291,10 +1291,66 @@ test("#224 A14b: a failing diagnostic write must not block the step-down", async
 	process.env.AGENT_BOARD_TEST_FAIL_DIAGNOSTIC = "1";
 	child = await startWithHeartbeatFailure(root);
 
+	// A14b: the diagnostic append throws under this knob; the step-down must still
+	// complete cleanly (exit 0, lease released).
 	const code = await waitForExit(child, 5000);
 	assert.equal(code, 0, "diagnostic failure must not skip shutdown");
 	assert.equal(existsSync(P.viewLockPath(root, "_coordinator", "state-coordinator")), false, "lease still released");
 	if (process.platform !== "win32") {
 		assert.equal(existsSync(P.coordinatorEndpointPathFor(process.platform, root)), false, "endpoint still cleaned up");
 	}
+});
+
+test("#255 A3: a deposed coordinator keeps its own endpoint", async (t) => {
+	if (process.platform === "win32") return t.skip("POSIX AF_UNIX only");
+	const root = freshRoot();
+	let child = null;
+	t.after(async () => {
+		clearHeartbeatKnobs();
+		if (child && isAlive(child.pid)) {
+			child.kill("SIGTERM");
+			await waitForExit(child);
+		}
+		rmSync(root, { recursive: true, force: true });
+	});
+	createView(root, { id: "v1", name: "x", cwd: root });
+	process.env.AGENT_BOARD_TEST_COORDINATOR_HEARTBEAT_MS = "100";
+	child = startCoordinator(root);
+	await readyClient(root);
+	const socketPath = P.coordinatorEndpointPathFor(process.platform, root);
+	const lockPath = P.viewLockPath(root, "_coordinator", "state-coordinator");
+	assert.ok(existsSync(socketPath), "precondition: endpoint exists");
+
+	// Simulate "the lease moved elsewhere": the lock dir is quarantined away, so the
+	// holder's next touches fail (touch() returns false when stillOwns() is false).
+	rmSync(lockPath, { recursive: true, force: true });
+	assert.ok(existsSync(socketPath), "anti-vacuous: endpoint still exists right after the lease removal");
+
+	const code = await waitForExit(child, 6000);
+	assert.equal(code, 0, "clean step-down");
+	// The deposed owner must not unlink its own endpoint: restoring #70's owner-token
+	// condition means an instance that no longer holds the lease cleans nothing.
+	assert.ok(existsSync(socketPath), "a deposed owner must not unlink its own endpoint");
+});
+
+test("#255 A6: SIGTERM on a healthy owner still unlinks the endpoint", async (t) => {
+	if (process.platform === "win32") return t.skip("POSIX AF_UNIX only");
+	const root = freshRoot();
+	let child = null;
+	t.after(async () => {
+		if (child && isAlive(child.pid)) {
+			child.kill("SIGTERM");
+			await waitForExit(child);
+		}
+		rmSync(root, { recursive: true, force: true });
+	});
+	createView(root, { id: "v1", name: "x", cwd: root });
+	child = startCoordinator(root);
+	await readyClient(root);
+	const socketPath = P.coordinatorEndpointPathFor(process.platform, root);
+	assert.ok(existsSync(socketPath), "precondition: endpoint exists");
+
+	child.kill("SIGTERM");
+	await waitForExit(child);
+	assert.equal(existsSync(socketPath), false, "healthy owner cleans its own endpoint");
 });
