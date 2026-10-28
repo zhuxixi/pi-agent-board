@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
 	canFinalizeLegacyHost,
 	canReplaceHost,
+	classifyEndpointHealth,
 	classifyProbeResult,
 	classifyUnverifiableProcess,
 	commandLineMentions,
@@ -12,7 +13,9 @@ import {
 	sameHostOwner,
 	shouldAcceptInput,
 	shouldRetryBind,
+	shouldUnlinkEndpoint,
 	shouldYieldRunner,
+	socketIdentityObservation,
 } from "../src/core/host-coordination.mjs";
 
 test("starting claim without runnerPid is protected inside grace", () => {
@@ -125,6 +128,40 @@ test("canFinalizeLegacyHost requires legacy record + dead pid + unreachable endp
 test("ownsEndpoint compares dev+ino", () => {
 	assert.equal(ownsEndpoint({ dev: 1, ino: 2 }, { dev: 1, ino: 2 }), true);
 	assert.equal(ownsEndpoint({ dev: 1, ino: 2 }, { dev: 1, ino: 3 }), false);
+});
+
+test("shouldUnlinkEndpoint gates on lease ownership and compromise", () => {
+	const same = { dev: 1, ino: 2 };
+	assert.equal(shouldUnlinkEndpoint({ stillOwner: true, compromised: false, bound: same, current: same }), true);
+	assert.equal(shouldUnlinkEndpoint({ stillOwner: false, compromised: false, bound: same, current: same }), false);
+	assert.equal(shouldUnlinkEndpoint({ stillOwner: true, compromised: true, bound: same, current: same }), false);
+	assert.equal(shouldUnlinkEndpoint({ stillOwner: true, compromised: false, bound: same, current: { dev: 1, ino: 3 } }), false);
+	assert.equal(shouldUnlinkEndpoint({ stillOwner: false, compromised: false, bound: same, current: { dev: 1, ino: 3 } }), false);
+	assert.equal(shouldUnlinkEndpoint({ stillOwner: true, compromised: true, bound: same, current: { dev: 1, ino: 3 } }), false);
+	assert.equal(shouldUnlinkEndpoint({ stillOwner: false, compromised: true, bound: same, current: same }), false);
+	assert.equal(shouldUnlinkEndpoint({ stillOwner: false, compromised: true, bound: same, current: { dev: 1, ino: 3 } }), false);
+	// degenerate rows: without both identities nothing may be unlinked
+	assert.equal(shouldUnlinkEndpoint({ stillOwner: true, compromised: false, bound: null, current: same }), false);
+	assert.equal(shouldUnlinkEndpoint({ stillOwner: true, compromised: false, bound: same, current: null }), false);
+});
+
+test("socketIdentityObservation maps one stat attempt", () => {
+	assert.deepEqual(socketIdentityObservation({ dev: 7, ino: 8 }, null), { kind: "ok", dev: 7, ino: 8 });
+	assert.deepEqual(socketIdentityObservation(null, "ENOENT"), { kind: "missing" });
+	assert.deepEqual(socketIdentityObservation(null, "EACCES"), { kind: "unknown" });
+	assert.deepEqual(socketIdentityObservation(null, "EBUSY"), { kind: "unknown" });
+	assert.deepEqual(socketIdentityObservation(null, "ELOOP"), { kind: "unknown" });
+});
+
+test("classifyEndpointHealth never steps down without an identity", () => {
+	const bound = { dev: 1, ino: 2 };
+	const ok = { kind: "ok", dev: 1, ino: 2 };
+	assert.equal(classifyEndpointHealth(bound, ok), "ok");
+	assert.equal(classifyEndpointHealth(bound, { kind: "ok", dev: 1, ino: 3 }), "replaced");
+	assert.equal(classifyEndpointHealth(bound, { kind: "missing" }), "missing");
+	assert.equal(classifyEndpointHealth(bound, { kind: "unknown" }), "unknown");
+	assert.equal(classifyEndpointHealth(null, ok), "unknown");
+	assert.equal(classifyEndpointHealth(bound, null), "unknown");
 });
 
 test("classifyProbeResult maps probe snapshots", () => {
