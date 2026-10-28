@@ -1351,7 +1351,8 @@ test("#255 A6: SIGTERM on a healthy owner still unlinks the endpoint", async (t)
 	assert.ok(existsSync(socketPath), "precondition: endpoint exists");
 
 	child.kill("SIGTERM");
-	await waitForExit(child);
+	const code = await waitForExit(child);
+	assert.equal(code, 0, "clean SIGTERM exit");
 	assert.equal(existsSync(socketPath), false, "healthy owner cleans its own endpoint");
 });
 
@@ -1380,6 +1381,7 @@ test("#255 A4: a missing endpoint steps the coordinator down", async (t) => {
 	const lost = readDiagnostics(root, "_coordinator").find((e) => e.code === "coordinator_endpoint_lost");
 	assert.ok(lost, "endpoint loss is recorded");
 	assert.equal(lost.details.state, "missing");
+	assert.equal(existsSync(P.viewLockPath(root, "_coordinator", "state-coordinator")), false, "lease released");
 });
 
 test("#255 A4b: a failing diagnostic write does not block the step-down", async (t) => {

@@ -389,7 +389,12 @@ async function main() {
 			// endpoint. MUST stay after the root guard: a diagnostic append for a
 			// deleted root would recreate the directory skeleton (#241). `unknown`
 			// (transient stat error, or no bound identity) never steps a holder down.
-			const endpointState = classifyEndpointHealth(boundSocketIdentity, statSocketObservation(socketPath));
+			// Short-circuit on the bound identity: without it (win32 named pipe, or a
+			// failed bind-time stat) there is nothing to compare against, and skipping
+			// the stat also avoids win32's non-trivial pipe stat side effects.
+			const endpointState = boundSocketIdentity
+				? classifyEndpointHealth(boundSocketIdentity, statSocketObservation(socketPath))
+				: "unknown";
 			if (endpointState === "missing" || endpointState === "replaced") {
 				endpointCompromised = true; // veto endpoint cleanup in shutdown (R1)
 				try {
@@ -456,6 +461,9 @@ async function main() {
 		// gone/replaced (endpointCompromised) — must clean nothing. Without the
 		// owner-token condition a deposed instance can unlink an endpoint it does
 		// not own (inode reuse defeats the dev+ino comparison alone).
+		// `endpointCompromised` is defence in depth: with a genuinely different inode
+		// the dev+ino comparison already refuses the unlink; the flag only bites when
+		// inode reuse makes that comparison match the deposited path.
 		const stillOwner = safeIsOwner();
 		if (process.platform !== "win32" && stillOwner && !endpointCompromised && boundSocketIdentity) {
 			try {
