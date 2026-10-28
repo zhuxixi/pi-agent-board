@@ -54,7 +54,7 @@ import {
 	repairJournalTail,
 	writeCheckpoint,
 } from "../src/core/coordinator-journal.mjs";
-import { ownsEndpoint } from "../src/core/host-coordination.mjs";
+import { classifyEndpointHealth, shouldUnlinkEndpoint, socketIdentityObservation } from "../src/core/host-coordination.mjs";
 import { appendDiagnostic } from "../src/core/diagnostics.mjs";
 import { acquireOwnedViewLock, describeLeaseConflict, heartbeatFailureAction, withViewLockSync } from "../src/core/locks.mjs";
 import { captureStartToken } from "../src/core/pid.mjs";
@@ -303,6 +303,10 @@ async function main() {
 	}
 	/** {dev,ino} recorded at bind time; cleanup unlinks only this exact inode. */
 	let boundSocketIdentity = null;
+	/** Set by the supervised tick when the bound endpoint is gone or replaced:
+	 *  shutdown must then leave the path alone even while the lease still looks
+	 *  ours (issue #255). */
+	let endpointCompromised = false;
 
 	const server = createServer((socket) => {
 		let buffer = "";
@@ -335,7 +339,11 @@ async function main() {
 			try {
 				const st = statSync(socketPath);
 				boundSocketIdentity = { dev: st.dev, ino: st.ino };
-			} catch { /* without the identity, cleanup degrades to no-op */ }
+			} catch (err) {
+				// Without the bind identity both endpoint cleanup and self-supervision
+				// degrade to a no-op; say so instead of failing silently (issue #255).
+				process.stderr.write(`state-coordinator: endpoint identity unavailable (${err instanceof Error ? err.message : String(err)}); self-supervision disabled\n`);
+			}
 		}
 		// Supervision starts only after the endpoint is bound (issue #224 D4):
 		// a live-but-stuck holder must step down before its lease can be
@@ -374,6 +382,28 @@ async function main() {
 				shutdown(0);
 				return;
 			}
+			// Self-supervise the endpoint (issue #255): a lease holder whose socket
+			// vanished or was replaced serves nobody — every client write fails with
+			// ENOENT while its fresh heartbeat keeps replacement coordinators losing
+			// the lease race. Step down so the next ensureCoordinator() binds a fresh
+			// endpoint. MUST stay after the root guard: a diagnostic append for a
+			// deleted root would recreate the directory skeleton (#241). `unknown`
+			// (transient stat error, or no bound identity) never steps a holder down.
+			// Short-circuit on the bound identity: without it (win32 named pipe, or a
+			// failed bind-time stat) there is nothing to compare against, and skipping
+			// the stat also avoids win32's non-trivial pipe stat side effects.
+			const endpointState = boundSocketIdentity
+				? classifyEndpointHealth(boundSocketIdentity, statSocketObservation(socketPath))
+				: "unknown";
+			if (endpointState === "missing" || endpointState === "replaced") {
+				endpointCompromised = true; // veto endpoint cleanup in shutdown (R1)
+				try {
+					appendCoordinatorDiagnostic("coordinator_endpoint_lost", { state: endpointState }, "warn");
+				} catch { /* a failing diagnostic must not block the step-down (#224 D4) */ }
+				process.stderr.write(`state-coordinator: endpoint ${endpointState} (${socketPath}); stepping down\n`);
+				shutdown(0);
+				return;
+			}
 			let ok;
 			try {
 				ok = process.env.AGENT_BOARD_TEST_FORCE_TOUCH_FAILURE === "1" ? false : lease.touch();
@@ -403,15 +433,42 @@ async function main() {
 	process.on("SIGTERM", () => shutdown(0));
 	process.on("SIGINT", () => shutdown(0));
 
+	/** One stat attempt, classified into the supervised observation discriminator.
+	 *  A transient access error is `unknown`, never `missing`/`replaced` (issue #255). */
+	function statSocketObservation(path) {
+		let stat = null;
+		let errorCode = null;
+		try {
+			stat = statSync(path);
+		} catch (err) {
+			errorCode = /** @type {NodeJS.ErrnoException} */ (err)?.code ?? "UNKNOWN";
+		}
+		return socketIdentityObservation(stat, errorCode);
+	}
+
+	/** Lease ownership at cleanup time; a read failure fails closed (no unlink). */
+	function safeIsOwner() {
+		try { return lease.isOwner(); } catch { return false; }
+	}
+
 	function shutdown(code) {
 		if (shuttingDown) return;
 		shuttingDown = true;
 		try { clearInterval(heartbeatTimer); } catch { /* best effort */ }
-		try { server.close(); } catch { /* already closed */ }
-		if (process.platform !== "win32" && boundSocketIdentity) {
+		// Do NOT call server.close() (issue #255, nodejs/node#19729): libuv unlinks the
+		// unix-socket bind path when the handle closes, so a deposed coordinator closing
+		// after a successor bound would delete the successor's endpoint. The process is
+		// exiting anyway, and process.exit() skips the uv handle cleanup, so the implicit
+		// unlink never runs. Cleanup is explicit and ownership-gated below — the #70
+		// contract: unlink only while this instance still holds the lease AND the path
+		// still carries the inode it bound.
+		// `endpointCompromised` (set by the supervised tick) vetoes that explicit unlink
+		// as well; it is defence in depth on top of the dev+ino comparison.
+		const stillOwner = safeIsOwner();
+		if (process.platform !== "win32" && stillOwner && !endpointCompromised && boundSocketIdentity) {
 			try {
 				const st = statSync(socketPath);
-				if (ownsEndpoint(boundSocketIdentity, { dev: st.dev, ino: st.ino })) {
+				if (shouldUnlinkEndpoint({ stillOwner, compromised: endpointCompromised, bound: boundSocketIdentity, current: { dev: st.dev, ino: st.ino } })) {
 					try { unlinkSync(socketPath); } catch { /* best effort */ }
 				}
 			} catch { /* path gone — nothing to clean */ }

@@ -162,6 +162,54 @@ export function ownsEndpoint(bound, current) {
 }
 
 /**
+ * Whether this instance may unlink the endpoint path now.
+ * Restores the #70 cleanup contract (docs/superpowers/specs/
+ * 2026-09-05-pty-host-stacking-sock-race-design.md:418): the path must still be
+ * the inode this instance bound AND this instance must still own the lease.
+ * `compromised` lets the supervised tick veto its own cleanup after detecting
+ * that the endpoint is gone or replaced (issue #255).
+ * @param {{
+ *   stillOwner: boolean,
+ *   compromised: boolean,
+ *   bound: {dev:number,ino:number}|null|undefined,
+ *   current: {dev:number,ino:number}|null|undefined,
+ * }} input
+ * @returns {boolean}
+ */
+export function shouldUnlinkEndpoint({ stillOwner, compromised, bound, current }) {
+	if (!stillOwner || compromised) return false;
+	return ownsEndpoint(bound, current);
+}
+
+/**
+ * Map one supervised stat attempt to the endpoint observation discriminator.
+ * A transient stat failure (EACCES/EBUSY/...) must never be read as "replaced":
+ * only ENOENT means the endpoint is actually gone (issue #255, mirrors the
+ * rootVanishedOrReplaced rule of issue #241).
+ * @param {{dev:number,ino:number}|null} stat The successful stat snapshot, or null.
+ * @param {string|null} errorCode The stat error code, or null on success.
+ * @returns {{kind:"ok",dev:number,ino:number}|{kind:"missing"}|{kind:"unknown"}}
+ */
+export function socketIdentityObservation(stat, errorCode) {
+	if (stat) return { kind: "ok", dev: stat.dev, ino: stat.ino };
+	return errorCode === "ENOENT" ? { kind: "missing" } : { kind: "unknown" };
+}
+
+/**
+ * Classify the supervised endpoint against the identity bound at boot.
+ * `unknown` never steps a holder down: without a bound identity (win32, or a
+ * failed bind-time stat) the supervisor degrades to a no-op.
+ * @param {{dev:number,ino:number}|null|undefined} bound
+ * @param {{kind:"ok",dev:number,ino:number}|{kind:"missing"}|{kind:"unknown"}|null|undefined} observed
+ * @returns {"ok"|"missing"|"replaced"|"unknown"}
+ */
+export function classifyEndpointHealth(bound, observed) {
+	if (!bound || !observed || observed.kind === "unknown") return "unknown";
+	if (observed.kind === "missing") return "missing";
+	return ownsEndpoint(bound, observed) ? "ok" : "replaced";
+}
+
+/**
  * Classify a connect+hello probe snapshot into the coordination enum.
  * Order: connection errors first (they carry the errorCode), then protocol
  * validity, then ownership mismatch (`occupied` — never touch), then
