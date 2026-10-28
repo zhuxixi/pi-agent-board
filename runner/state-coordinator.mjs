@@ -54,7 +54,7 @@ import {
 	repairJournalTail,
 	writeCheckpoint,
 } from "../src/core/coordinator-journal.mjs";
-import { shouldUnlinkEndpoint } from "../src/core/host-coordination.mjs";
+import { classifyEndpointHealth, shouldUnlinkEndpoint, socketIdentityObservation } from "../src/core/host-coordination.mjs";
 import { appendDiagnostic } from "../src/core/diagnostics.mjs";
 import { acquireOwnedViewLock, describeLeaseConflict, heartbeatFailureAction, withViewLockSync } from "../src/core/locks.mjs";
 import { captureStartToken } from "../src/core/pid.mjs";
@@ -339,7 +339,11 @@ async function main() {
 			try {
 				const st = statSync(socketPath);
 				boundSocketIdentity = { dev: st.dev, ino: st.ino };
-			} catch { /* without the identity, cleanup degrades to no-op */ }
+			} catch (err) {
+				// Without the bind identity both endpoint cleanup and self-supervision
+				// degrade to a no-op; say so instead of failing silently (issue #255).
+				process.stderr.write(`state-coordinator: endpoint identity unavailable (${err instanceof Error ? err.message : String(err)}); self-supervision disabled\n`);
+			}
 		}
 		// Supervision starts only after the endpoint is bound (issue #224 D4):
 		// a live-but-stuck holder must step down before its lease can be
@@ -378,6 +382,23 @@ async function main() {
 				shutdown(0);
 				return;
 			}
+			// Self-supervise the endpoint (issue #255): a lease holder whose socket
+			// vanished or was replaced serves nobody — every client write fails with
+			// ENOENT while its fresh heartbeat keeps replacement coordinators losing
+			// the lease race. Step down so the next ensureCoordinator() binds a fresh
+			// endpoint. MUST stay after the root guard: a diagnostic append for a
+			// deleted root would recreate the directory skeleton (#241). `unknown`
+			// (transient stat error, or no bound identity) never steps a holder down.
+			const endpointState = classifyEndpointHealth(boundSocketIdentity, statSocketObservation(socketPath));
+			if (endpointState === "missing" || endpointState === "replaced") {
+				endpointCompromised = true; // veto endpoint cleanup in shutdown (R1)
+				try {
+					appendCoordinatorDiagnostic("coordinator_endpoint_lost", { state: endpointState }, "warn");
+				} catch { /* a failing diagnostic must not block the step-down (#224 D4) */ }
+				process.stderr.write(`state-coordinator: endpoint ${endpointState} (${socketPath}); stepping down\n`);
+				shutdown(0);
+				return;
+			}
 			let ok;
 			try {
 				ok = process.env.AGENT_BOARD_TEST_FORCE_TOUCH_FAILURE === "1" ? false : lease.touch();
@@ -406,6 +427,19 @@ async function main() {
 	let shuttingDown = false;
 	process.on("SIGTERM", () => shutdown(0));
 	process.on("SIGINT", () => shutdown(0));
+
+	/** One stat attempt, classified into the supervised observation discriminator.
+	 *  A transient access error is `unknown`, never `missing`/`replaced` (issue #255). */
+	function statSocketObservation(path) {
+		let stat = null;
+		let errorCode = null;
+		try {
+			stat = statSync(path);
+		} catch (err) {
+			errorCode = /** @type {NodeJS.ErrnoException} */ (err)?.code ?? "UNKNOWN";
+		}
+		return socketIdentityObservation(stat, errorCode);
+	}
 
 	/** Lease ownership at cleanup time; a read failure fails closed (no unlink). */
 	function safeIsOwner() {
