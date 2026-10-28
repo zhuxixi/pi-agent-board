@@ -2079,9 +2079,10 @@ async function bootLegacyRunner(viewId = "v1") {
 	return { root, runner, socketPath: P.controlSocketPath(root, viewId) };
 }
 
-async function stopLegacyRunner(runner, root) {
+async function stopLegacyRunner(runner, root, viewId = "v1") {
 	try { if (runner.exitCode === null) runner.kill("SIGKILL"); } catch { /* already gone */ }
 	await waitForExit(runner, 2000);
+	reapChild(root, viewId);
 	rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 }
 

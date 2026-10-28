@@ -525,6 +525,11 @@ function legacyMain(config) {
 		// successor bound would delete the successor's endpoint. With no close there is
 		// no implicit unlink. Cleanup is explicit and identity-gated below — the legacy
 		// path has no lease, so dev+ino is its only ownership proof.
+		// Windows has no close-time unlink (named pipes are kernel objects), so keep the
+		// historical prompt refusal of new connections there.
+		if (process.platform === "win32") {
+			try { server?.close(); } catch { /* already closed */ }
+		}
 		if (process.platform !== "win32" && boundSocketIdentity) {
 			try {
 				const st = statSync(socketPath);
