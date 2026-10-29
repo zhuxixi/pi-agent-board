@@ -12,15 +12,22 @@
 export const CLIENT_ID_PROBE = "probe";
 /** Resident editor-state reporter inside a hosted child; never counts as attached. */
 export const CLIENT_ID_EDITOR_REPORTER = "editor-reporter";
+/**
+ * Resident frame-witness reporter inside a hosted child (issue #222 FW-03/FW-04).
+ * Bookkeeping-only like the editor reporter: it must never keep a host attached or flip
+ * attachedEver, or warm-host reclaim never fires.
+ */
+export const CLIENT_ID_FRAME_REPORTER = "frame-reporter";
 
 /**
  * @param {{ type?: string, clientId?: string } | null | undefined} msg
- * @returns {"probe" | "editor-reporter" | "client"}
+ * @returns {"probe" | "editor-reporter" | "frame-reporter" | "client"}
  */
 export function classifyClientHello(msg) {
 	const clientId = msg && typeof msg.clientId === "string" ? msg.clientId : "";
 	if (clientId === CLIENT_ID_PROBE) return "probe";
 	if (clientId === CLIENT_ID_EDITOR_REPORTER) return "editor-reporter";
+	if (clientId === CLIENT_ID_FRAME_REPORTER) return "frame-reporter";
 	return "client";
 }
 
@@ -46,7 +53,7 @@ export function classifyClientHello(msg) {
  * an unknown connection is the conservative direction (it can only delay
  * reclaim, never risk killing a host with a live client).
  *
- * @param {"probe" | "editor-reporter" | "client"} kind
+ * @param {"probe" | "editor-reporter" | "frame-reporter" | "client"} kind
  * @returns {{ keepInClients: boolean, registerReporter: boolean,
  *             flipAttachedEver: boolean, persist: boolean, suppressCloseWrite: boolean }}
  */
@@ -56,6 +63,10 @@ export function helloBookkeeping(kind) {
 			return { keepInClients: false, registerReporter: false, flipAttachedEver: false, persist: false, suppressCloseWrite: true };
 		case "editor-reporter":
 			return { keepInClients: false, registerReporter: true, flipAttachedEver: false, persist: true, suppressCloseWrite: false };
+		case "frame-reporter":
+			// Same policy as the editor reporter (issue #222 FW-04): bookkeeping-only, no
+			// attachEver flip, but the socket stays writable so enable/intent keep flowing.
+			return { keepInClients: false, registerReporter: false, flipAttachedEver: false, persist: true, suppressCloseWrite: false };
 		default:
 			return { keepInClients: true, registerReporter: false, flipAttachedEver: true, persist: true, suppressCloseWrite: false };
 	}

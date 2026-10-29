@@ -37,7 +37,10 @@ import {
 } from "../src/core/control-protocol.mjs";
 import { readHost, readState, updateOwnedHost, writeHost } from "../src/core/store.mjs";
 import { sendStateCommand } from "../src/core/coordinator-client.mjs";
-import { classifyClientHello, helloBookkeeping } from "../src/core/host-protocol.mjs";
+import { classifyClientHello, helloBookkeeping, CLIENT_ID_FRAME_REPORTER } from "../src/core/host-protocol.mjs";
+import { createFrameStreamParser } from "../src/core/attach-frame-stream.mjs";
+import { createViewProofTracker } from "../src/core/attach-view-proof.mjs";
+import { createHash, randomBytes } from "node:crypto";
 import { markRowFailedDirect } from "./pty-runner-legacy.mjs";
 import { ensureNodePtySpawnHelperExecutable } from "../src/core/pty-support.mjs";
 
@@ -97,6 +100,218 @@ function readScreenLogTail(path, maxBytes) {
  * @param {string} screenLogPath
  * @returns {{} | { error: string }}
  */
+/**
+ * Issue #222 FW-03/FW-04 runner-side frame-witness plumbing.
+ *
+ * A frame reporter socket (`hello` with `clientId:"frame-reporter"` and
+ * `frameWitness:{protocol:1}`) receives a per-instance random >=128-bit base64url token and
+ * the owned DCS parser is installed for that child. Old/no hello keeps byte-identical
+ * behaviour: `splitFrameChunk` passes the chunk through untouched.
+ */
+function enableFrameReporter(socket, msg, send) {
+	const protocol = msg && msg.frameWitness && Number(msg.frameWitness.protocol);
+	if (msg?.clientId !== CLIENT_ID_FRAME_REPORTER || protocol !== 1) return null;
+	const token = randomBytes(32).toString("base64url");
+	// F4: the identity is the runner's ACTUAL generation (one per runner process), not a
+	// per-connection UUID. A reporter replacement gets a new token but the same generation.
+	const instanceId = GENERATION;
+	// The reporter reports its actual extension session epoch (1, then 2+ after a real
+	// /new). Absence keeps the legacy epoch-1 compatibility default; present values must
+	// be positive integers or the enable is rejected without installing proof.
+	const reportedEpoch = msg.frameWitness?.sessionEpoch;
+	let sessionEpoch = 1;
+	if (reportedEpoch !== undefined) {
+		if (!Number.isInteger(reportedEpoch) || reportedEpoch < 1) return null;
+		sessionEpoch = reportedEpoch;
+	}
+	const state = {
+		socket,
+		token,
+		instanceId,
+		sessionEpoch,
+		parser: createFrameStreamParser({ token, instanceId, sessionEpoch }),
+		viewProof: createViewProofTracker(),
+		viewProofBaselineSeeded: false,
+		viewProofFailures: 0,
+		viewProofLastFailure: null,
+		geometryRevision: 0,
+		requestSeq: 0,
+		intents: [],
+	};
+	send(socket, { type: "frame_witness_enable", protocol: 1, token, instanceId, sessionEpoch });
+	return state;
+}
+
+/** Split one child chunk into ordinary segments + proofs (marker bytes are stripped). */
+function splitFrameChunk(data, frameReporter) {
+	if (!frameReporter) return [{ kind: "output", data }];
+	const parts = frameReporter.parser.push(data);
+	return parts.length > 0 ? parts : [];
+}
+
+/**
+ * Announce a frame-witness intent after an ACTUAL differing-size resize reached applied.
+ * Same-size requests do not call this at all (zero resize, no new revision). Each intent
+ * carries the current instance, a unique requestId, a monotonically increasing
+ * geometryRevision and the exact target cols/rows.
+ */
+function announceFrameIntent(frameReporter, send, cols, rows) {
+	if (!frameReporter) return null;
+	frameReporter.geometryRevision += 1;
+	frameReporter.requestSeq += 1;
+	const intent = {
+		type: "frame_witness_intent",
+		protocol: 1,
+		instanceId: frameReporter.instanceId,
+		requestId: `fw-${frameReporter.requestSeq}`,
+		geometryRevision: frameReporter.geometryRevision,
+		cols,
+		rows,
+	};
+	frameReporter.intents.push({ requestId: intent.requestId, geometryRevision: intent.geometryRevision, cols, rows });
+	send(frameReporter.socket, intent);
+	return intent;
+}
+
+/**
+ * F7: ONE cleanup path for every lifecycle end (socket close/error, child exit, reporter
+ * replacement). Finishes the parser, forwards any trailing ORDINARY byte to the normal
+ * output path, and clears the state so no stale enabled reporter survives.
+ */
+function cleanupFrameReporter(frameReporter, reason, forward) {
+	if (!frameReporter) return null;
+	const finished = frameReporter.parser.finish(reason);
+	if (typeof forward === "function" && typeof finished.trailing === "string" && finished.trailing.length > 0) forward(finished.trailing);
+	return finished;
+}
+
+/** Bounded host-facing summary (never the token). */
+function frameWitnessSummary(frameReporter) {
+	if (!frameReporter) return { enabled: false };
+	const snapshot = frameReporter.parser.snapshot();
+	return {
+		enabled: true,
+		instanceId: frameReporter.instanceId,
+		sessionEpoch: frameReporter.sessionEpoch,
+		tokenFingerprint: createHash("sha256").update(frameReporter.token).digest("hex").slice(0, 16),
+		proofs: snapshot.proofs.length,
+		droppedProofs: snapshot.droppedProofs,
+		droppedFinishedIds: snapshot.droppedFinishedIds,
+		diagnostics: snapshot.diagnostics.length,
+		lastFrameId: snapshot.lastFrameId,
+		openFrameId: snapshot.openFrameId,
+		pendingBytes: snapshot.pendingBytes,
+		geometryRevision: frameReporter.geometryRevision,
+		intents: frameReporter.intents.length,
+		viewProofFailures: frameReporter.viewProofFailures ?? 0,
+		...(frameReporter.viewProofLastFailure === null ? {} : { viewProofLastFailure: frameReporter.viewProofLastFailure }),
+		// Bounded, user-text-free view of the newest proof so a real-topology test can
+		// assert target geometry/mode/seq without parsing host-private internals.
+		lastProof: (() => {
+			const proofs = snapshot.proofs;
+			const last = proofs.length === 0 ? null : proofs[proofs.length - 1];
+			if (last === null) return null;
+			return {
+				marker: last.marker,
+				frameId: last.frameId,
+				seq: last.seq,
+				sessionEpoch: last.sessionEpoch,
+				...(last.metadata === undefined
+					? { reason: last.reason }
+					: {
+						cols: last.metadata.cols,
+						rows: last.metadata.rows,
+						mode: last.metadata.mode,
+						rendererEpoch: last.metadata.rendererEpoch,
+						intentId: last.metadata.intentId,
+						geometryRevision: last.metadata.geometryRevision,
+					}),
+			};
+		})(),
+	};
+}
+
+/** One per-enabled-reporter tracker source; reads the CURRENT reporter on every call. */
+function createViewProofSource(getReporter) {
+	return {
+		coverage(seq) {
+			try {
+				return getReporter()?.viewProof?.coverageFor(seq) ?? null;
+			} catch {
+				return null;
+			}
+		},
+		replay(fromSeq, throughSeq) {
+			try {
+				return getReporter()?.viewProof?.replay(fromSeq, throughSeq) ?? null;
+			} catch {
+				return null;
+			}
+		},
+	};
+}
+
+function noteViewProofFailure(frameReporter, reason) {
+	if (!frameReporter) return;
+	frameReporter.viewProofFailures = (frameReporter.viewProofFailures ?? 0) + 1;
+	frameReporter.viewProofLastFailure = String(reason).slice(0, 64);
+}
+
+/** Feed the canonical segment seq into the tracker BEFORE subscriptions see it. */
+function feedViewProofOutput(frameReporter, seq, data) {
+	if (!frameReporter?.viewProof) return;
+	try {
+		const result = frameReporter.viewProof.feedOutput(seq, data);
+		if (result.status === "protocol-error") noteViewProofFailure(frameReporter, result.reason);
+		else frameReporter.viewProofBaselineSeeded = true;
+	} catch (err) {
+		noteViewProofFailure(frameReporter, err instanceof Error ? err.message : String(err));
+	}
+}
+
+/**
+ * Route one additive S candidate or F/A proof into the accepted tracker. Returns the
+ * accepted wire record (seq already assigned) or null. Never calls completeProof for an
+ * S/A record.
+ */
+function applyViewProofPart(frameReporter, part, seq) {
+	if (!frameReporter?.viewProof) return null;
+	const record = part.kind === "candidate" ? part.candidate : part.kind === "proof" ? part.proof : null;
+	if (record === null) return null;
+	record.seq = seq;
+	// A tracker created at reporter-enable time may see its first S before any ordinary
+	// segment was fed after enable. Adopt the runner's existing output seq as the baseline
+	// (zero bytes retained) so the real first frame is not dropped.
+	if (record.marker === "S" && frameReporter.viewProofBaselineSeeded === false && seq >= 1) {
+		try {
+			const baseline = frameReporter.viewProof.feedOutput(seq, "");
+			if (baseline.status === "protocol-error") noteViewProofFailure(frameReporter, baseline.reason);
+			else frameReporter.viewProofBaselineSeeded = true;
+		} catch (err) {
+			noteViewProofFailure(frameReporter, err instanceof Error ? err.message : String(err));
+		}
+	}
+	let result;
+	try {
+		if (record.marker === "S") result = frameReporter.viewProof.openCandidate(record);
+		else if (record.marker === "F") result = frameReporter.viewProof.completeProof(record);
+		else if (record.marker === "A") result = frameReporter.viewProof.abortCandidate(record);
+		else result = { status: "protocol-error", reason: "unknown-record-marker" };
+	} catch (err) {
+		noteViewProofFailure(frameReporter, err instanceof Error ? err.message : String(err));
+		return null;
+	}
+	if (result.status !== "ok") {
+		noteViewProofFailure(frameReporter, result.reason);
+		return null;
+	}
+	return record;
+}
+
+function resetViewProofSubscribers(terminalSubscriptions, reason) {
+	for (const sub of terminalSubscriptions.values()) sub.onViewProofReset?.(reason);
+}
+
 function attributedExitError(exitCode, screenLogPath) {
 	if (exitCode === 0) return {};
 	try {
@@ -143,6 +358,8 @@ function legacyMain(config) {
 	const clients = new Set();
 	/** Resident editor-state reporters: connected but never "attached" (#103). */
 	const editorReporters = new Set();
+	let frameReporter = null;
+	let lastOutputSeq = 0;
 	let childPid = null;
 	let child = null;
 	let exitCode = null;
@@ -211,8 +428,17 @@ function legacyMain(config) {
 			hostCols: () => host.cols,
 			hostRows: () => host.rows,
 			applyResize: (cols, rows) => {
+				// Issue #222 FW-04: THE applied-resize seam shared by the control runtime and
+				// the plain resize path. The intent uses the ACTUAL model dims after the
+				// resize (a PTY that keeps its old geometry changes nothing => no intent).
+				const before = { cols: terminalModel.cols, rows: terminalModel.rows };
 				resizeChildAndModel(child, terminalModel, cols, rows);
 				update({ cols, rows });
+				const after = { cols: terminalModel.cols, rows: terminalModel.rows };
+				if (frameReporter !== null && (after.cols !== before.cols || after.rows !== before.rows)) {
+					announceFrameIntent(frameReporter, send, after.cols, after.rows);
+					update({ frameWitness: frameWitnessSummary(frameReporter) });
+				}
 			},
 			currentDims: () => ({ cols: terminalModel.cols, rows: terminalModel.rows }),
 			applyInterrupt: () => {
@@ -330,25 +556,64 @@ function legacyMain(config) {
 	update({ childPid });
 
 	child.onData((data) => {
-		screenLogBytes = appendBoundedScreenLog(screenLog, data, screenLogBytes, screenLogLimits);
-		const outputSeq = feedOutput(terminalModel, data);
-		// Per-socket output delivery (issue #91 phase 3): sockets that speak the
-		// subscribe_terminal protocol get exactly-once, gap-checked chunks from
-		// their subscription state machine; every other client keeps the legacy
-		// fire-and-forget broadcast (additive seq). Both streams to one socket
-		// would duplicate every chunk.
-		const outputLine = JSON.stringify({ type: "output", seq: outputSeq, data }) + "\n";
-		for (const [socket, sub] of terminalSubscriptions) {
-			if (sub.subscribed()) sub.onOutput(outputSeq, data);
-			// Per-socket guard: a synchronous throw from a dead socket must never
-			// escape into the uncaughtException crash path (whole-branch review).
-			else { try { socket.write(outputLine); } catch { /* 'error' handler cleans up */ } }
+		// Issue #222 FW-03: split the ordered stream at exact DCS marker boundaries. With
+		// no frame reporter this is the byte-identical legacy path (one output part).
+		// Marker bytes never reach screenLog, the canonical model, subscribers or the
+		// legacy broadcast.
+		for (const part of splitFrameChunk(data, frameReporter)) {
+			if (part.kind !== "output") {
+				// S opens; F completes; A aborts. Never call completeProof for every record.
+				const record = applyViewProofPart(frameReporter, part, lastOutputSeq);
+				if (record !== null) {
+					for (const sub of terminalSubscriptions.values()) sub.onViewProofRecord?.(record);
+				}
+				if (frameReporter !== null) update({ frameWitness: frameWitnessSummary(frameReporter) });
+				continue;
+			}
+			const chunk = part.data;
+			screenLogBytes = appendBoundedScreenLog(screenLog, chunk, screenLogBytes, screenLogLimits);
+			const outputSeq = feedOutput(terminalModel, chunk);
+			lastOutputSeq = outputSeq;
+			feedViewProofOutput(frameReporter, outputSeq, chunk);
+			// Per-socket output delivery (issue #91 phase 3): sockets that speak the
+			// subscribe_terminal protocol get exactly-once, gap-checked chunks from
+			// their subscription state machine; every other client keeps the legacy
+			// fire-and-forget broadcast (additive seq). Both streams to one socket
+			// would duplicate every chunk.
+			const outputLine = JSON.stringify({ type: "output", seq: outputSeq, data: chunk }) + "\n";
+			for (const [socket, sub] of terminalSubscriptions) {
+				if (sub.subscribed()) sub.onOutput(outputSeq, chunk);
+				// Per-socket guard: a synchronous throw from a dead socket must never
+				// escape into the uncaughtException crash path (whole-branch review).
+				else { try { socket.write(outputLine); } catch { /* 'error' handler cleans up */ } }
+			}
 		}
 	});
 	child.onExit((code) => {
 		childExited = true;
 		resolveChildExit?.();
 		exitCode = code ?? 0;
+		if (frameReporter !== null) {
+			// F9: a trailing ordinary byte is forwarded through the normal output path.
+			cleanupFrameReporter(frameReporter, "child-exit", (trailing) => {
+				try {
+					screenLogBytes = appendBoundedScreenLog(screenLog, trailing, screenLogBytes, screenLogLimits);
+					const seq = feedOutput(terminalModel, trailing);
+					feedViewProofOutput(frameReporter, seq, trailing);
+					for (const [socket, sub] of terminalSubscriptions) {
+						if (sub.subscribed()) sub.onOutput(seq, trailing);
+					}
+				} catch {
+					/* best effort during exit */
+				}
+			});
+			resetViewProofSubscribers(terminalSubscriptions, "child-exit");
+			try {
+				update({ frameWitness: frameWitnessSummary(frameReporter) });
+			} catch {
+				/* row may already be finalised */
+			}
+		}
 		// Terminate lifecycle (spec D4): a confirmed child exit is the observed
 		// evidence for any enveloped terminate still pending on a live socket.
 		control.flushTerminateObservations(exitCode, false);
@@ -375,7 +640,7 @@ function legacyMain(config) {
 		clients.add(socket);
 		terminalSubscriptions.set(
 			socket,
-			createTerminalSubscription({ model: terminalModel, send: (msg) => send(socket, msg), generation: GENERATION }),
+			createTerminalSubscription({ model: terminalModel, send: (msg) => send(socket, msg), generation: GENERATION, viewProof: createViewProofSource(() => frameReporter) }),
 		);
 		socket.write(JSON.stringify({ type: "hello", status: host, editorEmpty, generation: GENERATION }) + "\n");
 		let buffer = "";
@@ -390,6 +655,22 @@ function legacyMain(config) {
 			editorReporters.delete(socket);
 			terminalSubscriptions.delete(socket);
 			control.closeSocket(socket);
+			if (frameReporter !== null && frameReporter.socket === socket) {
+				// P2: a trailing ORDINARY byte must not be lost when the reporter goes away.
+				cleanupFrameReporter(frameReporter, "reporter-close", (trailing) => {
+					try {
+						screenLogBytes = appendBoundedScreenLog(screenLog, trailing, screenLogBytes, screenLogLimits);
+						const seq = feedOutput(terminalModel, trailing);
+						lastOutputSeq = seq;
+						feedViewProofOutput(frameReporter, seq, trailing);
+						for (const [peer, sub] of terminalSubscriptions) if (sub.subscribed()) sub.onOutput(seq, trailing);
+					} catch {
+						/* best effort */
+					}
+				});
+				frameReporter = null;
+				resetViewProofSubscribers(terminalSubscriptions, "reporter-close");
+			}
 			update();
 		});
 		socket.on("error", () => {
@@ -397,6 +678,21 @@ function legacyMain(config) {
 			editorReporters.delete(socket);
 			terminalSubscriptions.delete(socket);
 			control.closeSocket(socket);
+			if (frameReporter !== null && frameReporter.socket === socket) {
+				cleanupFrameReporter(frameReporter, "reporter-error", (trailing) => {
+					try {
+						screenLogBytes = appendBoundedScreenLog(screenLog, trailing, screenLogBytes, screenLogLimits);
+						const seq = feedOutput(terminalModel, trailing);
+						lastOutputSeq = seq;
+						feedViewProofOutput(frameReporter, seq, trailing);
+						for (const [peer, sub] of terminalSubscriptions) if (sub.subscribed()) sub.onOutput(seq, trailing);
+					} catch {
+						/* best effort */
+					}
+				});
+				frameReporter = null;
+				resetViewProofSubscribers(terminalSubscriptions, "reporter-error");
+			}
 			update();
 		});
 	});
@@ -432,6 +728,33 @@ function legacyMain(config) {
 					terminalSubscriptions.delete(socket);
 				}
 				if (book.registerReporter) editorReporters.add(socket);
+				// Issue #222 FW-04: a frame reporter gets a per-instance random token; only a
+				// valid hello + frameWitness protocol 1 enables anything. Old/no hello is
+				// unchanged (no new messages).
+				{
+					const enabled = enableFrameReporter(socket, msg, send);
+					if (enabled !== null) {
+						const replacingReporter = frameReporter !== null && frameReporter.socket !== socket;
+						if (replacingReporter) {
+							// Same ordinary-trailing forwarding path as close/error/child-exit: a
+							// pending ordinary tail must not be lost when the reporter is replaced.
+							cleanupFrameReporter(frameReporter, "reporter-replaced", (trailing) => {
+								try {
+									screenLogBytes = appendBoundedScreenLog(screenLog, trailing, screenLogBytes, screenLogLimits);
+									const seq = feedOutput(terminalModel, trailing);
+									lastOutputSeq = seq;
+									feedViewProofOutput(frameReporter, seq, trailing);
+									for (const [peer, sub] of terminalSubscriptions) if (sub.subscribed()) sub.onOutput(seq, trailing);
+								} catch {
+									/* best effort during replacement */
+								}
+							});
+						}
+						frameReporter = enabled;
+						if (replacingReporter) resetViewProofSubscribers(terminalSubscriptions, "reporter-replaced");
+						try { update({ frameWitness: frameWitnessSummary(frameReporter) }); } catch { /* row may be finalised */ }
+					}
+				}
 				// A real client writes via flipAttachedEver alone (hence the `else
 				// if`); `persist` is the write flag for rows that write as-is (reporter).
 				if (book.flipAttachedEver) update({ attachedEver: true });
@@ -446,9 +769,16 @@ function legacyMain(config) {
 				const cols = clampInt(msg.cols, 20, 300, host.cols);
 				const rows = clampInt(msg.rows, 5, 120, host.rows);
 				// Paired step (CR R1 advisory): model reflows only when the real PTY
-				// resize succeeded. host.cols/rows keep recording the intended size
-				// (new-client clamp baseline), deliberately outside the guard.
+				// resize succeeded. The frame-witness intent seam lives in
+				// actions.applyResize (shared with the control runtime), so this plain path
+				// never announces a second time.
 				resizeChildAndModel(child, terminalModel, cols, rows);
+				if (frameReporter !== null) {
+					const dims = { cols: terminalModel.cols, rows: terminalModel.rows };
+					if (dims.cols !== cols || dims.rows !== rows) {
+						/* keep silent: actual geometry did not change */
+					}
+				}
 				update({ cols, rows });
 				break;
 			}
@@ -557,6 +887,8 @@ async function ownedMain(config) {
 	const clients = new Set();
 	/** Resident editor-state reporters: connected but never "attached" (#103). */
 	const editorReporters = new Set();
+	let frameReporter = null;
+	let lastOutputSeq = 0;
 	let childPid = null;
 	let child = null;
 	let exitCode = null;
@@ -837,10 +1169,18 @@ async function ownedMain(config) {
 				// Paired step (CR R1 advisory): model reflows only when the real
 				// PTY resize succeeded; cachedResize cleared either way — a failed
 				// resize is not retried against a exiting child.
+				const before = { cols: terminalModel.cols, rows: terminalModel.rows };
 				resizeChildAndModel(child, terminalModel, cols, rows);
 				notifyChildResize(childPid);
 				cachedResize = null;
 				ownedUpdate((cur) => ({ ...cur, cols, rows }));
+				// Issue #222 FW-04: single intent seam (control runtime + plain path). Only an
+				// ACTUAL geometry change emits an intent, with the resulting dims as target.
+				const after = { cols: terminalModel.cols, rows: terminalModel.rows };
+				if (frameReporter !== null && (after.cols !== before.cols || after.rows !== before.rows)) {
+					announceFrameIntent(frameReporter, send, after.cols, after.rows);
+					ownedUpdate((cur) => ({ ...cur, frameWitness: frameWitnessSummary(frameReporter) }));
+				}
 			},
 			currentDims: () => ({ cols: terminalModel.cols, rows: terminalModel.rows }),
 			applyInterrupt: () => {
@@ -875,7 +1215,7 @@ async function ownedMain(config) {
 			clients.add(socket);
 			terminalSubscriptions.set(
 				socket,
-				createTerminalSubscription({ model: terminalModel, send: (msg) => send(socket, msg), generation: GENERATION }),
+				createTerminalSubscription({ model: terminalModel, send: (msg) => send(socket, msg), generation: GENERATION, viewProof: createViewProofSource(() => frameReporter) }),
 			);
 			socket.write(JSON.stringify({ type: "hello", status: host, editorEmpty, generation: GENERATION }) + "\n");
 			broadcast({ type: "status", status: host, generation: GENERATION });
@@ -891,6 +1231,21 @@ async function ownedMain(config) {
 				editorReporters.delete(socket);
 				terminalSubscriptions.delete(socket);
 				control.closeSocket(socket);
+				if (frameReporter !== null && frameReporter.socket === socket) {
+					cleanupFrameReporter(frameReporter, "reporter-close", (trailing) => {
+						try {
+							screenLogBytes = appendBoundedScreenLog(screenLog, trailing, screenLogBytes, screenLogLimits);
+							const seq = feedOutput(terminalModel, trailing);
+							lastOutputSeq = seq;
+							feedViewProofOutput(frameReporter, seq, trailing);
+							for (const [peer, sub] of terminalSubscriptions) if (sub.subscribed()) sub.onOutput(seq, trailing);
+						} catch {
+							/* best effort */
+						}
+					});
+					frameReporter = null;
+					resetViewProofSubscribers(terminalSubscriptions, "reporter-close");
+				}
 				if (probeSockets.has(socket)) return;
 				// Merge into the live record (a stale closure spread here erases a
 				// concurrent revoke — final review finding 2).
@@ -901,6 +1256,21 @@ async function ownedMain(config) {
 				editorReporters.delete(socket);
 				terminalSubscriptions.delete(socket);
 				control.closeSocket(socket);
+				if (frameReporter !== null && frameReporter.socket === socket) {
+					cleanupFrameReporter(frameReporter, "reporter-error", (trailing) => {
+						try {
+							screenLogBytes = appendBoundedScreenLog(screenLog, trailing, screenLogBytes, screenLogLimits);
+							const seq = feedOutput(terminalModel, trailing);
+							lastOutputSeq = seq;
+							feedViewProofOutput(frameReporter, seq, trailing);
+							for (const [peer, sub] of terminalSubscriptions) if (sub.subscribed()) sub.onOutput(seq, trailing);
+						} catch {
+							/* best effort */
+						}
+					});
+					frameReporter = null;
+					resetViewProofSubscribers(terminalSubscriptions, "reporter-error");
+				}
 				if (probeSockets.has(socket)) return;
 				ownedUpdate((cur) => ({ ...cur }));
 			});
@@ -990,22 +1360,61 @@ async function ownedMain(config) {
 	}
 	childPid = child.pid ?? null;
 	child.onData((data) => {
-		screenLogBytes = appendBoundedScreenLog(screenLog, data, screenLogBytes, screenLogLimits);
-		const outputSeq = feedOutput(terminalModel, data);
-		// Per-socket output delivery — same contract as legacyMain above.
-		const outputLine = JSON.stringify({ type: "output", seq: outputSeq, data }) + "\n";
-		for (const [socket, sub] of terminalSubscriptions) {
-			if (sub.subscribed()) sub.onOutput(outputSeq, data);
-			// Same per-socket guard the legacy broadcast had: a synchronous throw
-			// from a dead socket must never escape into the uncaughtException
-			// crash path (whole-branch review finding).
-			else { try { socket.write(outputLine); } catch { /* socket 'error' handler cleans up */ } }
+		// Issue #222 FW-03 (owned host path): marker bytes are stripped before every
+		// consumer and each ordinary segment gets its own output sequence; a proof takes
+		// the sequence of the preceding ordinary segment (never a child frameId, never
+		// socket timing) and several proofs at one seq keep production order.
+		for (const part of splitFrameChunk(data, frameReporter)) {
+			if (part.kind !== "output") {
+				// S opens; F completes; A aborts. Never call completeProof for every record.
+				const record = applyViewProofPart(frameReporter, part, lastOutputSeq);
+				if (record !== null) {
+					for (const sub of terminalSubscriptions.values()) sub.onViewProofRecord?.(record);
+				}
+				ownedUpdate((cur) => ({ ...cur, frameWitness: frameWitnessSummary(frameReporter) }));
+				continue;
+			}
+			const chunk = part.data;
+			screenLogBytes = appendBoundedScreenLog(screenLog, chunk, screenLogBytes, screenLogLimits);
+			const outputSeq = feedOutput(terminalModel, chunk);
+			lastOutputSeq = outputSeq;
+			feedViewProofOutput(frameReporter, outputSeq, chunk);
+			// Per-socket output delivery — same contract as legacyMain above.
+			const outputLine = JSON.stringify({ type: "output", seq: outputSeq, data: chunk }) + "\n";
+			for (const [socket, sub] of terminalSubscriptions) {
+				if (sub.subscribed()) sub.onOutput(outputSeq, chunk);
+				// Same per-socket guard the legacy broadcast had: a synchronous throw
+				// from a dead socket must never escape into the uncaughtException
+				// crash path (whole-branch review finding).
+				else { try { socket.write(outputLine); } catch { /* socket 'error' handler cleans up */ } }
+			}
 		}
 	});
 	child.onExit((code) => {
 		childExited = true;
 		resolveChildExit?.();
 		exitCode = code ?? 0;
+		if (frameReporter !== null) {
+			// F9: a trailing ordinary byte is forwarded through the normal output path.
+			cleanupFrameReporter(frameReporter, "child-exit", (trailing) => {
+				try {
+					screenLogBytes = appendBoundedScreenLog(screenLog, trailing, screenLogBytes, screenLogLimits);
+					const seq = feedOutput(terminalModel, trailing);
+					feedViewProofOutput(frameReporter, seq, trailing);
+					for (const [socket, sub] of terminalSubscriptions) {
+						if (sub.subscribed()) sub.onOutput(seq, trailing);
+					}
+				} catch {
+					/* best effort during exit */
+				}
+			});
+			resetViewProofSubscribers(terminalSubscriptions, "child-exit");
+			try {
+				ownedUpdate((cur) => ({ ...cur, frameWitness: frameWitnessSummary(frameReporter) }));
+			} catch {
+				/* row may already be finalised */
+			}
+		}
 		// Terminate lifecycle (spec D4): a confirmed child exit is the observed
 		// evidence for any enveloped terminate still pending — flush before the
 		// finish teardown ends the client sockets.
@@ -1106,6 +1515,33 @@ async function ownedMain(config) {
 					terminalSubscriptions.delete(socket);
 				}
 				if (book.registerReporter) editorReporters.add(socket);
+				// Issue #222 FW-04: a frame reporter gets a per-instance random token; only a
+				// valid hello + frameWitness protocol 1 enables anything. Old/no hello is
+				// unchanged (no new messages).
+				{
+					const enabled = enableFrameReporter(socket, msg, send);
+					if (enabled !== null) {
+						const replacingReporter = frameReporter !== null && frameReporter.socket !== socket;
+						if (replacingReporter) {
+							// Same ordinary-trailing forwarding path as close/error/child-exit: a
+							// pending ordinary tail must not be lost when the reporter is replaced.
+							cleanupFrameReporter(frameReporter, "reporter-replaced", (trailing) => {
+								try {
+									screenLogBytes = appendBoundedScreenLog(screenLog, trailing, screenLogBytes, screenLogLimits);
+									const seq = feedOutput(terminalModel, trailing);
+									lastOutputSeq = seq;
+									feedViewProofOutput(frameReporter, seq, trailing);
+									for (const [peer, sub] of terminalSubscriptions) if (sub.subscribed()) sub.onOutput(seq, trailing);
+								} catch {
+									/* best effort during replacement */
+								}
+							});
+						}
+						frameReporter = enabled;
+						if (replacingReporter) resetViewProofSubscribers(terminalSubscriptions, "reporter-replaced");
+						try { ownedUpdate((cur) => ({ ...cur, frameWitness: frameWitnessSummary(frameReporter) })); } catch { /* row may be finalised */ }
+					}
+				}
 				// The probe's close-time host.json refresh stays suppressed: the
 				// resolver probes every HOST_PROBE_RETRY_MS, so flushing there
 				// would amplify fenced writes (see the probeSockets comment at the
