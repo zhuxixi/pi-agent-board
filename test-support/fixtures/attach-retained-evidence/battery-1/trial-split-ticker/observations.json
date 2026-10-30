@@ -1,0 +1,86 @@
+{
+  "observations": [
+    {
+      "grid": [
+        {
+          "text": " s15 attached · opens links · drag selects+copies · Ctrl+←/Ctrl+\\ detach"
+        },
+        {
+          "text": "F1 HEADER controlled work area"
+        },
+        {
+          "text": "F1 UPPER reply history one"
+        },
+        {
+          "text": "F1 UPPER reply history two"
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": "F1 MIDDLE divider"
+        },
+        {
+          "text": "F0 LOWER reply history three                                                    "
+        },
+        {
+          "text": "F0 LOWER reply history four                                                     "
+        },
+        {
+          "text": "                                                                                "
+        },
+        {
+          "text": "                                                                                "
+        },
+        {
+          "text": "                                                                                "
+        },
+        {
+          "text": "                                                                                "
+        },
+        {
+          "text": "                                                                                "
+        },
+        {
+          "text": "                                                                                "
+        },
+        {
+          "text": "F0 TAIL assistant final answer                                                  "
+        },
+        {
+          "text": "                                                                                "
+        },
+        {
+          "text": "F0 INPUT >                                                                      "
+        },
+        {
+          "text": "────────────────────────────────────────────────────────────────────────────────"
+        }
+      ]
+    }
+  ],
+  "fixtureDerivation": {
+    "kind": "exact-grid-text-projection",
+    "sourceObservationIndex": 32,
+    "sourceObservationCount": 55,
+    "selection": "first observation satisfying the existing S mixed upper/lower predicate"
+  }
+}

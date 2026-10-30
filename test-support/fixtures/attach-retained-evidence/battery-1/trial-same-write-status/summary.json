@@ -1,0 +1,744 @@
+{
+  "ok": true,
+  "variant": "same-write",
+  "entry": "status",
+  "declared": {
+    "variant": "same-write",
+    "entry": "status",
+    "screens": [
+      "bootstrap-blank",
+      "loading-Starting the session host… 0s-⠋",
+      "loading-Starting the session host… 0s-⠙",
+      "loading-Starting the session host… 0s-⠹",
+      "loading-Starting the session host… 0s-⠸",
+      "loading-Starting the session host… 0s-⠼",
+      "loading-Starting the session host… 0s-⠴",
+      "loading-Starting the session host… 0s-⠦",
+      "loading-Starting the session host… 0s-⠧",
+      "loading-Starting the session host… 0s-⠇",
+      "loading-Starting the session host… 0s-⠏",
+      "loading-Starting the session host… 1s-⠋",
+      "loading-Starting the session host… 1s-⠙",
+      "loading-Starting the session host… 1s-⠹",
+      "loading-Starting the session host… 1s-⠸",
+      "loading-Starting the session host… 1s-⠼",
+      "loading-Starting the session host… 1s-⠴",
+      "loading-Starting the session host… 1s-⠦",
+      "loading-Starting the session host… 1s-⠧",
+      "loading-Starting the session host… 1s-⠇",
+      "loading-Starting the session host… 1s-⠏",
+      "loading-Attached · waiting for the session to render…-⠋",
+      "loading-Attached · waiting for the session to render…-⠙",
+      "loading-Attached · waiting for the session to render…-⠹",
+      "loading-Attached · waiting for the session to render…-⠸",
+      "loading-Attached · waiting for the session to render…-⠼",
+      "loading-Attached · waiting for the session to render…-⠴",
+      "loading-Attached · waiting for the session to render…-⠦",
+      "loading-Attached · waiting for the session to render…-⠧",
+      "loading-Attached · waiting for the session to render…-⠇",
+      "loading-Attached · waiting for the session to render…-⠏",
+      "f0-complete",
+      "f1-complete",
+      "f2-complete"
+    ],
+    "preconditions": [
+      "runner model holds the complete literal F0 seed (proven via a real subscribe/capture on a second client before any step command)",
+      "an outer F0 commit is observed on the primary terminal before step 1 (post-settle live-entry trial)",
+      "every open-frame hold exceeds 40ms on the parent-local monotonic clock"
+    ],
+    "requiredScreens": [
+      "f0-complete",
+      "f2-complete"
+    ],
+    "teardownContract": {
+      "finalTargetId": "F2",
+      "allowedRowTexts": [
+        "F2 HEADER controlled work area",
+        "F2 UPPER reply history one",
+        "F2 UPPER reply history two",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "F2 MIDDLE divider",
+        "F2 LOWER reply history three",
+        "F2 LOWER reply history four",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "F2 TAIL assistant final answer",
+        "",
+        "F2 INPUT >",
+        " s15 connecting · opens links · drag selects+copies · Ctrl+←/Ctrl+\\ detach",
+        " s15 attached · opens links · drag selects+copies · Ctrl+←/Ctrl+\\ detach",
+        " s15 host exited · opens links · drag selects+copies · Ctrl+←/Ctrl+\\ detach",
+        "────────────────────────────────────────────────────────────────────────────────"
+      ]
+    }
+  },
+  "f0SeedProof": {
+    "ok": true,
+    "method": "runner-capture-replay",
+    "rawRows": [
+      "F0 HEADER controlled work area                                                  ",
+      "F0 UPPER reply history one                                                      ",
+      "F0 UPPER reply history two                                                      ",
+      "                                                                                ",
+      "                                                                                ",
+      "                                                                                ",
+      "                                                                                ",
+      "                                                                                ",
+      "                                                                                ",
+      "                                                                                ",
+      "F0 MIDDLE divider                                                               ",
+      "F0 LOWER reply history three                                                    ",
+      "F0 LOWER reply history four                                                     ",
+      "                                                                                ",
+      "                                                                                ",
+      "                                                                                ",
+      "                                                                                ",
+      "                                                                                ",
+      "                                                                                ",
+      "F0 TAIL assistant final answer                                                  ",
+      "                                                                                ",
+      "F0 INPUT >                                                                      "
+    ],
+    "rows": [
+      "F0 HEADER controlled work area",
+      "F0 UPPER reply history one",
+      "F0 UPPER reply history two",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "F0 MIDDLE divider",
+      "F0 LOWER reply history three",
+      "F0 LOWER reply history four",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "F0 TAIL assistant final answer",
+      "",
+      "F0 INPUT >"
+    ],
+    "snapshotSeq": 1,
+    "detail": "captured frame paints the literal F0 screen (right-trimmed per the producer contract)"
+  },
+  "finalTarget": {
+    "frameId": "F2",
+    "committed": true,
+    "rows": [
+      "F2 HEADER controlled work area",
+      "F2 UPPER reply history one",
+      "F2 UPPER reply history two",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "F2 MIDDLE divider",
+      "F2 LOWER reply history three",
+      "F2 LOWER reply history four",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "F2 TAIL assistant final answer",
+      "",
+      "F2 INPUT >"
+    ],
+    "outerCursor": {
+      "x": 10,
+      "y": 21,
+      "absoluteY": 21,
+      "visible": false
+    },
+    "childLogicalCursor": {
+      "x": 10,
+      "y": 21,
+      "visible": false
+    }
+  },
+  "closeOrdering": {
+    "ok": true,
+    "phases": [
+      "seed",
+      "open",
+      "close-open",
+      "closed"
+    ],
+    "commandOrder": [
+      "stdout-write:0",
+      "command:1",
+      "stdout-write:1",
+      "command:2",
+      "stdout-write:2",
+      "command:3",
+      "stdout-write:3",
+      "command:",
+      "exit:"
+    ],
+    "expectedOrder": [
+      "stdout-write:0",
+      "command:1",
+      "stdout-write:1",
+      "command:2",
+      "stdout-write:2",
+      "command:3",
+      "stdout-write:3",
+      "command:",
+      "exit:"
+    ],
+    "detail": "child phases and command/write ordering from the child event log",
+    "closeOpenAdjacency": true,
+    "componentRxChunkEvidence": {
+      "found": true,
+      "inOneMessage": true,
+      "inOneChunk": true,
+      "messageIndex": 4,
+      "chunkIndex": 3,
+      "chunkAt": 5858.636447
+    }
+  },
+  "streamAudit": {
+    "ok": true
+  },
+  "noControlEcho": true,
+  "holds": [
+    {
+      "after": "f1-open-hold",
+      "plannedMs": 120,
+      "actualMs": 119.25098400000024,
+      "openFrame": true,
+      "startAt": 5736.145976,
+      "endAt": 5855.39696
+    },
+    {
+      "after": "closeopen-hold-1",
+      "plannedMs": 120,
+      "actualMs": 120.36226799999986,
+      "openFrame": true,
+      "startAt": 5856.014053,
+      "endAt": 5976.376321
+    },
+    {
+      "after": "closeopen-hold-2",
+      "plannedMs": 150,
+      "actualMs": 150.46772800000053,
+      "openFrame": true,
+      "startAt": 5976.550141,
+      "endAt": 6127.017869
+    }
+  ],
+  "attachingWindowMs": 262.0332330000001,
+  "chromeViolations": [],
+  "teardownViolations": [],
+  "oracleFailures": [
+    {
+      "index": 20,
+      "category": "inverse-cells",
+      "expected": {
+        "screen": "f0-complete",
+        "inverseCells": []
+      },
+      "actual": {
+        "extraInverseCells": [
+          {
+            "x": 10,
+            "y": 21
+          }
+        ],
+        "missingInverseCells": [],
+        "kind": "frame",
+        "note": null
+      },
+      "attribution": "settle",
+      "candidates": [
+        "settle"
+      ]
+    },
+    {
+      "index": 21,
+      "category": "inverse-cells",
+      "expected": {
+        "screen": "f0-complete",
+        "inverseCells": []
+      },
+      "actual": {
+        "extraInverseCells": [
+          {
+            "x": 10,
+            "y": 21
+          }
+        ],
+        "missingInverseCells": [],
+        "kind": "unframed",
+        "note": null
+      },
+      "attribution": "settle",
+      "candidates": [
+        "settle"
+      ]
+    },
+    {
+      "index": 22,
+      "category": "inverse-cells",
+      "expected": {
+        "screen": "f0-complete",
+        "inverseCells": []
+      },
+      "actual": {
+        "extraInverseCells": [
+          {
+            "x": 10,
+            "y": 21
+          }
+        ],
+        "missingInverseCells": [],
+        "kind": "unframed",
+        "note": "sync-entry"
+      },
+      "attribution": "input-echo",
+      "candidates": [
+        "input-echo"
+      ]
+    },
+    {
+      "index": 23,
+      "category": "inverse-cells",
+      "expected": {
+        "screen": "f0-complete",
+        "inverseCells": []
+      },
+      "actual": {
+        "extraInverseCells": [
+          {
+            "x": 10,
+            "y": 21
+          }
+        ],
+        "missingInverseCells": [],
+        "kind": "frame",
+        "note": null
+      },
+      "attribution": "input-echo",
+      "candidates": [
+        "input-echo"
+      ]
+    },
+    {
+      "index": 24,
+      "category": "inverse-cells",
+      "expected": {
+        "screen": "f0-complete",
+        "inverseCells": []
+      },
+      "actual": {
+        "extraInverseCells": [
+          {
+            "x": 10,
+            "y": 21
+          }
+        ],
+        "missingInverseCells": [],
+        "kind": "unframed",
+        "note": null
+      },
+      "attribution": "input-echo",
+      "candidates": [
+        "input-echo"
+      ]
+    },
+    {
+      "index": 25,
+      "category": "inverse-cells",
+      "expected": {
+        "screen": "f0-complete",
+        "inverseCells": []
+      },
+      "actual": {
+        "extraInverseCells": [
+          {
+            "x": 10,
+            "y": 21
+          }
+        ],
+        "missingInverseCells": [],
+        "kind": "unframed",
+        "note": "sync-entry"
+      },
+      "attribution": "output-40ms",
+      "candidates": [
+        "output-40ms"
+      ]
+    },
+    {
+      "index": 26,
+      "category": "mixed-frame-id",
+      "expected": {
+        "screen": "f0-complete",
+        "row": 0,
+        "frameId": "F0",
+        "text": "F0 HEADER controlled work area"
+      },
+      "actual": {
+        "row": 0,
+        "frameId": "F1",
+        "text": "F1 HEADER controlled work area",
+        "kind": "frame",
+        "note": null
+      },
+      "attribution": "output-40ms",
+      "candidates": [
+        "output-40ms"
+      ]
+    },
+    {
+      "index": 27,
+      "category": "mixed-frame-id",
+      "expected": {
+        "screen": "f0-complete",
+        "row": 0,
+        "frameId": "F0",
+        "text": "F0 HEADER controlled work area"
+      },
+      "actual": {
+        "row": 0,
+        "frameId": "F1",
+        "text": "F1 HEADER controlled work area",
+        "kind": "unframed",
+        "note": null
+      },
+      "attribution": "output-40ms",
+      "candidates": [
+        "output-40ms"
+      ]
+    },
+    {
+      "index": 28,
+      "category": "mixed-frame-id",
+      "expected": {
+        "screen": "f0-complete",
+        "row": 0,
+        "frameId": "F0",
+        "text": "F0 HEADER controlled work area"
+      },
+      "actual": {
+        "row": 0,
+        "frameId": "F1",
+        "text": "F1 HEADER controlled work area",
+        "kind": "unframed",
+        "note": "sync-entry"
+      },
+      "attribution": "input-echo",
+      "candidates": [
+        "input-echo"
+      ]
+    },
+    {
+      "index": 29,
+      "category": "mixed-frame-id",
+      "expected": {
+        "screen": "f0-complete",
+        "row": 0,
+        "frameId": "F0",
+        "text": "F0 HEADER controlled work area"
+      },
+      "actual": {
+        "row": 0,
+        "frameId": "F1",
+        "text": "F1 HEADER controlled work area",
+        "kind": "frame",
+        "note": null
+      },
+      "attribution": "input-echo",
+      "candidates": [
+        "input-echo"
+      ]
+    },
+    {
+      "index": 30,
+      "category": "mixed-frame-id",
+      "expected": {
+        "screen": "f0-complete",
+        "row": 0,
+        "frameId": "F0",
+        "text": "F0 HEADER controlled work area"
+      },
+      "actual": {
+        "row": 0,
+        "frameId": "F1",
+        "text": "F1 HEADER controlled work area",
+        "kind": "unframed",
+        "note": null
+      },
+      "attribution": "input-echo",
+      "candidates": [
+        "input-echo"
+      ]
+    },
+    {
+      "index": 31,
+      "category": "mixed-frame-id",
+      "expected": {
+        "screen": "f0-complete",
+        "row": 0,
+        "frameId": "F0",
+        "text": "F0 HEADER controlled work area"
+      },
+      "actual": {
+        "row": 0,
+        "frameId": "F1",
+        "text": "F1 HEADER controlled work area",
+        "kind": "unframed",
+        "note": "sync-entry"
+      },
+      "attribution": "output-40ms",
+      "candidates": [
+        "output-40ms"
+      ]
+    },
+    {
+      "index": 32,
+      "category": "mixed-frame-id",
+      "expected": {
+        "screen": "f1-complete",
+        "row": 0,
+        "frameId": "F1",
+        "text": "F1 HEADER controlled work area"
+      },
+      "actual": {
+        "row": 0,
+        "frameId": "F2",
+        "text": "F2 HEADER controlled work area",
+        "kind": "frame",
+        "note": null
+      },
+      "attribution": "output-40ms",
+      "candidates": [
+        "output-40ms"
+      ]
+    },
+    {
+      "index": 33,
+      "category": "mixed-frame-id",
+      "expected": {
+        "screen": "f1-complete",
+        "row": 0,
+        "frameId": "F1",
+        "text": "F1 HEADER controlled work area"
+      },
+      "actual": {
+        "row": 0,
+        "frameId": "F2",
+        "text": "F2 HEADER controlled work area",
+        "kind": "unframed",
+        "note": null
+      },
+      "attribution": "output-40ms",
+      "candidates": [
+        "output-40ms"
+      ]
+    },
+    {
+      "index": 34,
+      "category": "mixed-frame-id",
+      "expected": {
+        "screen": "f1-complete",
+        "row": 0,
+        "frameId": "F1",
+        "text": "F1 HEADER controlled work area"
+      },
+      "actual": {
+        "row": 0,
+        "frameId": "F2",
+        "text": "F2 HEADER controlled work area",
+        "kind": "unframed",
+        "note": "sync-entry"
+      },
+      "attribution": "status",
+      "candidates": [
+        "status"
+      ]
+    },
+    {
+      "index": 35,
+      "category": "mixed-frame-id",
+      "expected": {
+        "screen": "f1-complete",
+        "row": 0,
+        "frameId": "F1",
+        "text": "F1 HEADER controlled work area"
+      },
+      "actual": {
+        "row": 0,
+        "frameId": "F2",
+        "text": "F2 HEADER controlled work area",
+        "kind": "frame",
+        "note": null
+      },
+      "attribution": "status",
+      "candidates": [
+        "status"
+      ]
+    },
+    {
+      "index": 36,
+      "category": "mixed-frame-id",
+      "expected": {
+        "screen": "f1-complete",
+        "row": 0,
+        "frameId": "F1",
+        "text": "F1 HEADER controlled work area"
+      },
+      "actual": {
+        "row": 0,
+        "frameId": "F2",
+        "text": "F2 HEADER controlled work area",
+        "kind": "unframed",
+        "note": null
+      },
+      "attribution": "status",
+      "candidates": [
+        "status"
+      ]
+    },
+    {
+      "index": 37,
+      "category": "mixed-frame-id",
+      "expected": {
+        "screen": "f1-complete",
+        "row": 0,
+        "frameId": "F1",
+        "text": "F1 HEADER controlled work area"
+      },
+      "actual": {
+        "row": 0,
+        "frameId": "F2",
+        "text": "F2 HEADER controlled work area",
+        "kind": "unframed",
+        "note": "sync-entry"
+      },
+      "attribution": "input-echo",
+      "candidates": [
+        "input-echo"
+      ]
+    },
+    {
+      "index": 38,
+      "category": "mixed-frame-id",
+      "expected": {
+        "screen": "f1-complete",
+        "row": 0,
+        "frameId": "F1",
+        "text": "F1 HEADER controlled work area"
+      },
+      "actual": {
+        "row": 0,
+        "frameId": "F2",
+        "text": "F2 HEADER controlled work area",
+        "kind": "frame",
+        "note": null
+      },
+      "attribution": "input-echo",
+      "candidates": [
+        "input-echo"
+      ]
+    },
+    {
+      "index": 39,
+      "category": "mixed-frame-id",
+      "expected": {
+        "screen": "f1-complete",
+        "row": 0,
+        "frameId": "F1",
+        "text": "F1 HEADER controlled work area"
+      },
+      "actual": {
+        "row": 0,
+        "frameId": "F2",
+        "text": "F2 HEADER controlled work area",
+        "kind": "unframed",
+        "note": null
+      },
+      "attribution": "input-echo",
+      "candidates": [
+        "input-echo"
+      ]
+    },
+    {
+      "index": 40,
+      "category": "mixed-frame-id",
+      "expected": {
+        "screen": "f1-complete",
+        "row": 0,
+        "frameId": "F1",
+        "text": "F1 HEADER controlled work area"
+      },
+      "actual": {
+        "row": 0,
+        "frameId": "F2",
+        "text": "F2 HEADER controlled work area",
+        "kind": "unframed",
+        "note": "sync-entry"
+      },
+      "attribution": "output-40ms",
+      "candidates": [
+        "output-40ms"
+      ]
+    }
+  ],
+  "firstBad": {
+    "observationIndex": 20,
+    "category": "inverse-cells",
+    "attribution": "settle",
+    "candidates": [
+      "settle"
+    ]
+  },
+  "verdicts": {
+    "status": {
+      "verdict": "REPRODUCED",
+      "requestsDuringHold": 1,
+      "submissionsDuringHold": 1,
+      "badSubmissions": 1
+    },
+    "output-40ms": {
+      "verdict": "REPRODUCED",
+      "requestsDuringHold": 2,
+      "submissionsDuringHold": 2,
+      "badSubmissions": 2
+    }
+  },
+  "cleanup": {
+    "childExited": true,
+    "childExitCode": null,
+    "runnerExited": true,
+    "runnerExitCode": 0,
+    "forcedKills": [],
+    "childAliveAfter": false,
+    "runnerAliveAfter": false,
+    "rootRemoved": true,
+    "rootRetainedForEvidence": false,
+    "ok": true
+  },
+  "artifactErrors": [],
+  "error": null,
+  "artifactDir": "/home/elling/work/git-repo/pi-agent-board/.pi/worktrees/issue-222-attach-ready/.superpowers/sdd/2026-10-23-issue-222-attach-ready/task-15-integration-parentfix2-artifacts/battery-1/trial-same-write-status"
+}

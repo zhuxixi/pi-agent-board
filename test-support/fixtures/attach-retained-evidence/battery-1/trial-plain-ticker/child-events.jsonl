@@ -1,0 +1,11 @@
+{"event":"start","script":"plain","pid":1852338,"cols":80,"rows":22,"protocol":"RS(0x1E) + JSON + LF(0x0A); commands: {\"cmd\":\"step\",\"step\":N} strictly in order, {\"cmd\":\"exit\"}","clock":{"mono":"process.hrtime.bigint (ns, arbitrary origin)","wall":"Date.now (ms)","note":"child clock has no proven common origin with any parent clock; timings are emission/write-callback facts only"},"monoNs":"356335258476857","wallMs":1792778005464}
+{"event":"stdout-write","script":"plain","step":0,"frame":"F0","phase":"seed","writeIndex":0,"bytes":465,"sha256":"9cc80f0f164bab5dd1b572b13f390079d63efc7b00aa1542f3389e62d73edcb5","monoNs":"356335260812085","wallMs":1792778005466}
+{"event":"stdout-write-flushed","writeIndex":0,"monoNs":"356335261842594","wallMs":1792778005467}
+{"event":"command","step":1,"raw":"{\"cmd\":\"step\",\"step\":1}","monoNs":"356335574105646","wallMs":1792778005779}
+{"event":"stdout-write","script":"plain","step":1,"frame":"F1","phase":"open","writeIndex":1,"bytes":233,"sha256":"dbc9d3d8b4ce6618d214bac2f2173977b9e8116d375ebe87a0460714a915d292","monoNs":"356335574412880","wallMs":1792778005780}
+{"event":"stdout-write-flushed","writeIndex":1,"monoNs":"356335574555836","wallMs":1792778005780}
+{"event":"command","step":2,"raw":"{\"cmd\":\"step\",\"step\":2}","monoNs":"356335974065921","wallMs":1792778006179}
+{"event":"stdout-write","script":"plain","step":2,"frame":"F1","phase":"closed","writeIndex":2,"bytes":238,"sha256":"5d5159ab1fab872429e44c672f6de660fb109d46a480d95327c00eb74d7e35bd","monoNs":"356335974572374","wallMs":1792778006180}
+{"event":"stdout-write-flushed","writeIndex":2,"monoNs":"356335974836120","wallMs":1792778006180}
+{"event":"command","raw":"{\"cmd\":\"exit\"}","monoNs":"356336036639094","wallMs":1792778006242}
+{"event":"exit","monoNs":"356336036852626","wallMs":1792778006242}

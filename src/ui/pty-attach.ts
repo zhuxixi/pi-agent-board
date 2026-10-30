@@ -7,11 +7,13 @@ import type { Component, KeybindingsManager, RgbColor, TUI, TerminalColorScheme,
 import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { resolveAttachDeleteKey } from "../core/attach-delete.mjs";
 import { findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
-import { createAttachOutputRenderScheduler, detectCursorDesync, isPtyCursorHidden, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
+import { canPublishAttachView, createAttachOutputRenderScheduler, decideAttachPresentation, detectCursorDesync, isPtyCursorHidden, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
 import { evaluateAttachReconnect, shouldEscapeAttach } from "../core/pty-attach-reconnect.mjs";
 import { installImeCursorCoalesce } from "../core/ime-cursor-coalesce.mjs";
 import { createJiggleRetryController } from "../core/pty-attach-jiggle-controller.mjs";
 import { createTerminalAttachClient } from "../core/terminal-attach-client.mjs";
+import { MAX_VIEW_PROOF_RECORDS } from "../core/terminal-attach-protocol.mjs";
+import { createSafeTrailingClassifier } from "../core/attach-view-proof.mjs";
 import { backgroundRgbFromTerminalColors, buildSettleSchemePatch, colorSchemeForBackgroundRgb, extractOscQuerySequences, resolveProbeApi, toColorSchemeReport } from "../core/terminal-query-sequences.mjs";
 import { REPLY_GUARD_WINDOW_MS, createReplyGuard, isReplyGuardEnabled } from "../core/terminal-reply-guard.mjs";
 import { clampInt, encodeWheelReport, fullscreenMouseEnableSequence, historyFloorAfterHydrate, isFullscreenSelectionEnd, resolveAttachMouseAction, resolveAttachWheelRoute, resolvePasteSelectionSource, resolveWheelLines, sameMousePoint, scrollableHistoryLines, scrollViewportTop, selectionDragScrollLines, selectionReleaseIsDrag, shouldOwnOuterMouseMode, splitAttachInput, wheelScrollLinesUp } from "../core/pty-scroll.mjs";
@@ -102,9 +104,15 @@ const TERMINAL_PASSTHROUGH_CARRY_MAX_BYTES = TERMINAL_PASSTHROUGH_MAX_BYTES + 40
 const KITTY_IMAGE_PREFIX = "\x1b_G";
 const ITERM2_FILE_PREFIX = "\x1b]1337;File=";
 
+interface XtermParserLike {
+	registerCsiHandler(opts: { prefix: string; final: string }, cb: (params: (number | number[])[]) => boolean): { dispose(): void };
+}
+
 interface XtermLike {
 	write(data: string, cb?: () => void): void;
 	resize(cols: number, rows: number): void;
+	parser?: XtermParserLike;
+	dispose?(): void;
 	// Full buffer wipe (@xterm/headless Terminal.reset): the attach client's
 	// "empty/resnapshot → UI resets its buffer" contract (phase 4, F3).
 	reset(): void;
@@ -159,6 +167,93 @@ interface BufferCellLike {
 	isInvisible(): number;
 	isStrikethrough(): number;
 	isOverline(): number;
+}
+
+interface CommittedRow { cells: SnapshotLine; }
+
+interface CommittedView {
+	identity: {
+		connectionToken: number;
+		baselineToken: number;
+		generation: string;
+		parser: XtermLike;
+		geometryRevision: number;
+		targetCols: number;
+		targetRows: number;
+		closed: boolean;
+	};
+	start: number;
+	end: number;
+	rows: CommittedRow[];
+	cursor: { row: number; col: number } | null;
+	cursorHidden: boolean;
+	viewportTop: number | null;
+	proofSeq: number | null;
+}
+
+/** Primitive cell snapshot used by committed rendering and interactions. */
+class SnapshotCell implements BufferCellLike {
+	private constructor(
+		private readonly charsValue: string,
+		private readonly widthValue: number,
+		private readonly attrs: {
+			bold: number; dim: number; italic: number; underline: number; blink: number; inverse: number;
+			invisible: number; strikethrough: number; overline: number;
+			fgRGB: boolean; fgPalette: boolean; fg: number;
+			bgRGB: boolean; bgPalette: boolean; bg: number;
+		},
+		private readonly uriValue: string,
+	) {
+		this.extended = this.uriValue ? { urlId: 1, _urlId: 1 } : undefined;
+	}
+	static empty(): SnapshotCell {
+		return new SnapshotCell("", 0, {
+			bold: 0, dim: 0, italic: 0, underline: 0, blink: 0, inverse: 0,
+			invisible: 0, strikethrough: 0, overline: 0,
+			fgRGB: false, fgPalette: false, fg: -1, bgRGB: false, bgPalette: false, bg: -1,
+		}, "");
+	}
+	static fromBufferCell(cell: BufferCellLike, uri: string): SnapshotCell {
+		return new SnapshotCell(cell.getChars(), cell.getWidth(), {
+			bold: cell.isBold(), dim: cell.isDim(), italic: cell.isItalic(), underline: cell.isUnderline(),
+			blink: cell.isBlink(), inverse: cell.isInverse(), invisible: cell.isInvisible(),
+			strikethrough: cell.isStrikethrough(), overline: cell.isOverline(),
+			fgRGB: cell.isFgRGB(), fgPalette: cell.isFgPalette(), fg: cell.getFgColor(),
+			bgRGB: cell.isBgRGB(), bgPalette: cell.isBgPalette(), bg: cell.getBgColor(),
+		}, uri);
+	}
+	getWidth(): number { return this.widthValue; }
+	getChars(): string { return this.charsValue; }
+	hasExtendedAttrs(): number { return this.uriValue ? 1 : 0; }
+	extended?: { urlId?: number; _urlId?: number };
+	getFgColor(): number { return this.attrs.fg; }
+	getBgColor(): number { return this.attrs.bg; }
+	isFgRGB(): boolean { return this.attrs.fgRGB; }
+	isBgRGB(): boolean { return this.attrs.bgRGB; }
+	isFgPalette(): boolean { return this.attrs.fgPalette; }
+	isBgPalette(): boolean { return this.attrs.bgPalette; }
+	isFgDefault(): boolean { return !this.attrs.fgRGB && !this.attrs.fgPalette; }
+	isBgDefault(): boolean { return !this.attrs.bgRGB && !this.attrs.bgPalette; }
+	isBold(): number { return this.attrs.bold; }
+	isItalic(): number { return this.attrs.italic; }
+	isDim(): number { return this.attrs.dim; }
+	isUnderline(): number { return this.attrs.underline; }
+	isBlink(): number { return this.attrs.blink; }
+	isInverse(): number { return this.attrs.inverse; }
+	isInvisible(): number { return this.attrs.invisible; }
+	isStrikethrough(): number { return this.attrs.strikethrough; }
+	isOverline(): number { return this.attrs.overline; }
+	osc8Uri(): string { return this.uriValue; }
+}
+
+class SnapshotLine implements BufferLineLike {
+	constructor(readonly cells: SnapshotCell[]) {}
+	get length(): number { return this.cells.length; }
+	getCell(x: number): BufferCellLike | undefined { return this.cells[x]; }
+	translateToString(trimRight = false): string {
+		const text = this.cells.map((cell) => cell.getChars() || " ").join("");
+		return trimRight ? text.replace(/\s+$/u, "") : text;
+	}
 }
 
 type MousePoint = { line: number; col: number };
@@ -232,7 +327,55 @@ export class PtyAttachComponent implements Component {
 	// configurable via $AGENT_BOARD_WHEEL_LINES. The fullscreen handleMouse path uses
 	// the TUI's wheelDelta instead, which is already accelerated and line-quantified.
 	private readonly mouseWheelLines = resolveWheelLines();
-	private readonly term: XtermLike;
+	/** Current local parser. Replaced atomically at an accepted snapshotReady. */
+	private term: XtermLike;
+	/** Monotonic identity axes: one per accepted socket / authoritative baseline / parser. */
+	private connectionToken = 0;
+	private baselineToken = 0;
+	private parserEpoch = 1;
+	private parserObservers: Array<{ dispose(): void }> = [];
+	private parserObservationSupported = true;
+	private replacementFailureCount = 0;
+	private parserSyncOpen = false;
+	private parserObserverEvents = 0;
+	private collectingConnectionToken = 0;
+	private collectingBaselineToken = 0;
+	private collectingParserEpoch = 0;
+	/** Distinct facts; none of these is presentation truth in this stage. */
+	private protocolBaselineState: "unverified" | "valid-empty" | "valid-content" = "unverified";
+	private localHydrationState: "idle" | "hydrating" | "complete" | "failed" = "idle";
+	private publishabilityState: "wait" | "unknown" | "ready" = "wait";
+	private firstAttachSideEffectsApplied = false;
+	private latestViewProof: unknown = null;
+	private viewProofRecords: unknown[] = [];
+	private viewProofRecordCount = 0;
+	/** Identity captured when the current proof/coverage was received. */
+	private viewProofIdentity: ReturnType<PtyAttachComponent["currentViewIdentity"]> | null = null;
+	/** Local geometry revision: incremented once per real differing-size transition. */
+	private geometryRevision = 0;
+	private resizeIntentRequired = false;
+	private resizeIntentSatisfied = false;
+	private resizeIntentId = 0;
+	private pendingEarlySyncTarget: string | null = null;
+	/** Protocol transition facts; timers may mark expiry but never publish. */
+	private deadlineState: "pending" | "expired" = "pending";
+	private notReadyReason: string | null = null;
+	private parserWritesInFlight = 0;
+	private readonly attachStartedAt = Date.now();
+	private readonly viewProofTrailing = createSafeTrailingClassifier();
+	private recentProtocolOutput: Array<{ seq: number; data: string }> = [];
+	private proofResyncRequested = false;
+	/** Runner-reported reporter capability. Without it the attach keeps the
+	 *  accepted legacy deadline path (old/no-reporter hosts are not stranded). */
+	private frameWitnessAvailable = false;
+	/** Last complete modern projection installed at a real ?2026l boundary. */
+	private committedView: CommittedView | null = null;
+	/** Display-only same-generation/geometry recovery view; never readiness. */
+	private recoveryView: CommittedView | null = null;
+	private recoveryGeneration: string | null = null;
+	private currentWireGeneration: string | null = null;
+	private emptyResetPending = false;
+	private attachWaitToken = 0;
 	private cols = 120;
 	private rows = 24;
 	// Absolute buffer line shown at the top of the viewport. null means follow bottom.
@@ -315,6 +458,9 @@ export class PtyAttachComponent implements Component {
 		// parameter property is set regardless of the TS loader's field-init semantics.
 		this.imeCoalesceUninstall = installImeCursorCoalesce(this.tui);
 		this.term = new Terminal({ cols: this.cols, rows: this.rows, scrollback: 2000, allowProposedApi: true });
+		this.parserObservers = this.installParserObservers(this.term, this.parserEpoch);
+		this.parserObservationSupported = this.parserObservers.length > 0;
+		if (!this.parserObservationSupported) this.attachClient.forceLegacy("parser_observation_unavailable");
 		// Keep mouse reporting enabled by default so wheel scrolling and local drag-to-copy
 		// selection can coexist inside the attach surface. Set AGENT_BOARD_ATTACH_MOUSE=0
 		// to fall back to terminal-native selection only.
@@ -557,11 +703,14 @@ export class PtyAttachComponent implements Component {
 	}
 
 	render(width: number): string[] {
+		if (this.closed) return [];
 		this.resizeIfNeeded(width);
 		const height = this.tui.terminal?.rows ?? 24;
 		const bodyHeight = Math.max(1, height - 2);
 		let body: string[];
-		if (!this.attaching && this.receivedOutput) {
+		if (this.modernCommittedMode() && this.emptyResetPending) {
+			body = Array.from({ length: bodyHeight }, () => "");
+		} else if (!this.attaching && this.receivedOutput) {
 			const projected = this.project(bodyHeight);
 			body = projected.lines;
 			while (body.length < bodyHeight) body.unshift("");
@@ -626,6 +775,102 @@ export class PtyAttachComponent implements Component {
 		this.done({ action: "detached" });
 	}
 
+		/** Install the component's public ?2026 observers; false return keeps xterm defaults. */
+	private installParserObservers(term: XtermLike, epoch: number): Array<{ dispose(): void }> {
+		try {
+			const parser = term.parser;
+			if (!parser || typeof parser.registerCsiHandler !== "function") return [];
+			const has2026 = (params: readonly (number | number[])[]) => params.some((p) => p === 2026 || (Array.isArray(p) && p.includes(2026)));
+			return [
+				parser.registerCsiHandler({ prefix: "?", final: "h" }, (params) => {
+					if (this.closed || this.term !== term || this.parserEpoch !== epoch) return false;
+					if (has2026(params)) {
+						this.parserSyncOpen = true;
+						this.parserObserverEvents += 1;
+					}
+					return false;
+				}),
+				parser.registerCsiHandler({ prefix: "?", final: "l" }, (params) => {
+					if (this.closed || this.term !== term || this.parserEpoch !== epoch) return false;
+					if (has2026(params)) {
+						this.parserSyncOpen = false;
+						this.parserObserverEvents += 1;
+						this.commitCommittedView(term, epoch);
+					}
+					return false;
+				}),
+			];
+		} catch {
+			return [];
+		}
+	}
+
+	/**
+	 * Replace the local parser exactly at an accepted authoritative snapshotReady:
+	 * same constructor options, observers installed before the first frame write.
+	 * Creation/observer failure is fail-closed (old parser retained, no write).
+	 */
+	private replaceParser(): boolean {
+		// Preserve the last complete same-generation view before a nonempty
+		// resnapshot replaces the parser. An empty baseline clears it later in
+		// the same snapshotReady event.
+		this.captureRecoveryView();
+		let next: XtermLike;
+		try {
+			next = new Terminal({ cols: this.cols, rows: this.rows, scrollback: 2000, allowProposedApi: true });
+		} catch {
+			return false;
+		}
+		const nextEpoch = this.parserEpoch + 1;
+		const observers = this.installParserObservers(next, nextEpoch);
+		if (observers.length === 0) {
+			try { next.dispose?.(); } catch { /* best effort */ }
+			return false;
+		}
+		const previous = this.term;
+		const previousObservers = this.parserObservers;
+		this.term = next;
+		this.parserObservers = observers;
+		this.parserEpoch = nextEpoch;
+		this.baselineToken += 1;
+		this.replacementFailureCount = 0;
+		this.parserObservationSupported = true;
+		this.parserSyncOpen = false;
+		this.parserWritesInFlight = 0;
+		this.committedView = null;
+		this.historyFloor = 0;
+		this.viewportTop = null;
+		this.selection = null;
+		this.selectionDragging = false;
+		this.localHydrationState = "idle";
+		for (const observer of previousObservers) {
+			try { observer.dispose(); } catch { /* best effort */ }
+		}
+		try { previous.dispose?.(); } catch { /* best effort */ }
+		return true;
+	}
+
+	private disposeCurrentParser(): void {
+		for (const observer of this.parserObservers) {
+			try { observer.dispose(); } catch { /* best effort */ }
+		}
+		this.parserObservers = [];
+		try { this.term.dispose?.(); } catch { /* best effort */ }
+	}
+
+	/** Bounded fail-closed policy for a failed authoritative parser replacement. */
+	private handleParserReplacementFailure(): void {
+		this.protocolBaselineState = "unverified";
+		this.localHydrationState = "failed";
+		this.publishabilityState = "wait";
+		this.latestViewProof = null;
+		this.viewProofRecords = [];
+		this.viewProofRecordCount = 0;
+		this.replacementFailureCount += 1;
+		if (this.replacementFailureCount <= 3) this.attachClient.requestResync("parser_replacement_failed");
+		else this.attachClient.forceLegacy("parser_replacement_failed");
+	}
+
 	private connect(): void {
 		if (this.closed || this.connected || this.socket) return;
 		// On Windows the control socket is a named pipe — it never exists as a
@@ -647,10 +892,18 @@ export class PtyAttachComponent implements Component {
 				return;
 			}
 			this.clearRetry();
+			this.outputRenderScheduler.cancel();
+			this.captureRecoveryView();
 			this.connected = true;
 			this.everConnected = true;
+			this.connectionToken += 1;
+			this.committedView = null;
+			this.currentWireGeneration = null;
+			// Do not paint the previous generation between reconnect and its
+			// confirming hello/status; same-generation status clears this gate.
+			this.emptyResetPending = true;
 			this.disconnectedAt = null;
-			this.status = "attached";
+			this.status = this.recoveryView !== null ? "reconnecting…" : "attached";
 			this.send({ type: "hello", clientId: `ui-${Date.now()}`, wantOutput: true });
 			// Snapshot+subscribe attach (issue #91 phase 4): the first connect
 			// probes with subscribe_terminal (old runners stay silent → probe
@@ -665,7 +918,7 @@ export class PtyAttachComponent implements Component {
 			// so the jiggle never runs there (armLegacyJiggle guards the race).
 			this.armLegacyJiggle();
 			this.enableMouseScroll();
-			this.scheduleRender();
+			if (!this.emptyResetPending) this.scheduleRender();
 			this.startAttachSettle();
 		});
 		socket.on("data", (chunk) => {
@@ -676,6 +929,7 @@ export class PtyAttachComponent implements Component {
 			// A failed socket can close after a replacement connection has already
 			// succeeded. Never let that stale event clear the replacement state.
 			if (this.socket !== socket) return;
+			this.captureRecoveryView();
 			this.socket = null;
 			this.connected = false;
 			this.disconnectedAt ??= Date.now();
@@ -697,6 +951,7 @@ export class PtyAttachComponent implements Component {
 				try { socket.destroy(); } catch { /* best-effort stale-socket cleanup */ }
 				return;
 			}
+			this.captureRecoveryView();
 			this.socket = null;
 			this.connected = false;
 			// Notify before nulling: the close event that follows will hit the
@@ -767,22 +1022,313 @@ export class PtyAttachComponent implements Component {
 	 */
 	private startAttachSettle(): void {
 		if (!this.attaching) return;
+		this.attachWaitToken += 1;
+		const waitToken = this.attachWaitToken;
 		this.deferAttachSettle();
+		if (this.attachHardTimeout) clearTimeout(this.attachHardTimeout);
+		const remainingHard = Math.max(0, ATTACH_HARD_TIMEOUT_MS - (Date.now() - this.attachStartedAt));
+		this.attachHardTimeout = setTimeout(() => this.handleAttachHardTimeout(waitToken), remainingHard);
+		this.attachHardTimeout.unref?.();
+	}
+
+	private deferAttachSettle(): void {
+		if (!this.attaching || (this.attachMode === "protocol" && this.frameWitnessAvailable)) return;
+		if (this.attachSettleTimer) clearTimeout(this.attachSettleTimer);
+		const waitToken = this.attachWaitToken;
+		this.attachSettleTimer = setTimeout(() => this.handleAttachSettleTimeout(waitToken), ATTACH_SETTLE_MS);
+		this.attachSettleTimer.unref?.();
+	}
+
+	/** Legacy settle callback. In protocol mode the timer is cancelled; an
+	 *  undecided timer may not consume the first transition either. */
+	private handleAttachSettleTimeout(waitToken = this.attachWaitToken): void {
+		if (waitToken !== this.attachWaitToken) return;
+		this.attachSettleTimer = null;
+		if (!this.attaching || this.closed) return;
+		const legacyCompatible = this.attachMode === "legacy" || (this.attachMode === "protocol" && !this.frameWitnessAvailable);
+		if (legacyCompatible) this.finishAttachTransition();
+	}
+
+	/** The 2500 ms cap never forces a modern publish. It records an explicit
+	 *  expired/degraded wait instead; legacy keeps its old reveal. */
+	private handleAttachHardTimeout(waitToken = this.attachWaitToken): void {
+		if (waitToken !== this.attachWaitToken) return;
+		this.attachHardTimeout = null;
+		if (!this.attaching || this.closed) return;
+		const legacyCompatible = this.attachMode === "legacy" || (this.attachMode === "protocol" && !this.frameWitnessAvailable);
+		if (legacyCompatible) {
+			this.finishAttachTransition();
+			return;
+		}
+		this.deadlineState = "expired";
+		this.notReadyReason = this.attachMode === "protocol" ? "deadline-expired:waiting-for-complete-frame" : "deadline-expired:mode-undecided";
+		this.publishabilityState = "unknown";
+		this.scheduleRender();
+	}
+
+	/** A late legacy decision restores the ORIGINAL deadlines (remaining time),
+	 *  not a fresh extended window. */
+	private restoreLegacyDeadlines(): void {
+		if (!this.attaching || this.closed) return;
+		const now = Date.now();
+		if (now - this.attachStartedAt >= ATTACH_HARD_TIMEOUT_MS) {
+			this.finishAttachTransition();
+			return;
+		}
+		const settleBase = this.lastOutputAt > 0 ? this.lastOutputAt : this.attachStartedAt;
+		const remaining = Math.max(0, ATTACH_SETTLE_MS - (now - settleBase));
+		if (this.attachSettleTimer) clearTimeout(this.attachSettleTimer);
+		const waitToken = this.attachWaitToken;
+		this.attachSettleTimer = setTimeout(() => this.handleAttachSettleTimeout(waitToken), remaining);
+		this.attachSettleTimer.unref?.();
 		if (!this.attachHardTimeout) {
-			this.attachHardTimeout = setTimeout(() => this.finishAttachTransition(), ATTACH_HARD_TIMEOUT_MS);
+			this.attachHardTimeout = setTimeout(() => this.handleAttachHardTimeout(waitToken), Math.max(0, ATTACH_HARD_TIMEOUT_MS - (now - this.attachStartedAt)));
 			this.attachHardTimeout.unref?.();
 		}
 	}
 
-	private deferAttachSettle(): void {
-		if (!this.attaching) return;
-		if (this.attachSettleTimer) clearTimeout(this.attachSettleTimer);
-		this.attachSettleTimer = setTimeout(() => this.finishAttachTransition(), ATTACH_SETTLE_MS);
-		this.attachSettleTimer.unref?.();
+	private currentViewIdentity() {
+		return {
+			connectionToken: this.connectionToken,
+			baselineToken: this.baselineToken,
+			generation: this.attachClient.getIdentity().generation ?? "local",
+			parser: this.term,
+			geometryRevision: this.geometryRevision,
+			targetCols: this.cols,
+			targetRows: this.rows,
+			closed: this.closed,
+		};
+	}
+
+	/** Snapshot the visible complete grid at a real close boundary. Only
+	 *  primitives are copied; no xterm BufferLine/Cell survives this call. */
+	private commitCommittedView(term: XtermLike, epoch: number): void {
+		if (this.closed || this.term !== term || this.parserEpoch !== epoch) return;
+		if (!this.modernCommittedMode() || this.localHydrationState === "hydrating") return;
+		const height = this.bodyHeight();
+		const buf = term.buffer.active;
+		const start = Math.max(0, Math.min(this.viewportTop ?? this.liveBottomViewportTop(height), Math.max(0, buf.length - height)));
+		const end = Math.min(buf.length, start + height);
+		const rows: CommittedRow[] = [];
+		for (let lineIndex = start; lineIndex < end; lineIndex += 1) {
+			const line = buf.getLine(lineIndex);
+			const cells: SnapshotCell[] = [];
+			if (line) {
+				for (let x = 0; x < line.length; x += 1) {
+					const cell = line.getCell(x);
+					if (!cell || cell.getWidth() === 0) {
+						cells.push(SnapshotCell.empty());
+						continue;
+					}
+					cells.push(SnapshotCell.fromBufferCell(cell, osc8UriForCell(term, cell)));
+				}
+			}
+			rows.push({ cells: new SnapshotLine(cells) });
+		}
+		const cursor = projectPtyCursor(buf, start, height);
+		this.committedView = {
+			identity: this.currentViewIdentity(),
+			start,
+			end,
+			rows,
+			cursor,
+			cursorHidden: isPtyCursorHidden(term),
+			viewportTop: this.viewportTop,
+			proofSeq: null,
+		};
+		this.recoveryView = null;
+		this.recoveryGeneration = null;
+		this.emptyResetPending = false;
+		if (this.connected) this.status = "attached";
+	}
+
+	private captureRecoveryView(): void {
+		if (!this.modernCommittedMode() || this.committedView === null || this.closed) return;
+		if (!canPublishAttachView(this.committedView.identity, this.currentViewIdentity())) return;
+		this.recoveryView = this.committedView;
+		this.recoveryGeneration = this.committedView.identity.generation;
+	}
+
+	private invalidateRecoveryView(): void {
+		this.recoveryView = null;
+		this.recoveryGeneration = null;
+	}
+
+	private recoveryViewValid(): boolean {
+		if (!this.modernCommittedMode() || this.recoveryView === null || this.closed) return false;
+		if (this.recoveryView.identity.closed === true) return false;
+		if (this.recoveryView.identity.targetCols !== this.cols || this.recoveryView.identity.targetRows !== this.rows) return false;
+		if (this.recoveryView.identity.geometryRevision !== this.geometryRevision) return false;
+		if (typeof this.currentWireGeneration !== "string" || this.currentWireGeneration.length === 0) return false;
+		if (this.currentWireGeneration !== this.recoveryGeneration) return false;
+		return true;
+	}
+
+	private activeCommittedView(): CommittedView | null {
+		if (this.committedViewValid()) return this.committedView;
+		if (this.recoveryViewValid()) return this.recoveryView;
+		return null;
+	}
+
+	private modernCommittedMode(): boolean {
+		return this.attachMode === "protocol" && this.frameWitnessAvailable;
+	}
+
+	private committedViewValid(): boolean {
+		if (this.committedView === null) return false;
+		return canPublishAttachView(this.committedView.identity, this.currentViewIdentity());
+	}
+
+	private liveBottomViewportTop(height: number): number {
+		const buf = this.term.buffer.active;
+		const bottom = Math.min(buf.length, buf.baseY + this.rows);
+		return Math.max(0, bottom - height);
+	}
+
+	private committedLineAt(lineIndex: number): BufferLineLike | null {
+		if (!this.modernCommittedMode()) return null;
+		const view = this.activeCommittedView();
+		if (view === null || lineIndex < view.start || lineIndex >= view.end) return null;
+		return view.rows[lineIndex - view.start]?.cells ?? null;
+	}
+
+	private captureViewProofIdentity(): void {
+		this.viewProofIdentity = this.currentViewIdentity();
+	}
+
+	private invalidateViewProof(reason: string): void {
+		this.latestViewProof = { status: "unknown", reason, proof: null, throughSeq: null, cursorVisible: null };
+		this.viewProofIdentity = null;
+		this.viewProofTrailing.reset();
+		this.resizeIntentSatisfied = false;
+	}
+
+	/** Feed ordinary output after the last F proof through the safe-trailing
+	 *  classifier. Only a completely safe window may extend coverage. */
+	private noteViewProofOutput(data: string): void {
+		const coverage = this.latestViewProof as { status?: string; proof?: unknown } | null;
+		if (this.attachMode !== "protocol" || coverage === null || coverage.status !== "covered" || coverage.proof === null) return;
+		const localSeq = this.attachClient.getLastSeq();
+		const state = this.viewProofTrailing.push(data);
+		if (state.status === "safe") {
+			this.latestViewProof = {
+				status: "covered",
+				reason: "safe-trailing",
+				proof: (coverage as { proof: unknown }).proof,
+				throughSeq: localSeq,
+				cursorVisible: state.cursorVisible,
+			};
+			this.captureViewProofIdentity();
+		} else {
+			this.invalidateViewProof(state.status === "pending" ? "view-proof-trailing-pending" : `view-proof-trailing-${state.reason ?? "unsafe"}`);
+		}
+	}
+
+	private noteViewProofRecord(record: Record<string, unknown>): void {
+		if (record.marker === "S") {
+			this.viewProofRecords.push(record);
+			if (this.viewProofRecords.length > MAX_VIEW_PROOF_RECORDS) this.viewProofRecords.shift();
+			this.viewProofRecordCount += 1;
+			this.invalidateViewProof("candidate-open");
+			return;
+		}
+		if (record.marker === "A") {
+			this.viewProofRecords.push(record);
+			if (this.viewProofRecords.length > MAX_VIEW_PROOF_RECORDS) this.viewProofRecords.shift();
+			this.viewProofRecordCount += 1;
+			this.invalidateViewProof("candidate-aborted");
+			return;
+		}
+		if (record.marker !== "F") return;
+		this.viewProofRecords.push(record);
+		if (this.viewProofRecords.length > MAX_VIEW_PROOF_RECORDS) this.viewProofRecords.shift();
+		this.viewProofRecordCount += 1;
+		this.latestViewProof = {
+			status: "covered",
+			reason: "safe-trailing",
+			proof: record,
+			throughSeq: record.seq,
+			cursorVisible: typeof record.cursorVisible === "boolean" ? record.cursorVisible : null,
+		};
+		this.captureViewProofIdentity();
+		this.viewProofTrailing.reset(typeof record.cursorVisible === "boolean" ? { cursorVisible: record.cursorVisible } : {});
+		const proofSeq = Number(record.seq);
+		const following = this.recentProtocolOutput.filter((chunk) => chunk.seq > proofSeq).sort((a, b) => a.seq - b.seq);
+		let expectedSeq = proofSeq + 1;
+		for (const chunk of following) {
+			if (chunk.seq !== expectedSeq) {
+				this.invalidateViewProof("view-proof-replay-gap");
+				return;
+			}
+			expectedSeq = chunk.seq + 1;
+			const state = this.viewProofTrailing.push(chunk.data);
+			if (state.status !== "safe") {
+				this.invalidateViewProof(state.status === "pending" ? "view-proof-trailing-pending" : `view-proof-trailing-${state.reason ?? "unsafe"}`);
+				return;
+			}
+			this.latestViewProof = {
+				status: "covered",
+				reason: "safe-trailing",
+				proof: record,
+				throughSeq: chunk.seq,
+				cursorVisible: state.cursorVisible,
+			};
+			this.captureViewProofIdentity();
+		}
+		if (this.attachClient.getLastSeq() >= expectedSeq) {
+			this.invalidateViewProof("view-proof-replay-gap");
+		}
+	}
+
+	/** Pure fact assembly for the accepted decideAttachPresentation gate. */
+	private evaluateAttachReady(): void {
+		if (!this.attaching || this.closed || this.attachMode !== "protocol" || !this.frameWitnessAvailable) return;
+		if (this.parserWritesInFlight > 0) return;
+		if (this.committedView === null) {
+			this.notReadyReason = "committed-view-missing";
+			return;
+		}
+		const coverage = this.latestViewProof as { status?: string; proof?: { metadata?: unknown } | null } | null;
+		const proof = coverage?.status === "covered" && coverage.proof !== null ? coverage.proof : null;
+		const localSeq = this.attachClient.getLastSeq();
+		const baselineState =
+			this.protocolBaselineState === "valid-empty" || this.protocolBaselineState === "valid-content"
+				? this.protocolBaselineState
+				: this.localHydrationState === "hydrating"
+					? "hydrating"
+					: this.protocolBaselineState;
+		const decision = decideAttachPresentation({
+			closed: this.closed,
+			mode: this.attachMode,
+			baselineState,
+			localParseComplete: this.parserWritesInFlight === 0 && this.localHydrationState !== "hydrating",
+			frameState: this.parserSyncOpen ? "open" : this.parserWritesInFlight > 0 ? "unknown" : "complete",
+			contentAvailable: this.receivedOutput === true && proof !== null,
+			contentKind: proof === null ? "unknown" : "complete",
+			localSeq,
+			viewProof: coverage,
+			viewIdentity: this.viewProofIdentity,
+			currentIdentity: this.currentViewIdentity(),
+			targetCols: this.cols,
+			targetRows: this.rows,
+			geometryRevision: this.geometryRevision,
+			requiredGeometryRevision: this.resizeIntentRequired ? this.geometryRevision : undefined,
+			resizeIntentRequired: this.resizeIntentRequired,
+			resizeIntentSatisfied: this.resizeIntentSatisfied,
+			intentId: this.resizeIntentId,
+			deadlineState: this.deadlineState,
+		});
+		this.notReadyReason = decision.action === "wait" ? decision.reason : null;
+		if (decision.action === "publish") {
+			this.publishabilityState = "ready";
+			this.finishAttachTransition();
+		} else if (decision.action === "wait") {
+			this.publishabilityState = this.deadlineState === "expired" ? "unknown" : "wait";
+		}
 	}
 
 	private finishAttachTransition(): void {
-		if (!this.attaching) return;
+		if (!this.attaching || this.closed) return;
 		// Note: jiggle retry chain is NOT cancelled here — it survives the settle
 		// transition because any successful jiggle triggers a fullRender which emits
 		// \x1b[2J, self-cancelling the chain. Post-settle jiggles only occur when the
@@ -793,6 +1339,9 @@ export class PtyAttachComponent implements Component {
 		// healthy, the very first jiggle's fullRender is detected and the chain
 		// stops before settle ends, so no post-settle jiggle fires at all.
 		this.attaching = false;
+		this.publishabilityState = "ready";
+		this.notReadyReason = null;
+		this.firstAttachSideEffectsApplied = true;
 		if (this.attachSettleTimer) {
 			clearTimeout(this.attachSettleTimer);
 			this.attachSettleTimer = null;
@@ -1263,11 +1812,26 @@ export class PtyAttachComponent implements Component {
 		}
 	}
 
+	private interactionLine(lineIndex: number): BufferLineLike | null {
+		if (this.modernCommittedMode()) return this.committedLineAt(lineIndex);
+		return this.term.buffer.active.getLine(lineIndex) ?? null;
+	}
+
+	private interactionNullCell(): BufferCellLike {
+		return this.modernCommittedMode() ? SnapshotCell.empty() : this.term.buffer.active.getNullCell();
+	}
+
 	private mousePointForEvent(row: number, col: number, clampToBody: boolean): MousePoint | null {
 		const height = this.bodyHeight();
 		const bodyRow = row - 2;
 		if (!clampToBody && (bodyRow < 0 || bodyRow >= height)) return null;
 		const clampedRow = clampInt(bodyRow, 0, Math.max(0, height - 1));
+		if (this.modernCommittedMode()) {
+			const view = this.activeCommittedView();
+			if (view === null) return null;
+			const line = clampInt(view.start + clampedRow, view.start, Math.max(view.start, view.end - 1));
+			return { line, col: clampInt(col - 1, 0, Math.max(0, this.cols - 1)) };
+		}
 		this.clampViewportTop(height);
 		const start = this.viewportTop ?? this.bottomViewportTop(height);
 		const line = clampInt(start + clampedRow, 0, Math.max(0, this.term.buffer.active.length - 1));
@@ -1301,10 +1865,9 @@ export class PtyAttachComponent implements Component {
 	}
 
 	private selectWordAtPoint(point: MousePoint): boolean {
-		const buf = this.term.buffer.active;
-		const line = buf.getLine(point.line);
+		const line = this.interactionLine(point.line);
 		if (!line) return false;
-		const reusable = buf.getNullCell();
+		const reusable = this.interactionNullCell();
 		const range = findWordRangeAtCells(asciiCellsForBufferLine(line, reusable), point.col);
 		if (!range) return false;
 		this.selection = {
@@ -1322,10 +1885,9 @@ export class PtyAttachComponent implements Component {
 	}
 
 	private linkAtPoint(point: MousePoint): string | null {
-		const buf = this.term.buffer.active;
-		const line = buf.getLine(point.line);
+		const line = this.interactionLine(point.line);
 		if (!line) return null;
-		const reusable = buf.getNullCell();
+		const reusable = this.interactionNullCell();
 		const cell = line.getCell(point.col, reusable);
 		const osc8 = cell ? osc8UriForCell(this.term, cell) : "";
 		if (osc8) return osc8;
@@ -1424,11 +1986,10 @@ export class PtyAttachComponent implements Component {
 	private selectionText(): string {
 		const range = normalizeSelection(this.selection);
 		if (!range) return "";
-		const buf = this.term.buffer.active;
-		const reusable = buf.getNullCell();
+		const reusable = this.interactionNullCell();
 		const parts: string[] = [];
 		for (let lineIndex = range.start.line; lineIndex <= range.end.line; lineIndex++) {
-			const line = buf.getLine(lineIndex);
+			const line = this.interactionLine(lineIndex);
 			if (!line) {
 				parts.push("");
 				continue;
@@ -1462,9 +2023,15 @@ export class PtyAttachComponent implements Component {
 		// Render width is authoritative inside ctx.ui.custom; terminal.cols is not
 		// consistently exposed by all Pi TUI versions.
 		size.cols = Math.max(20, width);
-		if (size.cols === this.cols && size.rows === this.rows) return;
+		if (size.cols === this.cols && size.rows === this.rows) {
+			// A same-size render after the early protocol size-sync consumes that
+			// one-shot pair; it must not mint another intent.
+			if (this.pendingEarlySyncTarget === `${size.cols}x${size.rows}`) this.pendingEarlySyncTarget = null;
+			return;
+		}
 		this.cols = size.cols;
 		this.rows = size.rows;
+		this.noteGeometryIntent(size.cols, size.rows);
 		// A real terminal resize supersedes the hold protocol: cancel any armed
 		// hold and adopt the new size as the baseline (guard G4, issue #25).
 		this.jiggleRetry.notifyExternalResize(size.cols, size.rows);
@@ -1477,6 +2044,32 @@ export class PtyAttachComponent implements Component {
 		if (this.historyFloor > 0) this.historyFloor = this.term.buffer.active.baseY;
 		this.sendResize();
 		this.enableMouseScroll();
+	}
+
+	/** A differing resize is exactly one local geometry revision/intent; an
+	 *  applied ack is not completion, only a matching proof is. */
+	private noteGeometryIntent(cols = this.cols, rows = this.rows, options: { early?: boolean } = {}): void {
+		const target = `${cols}x${rows}`;
+		if (options.early === true) {
+			// Every actual early size-sync/mismatch advances once. De-dup is
+			// ONLY early→next render; early→early is never collapsed. The latest
+			// pending target is consumed by the next render of that target.
+			this.pendingEarlySyncTarget = target;
+		} else if (this.pendingEarlySyncTarget === target) {
+			// The next render of the same target consumes the early pair.
+			this.pendingEarlySyncTarget = null;
+			return;
+		} else {
+			this.pendingEarlySyncTarget = null;
+		}
+		this.geometryRevision += 1;
+		this.resizeIntentId = this.geometryRevision;
+		this.resizeIntentRequired = true;
+		this.resizeIntentSatisfied = false;
+		this.committedView = null;
+		this.recoveryView = null;
+		this.recoveryGeneration = null;
+		this.invalidateViewProof("geometry-resize");
 	}
 
 	private sendResize(cols = this.cols, rows = this.rows): void {
@@ -1517,6 +2110,14 @@ export class PtyAttachComponent implements Component {
 
 	private tryScrollBy(linesUp: number): boolean {
 		const height = this.bodyHeight();
+		if (this.modernCommittedMode()) {
+			// The committed view is the only visible cache. Record the requested
+			// viewport intent but let the child own history: the display stays on
+			// the current complete range until a later verified boundary.
+			const intent = scrollViewportTop(this.viewportTop, this.bottomViewportTop(height), linesUp, this.scrollFloorStart(height));
+			this.viewportTop = intent.viewportTop;
+			return false;
+		}
 		const result = scrollViewportTop(this.viewportTop, this.bottomViewportTop(height), linesUp, this.scrollFloorStart(height));
 		this.viewportTop = result.viewportTop;
 		if (result.changed) this.requestScrollRender();
@@ -1610,6 +2211,7 @@ export class PtyAttachComponent implements Component {
 		const lines = this.parserBuffer.split("\n");
 		this.parserBuffer = lines.pop() ?? "";
 		let needsRender = false;
+		let suppressGenerationRender = false;
 		for (const line of lines) {
 			if (!line.trim()) continue;
 			try {
@@ -1626,7 +2228,37 @@ export class PtyAttachComponent implements Component {
 					continue;
 				}
 				if (msg.type === "hello" || msg.type === "status") {
+					const wireGeneration = typeof msg.generation === "string" ? msg.generation : typeof msg.status?.generation === "string" ? msg.status.generation : null;
+					if (wireGeneration !== null) {
+						this.currentWireGeneration = wireGeneration;
+						this.emptyResetPending = this.recoveryGeneration !== null && wireGeneration !== this.recoveryGeneration;
+						if (
+							(this.committedView !== null && wireGeneration !== this.committedView.identity.generation) ||
+							(this.recoveryGeneration !== null && wireGeneration !== this.recoveryGeneration)
+						) {
+							this.outputRenderScheduler.cancel();
+							this.committedView = null;
+							this.invalidateRecoveryView();
+							this.invalidateViewProof("generation-change");
+							// Do not paint the previous generation from a status render
+							// before the new empty/snapshot arrives.
+							suppressGenerationRender = true;
+						}
+					}
 					this.status = "attached";
+					const status = (msg.status ?? msg) as { frameWitness?: { enabled?: unknown } };
+					if (status.frameWitness?.enabled === true) {
+						const wasAvailable = this.frameWitnessAvailable;
+						this.frameWitnessAvailable = true;
+						if (!wasAvailable && this.attaching && this.attachMode === "protocol") {
+							if (this.attachSettleTimer) {
+								clearTimeout(this.attachSettleTimer);
+								this.attachSettleTimer = null;
+							}
+							this.deadlineState = "pending";
+							this.evaluateAttachReady();
+						}
+					}
 					if (msg.type === "hello") this.editorEmpty = typeof msg.editorEmpty === "boolean" ? msg.editorEmpty : null;
 				} else if (msg.type === "editor_state") {
 					this.editorEmpty = typeof msg.empty === "boolean" ? msg.empty : null;
@@ -1645,7 +2277,7 @@ export class PtyAttachComponent implements Component {
 				// Ignore malformed protocol lines; raw PTY data is only legal inside output.data.
 			}
 		}
-		if (needsRender) this.scheduleRender();
+		if (needsRender && !suppressGenerationRender) this.scheduleRender();
 	}
 
 	/**
@@ -1654,7 +2286,7 @@ export class PtyAttachComponent implements Component {
 	 * hydrates frames.
 	 */
 	private handleAttachEvent(
-		event: "mode" | "snapshotBegin" | "snapshotReady" | "output" | "resubscribing" | "protocolError" | "cmdAck" | "reconciled" | "epochReset",
+		event: "mode" | "snapshotBegin" | "snapshotReady" | "output" | "viewProof" | "viewProofRecord" | "resubscribing" | "protocolError" | "cmdAck" | "reconciled" | "epochReset",
 		payload: any,
 	): void {
 		if (event === "mode") {
@@ -1663,9 +2295,18 @@ export class PtyAttachComponent implements Component {
 			if (this.attachMode === "protocol") {
 				// Snapshot mode owns screen correctness: cancel any pending legacy
 				// jiggle arming and unwind anything already armed (restores a held
-				// resize; no-ops otherwise).
+				// resize; no-ops otherwise). The legacy 250 ms settle is cancelled
+				// permanently for this attach; the hard deadline only marks an
+				// explicit expired wait, never a forced publish.
 				this.clearJiggleStartTimer();
 				this.jiggleRetry.restoreAndStop();
+				if (this.frameWitnessAvailable && this.attachSettleTimer) {
+					clearTimeout(this.attachSettleTimer);
+					this.attachSettleTimer = null;
+				}
+				this.deadlineState = "pending";
+				this.notReadyReason = this.frameWitnessAvailable ? "awaiting-complete-frame" : "legacy-deadlines-without-reporter";
+				this.evaluateAttachReady();
 			} else if (prev === "protocol") {
 				// Downgrade after a protocol session (recovery budget exhausted):
 				// re-arm the legacy screen-healing machinery. This must run whenever
@@ -1676,11 +2317,37 @@ export class PtyAttachComponent implements Component {
 				this.clearJiggleStartTimer();
 				if (this.connected) this.jiggleRetry.start(this.cols, this.rows);
 			}
+			if (this.attachMode === "legacy") this.restoreLegacyDeadlines();
 			// Legacy decided during the undecided window: the race-guard timer
 			// already fired at 100ms (≪ the 1500ms probe timeout) — nothing to do.
 			return;
 		}
 		if (event === "snapshotBegin") {
+			// Collecting identity only: replacement happens at snapshotReady.
+			const beginGeneration = (payload ?? {}) as { generation?: unknown; empty?: unknown };
+			if (beginGeneration.empty === true) {
+				// Empty baseline invalidates old views/proof AT THE BEGIN, before
+				// any status/hello render can present the dead generation again.
+				this.outputRenderScheduler.cancel();
+				this.committedView = null;
+				this.invalidateRecoveryView();
+				this.invalidateViewProof("new-empty-baseline");
+				this.emptyResetPending = true;
+				this.scheduleRender();
+			}
+			if (typeof beginGeneration.generation === "string") {
+				const generationChanged =
+					(this.committedView !== null && beginGeneration.generation !== this.committedView.identity.generation) ||
+					(this.recoveryGeneration !== null && beginGeneration.generation !== this.recoveryGeneration);
+				if (generationChanged) {
+					this.committedView = null;
+					this.invalidateRecoveryView();
+					this.invalidateViewProof("generation-change");
+				}
+			}
+			this.collectingConnectionToken = this.connectionToken;
+			this.collectingBaselineToken = this.baselineToken;
+			this.collectingParserEpoch = this.parserEpoch;
 			// Protocol attach size-sync (CR R1 blocking): the legacy attach resized
 			// the child at every connect (jiggle start); subscribe_terminal carries
 			// no size, so without this the child keeps its host-creation geometry
@@ -1695,12 +2362,16 @@ export class PtyAttachComponent implements Component {
 				typeof beginSize.rows === "number" &&
 				(beginSize.cols !== this.cols || beginSize.rows !== this.rows)
 			) {
+				// One early size-sync pairs with the next render of the same target.
+				// Later independent size-syncs to an already-seen target still advance.
+				this.noteGeometryIntent(this.cols, this.rows, { early: true });
 				this.sendResize();
 			}
 			return;
 		}
 		if (event === "snapshotReady") {
-			const snap = (payload ?? {}) as { frame?: string; empty?: boolean; resnapshot?: boolean; scrollbackLines?: number };
+			const snap = (payload ?? {}) as { frame?: string; empty?: boolean; resnapshot?: boolean; scrollbackLines?: number; viewProof?: unknown; viewProofRecords?: unknown[] };
+			if (this.collectingConnectionToken !== this.connectionToken) return;
 			// The synthesized frame is self-contained on dirty terminals (phase 3
 			// torture-proven: DECSTR + clear preamble wipes the constructor
 			// screen.log replay and any pre-probe broadcast bytes), so hydrating is
@@ -1715,29 +2386,109 @@ export class PtyAttachComponent implements Component {
 			// constructor's screen.log warm-start must not outlive the protocol
 			// answer — a gated reset let the dead session's tail render as a
 			// cold-start ghost once the banner lifted (final-review F1).
+			if (!this.replaceParser()) {
+				this.handleParserReplacementFailure();
+				return; // fail-closed: no write to the old parser
+			}
+			const records = Array.isArray(snap.viewProofRecords) ? snap.viewProofRecords.slice(0, MAX_VIEW_PROOF_RECORDS) : [];
+			this.viewProofRecords = records;
+			this.viewProofRecordCount = records.length;
+			if (
+				!this.proofResyncRequested &&
+				records.some((record) => (record as { marker?: unknown } | null)?.marker === "F") &&
+				(snap.viewProof as { status?: string } | null | undefined)?.status !== "covered"
+			) {
+				this.proofResyncRequested = true;
+				this.attachClient.requestResync("view-proof-records-without-coverage");
+			}
+			this.viewProofTrailing.reset();
+			this.recentProtocolOutput = [];
+			this.resizeIntentSatisfied = false;
+			if (snap.viewProof !== undefined) {
+				this.latestViewProof = snap.viewProof;
+				this.viewProofIdentity = (snap.viewProof as { status?: string } | null)?.status === "covered" ? this.currentViewIdentity() : null;
+				if ((snap.viewProof as { status?: string } | null)?.status === "covered") this.proofResyncRequested = false;
+			} else if (snap.empty === true) {
+				this.latestViewProof = { status: "unknown", reason: "empty-baseline", proof: null, throughSeq: null, cursorVisible: null };
+				this.viewProofIdentity = null;
+			} else {
+				this.latestViewProof = null;
+				this.viewProofIdentity = null;
+			}
 			if (typeof snap.frame === "string") {
+				this.protocolBaselineState = "valid-content";
+				this.localHydrationState = "hydrating";
 				this.pushOutput(snap.frame, { authoritative: true, scrollbackLines: snap.scrollbackLines });
 			} else if (snap.empty || snap.resnapshot) {
+				if (snap.empty === true) {
+					this.committedView = null;
+					this.invalidateRecoveryView();
+					this.invalidateViewProof("new-empty-baseline");
+					this.emptyResetPending = true;
+				}
+				this.protocolBaselineState = "valid-empty";
 				this.childInputReady = false;
 				this.childInputModeCarry = "";
-				this.term.reset();
-				// Issue #205: the buffer is empty again, so a stale floor would make the
-				// first `floor` lines of the restarted host unscrollable.
+				// Issue #205: the replacement parser is empty, so no stale floor/poison
+				// survives. Empty/resnapshot never triggers the first-attach hooks.
 				this.historyFloor = 0;
+				this.scheduleRender();
+				this.evaluateAttachReady();
 			}
 			return;
 		}
 		if (event === "output") {
+			// Replacement failure is a hard fence: protocol bytes cannot be mixed into
+			// the old parser while waiting for a bounded fresh resync/legacy decision.
+			if (this.localHydrationState === "failed") return;
 			// Live/replay protocol output: no jiggle clear-detection — that feed
 			// exists to cancel the shrink-and-hold chain, which never runs in
 			// protocol mode.
-			if (typeof payload === "string") this.pushOutput(payload, { forwardProtocols: true });
+			if (typeof payload === "string") {
+				this.recentProtocolOutput.push({ seq: this.attachClient.getLastSeq(), data: payload });
+				if (this.recentProtocolOutput.length > 16) this.recentProtocolOutput.shift();
+				this.noteViewProofOutput(payload);
+				this.pushOutput(payload, { forwardProtocols: true });
+			}
+			return;
+		}
+		if (event === "viewProof") {
+			this.latestViewProof = payload ?? null;
+			if ((payload as { status?: string } | null)?.status === "covered") {
+				this.viewProofIdentity = this.currentViewIdentity();
+				this.viewProofTrailing.reset({ cursorVisible: typeof (payload as { cursorVisible?: unknown }).cursorVisible === "boolean" ? (payload as { cursorVisible: boolean }).cursorVisible : undefined });
+			} else {
+				this.viewProofIdentity = null;
+				this.viewProofTrailing.reset();
+				if (String((payload as { reason?: string } | null)?.reason ?? "").includes("reporter-replaced")) {
+					this.viewProofRecords = [];
+					this.viewProofRecordCount = 0;
+				}
+			}
+			this.evaluateAttachReady();
+			return;
+		}
+		if (event === "viewProofRecord") {
+			if (payload !== null && typeof payload === "object") {
+				const record = payload as Record<string, unknown>;
+				this.noteViewProofRecord(record);
+				if (record.marker === "F") {
+					const metadata = record.metadata as { geometryRevision?: unknown; intentId?: unknown } | undefined;
+					this.resizeIntentSatisfied = !this.resizeIntentRequired || (metadata?.geometryRevision === this.geometryRevision && metadata?.intentId === this.resizeIntentId);
+				}
+				this.evaluateAttachReady();
+			}
 			return;
 		}
 		if (event === "epochReset") {
 			this.childInputReady = false;
 			this.childInputModeCarry = "";
+			this.committedView = null;
+			this.invalidateRecoveryView();
+			this.invalidateViewProof("epoch-reset");
 		}
+		// "viewProof"/"viewProofRecord": independent protocol facts in this stage;
+		// the component has no readiness/publish hook for them yet.
 		// "resubscribing": recovery is client-internal (informational only).
 		// "protocolError": observability only — recovery is automatic until the
 		// legacy fallback, whose mode event the UI acts on above.
@@ -1830,25 +2581,71 @@ export class PtyAttachComponent implements Component {
 		}
 		if (opts.forwardProtocols || opts.authoritative) this.updateChildInputReadiness(data);
 		if (opts.forwardProtocols) this.forwardTerminalProtocols(data);
+		const term = this.term;
+		const connectionToken = this.connectionToken;
+		const baselineToken = this.baselineToken;
+		const parserEpoch = this.parserEpoch;
+		const generation = this.attachClient.getIdentity().generation ?? "local";
+		const capturedIdentity = { connectionToken, baselineToken, generation, parser: term, geometryRevision: this.geometryRevision, targetCols: this.cols, targetRows: this.rows, closed: false };
 		// @xterm/headless parses asynchronously; the buffer is only populated once this
 		// callback fires. Mark the buffer as ready (so the project path can paint it), but
 		// stay on the loading banner while `attaching` — otherwise the screen-log replay and
 		// the initial resize-jiggle redraws would flash through the viewport. Each parsed
-		// chunk also defers the settle window, so the banner holds until output actually
+		// chunk defers the settle window, so the banner holds until output actually
 		// stops arriving (i.e. the redraw finished), not just until the resize jiggle ends.
-		this.term.write(data, () => {
+		// Current-epoch invariant: replaceParser() resets this counter to 0 when it
+		// advances parserEpoch. A stale callback returns below WITHOUT decrementing;
+		// decrementing it would cancel a new-epoch write and allow premature publish.
+		this.parserWritesInFlight += 1;
+		try {
+			term.write(data, () => {
+				if (this.parserEpoch !== parserEpoch) return;
+				if (this.parserWritesInFlight > 0) this.parserWritesInFlight -= 1;
+			const currentIdentity = {
+				connectionToken: this.connectionToken,
+				baselineToken: this.baselineToken,
+				generation: this.attachClient.getIdentity().generation ?? "local",
+				parser: this.term,
+				geometryRevision: this.geometryRevision,
+				targetCols: this.cols,
+				targetRows: this.rows,
+				closed: this.closed,
+			};
+			if (!canPublishAttachView(capturedIdentity, currentIdentity)) return;
 			if (opts.forwardProtocols || opts.authoritative) this.flushPendingSchemeReport();
 			// Issue #205: baseY is only final once this chunk parsed, and the callback
 			// has no buffer binding — re-read it. Rows past the runner-vouched
 			// scrollback are overflow the hydration itself scrolled out.
-			if (opts.authoritative) this.historyFloor = historyFloorAfterHydrate(this.term.buffer.active.baseY, opts.scrollbackLines);
+			if (opts.authoritative) {
+				this.historyFloor = historyFloorAfterHydrate(term.buffer.active.baseY, opts.scrollbackLines);
+				this.localHydrationState = "complete";
+				if (!this.parserSyncOpen) this.commitCommittedView(term, parserEpoch);
+			}
 			this.receivedOutput = true;
-			this.deferAttachSettle();
-			this.outputRenderScheduler.request();
-		});
+				this.deferAttachSettle();
+				this.outputRenderScheduler.request();
+				this.evaluateAttachReady();
+			});
+		} catch {
+			if (this.parserEpoch === parserEpoch && this.parserWritesInFlight > 0) this.parserWritesInFlight -= 1;
+		}
+	}
+
+	private projectCommitted(height: number): { lines: string[]; cursor: { row: number; col: number } | null } {
+		const view = this.activeCommittedView();
+		if (view === null) return { lines: [], cursor: null };
+		const selection = normalizeSelection(this.selection);
+		const out: string[] = [];
+		for (let index = 0; index < view.rows.length && out.length < height; index += 1) {
+			const lineIndex = view.start + index;
+			out.push(lineToAnsi(view.rows[index].cells, SnapshotCell.empty(), this.term, lineIndex, selection, view.cursor, view.cursorHidden));
+		}
+		return { lines: out, cursor: view.cursor };
 	}
 
 	private project(height: number): { lines: string[]; cursor: { row: number; col: number } | null } {
+		if (this.closed) return { lines: [], cursor: null };
+		if (this.modernCommittedMode()) return this.projectCommitted(height);
 		const out: string[] = [];
 		const buf = this.term.buffer.active;
 		const selection = normalizeSelection(this.selection);
@@ -1876,6 +2673,11 @@ export class PtyAttachComponent implements Component {
 			return;
 		}
 		this.closed = true;
+		this.attachWaitToken += 1;
+		this.committedView = null;
+		this.recoveryView = null;
+		this.recoveryGeneration = null;
+		this.disposeCurrentParser();
 		this.imeCoalesceUninstall?.();
 		this.detachColorSchemeBridge();
 		this.clearReplyGuardTimer();
@@ -1889,6 +2691,20 @@ export class PtyAttachComponent implements Component {
 		this.clearRetry();
 		this.stopLoadingTicker();
 		this.outputRenderScheduler.dispose();
+		// Narrow feature-detected host seam (repo pi-tui 1.1.0, host pi 1.4.0):
+		// cancel the already-queued TUI frame without stopping the TUI. A closed
+		// flag inside render cannot cancel a render queued before dispose.
+		const renderSeam = this.tui as unknown as {
+			cancelRenderTimer?: () => void;
+			renderRequested?: boolean;
+		};
+		if (typeof renderSeam.cancelRenderTimer === "function") {
+			try { renderSeam.cancelRenderTimer(); } catch { /* host seam is best-effort */ }
+		}
+		// TuiBase.requestImmediateRender() queues a process.nextTick that checks
+		// renderRequested; clearing it cancels an already queued immediate paint
+		// without stopping the TUI. Verified host pi 1.4.0 shape.
+		if (typeof renderSeam.renderRequested === "boolean") renderSeam.renderRequested = false;
 		this.stopDesyncProbe();
 		if (this.attachSettleTimer) {
 			clearTimeout(this.attachSettleTimer);
@@ -2125,6 +2941,8 @@ function clipTerminalLine(line: string, width: number): string {
 }
 
 function osc8UriForCell(term: XtermLike, cell: BufferCellLike): string {
+	const committed = (cell as { osc8Uri?: () => string }).osc8Uri?.();
+	if (typeof committed === "string" && committed.length > 0) return committed;
 	// xterm leaves cached extended data on reused cells when this flag is unset.
 	if (!cell.hasExtendedAttrs()) return "";
 	const id = cell.extended?.urlId ?? cell.extended?._urlId ?? 0;

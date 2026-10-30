@@ -66,8 +66,8 @@ const end = (nextSeq) => ({ type: "snapshot_end", nextSeq });
 const out = (seq, data = `chunk${seq}`) => ({ type: "output", seq, data });
 const err = (code, extra = {}) => ({ type: "error", code, ...extra });
 /** Exact wire shape the client must advertise on every subscribe (F1). */
-const SUB = { type: "subscribe_terminal", frameVersion: TERMINAL_FRAME_VERSION };
-const SUB_SEQ = (n) => ({ type: "subscribe_terminal", frameVersion: TERMINAL_FRAME_VERSION, sinceSeq: n });
+const SUB = { type: "subscribe_terminal", frameVersion: TERMINAL_FRAME_VERSION, viewProof: 1 };
+const SUB_SEQ = (n) => ({ type: "subscribe_terminal", frameVersion: TERMINAL_FRAME_VERSION, viewProof: 1, sinceSeq: n });
 const eventsOf = (events, name) => events.filter((e) => e.event === name).map((e) => e.payload);
 
 /** Drive one clean snapshot cycle into `client` (assumes collecting entry). */
@@ -496,7 +496,7 @@ test("snapshotBegin event carries begin geometry (size-sync hook, CR R1 blocking
 	const { client: c2, events: e2 } = harness();
 	c2.start();
 	c2.handleMessage(begin({ snapshotSeq: 0, empty: true }));
-	assert.deepEqual(eventsOf(e2, "snapshotBegin"), [{ cols: 80, rows: 24 }]);
+	assert.deepEqual(eventsOf(e2, "snapshotBegin"), [{ cols: 80, rows: 24, empty: true }]);
 });
 
 test("onDisconnect cancels the probe deadline — a dead window cannot downgrade (CR R1 advisory)", () => {

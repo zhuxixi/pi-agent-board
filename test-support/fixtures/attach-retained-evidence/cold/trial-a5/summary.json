@@ -1,0 +1,965 @@
+{
+  "ok": true,
+  "caseId": "A5",
+  "declared": {
+    "caseId": "A5",
+    "producerScript": "cold",
+    "hostSize": {
+      "cols": 80,
+      "rows": 22
+    },
+    "poisonedScreenLog": "OLD-LOG-POISON line one\r\nOLD-LOG-POISON line two\r\n",
+    "phases": [
+      {
+        "step": 1,
+        "phase": "boot",
+        "kind": "unframed text",
+        "lines": [
+          "fake pi boot: core ready",
+          "fake pi boot: extensions loaded"
+        ]
+      },
+      {
+        "step": 2,
+        "phase": "input-mode",
+        "kind": "alt-screen enter + bracketed paste enable (no editor content, NOT an OS raw transition)"
+      },
+      {
+        "step": 3,
+        "phase": "open",
+        "kind": "incomplete framed editor (upper half only, held >40ms)"
+      },
+      {
+        "step": 4,
+        "phase": "closed",
+        "kind": "complete literal E1 editor"
+      }
+    ],
+    "rawModeTruth": "the shared fixture footer sets stdin raw mode AT STARTUP; a cold-only stdin-raw-at-start event records the actual post-call state (null under non-TTY). Step 2 emits alt-screen/bracketed-paste bytes only.",
+    "targetFrame": {
+      "id": "E1",
+      "rows": [
+        "E1 HEADER controlled cold editor",
+        "E1 UPPER reply history one",
+        "E1 UPPER reply history two",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "E1 MIDDLE divider",
+        "E1 LOWER reply history three",
+        "E1 LOWER reply history four",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "E1 TAIL assistant final answer",
+        "",
+        "E1 INPUT >"
+      ],
+      "cursorWorkArea": {
+        "x": 10,
+        "y": 21,
+        "visible": false
+      }
+    },
+    "challengedPredicates": [
+      {
+        "id": "A5-P1",
+        "proposed": "the first committed outer content frame after an empty baseline is the session's editor working area"
+      },
+      {
+        "id": "A5-P2",
+        "proposed": "the child's raw/bracketed-paste enable (childInputReady) attests a complete editor frame"
+      },
+      {
+        "id": "A5-P3",
+        "proposed": "a complete outer synchronized frame attests the child completed a frame of its own"
+      }
+    ]
+  },
+  "emptyBaselineProof": {
+    "ok": true,
+    "method": "real probe subscribe/capture BEFORE the attach was mounted",
+    "begin": {
+      "type": "snapshot_begin",
+      "snapshotSeq": 0,
+      "cols": 80,
+      "rows": 22,
+      "frameVersion": 1,
+      "generation": "00a9e444-6c92-4dcf-97f5-c44aff726bef",
+      "empty": true
+    },
+    "end": {
+      "type": "snapshot_end",
+      "nextSeq": 1,
+      "scrollbackLines": 0
+    },
+    "frame": null
+  },
+  "componentBaseline": {
+    "snapshotBegin": {
+      "type": "snapshot_begin",
+      "snapshotSeq": 0,
+      "cols": 80,
+      "rows": 22,
+      "frameVersion": 1,
+      "generation": "00a9e444-6c92-4dcf-97f5-c44aff726bef",
+      "empty": true
+    },
+    "snapshotEnd": {
+      "type": "snapshot_end",
+      "nextSeq": 1,
+      "scrollbackLines": 0
+    },
+    "initialRxTypes": [
+      "hello",
+      "status",
+      "hello",
+      "snapshot_begin",
+      "snapshot_end"
+    ],
+    "note": "actual component-observed protocol identity (immediate rx observer; the accepted receive-context records independently retain the same initial messages)"
+  },
+  "bootCommit": {
+    "observationIndex": 23,
+    "boundaryParsedAt": 578.139574,
+    "rows": [
+      "fake pi boot: core ready",
+      "fake pi boot: extensions loaded",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      ""
+    ],
+    "isCompleteOuterSyncFrame": true,
+    "childSyncDelimiterBeforeCommit": false
+  },
+  "inputMode": {
+    "readyBeforeStep2": false,
+    "inputReadyAt": 606.070967,
+    "rawAtStart": {
+      "isRaw": true,
+      "monoNs": "367109299244481",
+      "wallMs": 1792810809283
+    },
+    "note": "private component flag read for flow/logging only — never oracle truth; rawAtStart is the child's actual stdin.isRaw observation after the shared footer's startup setRawMode (raw precedes boot/editor; step 2 is alt-screen/bracketed-paste bytes, not an OS raw transition)"
+  },
+  "incompleteEditorExposure": {
+    "verdict": "REPRODUCED",
+    "exposedObservationIndices": [
+      35
+    ],
+    "note": "an output-driven outer render committed the partial open editor frame during the hold"
+  },
+  "editorCommit": {
+    "committed": true,
+    "observationIndex": 41,
+    "boundaryParsedAt": 1263.881708,
+    "rows": [
+      "E1 HEADER controlled cold editor",
+      "E1 UPPER reply history one",
+      "E1 UPPER reply history two",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "E1 MIDDLE divider",
+      "E1 LOWER reply history three",
+      "E1 LOWER reply history four",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "E1 TAIL assistant final answer",
+      "",
+      "E1 INPUT >"
+    ],
+    "outerCursor": {
+      "x": 10,
+      "y": 22,
+      "absoluteY": 22,
+      "visible": false
+    },
+    "childLogicalCursor": {
+      "x": 10,
+      "y": 21,
+      "visible": false
+    }
+  },
+  "predicates": [
+    {
+      "id": "A5-P1",
+      "proposed": "the first committed outer content frame after an empty baseline is the session's editor working area",
+      "verdict": "REFUTED",
+      "evidence": {
+        "firstContentFrameIndex": 23,
+        "firstContentIdentity": "boot",
+        "firstContentRows": [
+          "fake pi boot: core ready",
+          "fake pi boot: extensions loaded",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          ""
+        ],
+        "note": "the first committed content is the declared BOOT text, not the editor — first content cannot attest editor readiness"
+      }
+    },
+    {
+      "id": "A5-P2",
+      "proposed": "the child's raw/bracketed-paste enable (childInputReady) attests a complete editor frame",
+      "verdict": "REFUTED",
+      "evidence": {
+        "readyBeforeStep2": false,
+        "inputReadyAt": 606.070967,
+        "editorCommitAt": 1263.881708,
+        "rawAtStart": {
+          "isRaw": true,
+          "monoNs": "367109299244481",
+          "wallMs": 1792810809283
+        },
+        "note": "the flag became true at the bracketed-paste enable, strictly BEFORE the editor frame existed; the outer surface still showed boot text at that moment"
+      }
+    },
+    {
+      "id": "A5-P3",
+      "proposed": "a complete outer synchronized frame attests the child completed a frame of its own",
+      "verdict": "REFUTED",
+      "evidence": {
+        "bootFrameIndex": 23,
+        "childSyncDelimiterBeforeCommit": false,
+        "partialEditorExposure": {
+          "verdict": "REPRODUCED",
+          "exposedObservationIndices": [
+            35
+          ],
+          "note": "an output-driven outer render committed the partial open editor frame during the hold"
+        },
+        "note": "the boot commit is a complete OUTER synchronized frame produced by the outer TUI's own render scheduling while the parent-received child byte history carried NO sync-open delimiter; an outer close boundary cannot attest child frame completeness"
+      }
+    }
+  ],
+  "teardownViolations": [],
+  "postTeardownAnalysis": {
+    "activeBoundary": 46,
+    "observationCounts": {
+      "total": 55,
+      "active": 46,
+      "teardown": 9
+    },
+    "activeFailures": [
+      {
+        "index": 23,
+        "category": "inverse-cells",
+        "expected": {
+          "screen": "boot",
+          "inverseCells": []
+        },
+        "actual": {
+          "extraInverseCells": [
+            {
+              "x": 0,
+              "y": 2
+            }
+          ],
+          "missingInverseCells": [],
+          "kind": "frame",
+          "note": null
+        }
+      },
+      {
+        "index": 24,
+        "category": "inverse-cells",
+        "expected": {
+          "screen": "boot",
+          "inverseCells": []
+        },
+        "actual": {
+          "extraInverseCells": [
+            {
+              "x": 0,
+              "y": 2
+            }
+          ],
+          "missingInverseCells": [],
+          "kind": "unframed",
+          "note": null
+        }
+      },
+      {
+        "index": 25,
+        "category": "inverse-cells",
+        "expected": {
+          "screen": "boot",
+          "inverseCells": []
+        },
+        "actual": {
+          "extraInverseCells": [
+            {
+              "x": 0,
+              "y": 2
+            }
+          ],
+          "missingInverseCells": [],
+          "kind": "unframed",
+          "note": "sync-entry"
+        }
+      },
+      {
+        "index": 26,
+        "category": "inverse-cells",
+        "expected": {
+          "screen": "boot",
+          "inverseCells": []
+        },
+        "actual": {
+          "extraInverseCells": [
+            {
+              "x": 0,
+              "y": 2
+            }
+          ],
+          "missingInverseCells": [],
+          "kind": "frame",
+          "note": null
+        }
+      },
+      {
+        "index": 27,
+        "category": "inverse-cells",
+        "expected": {
+          "screen": "boot",
+          "inverseCells": []
+        },
+        "actual": {
+          "extraInverseCells": [
+            {
+              "x": 0,
+              "y": 2
+            }
+          ],
+          "missingInverseCells": [],
+          "kind": "unframed",
+          "note": null
+        }
+      },
+      {
+        "index": 28,
+        "category": "inverse-cells",
+        "expected": {
+          "screen": "boot",
+          "inverseCells": []
+        },
+        "actual": {
+          "extraInverseCells": [
+            {
+              "x": 0,
+              "y": 2
+            }
+          ],
+          "missingInverseCells": [],
+          "kind": "unframed",
+          "note": "sync-entry"
+        }
+      },
+      {
+        "index": 29,
+        "category": "blank-screen",
+        "expected": {
+          "screen": "loading-Attached · waiting for the session to render…-⠹",
+          "rows": [
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "                                ⠹ Loading \"s15\"…",
+            "                 Attached · waiting for the session to render…",
+            "",
+            "                            Ctrl+←/Ctrl+\\ to detach",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            ""
+          ]
+        },
+        "actual": {
+          "kind": "frame",
+          "note": null,
+          "rows": [
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            ""
+          ]
+        }
+      },
+      {
+        "index": 30,
+        "category": "blank-screen",
+        "expected": {
+          "screen": "loading-Attached · waiting for the session to render…-⠹",
+          "rows": [
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "                                ⠹ Loading \"s15\"…",
+            "                 Attached · waiting for the session to render…",
+            "",
+            "                            Ctrl+←/Ctrl+\\ to detach",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            ""
+          ]
+        },
+        "actual": {
+          "kind": "unframed",
+          "note": null,
+          "rows": [
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            ""
+          ]
+        }
+      },
+      {
+        "index": 31,
+        "category": "blank-screen",
+        "expected": {
+          "screen": "loading-Attached · waiting for the session to render…-⠹",
+          "rows": [
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "                                ⠹ Loading \"s15\"…",
+            "                 Attached · waiting for the session to render…",
+            "",
+            "                            Ctrl+←/Ctrl+\\ to detach",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            ""
+          ]
+        },
+        "actual": {
+          "kind": "unframed",
+          "note": "sync-entry",
+          "rows": [
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            ""
+          ]
+        }
+      },
+      {
+        "index": 32,
+        "category": "blank-screen",
+        "expected": {
+          "screen": "loading-Attached · waiting for the session to render…-⠹",
+          "rows": [
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "                                ⠹ Loading \"s15\"…",
+            "                 Attached · waiting for the session to render…",
+            "",
+            "                            Ctrl+←/Ctrl+\\ to detach",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            ""
+          ]
+        },
+        "actual": {
+          "kind": "frame",
+          "note": null,
+          "rows": [
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            ""
+          ]
+        }
+      },
+      {
+        "index": 33,
+        "category": "blank-screen",
+        "expected": {
+          "screen": "loading-Attached · waiting for the session to render…-⠹",
+          "rows": [
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "                                ⠹ Loading \"s15\"…",
+            "                 Attached · waiting for the session to render…",
+            "",
+            "                            Ctrl+←/Ctrl+\\ to detach",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            ""
+          ]
+        },
+        "actual": {
+          "kind": "unframed",
+          "note": null,
+          "rows": [
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            ""
+          ]
+        }
+      },
+      {
+        "index": 34,
+        "category": "blank-screen",
+        "expected": {
+          "screen": "loading-Attached · waiting for the session to render…-⠹",
+          "rows": [
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "                                ⠹ Loading \"s15\"…",
+            "                 Attached · waiting for the session to render…",
+            "",
+            "                            Ctrl+←/Ctrl+\\ to detach",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            ""
+          ]
+        },
+        "actual": {
+          "kind": "unframed",
+          "note": "sync-entry",
+          "rows": [
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            ""
+          ]
+        }
+      },
+      {
+        "index": 35,
+        "category": "row-mismatch",
+        "expected": {
+          "screen": "e1-complete",
+          "row": 11,
+          "text": "E1 LOWER reply history three"
+        },
+        "actual": {
+          "row": 11,
+          "text": "",
+          "kind": "frame",
+          "note": null
+        }
+      },
+      {
+        "index": 36,
+        "category": "row-mismatch",
+        "expected": {
+          "screen": "e1-complete",
+          "row": 11,
+          "text": "E1 LOWER reply history three"
+        },
+        "actual": {
+          "row": 11,
+          "text": "",
+          "kind": "unframed",
+          "note": null
+        }
+      },
+      {
+        "index": 37,
+        "category": "row-mismatch",
+        "expected": {
+          "screen": "e1-complete",
+          "row": 11,
+          "text": "E1 LOWER reply history three"
+        },
+        "actual": {
+          "row": 11,
+          "text": "",
+          "kind": "unframed",
+          "note": "sync-entry"
+        }
+      },
+      {
+        "index": 38,
+        "category": "row-mismatch",
+        "expected": {
+          "screen": "e1-complete",
+          "row": 11,
+          "text": "E1 LOWER reply history three"
+        },
+        "actual": {
+          "row": 11,
+          "text": "",
+          "kind": "frame",
+          "note": null
+        }
+      },
+      {
+        "index": 39,
+        "category": "row-mismatch",
+        "expected": {
+          "screen": "e1-complete",
+          "row": 11,
+          "text": "E1 LOWER reply history three"
+        },
+        "actual": {
+          "row": 11,
+          "text": "",
+          "kind": "unframed",
+          "note": null
+        }
+      },
+      {
+        "index": 40,
+        "category": "row-mismatch",
+        "expected": {
+          "screen": "e1-complete",
+          "row": 11,
+          "text": "E1 LOWER reply history three"
+        },
+        "actual": {
+          "row": 11,
+          "text": "",
+          "kind": "unframed",
+          "note": "sync-entry"
+        }
+      }
+    ],
+    "chromeViolations": [
+      {
+        "index": 53,
+        "violations": [
+          "header",
+          "footer"
+        ]
+      },
+      {
+        "index": 54,
+        "violations": [
+          "header",
+          "footer"
+        ]
+      }
+    ],
+    "teardownViolations": [
+      {
+        "index": 53,
+        "violation": "teardown-non-target-content",
+        "rows": [
+          "E1 UPPER reply history one",
+          "E1 UPPER reply history two",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "E1 MIDDLE divider",
+          "E1 LOWER reply history three",
+          "E1 LOWER reply history four",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "E1 TAIL assistant final answer",
+          "",
+          "E1 INPUT >",
+          "────────────────────────────────────────────────────────────────────────────────"
+        ]
+      },
+      {
+        "index": 54,
+        "violation": "teardown-non-target-content",
+        "rows": [
+          "E1 UPPER reply history one",
+          "E1 UPPER reply history two",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "E1 MIDDLE divider",
+          "E1 LOWER reply history three",
+          "E1 LOWER reply history four",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "",
+          "E1 TAIL assistant final answer",
+          "",
+          "E1 INPUT >",
+          "────────────────────────────────────────────────────────────────────────────────"
+        ]
+      }
+    ],
+    "teardownRule": "each post-dispose observation must be fully blank OR the exact literal E1 grid (whole-grid, not row membership); cursor visibility unconstrained at teardown",
+    "poison": {
+      "neverVisibleOnOuter": true,
+      "scanScope": "EVERY observation including bootstrap, active, exit and teardown windows"
+    }
+  },
+  "holds": [
+    {
+      "after": "after-input-mode",
+      "plannedMs": 200,
+      "actualMs": 199.88276500000006,
+      "openFrame": false,
+      "startAt": 606.740692,
+      "endAt": 806.623457
+    },
+    {
+      "after": "editor-open-hold",
+      "plannedMs": 400,
+      "actualMs": 399.55535199999997,
+      "openFrame": false,
+      "startAt": 807.770668,
+      "endAt": 1207.32602
+    }
+  ],
+  "cleanup": {
+    "childExited": true,
+    "runnerExited": true,
+    "runnerExitCode": 0,
+    "forcedKills": [],
+    "childAliveAfter": false,
+    "runnerAliveAfter": false,
+    "rootRemoved": true,
+    "rootRetainedForEvidence": false,
+    "ok": true
+  },
+  "artifactErrors": [],
+  "error": null,
+  "artifactDir": ".superpowers/sdd/2026-10-23-issue-222-attach-ready/task-16-a5-artifacts/a5-attempt-1/trial-a5"
+}

@@ -1,0 +1,9 @@
+{
+  "sourceRoot": "/home/elling/work/git-repo/pi-agent-board/.pi/worktrees/issue-222-attach-ready/.superpowers/sdd/2026-10-23-issue-222-attach-ready/task-15-integration-parentfix2-artifacts/battery-1/trial-same-write-ticker",
+  "files": {
+    "summary.json": "9660b5b2b44ca8dc4b03ade2e5486c46537d16d234e47ece74966fbe1e063175",
+    "cleanup.json": "3052d9d1a07024eee6001ce396c0b54ab92ef344d25cad598fff1ad13c13fbd6",
+    "child-events.jsonl": "40a25b6fb2d73cec1643c67d3dd14eade69f8a06a843392a5e44cd509bf23bfb",
+    "observations.json": "6e786479ac04ef77847cb0e552e6f7d52c43ee472fe055cdcc01686fd2515bb4"
+  }
+}

@@ -1,0 +1,9 @@
+{"event":"start","script":"theme","pid":1891153,"cols":80,"rows":22,"protocol":"RS(0x1E) + JSON + LF(0x0A); commands: {\"cmd\":\"step\",\"step\":N} strictly in order, {\"cmd\":\"exit\"}","clock":{"mono":"process.hrtime.bigint (ns, arbitrary origin)","wall":"Date.now (ms)","note":"child clock has no proven common origin with any parent clock; timings are emission/write-callback facts only"},"monoNs":"369017989123701","wallMs":1792812717973}
+{"event":"stdout-write","script":"theme","step":0,"frame":"T0","phase":"seed","writeIndex":0,"bytes":482,"sha256":"6597c73cad4964c818cca492a13cdba7c69e34ea3275f9a2b241d8c5723a210a","monoNs":"369017990416963","wallMs":1792812717974}
+{"event":"stdout-write-flushed","writeIndex":0,"monoNs":"369017991069647","wallMs":1792812717975}
+{"event":"theme-report","scheme":"dark","monoNs":"369018585907119","wallMs":1792812718570}
+{"event":"stdout-write","script":"theme","step":"theme","frame":"T1","phase":"theme-repaint","writeIndex":1,"bytes":471,"sha256":"4b32d01bb51b2c02e00085e137c2f15d6434a2a33fae035b7efdd21f8d744d53","monoNs":"369018586389034","wallMs":1792812718570}
+{"event":"input-ignored","bytes":9,"sha256":"8f579b7e6b0caf75a896e5609f126414412755c86a3c191ef76fb5fe37777680","monoNs":"369018586603580","wallMs":1792812718571}
+{"event":"stdout-write-flushed","writeIndex":1,"monoNs":"369018586740355","wallMs":1792812718571}
+{"event":"command","raw":"{\"cmd\":\"exit\"}","monoNs":"369018952116247","wallMs":1792812718936}
+{"event":"exit","monoNs":"369018952321761","wallMs":1792812718936}
