@@ -450,9 +450,11 @@ test("step 20A geometry fixture: refuses without observable PTY dims and validat
 
 test("step 20A retained evidence: all nine S cells and both T trials pass every named case-specific check (no rerun)", async () => {
 	const s = await scenario();
-	const sddRoot = join(REPO_ROOT, ".superpowers", "sdd", "2026-10-23-issue-222-attach-ready");
+	// Self-contained exact excerpts keep this audit runnable in clean CI
+	// checkouts; fixture-provenance.json binds each source file hash.
+	const fixtureRoot = join(REPO_ROOT, "test-support", "fixtures", "attach-retained-evidence");
 	// C1: all nine S battery-1 cells (per-cell named assertions).
-	const batteryRoot = join(sddRoot, "task-15-integration-parentfix2-artifacts", "battery-1");
+	const batteryRoot = join(fixtureRoot, "battery-1");
 	const sResults = s.auditRetainedSCells(batteryRoot);
 	assert.equal(sResults.length, 9, "all nine S cells audited");
 	for (const audit of sResults) {
@@ -462,8 +464,8 @@ test("step 20A retained evidence: all nine S cells and both T trials pass every 
 	}
 	// C2: both retained theme trials with full grid/cursor/repaint-hash and
 	// late timing/997;2.
-	const themeRoot = join(sddRoot, "task-16-theme-artifacts");
-	const tResults = s.auditRetainedTTrials(join(themeRoot, "t-on-time-attempt-1", "trial-t-on-time"), join(themeRoot, "t-late-attempt-1", "trial-t-late"));
+	const themeRoot = join(fixtureRoot, "theme");
+	const tResults = s.auditRetainedTTrials(join(themeRoot, "trial-t-on-time"), join(themeRoot, "trial-t-late"));
 	assert.equal(tResults.length, 2, "both T trials audited");
 	for (const audit of tResults) {
 		assert.equal(audit.present, true, `T ${audit.cell}: retained evidence root readable`);
@@ -471,7 +473,7 @@ test("step 20A retained evidence: all nine S cells and both T trials pass every 
 		assert.deepEqual(failures, [], `T ${audit.cell}: every named check must pass (failures: ${failures.map((f) => f.name).join(", ")})`);
 	}
 	// C (cold) retained cell.
-	const cAudit = s.auditRetainedEvidence(join(sddRoot, "task-16-a5-artifacts", "a5-attempt-1", "trial-a5"), "C");
+	const cAudit = s.auditRetainedEvidence(join(fixtureRoot, "cold", "trial-a5"), "C");
 	assert.equal(cAudit.present, true, "C retained evidence root readable");
 	const cFailures = cAudit.checks.filter((c) => c.ok !== true);
 	assert.deepEqual(cFailures, [], `C every named check must pass (failures: ${cFailures.map((f) => f.name).join(", ")})`);

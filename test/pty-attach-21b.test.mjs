@@ -187,7 +187,7 @@ test("step 29 A5 CONTRACT: modern reporter cold startup publishes only the compl
 	assert.equal(ev.partialHalfFrames, 0, "no half editor is ever a publish target");
 	assert.equal(ev.publishedInBudget, true, "CONTRACT: the complete editor publishes within the modern budget");
 	assert.equal(ev.cursor.matched, true);
-	assert.equal(ev.ordering.ok, true);
+	assert.equal(ev.ordering.ok, true, `drain/render ordering: ${JSON.stringify(ev.ordering)}`);
 	assert.deepEqual(ev.hooksAfter, { colorProbe: 1, schemeBridge: 1 });
 	assert.equal(ev.oldContentHits, 0, "no old content");
 	assert.equal(ev.frameWitness?.ok, true, "A5 has a real reporter/current-child proof witness");

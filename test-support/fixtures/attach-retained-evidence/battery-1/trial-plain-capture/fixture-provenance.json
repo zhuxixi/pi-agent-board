@@ -1,0 +1,9 @@
+{
+  "sourceRoot": "/home/elling/work/git-repo/pi-agent-board/.pi/worktrees/issue-222-attach-ready/.superpowers/sdd/2026-10-23-issue-222-attach-ready/task-15-integration-parentfix2-artifacts/battery-1/trial-plain-capture",
+  "files": {
+    "summary.json": "04d1977028202f3f523a56272680d8fb3fe062f803756b18aff085a43fac2d0c",
+    "cleanup.json": "3052d9d1a07024eee6001ce396c0b54ab92ef344d25cad598fff1ad13c13fbd6",
+    "child-events.jsonl": "283252419d4264608fae803a66d7fe91e07e14d59a56189b7212e80dcc0dba03",
+    "observations.json": "a002456192b88d537269133912d840322cf86f8c0ca7094a10a23befaa4a6c98"
+  }
+}

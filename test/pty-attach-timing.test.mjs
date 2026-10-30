@@ -217,6 +217,16 @@ test("step 21A: publish ordering is derived from drain/render event indices, not
 	const lateRender = s.evaluatePublishOrdering({ publish, parserLog, requestRenders: [{ at: 10, observationCount: 7 }] });
 	assert.equal(lateRender.renderAtOrBeforePublish, false);
 	assert.equal(lateRender.ok, false);
+	// A same-time drain/render logged AFTER the publish must not hide the real
+	// preceding pair. Node 24 exposed this ordering in the A5 fake-clock trial.
+	const sameTimeInterleaving = s.evaluatePublishOrdering({
+		publish,
+		parserLog: [...parserLog, { kind: "drain", at: 10, observationCount: 6 }],
+		requestRenders: [...requestRenders, { at: 10, observationCount: 6 }],
+	});
+	assert.equal(sameTimeInterleaving.lastDrain.observationCount, 3);
+	assert.equal(sameTimeInterleaving.lastRenderRequest.observationCount, 3);
+	assert.equal(sameTimeInterleaving.ok, true, "event sequence, not same-time log position, selects the preceding pair");
 	assert.equal(s.evaluatePublishOrdering({ publish: null, parserLog, requestRenders }).ok, false, "no publish is never an ordering pass");
 });
 

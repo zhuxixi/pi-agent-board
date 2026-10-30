@@ -1,0 +1,9 @@
+{
+  "sourceRoot": "/home/elling/work/git-repo/pi-agent-board/.pi/worktrees/issue-222-attach-ready/.superpowers/sdd/2026-10-23-issue-222-attach-ready/task-15-integration-parentfix2-artifacts/battery-1/trial-same-write-status",
+  "files": {
+    "summary.json": "f80aa3153abe9876798fe4e1804fd0b3dfb61b6deac130e7c8fb3dab3274cae3",
+    "cleanup.json": "3052d9d1a07024eee6001ce396c0b54ab92ef344d25cad598fff1ad13c13fbd6",
+    "child-events.jsonl": "82ebaec9f95a426ee52eed1359e0384538b0ce72ee126ad2a21e8ea9629d6323",
+    "observations.json": "5f5e9400a5c5f04310ff8b3e22e7fca61733ab5cf97a637e806e79a3164ac9f0"
+  }
+}

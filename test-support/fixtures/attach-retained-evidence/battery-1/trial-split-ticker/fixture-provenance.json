@@ -1,0 +1,9 @@
+{
+  "sourceRoot": "/home/elling/work/git-repo/pi-agent-board/.pi/worktrees/issue-222-attach-ready/.superpowers/sdd/2026-10-23-issue-222-attach-ready/task-15-integration-parentfix2-artifacts/battery-1/trial-split-ticker",
+  "files": {
+    "summary.json": "07431a47f765a188aba8c9f6db9f4f9c6ee542f2e7edb936491afb333585dffe",
+    "cleanup.json": "3052d9d1a07024eee6001ce396c0b54ab92ef344d25cad598fff1ad13c13fbd6",
+    "child-events.jsonl": "638893aacda71b6e291b5344f7d694f1e3270185447202fa2298d49f5fe17164",
+    "observations.json": "3ec11a6b70429b2882677c197425e78587ffda8518dd31d41a878fe85171af2d"
+  }
+}

@@ -1,0 +1,302 @@
+{
+  "status": "completed",
+  "steps": {
+    "load": {
+      "loadCount": 1,
+      "selfRealpath": "/tmp/pi23a-SkjeZD/agent/probe/agent-board-probe-extension.ts",
+      "selfSha256": "2e1368bffd0a7cd1c44e2968dd6d082aa4a26bb3ac1338be55e331160f1b60df",
+      "execPath": "/home/elling/.local/share/pi-node/node-v22.23.2-linux-x64/bin/node",
+      "argv": [
+        "/home/elling/.local/share/pi-node/node-v22.23.2-linux-x64/bin/node",
+        "/home/elling/.pi/agent/install/releases/1.4.0/node_modules/.bin/pi",
+        "--no-extensions",
+        "--no-mcp",
+        "--extension",
+        "/tmp/pi23a-SkjeZD/agent/probe/agent-board-probe-extension.ts",
+        "--tui-mode",
+        "regular",
+        "--verbose",
+        "--offline",
+        "-na"
+      ],
+      "packages": {
+        "@earendil-works/pi-coding-agent": {
+          "version": "1.4.0",
+          "packageJson": "/home/elling/.pi/agent/install/releases/1.4.0/node_modules/@earendil-works/pi-coding-agent/package.json",
+          "exportsKeys": [
+            ".",
+            "./rpc-entry"
+          ],
+          "resolvedVia": "argv[1] (managed pi runtime entry)"
+        },
+        "@earendil-works/pi-tui": {
+          "version": "1.4.0",
+          "packageJson": "/home/elling/.pi/agent/install/releases/1.4.0/node_modules/@earendil-works/pi-tui/package.json",
+          "exportsKeys": null,
+          "resolvedVia": "argv[1] (managed pi runtime entry)"
+        }
+      },
+      "expectedOwnedProbeRealpath": "/tmp/pi23a-SkjeZD/agent/probe/agent-board-probe-extension.ts",
+      "expectedRepoProbeRealpath": "/home/elling/work/git-repo/pi-agent-board/.pi/worktrees/issue-222-attach-ready/test-support/pi23a-probe-extension.ts",
+      "expectedProbeSha256": "2e1368bffd0a7cd1c44e2968dd6d082aa4a26bb3ac1338be55e331160f1b60df",
+      "realpathMatches": true,
+      "repoCopyByteIdentical": true,
+      "hashMatches": true
+    },
+    "bootAndEditor": {
+      "tuiMode": "regular",
+      "sessionStart": {
+        "at": "473600645734063",
+        "wallMs": 1793048811725,
+        "event": "session-start",
+        "hasUI": true,
+        "mode": "tui",
+        "sessionFile": "/tmp/pi23a-SkjeZD/agent/sessions/--tmp-pi23a-SkjeZD-cwd--/2026-10-26T21-06-51-468Z_01a17a09-97cc-73e9-ad69-a75f74652ffd.jsonl",
+        "loadCount": 1,
+        "uiSeen": true
+      },
+      "sentinelRenderCount": 2,
+      "firstSentinelRender": {
+        "at": "473600661711923",
+        "wallMs": 1793048811741,
+        "event": "sentinel-render",
+        "pass": 1,
+        "mode": "regular",
+        "focusPresent": true,
+        "focusApi": "present",
+        "hasOverlay": false,
+        "loadCount": 1
+      },
+      "syncWrites": 2,
+      "focusApi": "present",
+      "focusPresent": true,
+      "mode": "regular",
+      "bootBytesBeforeFirstSync": 195,
+      "rawBytesTotal": 9356
+    },
+    "nonRenderReads": {
+      "commandReads": 2,
+      "sizeReadCountTotal": 8,
+      "attribution": "UNKNOWN: the probe never wraps component.render, so reads cannot be attributed to a pass",
+      "terminalOpsDelta": 0,
+      "readCommand": {
+        "at": "473600747762017",
+        "wallMs": 1793048811827,
+        "event": "non-render-size-reads",
+        "columns": 80,
+        "rows": 24,
+        "sizeReadsBefore": 6,
+        "sizeReadsAfter": 8,
+        "renderPassesBefore": 2,
+        "renderPassesAfter": 2,
+        "loadCount": 1
+      }
+    },
+    "overlay": {
+      "openRequested": true,
+      "mounted": true,
+      "rendered": 1,
+      "sentinelRendersDuringOverlay": 3,
+      "closed": true
+    },
+    "modeSwitch": {
+      "attemptedKeys": [
+        "/settings",
+        "\u0004"
+      ],
+      "modeBefore": "regular",
+      "modeAfter": "regular",
+      "changed": false,
+      "settingsFrameSeen": true,
+      "publicApiForModeSwitch": "none in the 1.4.0 extension types",
+      "verdict": "UNKNOWN"
+    },
+    "stop": {
+      "probeStop": true,
+      "shutdownAfterStop": false
+    },
+    "exit": {
+      "exited": true,
+      "exitCode": 0
+    }
+  },
+  "unknown": [
+    {
+      "what": "fullscreen->regular->fullscreen in-session switch",
+      "reason": "no public mode-switch API in the 1.4.0 types; documented /settings key path did not change the observed renderer mode"
+    }
+  ],
+  "unsupported": [],
+  "errors": [],
+  "probeEventCounts": {
+    "extension-load": 1,
+    "session-start": 1,
+    "sentinel-factory": 1,
+    "terminal-identity": 1,
+    "terminal-shadows-installed": 1,
+    "widget-registered": 1,
+    "size-read": 25,
+    "sentinel-render": 8,
+    "terminal-op": 21,
+    "non-render-size-reads": 1,
+    "overlay-open-request": 1,
+    "overlay-mounted": 1,
+    "overlay-render": 1,
+    "overlay-dispose": 1,
+    "overlay-closed": 1,
+    "probe-stop": 1
+  },
+  "probeTail": [
+    {
+      "at": "473603103480285",
+      "wallMs": 1793048814182,
+      "event": "size-read",
+      "key": "rows",
+      "attribution": "unknown: render is not wrapped by the probe",
+      "loadCount": 1
+    },
+    {
+      "at": "473603103634697",
+      "wallMs": 1793048814183,
+      "event": "size-read",
+      "key": "rows",
+      "attribution": "unknown: render is not wrapped by the probe",
+      "loadCount": 1
+    },
+    {
+      "at": "473603104214548",
+      "wallMs": 1793048814183,
+      "event": "sentinel-render",
+      "pass": 7,
+      "mode": "regular",
+      "focusPresent": true,
+      "focusApi": "present",
+      "hasOverlay": false,
+      "loadCount": 1
+    },
+    {
+      "at": "473603104866658",
+      "wallMs": 1793048814184,
+      "event": "terminal-op",
+      "key": "write",
+      "bytes": 5,
+      "sha256": "96aa91c4993805b716eb1b9cab7489a205ae0f646df5718f593d2905c2fc4ad6",
+      "hasSyncOpen": false,
+      "hasSyncClose": false,
+      "head": "\u001b[10G",
+      "attribution": "unknown: render is not wrapped by the probe",
+      "loadCount": 1
+    },
+    {
+      "at": "473603105016309",
+      "wallMs": 1793048814184,
+      "event": "terminal-op",
+      "key": "hideCursor",
+      "bytes": 0,
+      "sha256": null,
+      "hasSyncOpen": false,
+      "hasSyncClose": false,
+      "head": "",
+      "attribution": "unknown: render is not wrapped by the probe",
+      "loadCount": 1
+    },
+    {
+      "at": "473603118985741",
+      "wallMs": 1793048814198,
+      "event": "size-read",
+      "key": "columns",
+      "attribution": "unknown: render is not wrapped by the probe",
+      "loadCount": 1
+    },
+    {
+      "at": "473603119125578",
+      "wallMs": 1793048814198,
+      "event": "size-read",
+      "key": "rows",
+      "attribution": "unknown: render is not wrapped by the probe",
+      "loadCount": 1
+    },
+    {
+      "at": "473603119276534",
+      "wallMs": 1793048814198,
+      "event": "size-read",
+      "key": "rows",
+      "attribution": "unknown: render is not wrapped by the probe",
+      "loadCount": 1
+    },
+    {
+      "at": "473603119535692",
+      "wallMs": 1793048814198,
+      "event": "sentinel-render",
+      "pass": 8,
+      "mode": "regular",
+      "focusPresent": true,
+      "focusApi": "present",
+      "hasOverlay": false,
+      "loadCount": 1
+    },
+    {
+      "at": "473603120626997",
+      "wallMs": 1793048814200,
+      "event": "terminal-op",
+      "key": "write",
+      "bytes": 5,
+      "sha256": "96aa91c4993805b716eb1b9cab7489a205ae0f646df5718f593d2905c2fc4ad6",
+      "hasSyncOpen": false,
+      "hasSyncClose": false,
+      "head": "\u001b[10G",
+      "attribution": "unknown: render is not wrapped by the probe",
+      "loadCount": 1
+    },
+    {
+      "at": "473603120750858",
+      "wallMs": 1793048814200,
+      "event": "terminal-op",
+      "key": "hideCursor",
+      "bytes": 0,
+      "sha256": null,
+      "hasSyncOpen": false,
+      "hasSyncClose": false,
+      "head": "",
+      "attribution": "unknown: render is not wrapped by the probe",
+      "loadCount": 1
+    },
+    {
+      "at": "473604561491585",
+      "wallMs": 1793048815640,
+      "event": "probe-stop",
+      "renderPasses": 8,
+      "loadCount": 1
+    }
+  ],
+  "raw": {
+    "bytes": 13488,
+    "sha256": "666427f62569143671be995ff214db93884fff63f8a58ca1bb78b7b7f46dc78f",
+    "syncOpenCount": 9,
+    "syncCloseCount": 9,
+    "tuiMode": "regular",
+    "altScreenEntered": false
+  },
+  "isolation": {
+    "rootOwned": "/tmp/pi23a-SkjeZD",
+    "agentDirOwned": "/tmp/pi23a-SkjeZD/agent",
+    "rootWillBeRemoved": true,
+    "rootRemoved": true
+  },
+  "launcher": {
+    "whichPi": "/home/elling/.pi/agent/bin/pi",
+    "launcherRealpath": "/home/elling/.pi/agent/bin/pi",
+    "launcherSha256": "da0c6a49fe94aadc9765cc7afc6ba6b17e553eed0247d0385c160bc188f5cfbb",
+    "agentDir": "/home/elling/.pi/agent",
+    "managedVersionFile": "1.4.0",
+    "releaseBin": "/home/elling/.pi/agent/install/releases/1.4.0/node_modules/.bin/pi",
+    "releaseBinExists": true,
+    "releaseBinRealpath": "/home/elling/.pi/agent/install/releases/1.4.0/node_modules/@earendil-works/pi-coding-agent/dist/bundle/cli.js",
+    "versionStdout": "1.4.0",
+    "versionStderr": "",
+    "versionExit": 0,
+    "node": "v22.23.2",
+    "probeRealpath": "/home/elling/work/git-repo/pi-agent-board/.pi/worktrees/issue-222-attach-ready/test-support/pi23a-probe-extension.ts",
+    "probeSha256": "2e1368bffd0a7cd1c44e2968dd6d082aa4a26bb3ac1338be55e331160f1b60df"
+  }
+}

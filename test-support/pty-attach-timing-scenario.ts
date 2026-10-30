@@ -287,8 +287,12 @@ export function evaluatePublishOrdering(input: {
 		};
 	}
 	const publishAt = input.publish.at;
-	const lastDrain = [...input.parserLog].filter((entry) => entry.kind === "drain" && entry.at <= publishAt).pop() ?? null;
-	const lastRenderRequest = [...input.requestRenders].filter((entry) => entry.at <= publishAt).pop() ?? null;
+	const publishIndex = input.publish.index;
+	// Fake-clock events can share a timestamp across the publish boundary. Select
+	// by the captured observation sequence as well, so a later same-time drain or
+	// render cannot hide the actual preceding pair.
+	const lastDrain = [...input.parserLog].filter((entry) => entry.kind === "drain" && entry.at <= publishAt && entry.observationCount <= publishIndex).pop() ?? null;
+	const lastRenderRequest = [...input.requestRenders].filter((entry) => entry.at <= publishAt && entry.observationCount <= publishIndex).pop() ?? null;
 	const drainAtOrBeforePublish = lastDrain !== null && input.publish.index >= lastDrain.observationCount;
 	const renderAtOrBeforePublish = lastRenderRequest !== null && input.publish.index >= lastRenderRequest.observationCount;
 	return {

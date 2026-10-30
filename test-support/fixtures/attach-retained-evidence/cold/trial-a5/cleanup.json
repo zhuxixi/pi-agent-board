@@ -1,0 +1,11 @@
+{
+  "childExited": true,
+  "runnerExited": true,
+  "runnerExitCode": 0,
+  "forcedKills": [],
+  "childAliveAfter": false,
+  "runnerAliveAfter": false,
+  "rootRemoved": true,
+  "rootRetainedForEvidence": false,
+  "ok": true
+}

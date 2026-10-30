@@ -3,10 +3,11 @@
 //
 // Everything here is pure: no PTY, no Pi child, no network. The evaluator is the
 // test-support diagnostic from `test-support/pi23a-candidate-evaluator.ts`; the
-// streams are the probe JSONL files retained from the initial delivery
-// (`task-23a-smoke-artifacts/fullscreen-4-*`, `regular-4-*`), which the evaluator
-// had never seen. Expected decisions are stated independently per case, so a
-// grammar regression turns the case red rather than re-baselining it.
+// streams are exact probe JSONL/result fixtures retained from the initial
+// delivery (`task-23a-smoke-artifacts/fullscreen-4-*`, `regular-4-*`). They live
+// under test-support so clean checkouts exercise the same bytes; source hashes
+// accompany the fixtures. Expected decisions are stated independently per case,
+// so a grammar regression turns the case red rather than re-baselining it.
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -14,7 +15,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
-const ARTIFACTS = resolve(REPO_ROOT, ".superpowers/sdd/2026-10-23-issue-222-attach-ready/task-23a-smoke-artifacts");
+const ARTIFACTS = resolve(REPO_ROOT, "test-support/fixtures/pi23a-smoke");
 const evaluatorModule = await import(resolve(REPO_ROOT, "test-support/pi23a-candidate-evaluator.ts"));
 const { FrameCandidateEvaluator } = evaluatorModule;
 

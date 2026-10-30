@@ -1,0 +1,17 @@
+{"event":"start","script":"split","pid":1852485,"cols":80,"rows":22,"protocol":"RS(0x1E) + JSON + LF(0x0A); commands: {\"cmd\":\"step\",\"step\":N} strictly in order, {\"cmd\":\"exit\"}","clock":{"mono":"process.hrtime.bigint (ns, arbitrary origin)","wall":"Date.now (ms)","note":"child clock has no proven common origin with any parent clock; timings are emission/write-callback facts only"},"monoNs":"356344458437920","wallMs":1792778014664}
+{"event":"stdout-write","script":"split","step":0,"frame":"F0","phase":"seed","writeIndex":0,"bytes":465,"sha256":"9cc80f0f164bab5dd1b572b13f390079d63efc7b00aa1542f3389e62d73edcb5","monoNs":"356344460598818","wallMs":1792778014666}
+{"event":"stdout-write-flushed","writeIndex":0,"monoNs":"356344461651454","wallMs":1792778014667}
+{"event":"command","step":1,"raw":"{\"cmd\":\"step\",\"step\":1}","monoNs":"356344973035926","wallMs":1792778015178}
+{"event":"stdout-write","script":"split","step":1,"frame":"F1","phase":"open-fragment-1","writeIndex":1,"bytes":6,"sha256":"60dafe771b1766aed61240576dda7fa1bc70218463c4424db3eab28f2acc6cbe","monoNs":"356344973580166","wallMs":1792778015179,"dataHex":"1b5b3f323032"}
+{"event":"stdout-write-flushed","writeIndex":1,"monoNs":"356344973949867","wallMs":1792778015179}
+{"event":"command","step":2,"raw":"{\"cmd\":\"step\",\"step\":2}","monoNs":"356345070607990","wallMs":1792778015276}
+{"event":"stdout-write","script":"split","step":2,"frame":"F1","phase":"open","writeIndex":2,"bytes":227,"sha256":"f88cad2cee297a9348d5032469eff28abcdaf6c0d445200f02ef8bf8669c5660","monoNs":"356345070777163","wallMs":1792778015276}
+{"event":"stdout-write-flushed","writeIndex":2,"monoNs":"356345070916212","wallMs":1792778015276}
+{"event":"command","step":3,"raw":"{\"cmd\":\"step\",\"step\":3}","monoNs":"356345343284358","wallMs":1792778015549}
+{"event":"stdout-write","script":"split","step":3,"frame":"F1","phase":"close-fragment-1","writeIndex":3,"bytes":236,"sha256":"8d20bac47f4bf46569c64b026bd81ddcb1bf7df9a70cbab5fc2703a6e601052b","monoNs":"356345343775734","wallMs":1792778015549}
+{"event":"stdout-write-flushed","writeIndex":3,"monoNs":"356345344191165","wallMs":1792778015549}
+{"event":"command","step":4,"raw":"{\"cmd\":\"step\",\"step\":4}","monoNs":"356345583790319","wallMs":1792778015789}
+{"event":"stdout-write","script":"split","step":4,"frame":"F1","phase":"closed","writeIndex":4,"bytes":2,"sha256":"2bec3c070948341063e6767bc11c41cd2742c7e6b3a7b6ed8722cb3803e53415","monoNs":"356345584223121","wallMs":1792778015789,"dataHex":"366c"}
+{"event":"stdout-write-flushed","writeIndex":4,"monoNs":"356345584927065","wallMs":1792778015790}
+{"event":"command","raw":"{\"cmd\":\"exit\"}","monoNs":"356345585205835","wallMs":1792778015790}
+{"event":"exit","monoNs":"356345585266399","wallMs":1792778015790}
