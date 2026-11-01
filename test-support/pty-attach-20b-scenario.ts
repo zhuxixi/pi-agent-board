@@ -3013,6 +3013,7 @@ async function runD1Duplicate(artifactDir: string): Promise<Record<string, unkno
 	let f0Committed = false;
 	let doneCount = 0;
 	let duplicateSubscribeAt: number | null = null;
+	let duplicateSubscribeCount = 0;
 	let snapshotIdentities: string[] = [];
 	let duplicateBeginIdentity: string | null = null;
 	let blankWindowsAfterDuplicate = 0;
@@ -3055,14 +3056,15 @@ async function runD1Duplicate(artifactDir: string): Promise<Record<string, unkno
 		snapshotIdentities = capture.rxLines
 			.filter((line) => line.msg.type === "snapshot_begin")
 			.map((line) => `${line.socketId}:${String(line.msg.generation ?? "?")}:${String(line.msg.snapshotSeq ?? "?")}`);
-		// Truthful duplicate frame-ready: a SECOND documented `subscribe_terminal`
-		// on the component's OWN socket (real runner → real duplicate snapshot),
-		// never a manual private late callback.
-		const clientSocket = componentClientSocket(capture);
-		if (clientSocket === null) throw new Error("no component client socket captured for the duplicate subscribe");
+		// Truthful duplicate frame-ready through the client's PUBLIC resync API.
+		// A raw socket write would bypass the client's state machine, so its valid
+		// answer could be misclassified as an unsolicited begin and trigger resync
+		// storms that are unrelated to the duplicate-side-effect contract.
+		const resyncClient = (side.component as unknown as { attachClient: { requestResync: (reason: string) => boolean } }).attachClient;
 		const beginsBefore = capture.rxLines.filter((line) => line.msg.type === "snapshot_begin").length;
+		const subscribesBefore = capture.txLines.filter((line) => line.msg.type === "subscribe_terminal").length;
 		duplicateSubscribeAt = now();
-		clientSocket.write(`${JSON.stringify({ type: "subscribe_terminal", frameVersion: 1 })}\n`);
+		if (!resyncClient.requestResync("step20b-duplicate-subscribe")) throw new Error("public duplicate resync was not accepted");
 		await waitFor(
 			() => capture.rxLines.filter((line) => line.msg.type === "snapshot_begin").length > beginsBefore,
 			10_000,
@@ -3080,6 +3082,7 @@ async function runD1Duplicate(artifactDir: string): Promise<Record<string, unkno
 			.map((line) => `${line.socketId}:${String(line.msg.generation ?? "?")}:${String(line.msg.snapshotSeq ?? "?")}`);
 		// Let the duplicate answer settle, then count real observable side effects.
 		await sleep(500);
+		duplicateSubscribeCount = capture.txLines.filter((line) => line.msg.type === "subscribe_terminal").length - subscribesBefore;
 		hooksAfterDuplicate = { ...side.hooks };
 		doneCount = side.doneResults.length;
 		// Real observable side effects of the duplicate answer: a buffer WIPE would
@@ -3151,7 +3154,7 @@ async function runD1Duplicate(artifactDir: string): Promise<Record<string, unkno
 			(side?.hookLifecycle.bridgeRegistrations ?? 0) === 1;
 		const duplicateIdentityCount = countDuplicatePublishes(snapshotIdentities);
 		const duplicateObservableClean =
-			hooksAtMostOnce && doneCount === 0 && blankWindowsAfterDuplicate === 0 && gatesAfterTeardown?.ok === true;
+			hooksAtMostOnce && doneCount === 0 && duplicateSubscribeCount === 1 && blankWindowsAfterDuplicate === 0 && gatesAfterTeardown?.ok === true;
 		writeArtifact("observations.json", { observations: side?.observer.observations ?? [] });
 		writeArtifact("writes.json", side?.observer.writes ?? []);
 		writeArtifact("tx-lines.json", capture.txLines);
@@ -3183,6 +3186,7 @@ async function runD1Duplicate(artifactDir: string): Promise<Record<string, unkno
 			duplicateIdentityCount,
 			resourceGates: gatesAfterTeardown,
 			oneShotDrain,
+			duplicateSubscribeCount,
 			duplicateObservableClean,
 			duplicatePublishIdentityNote:
 				"per-snapshot PUBLISH identity is not observable on the component path without a private client seam: duplicatePublishIdentityCount is UNKNOWN (client-level duplicate semantics are pinned by test/terminal-attach-client.test.mjs)",
@@ -3195,7 +3199,7 @@ async function runD1Duplicate(artifactDir: string): Promise<Record<string, unkno
 		hooksAfterDuplicate !== null && hooksAfterDuplicate.colorProbe <= 1 && hooksAfterDuplicate.schemeBridge === 1 && (side?.hookLifecycle.bridgeRegistrations ?? 0) === 1;
 	const duplicateIdentityCount = countDuplicatePublishes(snapshotIdentities);
 	const duplicateObservableClean =
-		hooksAtMostOnce && doneCount === 0 && blankWindowsAfterDuplicate === 0 && gatesAfterTeardown?.ok === true;
+		hooksAtMostOnce && doneCount === 0 && duplicateSubscribeCount === 1 && blankWindowsAfterDuplicate === 0 && gatesAfterTeardown?.ok === true;
 	return {
 		caseId: "D1-duplicate",
 		ok: iterationValid,
@@ -3224,6 +3228,7 @@ async function runD1Duplicate(artifactDir: string): Promise<Record<string, unkno
 			duplicateIdentityCount,
 			resourceGates: gatesAfterTeardown,
 			oneShotDrain,
+			duplicateSubscribeCount,
 			resourcesAfterTeardown,
 			cleanup,
 		},

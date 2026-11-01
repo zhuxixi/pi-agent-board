@@ -1626,6 +1626,9 @@ test("step 16 producer: cold script emits no seed and closes the declared 22-row
 
 	h.send({ cmd: "step", step: 2 });
 	await waitForProducerWrite(h, 2, "cold step 2 (input-mode enable)");
+	// The producer event is written before the stdout chunk is guaranteed to
+	// arrive. Wait for the actual mode bytes, not merely the producer event.
+	await waitFor(() => h.stdout().includes("\x1b[?1049h\x1b[?2004h"), 5000, "cold step 2 mode bytes on stdout");
 	assert.ok(h.stdout().includes("\x1b[?1049h\x1b[?2004h"), "alt-screen + bracketed-paste enable, no editor content");
 	assert.equal(frames(h.observer).length, 0, "mode enable is not a frame");
 

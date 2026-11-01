@@ -261,6 +261,9 @@ test("23b1 fix1 F2 (owned main): no-hello identity, token enable, marker strippi
 	// Let the child emit real markers now that it knows the token.
 	writeFileSync(tokenFile, enable.token);
 	await waitFor(() => readHost(root, viewId)?.frameWitness?.proofs >= 1, 20000);
+	// Proof accounting and subscriber delivery are separate channels. Wait for
+	// the actual ordinary bytes instead of assuming proof => broadcast flushed.
+	await waitFor(() => subscriberMessages.filter((msg) => msg.type === "output").map((msg) => msg.data).join("").includes("BODY-A"), 20000);
 	const summary = readHost(root, viewId).frameWitness;
 	assert.ok(summary.proofs >= 1, "the accepted proof is recorded");
 	assert.equal(summary.openFrameId, null);

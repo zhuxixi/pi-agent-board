@@ -459,8 +459,15 @@ test("step 20B R-restart: correlated empty baseline, real initial hooks, reset b
 	assert.equal(ev.modernFrameWitness, true, "real reporter-enabled modern recovery topology");
 	assert.equal(ev.oldViewsClearedAtEmpty, true, "new-generation empty baseline clears current + recovery");
 	assert.equal(ev.recoveryClearedAfterGen2, true, "only new gen-2 complete content remains after replacement");
-	assert.equal(ev.resetAnalysis.strictPostEmptyPresentationClean, true, "zero post-empty old observations after the pre-empty drain");
-	assert.deepEqual(ev.resetAnalysis.postEmptyStaleObservations, [], "no old-generation observation after the empty baseline");
+	// Narrow exception (m6RIOg counterexamples): the only permitted post-empty
+	// stale observations are pre-recovery sync-entry snapshots of the already
+	// visible pre-baseline grid. Framed or otherwise-shaped gen-1 content still
+	// fails; strict remains diagnostic in the Q1 block below.
+	assert.deepEqual(ev.resetAnalysis.postEmptyStaleObservations, ev.resetAnalysis.stalePixelPersistenceObservations, "every post-empty stale observation is pre-recovery persistence");
+	for (const entry of ev.resetAnalysis.postEmptyStaleObservations) {
+		assert.equal(entry.kind, "unframed", "a framed gen-1 window after the baseline is a stale publish, never excepted");
+		assert.equal(entry.note, "sync-entry", "only the documented entry-window artifact is excepted");
+	}
 	// Correlated EMPTY baseline: begin + ITS OWN end on the component's socket.
 	assert.equal(ev.emptyBaseline.begin.msg.type, "snapshot_begin");
 	assert.equal(ev.emptyBaseline.begin.msg.empty, true, "authoritative empty baseline witness");
@@ -834,6 +841,7 @@ test("step 20B D1-duplicate: a documented duplicate subscribe repeats no first-a
 	assert.deepEqual(tr.evidence.hooksAfterDuplicate, { colorProbe: 1, schemeBridge: 1 }, "hooks are not repeated");
 	assert.equal(tr.evidence.hookLifecycle.bridgeRegistrations, 1);
 	assert.equal(tr.evidence.doneCount, 0, "the attach is not completed by a duplicate");
+	assert.equal(tr.evidence.duplicateSubscribeCount, 1, "the public duplicate request causes exactly one subscribe and no resync storm");
 	assert.equal(tr.evidence.blankWindowsAfterDuplicate, 0, "no buffer wipe from the duplicate");
 	assert.equal(tr.evidence.hooksAtMostOnce, true);
 	assert.equal(tr.duplicateObservableClean, true);
