@@ -234,6 +234,12 @@ export interface GenerationWindowAnalysis {
 	ok: boolean;
 }
 
+/** Return the actual status transition inside the measured down window. A
+ *  later `attached` value cannot erase it; an attached-only window still fails. */
+export function findReconnectStatusTransition(transitions: ReadonlyArray<{ at: number; status: string }>, startAt: number, endAt: number): string | null {
+	return transitions.find((entry) => entry.at >= startAt && entry.at <= endAt && /reconnect|disconnect/i.test(entry.status))?.status ?? null;
+}
+
 /** R-reconnect full-window oracle (pure): the seed (F0) must be visible before
  *  the reconnect, the continuation (F1) only after it, and once F1 has been
  *  observed NO seed-only window, mixed F0/F1 half or foreign generation may
@@ -744,6 +750,7 @@ async function runReconnect(artifactDir: string): Promise<Record<string, unknown
 	let observation: Awaited<ReturnType<typeof holdFormalObservation>> = null;
 	let recoveryDuringDown = false;
 	let recoveryStatusWhileDown: string | null = null;
+	let restoreStatusObservation: (() => void) | null = null;
 	let recoveryActiveRow: string | null = null;
 	let recoveryClearedAfterF1 = false;
 	let resnapshotPreserved = false;
@@ -800,7 +807,31 @@ async function runReconnect(artifactDir: string): Promise<Record<string, unknown
 		const clientSocket = componentClientSocket(capture);
 		if (!clientSocket) throw new Error("no component client socket captured via the public transport seam");
 		subscribeBefore = capture.txLines.filter((l) => l.msg.type === "subscribe_terminal").length;
+		// Retain the component's actual status transitions. A fast reconnect may
+		// restore `attached` before the scenario samples it, and may legitimately
+		// finish before the next painted frame.
+		const statusTarget = side.component as unknown as { status?: string };
+		const statusDescriptor = Object.getOwnPropertyDescriptor(statusTarget, "status");
+		if (statusDescriptor?.configurable !== true || !("value" in statusDescriptor) || typeof statusDescriptor.value !== "string") {
+			throw new Error("component status data property is unavailable for transition observation");
+		}
+		let currentStatus = statusDescriptor.value;
+		const statusTransitions: Array<{ at: number; status: string }> = [];
+		Object.defineProperty(statusTarget, "status", {
+			configurable: true,
+			enumerable: statusDescriptor.enumerable,
+			get: () => currentStatus,
+			set: (next: string) => {
+				currentStatus = next;
+				statusTransitions.push({ at: now(), status: next });
+			},
+		});
+		restoreStatusObservation = () => {
+			Object.defineProperty(statusTarget, "status", { ...statusDescriptor, value: currentStatus });
+			restoreStatusObservation = null;
+		};
 		// Real disconnect of the owned client socket (not a private component field).
+		const disconnectAt = now();
 		clientSocket.destroy();
 		const recoveryProbe = side.component as unknown as {
 			recoveryView?: { rows: Array<{ cells: { translateToString: (trim?: boolean) => string } }> } | null;
@@ -810,7 +841,6 @@ async function runReconnect(artifactDir: string): Promise<Record<string, unknown
 		};
 		await waitFor(() => recoveryProbe.recoveryView !== null && recoveryProbe.recoveryView !== undefined, 5000, "recovery view retained while down").catch(() => {});
 		recoveryDuringDown = recoveryProbe.recoveryView !== null && recoveryProbe.recoveryView !== undefined;
-		recoveryStatusWhileDown = recoveryProbe.status ?? null;
 		recoveryActiveRow = recoveryProbe.activeCommittedView?.()?.rows[0]?.cells.translateToString(true) ?? null;
 		// Reconnect is derived from a NEW subscribe_terminal in the public tx log.
 		await waitFor(() => capture.txLines.filter((l) => l.msg.type === "subscribe_terminal").length > subscribeBefore, 10_000, "reconnect re-subscribe");
@@ -824,6 +854,9 @@ async function runReconnect(artifactDir: string): Promise<Record<string, unknown
 		(side.component as unknown as { handleInput: (d: string) => void }).handleInput(producerCommand({ cmd: "step", step: 1 }));
 		await waitFor(() => side!.observer.observations.some((o) => o.kind === "frame" && rowsEqual(projectedRows(o, dims), targetLiteral)), 10_000, "gen-1 F1 after reconnect");
 		f1Committed = true;
+		const f1Observation = side.observer.observations.find((o) => o.kind === "frame" && rowsEqual(projectedRows(o, dims), targetLiteral));
+		recoveryStatusWhileDown = findReconnectStatusTransition(statusTransitions, disconnectAt, f1Observation?.boundaryParsedAt ?? now());
+		restoreStatusObservation?.();
 		modernFrameWitness = recoveryProbe.frameWitnessAvailable === true;
 		recoveryClearedAfterF1 = recoveryProbe.recoveryView === null || recoveryProbe.recoveryView === undefined;
 		const genEvents = readEventsSafe(eventsPath).filter((e) => e.generation !== undefined);
@@ -836,6 +869,7 @@ async function runReconnect(artifactDir: string): Promise<Record<string, unknown
 	} catch (err) {
 		error = err instanceof Error ? (err.stack ?? err.message) : String(err);
 	} finally {
+		try { restoreStatusObservation?.(); } catch { /* best-effort */ }
 		capture.restore();
 		try { frameReporter?.destroy(); } catch { /* best-effort */ }
 		// RU fix3 / Q4: fix the ACTIVE-window boundary BEFORE dispose/teardown, so a
@@ -2367,20 +2401,28 @@ function spawnInstrumentedRunner(input: {
 		record.hostTransitions.push({ at: now(), state, runnerPid: host?.runnerPid ?? null, childPid: host?.childPid ?? null });
 	}, 20);
 	sampler.unref?.();
-	const stopSampling = () => clearInterval(sampler);
 	const readLogs = () => ({ stderr: stderrChunks.join(""), stdout: stdoutChunks.join("") });
 	// Continuous persistence so a crash/failure keeps its output even if the
 	// harness dies before the trial's finally.
-	const flush = setInterval(() => {
+	const flushLogs = () => {
 		try {
 			writeFileSync(stderrFile, stderrChunks.join(""));
 			writeFileSync(stdoutFile, stdoutChunks.join(""));
 		} catch {
 			/* retained best-effort */
 		}
-	}, 100);
+	};
+	const flush = setInterval(flushLogs, 100);
 	flush.unref?.();
-	runner.on("close", () => clearInterval(flush));
+	runner.on("close", () => {
+		flushLogs();
+		clearInterval(flush);
+	});
+	const stopSampling = () => {
+		clearInterval(sampler);
+		flushLogs();
+		clearInterval(flush);
+	};
 	return { runner, record, stopSampling, readLogs };
 }
 

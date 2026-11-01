@@ -77,6 +77,18 @@ test("step 20B: classifyWindowRows separates content halves from loading/blank/c
 	assert.equal(s.classifyWindowRows([" s15 attached · opens links · Ctrl+←/Ctrl+\\ detach"], gen), "chrome");
 });
 
+test("step 20B: reconnect status evidence comes from retained transitions, not a later attached state", async () => {
+	const s = await scenario();
+	const transitions = [
+		{ at: 10, status: "attached" },
+		{ at: 20, status: "disconnected" },
+		{ at: 30, status: "attached" },
+	];
+	assert.match(s.findReconnectStatusTransition(transitions, 10, 30) ?? "", /disconnected/);
+	assert.equal(s.findReconnectStatusTransition([transitions[0], transitions[2]], 10, 30), null, "a later attached state is not reconnect evidence");
+	assert.equal(s.findReconnectStatusTransition(transitions, 21, 30), null, "a status outside the actual down window is not evidence");
+});
+
 test("step 20B: analyzeGenerationWindow fails on F0-after-F1, mixed halves and foreign content (pure negatives)", async () => {
 	const s = await scenario();
 	const gen = { generation: "gen-1" };
@@ -855,7 +867,13 @@ test("step 20B D1-stale-epoch: a stale baseline cannot publish after the newer e
 	assert.equal(ev.staleGenerationMessagesAfterEpoch, 0, "no old-epoch protocol message after the new epoch");
 	assert.equal(ev.recoveryAt !== null, true, "a real recovery window precedes any content claim");
 	assert.deepEqual(ev.stalePublishesAfterEpoch, [], "no old-generation write after the recovery");
-	assert.equal(tr.staleClean, true);
+	assert.equal(tr.staleClean, true, JSON.stringify({
+		staleGenerationMessagesAfterEpoch: ev.staleGenerationMessagesAfterEpoch,
+		stalePublishesAfterEpoch: ev.stalePublishesAfterEpoch,
+		recoveryAt: ev.recoveryAt,
+		resourceGates: ev.resourceGates,
+		ownedTimers: ev.resourcesAfterTeardown?.ownedTimersLiveDetail,
+	}));
 	assert.ok(ev.scenarioKills.length >= 1, "the old owned kill is a scenario action");
 	assert.equal(ev.resourceGates.ok, true, "resource gates hold for the stale-epoch case");
 	assert.equal(ev.resourceGates.intervalsLive, 0);
