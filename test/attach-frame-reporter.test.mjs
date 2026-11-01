@@ -14,7 +14,7 @@ const CUP = "\u001b[1;1H";
 const FULL = `${OPEN}${CUP}text${CLOSE}`;
 const TOKEN = "abcdefghijklmnopqrstuv";
 
-function createTerminalDouble({ failWrite = null, failStart = false, ownColumns = null } = {}) {
+function createTerminalDouble({ failWrite = null, failStart = false, ownColumns = null, ownWrite = false } = {}) {
 	const written = [];
 	class FakeTerminal {
 		constructor() {
@@ -28,12 +28,13 @@ function createTerminalDouble({ failWrite = null, failStart = false, ownColumns 
 		get rows() {
 			return 24;
 		}
-		write(text) {
+		write(text, callback) {
 			if (failWrite !== null && failWrite.matches(text)) {
 				if (failWrite.mode === "throw") throw new Error("write failed");
 				return;
 			}
 			written.push(text);
+			if (typeof callback === "function") callback();
 		}
 		hideCursor() {
 			written.push("<hide>");
@@ -49,7 +50,20 @@ function createTerminalDouble({ failWrite = null, failStart = false, ownColumns 
 			this.stopped += 1;
 		}
 	}
-	return { terminal: new FakeTerminal(), written };
+	const terminal = new FakeTerminal();
+	if (ownWrite) {
+		const original = terminal.write;
+		Object.defineProperty(terminal, "write", {
+			configurable: true,
+			enumerable: false,
+			writable: true,
+			value: function (text, ...args) {
+				written.push(`own:${text}`);
+				return original.call(this, text, ...args);
+			},
+		});
+	}
+	return { terminal, written };
 }
 
 function createUiDouble(terminal) {
@@ -120,7 +134,11 @@ test("fix1 adapter: S is inserted at the exact OPEN boundary, splitting the writ
 	renderPass();
 	const previousClose = `${CLOSE}\u001b[2A\u001b[1G`;
 	const text = `${previousClose}${FULL}`;
-	terminal.write(text);
+	let completions = 0;
+	terminal.write(text, () => {
+		completions += 1;
+	});
+	assert.equal(completions, 1, "only the last of two ordinary slices completes the caller");
 	const markers = markerKinds(written);
 	const sIndex = written.findIndex((chunk) => decodeFrameMarker(chunk)?.kind === "S");
 	assert.ok(sIndex > 0, "there is a prefix chunk before S");
@@ -129,6 +147,24 @@ test("fix1 adapter: S is inserted at the exact OPEN boundary, splitting the writ
 	assert.deepEqual(markerKinds(written).map((marker) => marker.kind), ["S", "F"]);
 	assert.equal(markers[0].frameId, 1);
 	assert.equal(reporter.markerCount, 2);
+});
+
+test("split writes preserve the completion callback exactly once on the final ordinary slice", () => {
+	const { terminal, renderPass } = enabledReporter();
+	renderPass();
+	let completions = 0;
+	terminal.write(FULL, () => {
+		completions += 1;
+	});
+	assert.equal(completions, 1, "xterm completion runs once after the final ordinary slice");
+});
+
+test("split writes chain a pre-existing own write wrapper instead of bypassing it", () => {
+	const { terminal, written, renderPass } = enabledReporter({ ownWrite: true });
+	renderPass();
+	written.length = 0;
+	terminal.write(FULL);
+	assert.ok(written.includes(`own:${FULL}`), "the pre-existing own wrapper observes the original ordinary output");
 });
 
 test("fix1 adapter: pre-existing own descriptors are restored, third-party replacements are left alone", () => {

@@ -2230,6 +2230,15 @@ export class PtyAttachComponent implements Component {
 							this.deadlineState = "pending";
 							this.evaluateAttachReady();
 						}
+					} else if (status.frameWitness?.enabled === false && this.frameWitnessAvailable) {
+						this.frameWitnessAvailable = false;
+						this.latestViewProof = null;
+						this.viewProofIdentity = null;
+						if (this.attaching && this.attachMode === "protocol") {
+							this.deadlineState = "pending";
+							this.notReadyReason = "legacy-deadlines-without-reporter";
+							this.restoreLegacyDeadlines();
+						}
 					}
 					if (msg.type === "hello") this.editorEmpty = typeof msg.editorEmpty === "boolean" ? msg.editorEmpty : null;
 				} else if (msg.type === "editor_state") {

@@ -729,6 +729,25 @@ async function run(): Promise<{ ok: boolean; checks: Check[] }> {
 		}
 	});
 
+	await check("reporter capability loss restores the legacy attach deadline", async () => {
+		const h = harness();
+		const c = internals(h.component);
+		try {
+			c.attaching = true;
+			c.attachMode = "protocol";
+			c.frameWitnessAvailable = true;
+			c.attachStartedAt = 0;
+			c.lastOutputAt = 0;
+			c.connected = true;
+			c.onSocketData(`${JSON.stringify({ type: "status", status: { frameWitness: { enabled: false } } })}\n`);
+			assert(c.frameWitnessAvailable === false, "status disable clears the cached capability");
+			assert(c.attaching === false, "an expired legacy deadline finishes instead of waiting forever");
+			return { attaching: c.attaching, frameWitnessAvailable: c.frameWitnessAvailable };
+		} finally {
+			h.component.dispose();
+		}
+	});
+
 	return { ok: checks.every((entry) => entry.ok), checks };
 }
 

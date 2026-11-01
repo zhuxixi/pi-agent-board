@@ -274,16 +274,15 @@ test("23b1 fix1 F2 (owned main): no-hello identity, token enable, marker strippi
 	const screenLog = readFileSync(P.screenLogPath(root, viewId), "utf8");
 	assert.equal(screenLog.includes("agent-board-frame"), false, "no marker bytes in the screen log");
 
-	// Intent seam (issue #222 FW-04): the runner announces an intent only when the ACTUAL
-	// model geometry changed after the resize. This fake child does not reflow, so a resize
-	// request must NOT fabricate an intent — that is the correct fail-closed behaviour and the
-	// real topology (attach-frame-witness.real.test.mjs) is where an intent is observed.
+	// Intent seam (issue #222 FW-04): the plain resize path shares the same
+	// applied-resize implementation as enveloped control. The actual 80x24 ->
+	// 100x30 model change emits one target intent; same-size emits none.
 	send(socket, { type: "resize", cols: 100, rows: 30 });
-	await new Promise((r) => setTimeout(r, 600));
-	assert.equal(messages.filter((msg) => msg.type === "frame_witness_intent").length, 0, "no intent without an actual geometry change");
+	const resizeIntent = await waitFor(() => messages.find((msg) => msg.type === "frame_witness_intent"));
+	assert.deepEqual({ cols: resizeIntent.cols, rows: resizeIntent.rows, geometryRevision: resizeIntent.geometryRevision }, { cols: 100, rows: 30, geometryRevision: 1 });
 	send(socket, { type: "resize", cols: 100, rows: 30 }); // same size
 	await new Promise((r) => setTimeout(r, 400));
-	assert.equal(messages.filter((msg) => msg.type === "frame_witness_intent").length, 0, "same-size resize emits no intent");
+	assert.equal(messages.filter((msg) => msg.type === "frame_witness_intent").length, 1, "same-size resize emits no second intent");
 	// Proofs stay consistent (the resumed render stream keeps proving).
 	await waitFor(() => (readHost(root, viewId)?.frameWitness?.proofs ?? 0) >= 1);
 
@@ -300,6 +299,34 @@ test("23b1 fix1 F2 (owned main): no-hello identity, token enable, marker strippi
 	subscriber.destroy();
 	socket.destroy();
 });
+
+for (const legacy of [false, true]) {
+	test(`plain resize (${legacy ? "legacy main" : "owned main"}): an actual geometry change emits exactly one target intent`, async (t) => {
+		const { socket, messages } = await startHost(t, { legacy });
+		send(socket, { type: "hello", clientId: "frame-reporter", frameWitness: { protocol: 1 } });
+		await waitFor(() => messages.find((msg) => msg.type === "frame_witness_enable"));
+		send(socket, { type: "resize", cols: 100, rows: 30 });
+		const intent = await waitFor(() => messages.find((msg) => msg.type === "frame_witness_intent"), 2000);
+		assert.equal(intent.cols, 100);
+		assert.equal(intent.rows, 30);
+		assert.equal(intent.geometryRevision, 1);
+		send(socket, { type: "resize", cols: 100, rows: 30 });
+		await new Promise((r) => setTimeout(r, 300));
+		assert.equal(messages.filter((msg) => msg.type === "frame_witness_intent").length, 1, "same-size raw resize emits no second intent");
+	});
+}
+
+for (const legacy of [false, true]) {
+	test(`reporter close (${legacy ? "legacy main" : "owned main"}): the runner broadcasts capability loss`, async (t) => {
+		const { root, viewId, socket, subscriberMessages } = await startHost(t, { legacy });
+		send(socket, { type: "hello", clientId: "frame-reporter", frameWitness: { protocol: 1 } });
+		await waitFor(() => readHost(root, viewId)?.frameWitness?.enabled === true);
+		socket.destroy();
+		const disabled = await waitFor(() => subscriberMessages.find((msg) => msg.type === "status" && msg.status?.frameWitness?.enabled === false), 2000);
+		assert.equal(disabled.status.frameWitness.enabled, false);
+		await waitFor(() => readHost(root, viewId)?.frameWitness?.enabled === false, 2000);
+	});
+}
 
 test("23b1 fix1 F2 (legacy main): no-hello identity and marker stripping still hold", async (t) => {
 	const { root, viewId, socket, tokenFile, messages } = await startHost(t, { legacy: true });
@@ -549,7 +576,12 @@ test("23b2b fix1 (legacy main): reporter-close trailing byte advances lastOutput
 	assert.equal(end.viewProof.status, "covered", `the post-close proof covers the first frame (reason=${end.viewProof.reason})`);
 	assert.notEqual(end.viewProof.reason, "output-gap");
 	assert.equal(end.viewProof.proof.marker, "F");
-	const summary = readHost(root, viewId)?.frameWitness;
+	// Socket proof delivery is synchronous; host.json summary is deliberately
+	// coalesced. Wait for that separate channel instead of assuming same-tick IO.
+	const summary = await waitFor(() => {
+		const current = readHost(root, viewId)?.frameWitness;
+		return current?.proofs >= 1 ? current : null;
+	}, 2000);
 	assert.ok(summary.proofs >= 1);
 	assert.equal(summary.viewProofFailures, 0, "no tracker protocol failure");
 	const screenLog = readFileSync(P.screenLogPath(root, viewId), "utf8");

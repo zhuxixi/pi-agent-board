@@ -5,8 +5,8 @@
  * carrying `clientId:"frame-reporter"` and `frameWitness:{protocol:1}`, and only a
  * `{type:"frame_witness_enable", protocol:1, token}` reply turns the capability on.
  * Old or silent runners therefore see byte-identical behaviour: no widget, no
- * wrappers, no markers. The current runner does not implement the handshake — that is
- * FW-04/23b — so nothing in the default extension path ever enables this.
+ * wrappers, no markers. Current runners may negotiate the capability explicitly;
+ * the adapter never enables itself merely because the extension loaded.
  *
  * ## Interface discipline (converged contract §2.1)
  *
@@ -24,8 +24,8 @@
  *   turns the capability off and reports UNKNOWN; it never blocks or alters the
  *   original child output, and no later `F` is written as if the frame completed.
  *
- * No production wiring lives here: `src/index.ts` is untouched, no runner code reads
- * these markers, and there is no default fast path.
+ * Production wiring lives in `src/index.ts` and `runner/pty-runner.mjs`; the
+ * per-runner enable handshake remains mandatory on every path.
  */
 import {
 	FRAME_REPORTER_CLIENT_ID,
@@ -450,9 +450,9 @@ export class AttachFrameReporter {
 			}
 		}
 		for (const key of ["write", "hideCursor", "showCursor"]) {
-			const original = protoDescriptorOf(terminal, key)?.value;
-			if (typeof original !== "function") continue;
 			const ownBefore = ownDescriptor(terminal, key);
+			const original = typeof ownBefore?.value === "function" ? ownBefore.value : protoDescriptorOf(terminal, key)?.value;
+			if (typeof original !== "function") continue;
 			const wrapper = (...args) => {
 				const text = typeof args[0] === "string" ? args[0] : "";
 				if (this.#state !== "enabled") return original.apply(terminal, args);
@@ -462,15 +462,30 @@ export class AttachFrameReporter {
 					if (insertions.length === 0) return original.apply(terminal, args);
 					// Split the write exactly at this frame's OPEN token: the prefix is written
 					// first, then S, then the remainder — so S never precedes a previous
-					// frame's CLOSE that shares the write.
+					// frame's CLOSE that shares the write. Only the LAST ordinary slice
+					// receives xterm's completion argument; intermediate slices take none.
+					const slices = [];
+					let sliceCursor = 0;
+					for (const insertion of insertions) {
+						if (insertion.offset > sliceCursor) {
+							slices.push(text.slice(sliceCursor, insertion.offset));
+							sliceCursor = insertion.offset;
+						}
+					}
+					if (sliceCursor < text.length) slices.push(text.slice(sliceCursor));
+					let sliceIndex = 0;
+					const writeSlice = (slice) => {
+						sliceIndex += 1;
+						return original.call(terminal, slice, ...(sliceIndex === slices.length ? args.slice(1) : []));
+					};
 					let cursor = 0;
 					let lastResult;
 					for (const insertion of insertions) {
-						if (insertion.offset > cursor) lastResult = original.call(terminal, text.slice(cursor, insertion.offset));
+						if (insertion.offset > cursor) lastResult = writeSlice(text.slice(cursor, insertion.offset));
 						this.#emitS(insertion);
 						cursor = insertion.offset;
 					}
-					if (cursor < text.length) lastResult = original.call(terminal, text.slice(cursor));
+					if (cursor < text.length) lastResult = writeSlice(text.slice(cursor));
 					return lastResult;
 				} catch (error) {
 					// A failed original write means the frame bytes were not delivered: abort

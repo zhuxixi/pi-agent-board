@@ -26,7 +26,7 @@ test("step 23b2c2: parser replacement, callback fences, empty reset and observer
 		assert.equal(result.status, 0, `scenario failed: ${(result.stderr ?? "").slice(-2000)}\n${JSON.stringify(parsed, null, 2)}`);
 		assert.equal(parsed.ok, true, JSON.stringify(parsed, null, 2));
 		assert.deepEqual(parsed.checks.filter((check) => !check.ok), []);
-		assert.equal(parsed.checks.length, 27);
+		assert.equal(parsed.checks.length, 28);
 		assert.deepEqual(
 			parsed.checks.map((check) => check.name),
 			[
@@ -57,6 +57,7 @@ test("step 23b2c2: parser replacement, callback fences, empty reset and observer
 				"step27: epoch/empty/geometry/dispose invalidate recovery and current",
 				"step28: old wait-identity deadline callbacks are no-ops; current expiry still fires",
 				"step28: close adapter cancels old frame but a later unrelated render still works",
+				"reporter capability loss restores the legacy attach deadline",
 			],
 		);
 	} finally {
