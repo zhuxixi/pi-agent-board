@@ -899,7 +899,13 @@ test("step 20B D1-stale-epoch: a stale baseline cannot publish after the newer e
 
 test("step 20B D2: new30 batch measures BOTH dispose shapes with per-shape counts and the same contract", async (t) => {
 	const r = await runCli(t, ["--case", "D", "--repeat", "30", "--clock", "real"]);
-	assert.equal(r.code, 0, `D2 new30 must record valid evidence with no infrastructure failure (stderr: ${r.stderr.slice(-500)})`);
+	const failureFacts = r.parsed?.trials?.[0];
+	assert.equal(r.code, 0, `D2 new30 must record valid evidence with no infrastructure failure (${JSON.stringify({
+		iterationsRun: failureFacts?.iterationsRun,
+		infrastructureErrors: failureFacts?.infrastructureErrors,
+		complianceFailures: failureFacts?.complianceFailures,
+		error: failureFacts?.error,
+	})}; stderr: ${r.stderr.slice(-500)})`);
 	const tr = r.parsed?.trials?.[0];
 	assert.equal(tr.iterationsRun, 30, "all 30 iterations ran (no blind continuation, no early stop)");
 	assert.equal(tr.stoppedAfterInfrastructureFailure, false);

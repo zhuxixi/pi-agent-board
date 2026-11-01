@@ -1621,6 +1621,7 @@ test("step 16 producer: cold script emits no seed and closes the declared 22-row
 
 	h.send({ cmd: "step", step: 1 });
 	await waitForProducerWrite(h, 1, "cold step 1 (boot text)");
+	await waitFor(() => h.stdout().includes("fake pi boot: core ready\r\n"), 5000, "cold step 1 boot text on stdout");
 	assert.ok(h.stdout().includes("fake pi boot: core ready\r\n"), "boot text is unframed plain output");
 	assert.equal(frames(h.observer).length, 0, "boot text never forms a synchronized frame");
 
