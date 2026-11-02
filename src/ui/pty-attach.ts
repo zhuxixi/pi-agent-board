@@ -1049,8 +1049,15 @@ export class PtyAttachComponent implements Component {
 		if (legacyCompatible) this.finishAttachTransition();
 	}
 
-	/** The 2500 ms cap never forces a modern publish. It records an explicit
-	 *  expired/degraded wait instead; legacy keeps its old reveal. */
+	/** The 2500 ms cap never forces a modern publish of an UNFINISHED frame. It
+	 * records an explicit expired/degraded wait; legacy keeps its old reveal.
+	 * Idle-session downgrade (post-#261 regression): when the cap fires with a
+	 * COMPLETE committed snapshot already hydrated, no pending geometry intent,
+	 * and the proof channel never covered this baseline (e.g. the child emitted
+	 * S and went idle, so viewProof stays unavailable/candidate-open forever),
+	 * reveal that complete runner-synthesized frame through the standard legacy
+	 * transition instead of waiting for a proof that cannot arrive. Empty
+	 * baselines and geometry-gated waits keep the original never-publish wait. */
 	private handleAttachHardTimeout(waitToken = this.attachWaitToken): void {
 		if (waitToken !== this.attachWaitToken) return;
 		this.attachHardTimeout = null;
@@ -1063,6 +1070,15 @@ export class PtyAttachComponent implements Component {
 		this.deadlineState = "expired";
 		this.notReadyReason = this.attachMode === "protocol" ? "deadline-expired:waiting-for-complete-frame" : "deadline-expired:mode-undecided";
 		this.publishabilityState = "unknown";
+		const proof = this.latestViewProof as { status?: string } | null;
+		if (
+			this.committedView !== null &&
+			!this.resizeIntentRequired &&
+			(proof === null || proof.status !== "covered")
+		) {
+			this.finishAttachTransition();
+			return;
+		}
 		this.scheduleRender();
 	}
 
