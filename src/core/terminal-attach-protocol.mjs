@@ -1,4 +1,3 @@
-import { validateFrameMetadata } from "./attach-frame-proof.mjs";
 import { ringChunksAfter } from "./terminal-model.mjs";
 import {
 	captureTerminalSnapshot,
@@ -39,49 +38,8 @@ import {
  * capture format, an internal artifact that never crosses the wire in Route B).
  */
 export const TERMINAL_FRAME_VERSION = 1;
-/** Optional per-socket view-proof capability (issue #222 FW-06, step 23b2b). */
-export const VIEW_PROOF_PROTOCOL_VERSION = 1;
-/** Bounded per-socket capture queue for S/F/A marker records. */
-export const MAX_VIEW_PROOF_RECORDS = 256;
 
 export { TERMINAL_SNAPSHOT_VERSION };
-
-function unknownCoverage(reason) {
-	return { status: "unknown", reason, proof: null, throughSeq: null, cursorVisible: null };
-}
-
-function emptyBaselineCoverage() {
-	return unknownCoverage("empty-baseline");
-}
-
-/** Strip everything except the bounded view-proof record fields (never token/user text). */
-export function sanitizeViewProofRecord(record) {
-	if (record === null || typeof record !== "object" || Array.isArray(record)) return null;
-	if (record.marker !== "S" && record.marker !== "F" && record.marker !== "A") return null;
-	if (!Number.isInteger(record.seq) || record.seq < 1) return null;
-	if (!Number.isInteger(record.frameId) || record.frameId < 1) return null;
-	if (record.sessionEpoch !== undefined && (!Number.isInteger(record.sessionEpoch) || record.sessionEpoch < 0)) return null;
-	const base = {
-		marker: record.marker,
-		seq: record.seq,
-		frameId: record.frameId,
-		...(record.sessionEpoch === undefined ? {} : { sessionEpoch: record.sessionEpoch }),
-	};
-	if (record.marker === "S") {
-		return {
-			...base,
-			...(Number.isInteger(record.intentId) ? { intentId: record.intentId } : {}),
-			...(Number.isInteger(record.sampledCols) ? { sampledCols: record.sampledCols } : {}),
-		};
-	}
-	if (record.marker === "F") {
-		const metadata = validateFrameMetadata(record.metadata);
-		if (!metadata.ok) return null;
-		if (record.sessionEpoch !== undefined && record.sessionEpoch !== metadata.value.sessionEpoch) return null;
-		return { ...base, metadata: metadata.value };
-	}
-	return { ...base, ...(typeof record.reason === "string" ? { reason: record.reason } : {}) };
-}
 
 /**
  * @typedef {ReturnType<typeof createTerminalSubscription>} TerminalSubscription
@@ -93,20 +51,12 @@ export function sanitizeViewProofRecord(record) {
  * @param {{
  *   model: import("./terminal-model.mjs").TerminalModel,
  *   send: (msg: Record<string, unknown>) => void,
- *   viewProof?: { coverage: (seq: number) => any, replay: (fromSeq: number, throughSeq: number) => any },
  * }} opts
  */
-export function createTerminalSubscription({ model, send: rawSend, generation, viewProof = null }) {
+export function createTerminalSubscription({ model, send: rawSend, generation }) {
 	/** @type {"idle" | "capturing" | "live"} */
 	let state = "idle";
 	let lastSeq = 0;
-	// Optional FW-06 capability: negotiated per socket, never downgraded by a later
-	// subscribe_terminal without the field. Queued only while a capture is in flight.
-	let viewProofEnabled = false;
-	/** @type {any[]} */
-	let viewProofQueue = [];
-	let viewProofQueueDropped = false;
-	let captureViewProofReset = null;
 	// Sticky protocol-ownership marker: set the moment a socket speaks
 	// subscribe_terminal, never reset (not even by gap downgrade or snapshot
 	// failure). The runner excludes subscribed sockets from the legacy output
@@ -137,78 +87,6 @@ export function createTerminalSubscription({ model, send: rawSend, generation, v
 		send({ type: "error", code, ...extra });
 	};
 
-	function coverageAt(seq, overrideReason = null) {
-		if (overrideReason !== null) return unknownCoverage(overrideReason);
-		if (seq === 0) return emptyBaselineCoverage();
-		const coverage = viewProof?.coverage?.(seq);
-		return coverage && typeof coverage === "object" ? coverage : unknownCoverage("no-frame-witness");
-	}
-
-	function clearCaptureViewProof(reason = null) {
-		viewProofQueue = [];
-		viewProofQueueDropped = false;
-		captureViewProofReset = reason;
-	}
-
-	function queueViewProofRecord(record) {
-		if (viewProofQueue.length >= MAX_VIEW_PROOF_RECORDS) {
-			viewProofQueueDropped = true;
-			return;
-		}
-		viewProofQueue.push(record);
-	}
-
-	/**
-	 * Emit queued S/F/A records in seq order around the ring catch-up. Output at
-	 * an equal seq is either already in the snapshot frame (seq <= snapshotSeq)
-	 * or emitted first by the caller (seq > snapshotSeq).
-	 */
-	function flushCaptureViewProofRecords(chunks, snapshotSeq) {
-		if (!viewProofEnabled) {
-			for (const chunk of chunks) {
-				send({ type: "output", seq: chunk.seq, data: chunk.data });
-				lastSeq = chunk.seq;
-			}
-			return;
-		}
-		if (viewProofQueueDropped) {
-			viewProofQueue = [];
-			for (const chunk of chunks) {
-				send({ type: "output", seq: chunk.seq, data: chunk.data });
-				lastSeq = chunk.seq;
-			}
-			return;
-		}
-		const records = viewProofQueue.slice();
-		viewProofQueue = [];
-		const beforeChunks = [];
-		const bySeq = new Map();
-		const afterChunks = [];
-		for (const record of records) {
-			if (record.seq <= snapshotSeq) beforeChunks.push(record);
-			else {
-				const list = bySeq.get(record.seq) ?? [];
-				list.push(record);
-				bySeq.set(record.seq, list);
-			}
-		}
-		for (const record of beforeChunks) send({ type: "view_proof", record });
-		const sentSeqs = new Set();
-		for (const chunk of chunks) {
-			send({ type: "output", seq: chunk.seq, data: chunk.data });
-			lastSeq = chunk.seq;
-			sentSeqs.add(chunk.seq);
-			for (const record of bySeq.get(chunk.seq) ?? []) send({ type: "view_proof", record });
-		}
-		for (const [seq, list] of bySeq) {
-			if (sentSeqs.has(seq)) continue;
-			for (const record of list) afterChunks.push(record);
-		}
-		// A record can only be missing its catch-up chunk if the ring lost data;
-		// do not pretend it was stitched. The end-state coverage marks UNKNOWN.
-		if (afterChunks.length > 0) viewProofQueueDropped = true;
-	}
-
 	/**
 	 * Fresh-snapshot path (first subscribe or unrecoverable cursor). Frame
 	 * metadata comes from the captured DTO, so a resize racing the async
@@ -217,7 +95,6 @@ export function createTerminalSubscription({ model, send: rawSend, generation, v
 	 */
 	async function startSnapshot({ resnapshot = false } = {}) {
 		state = "capturing";
-		clearCaptureViewProof(null);
 		try {
 			const empty = model.lastSeq === 0;
 			const begin = /** @type {Record<string, unknown>} */ ({
@@ -238,15 +115,9 @@ export function createTerminalSubscription({ model, send: rawSend, generation, v
 				// marker contract must be consistent across resnapshot paths).
 				begin.empty = true;
 				if (resnapshot) begin.resnapshot = true;
-				if (viewProofEnabled) begin.viewProof = emptyBaselineCoverage();
 				send(begin);
 				lastSeq = 0;
-				send({
-					type: "snapshot_end",
-					nextSeq: lastSeq + 1,
-					scrollbackLines: 0,
-					...(viewProofEnabled ? { viewProof: emptyBaselineCoverage() } : {}),
-				});
+				send({ type: "snapshot_end", nextSeq: lastSeq + 1, scrollbackLines: 0 });
 				if (!sendBroken) state = "live";
 				return;
 			}
@@ -255,7 +126,6 @@ export function createTerminalSubscription({ model, send: rawSend, generation, v
 			begin.cols = dto.cols;
 			begin.rows = dto.rows;
 			if (resnapshot) begin.resnapshot = true;
-			if (viewProofEnabled) begin.viewProof = coverageAt(dto.snapshotSeq, captureViewProofReset);
 			send(begin);
 			send({
 				type: "snapshot_frame",
@@ -269,27 +139,21 @@ export function createTerminalSubscription({ model, send: rawSend, generation, v
 			if (after.evicted) {
 				// Ring pressure during capture: refuse to stitch, ask for a redo.
 				state = "idle";
-				clearCaptureViewProof(null);
 				send({ type: "resnapshot_required", lastSeq, missing: dto.snapshotSeq + 1 });
 				return;
 			}
-			flushCaptureViewProofRecords(after.chunks, dto.snapshotSeq);
+			for (const chunk of after.chunks) {
+				send({ type: "output", seq: chunk.seq, data: chunk.data });
+				lastSeq = chunk.seq;
+			}
 			if (after.chunks.length === 0) lastSeq = dto.snapshotSeq;
 			// scrollbackLines is the runner-authoritative history count for the very
 			// frame just sent (same capture): the client needs it to tell real history
 			// from rows its local hydration scrolled out of the viewport (issue #205).
-			const endCoverageReason = captureViewProofReset ?? (viewProofQueueDropped ? "view-proof-records-dropped" : null);
-			send({
-				type: "snapshot_end",
-				nextSeq: lastSeq + 1,
-				scrollbackLines: dto.scrollback.length,
-				...(viewProofEnabled ? { viewProof: coverageAt(lastSeq, endCoverageReason) } : {}),
-			});
-			clearCaptureViewProof(null);
+			send({ type: "snapshot_end", nextSeq: lastSeq + 1, scrollbackLines: dto.scrollback.length });
 			if (!sendBroken) state = "live";
 		} catch (err) {
 			state = "idle";
-			clearCaptureViewProof(null);
 			fail("snapshot_failed", { message: err instanceof Error ? err.message : String(err) });
 		}
 	}
@@ -302,44 +166,10 @@ export function createTerminalSubscription({ model, send: rawSend, generation, v
 	 */
 	function startReplay(sinceSeq) {
 		const after = ringChunksAfter(model, sinceSeq);
-		if (after.evicted) {
-			state = "idle";
-			send({ type: "resnapshot_required", lastSeq, missing: sinceSeq + 1 });
-			return;
-		}
-		const hasRange = model.lastSeq > sinceSeq;
-		const replayResult = viewProofEnabled && hasRange ? viewProof?.replay?.(sinceSeq + 1, model.lastSeq) : null;
-		let proofBySeq = null;
-		let proofProblem = null;
-		if (viewProofEnabled && hasRange) {
-			if (replayResult === null || replayResult === undefined) proofProblem = "no-frame-witness";
-			else if (replayResult.status !== "ok") proofProblem = `proof-replay-${replayResult.reason ?? replayResult.status}`;
-			else if (replayResult.entries.some((entry) => entry.droppedProofs > 0 || entry.droppedEvents > 0)) proofProblem = "proof-replay-dropped";
-			else {
-				const chunkSeqs = new Set(after.chunks.map((chunk) => chunk.seq));
-				const map = new Map();
-				for (const entry of replayResult.entries) {
-					if (entry.proofs.length === 0) continue;
-					if (!chunkSeqs.has(entry.seq)) {
-						proofProblem = "proof-replay-gap";
-						break;
-					}
-					map.set(entry.seq, entry.proofs);
-				}
-				if (proofProblem === null) proofBySeq = map;
-			}
-		}
 		for (const chunk of after.chunks) {
 			send({ type: "output", seq: chunk.seq, data: chunk.data });
-			if (proofBySeq !== null) {
-				for (const proof of proofBySeq.get(chunk.seq) ?? []) {
-					const record = sanitizeViewProofRecord(proof);
-					if (record !== null) send({ type: "view_proof", record });
-				}
-			}
 		}
 		lastSeq = model.lastSeq;
-		if (viewProofEnabled) send({ type: "view_proof_state", viewProof: coverageAt(lastSeq, proofProblem) });
 		if (!sendBroken) state = "live";
 	}
 
@@ -362,13 +192,6 @@ export function createTerminalSubscription({ model, send: rawSend, generation, v
 		if (msg.frameVersion !== undefined && msg.frameVersion !== TERMINAL_FRAME_VERSION) {
 			fail("frame_version_mismatch", { supported: TERMINAL_FRAME_VERSION, received: msg.frameVersion });
 			return true;
-		}
-		if (msg.viewProof !== undefined) {
-			if (msg.viewProof !== VIEW_PROOF_PROTOCOL_VERSION) {
-				fail("view_proof_version_mismatch", { supported: VIEW_PROOF_PROTOCOL_VERSION, received: msg.viewProof });
-				return true;
-			}
-			viewProofEnabled = true;
 		}
 		if (
 			msg.sinceSeq !== undefined &&
@@ -415,46 +238,18 @@ export function createTerminalSubscription({ model, send: rawSend, generation, v
 		// Gap: never skip silently, never fabricate. One marker, then the client
 		// must re-subscribe (fresh snapshot or replay from its real cursor).
 		state = "idle";
-		clearCaptureViewProof(null);
 		send({ type: "resnapshot_required", lastSeq, missing: seq });
-	}
-
-	/** Live/capture delivery of one accepted S/F/A record (opt-in sockets only). */
-	function onViewProofRecord(record) {
-		if (!viewProofEnabled) return;
-		const clean = sanitizeViewProofRecord(record);
-		if (clean === null) return;
-		if (state === "live") send({ type: "view_proof", record: clean });
-		else if (state === "capturing") queueViewProofRecord(clean);
-	}
-
-	/**
-	 * Reporter replacement/close: drop queued old-token records and force current
-	 * view-proof state UNKNOWN. Never carries old proofs into a new reporter.
-	 */
-	function onViewProofReset(reason) {
-		viewProofQueue = [];
-		viewProofQueueDropped = false;
-		if (!viewProofEnabled) return;
-		if (state === "capturing") {
-			captureViewProofReset = reason;
-			return;
-		}
-		if (state === "live") send({ type: "view_proof_state", viewProof: unknownCoverage(reason) });
 	}
 
 	return {
 		handleMessage,
 		onOutput,
-		onViewProofRecord,
-		onViewProofReset,
 		/** Sticky: true once the socket sent subscribe_terminal. The runner uses
 		 *  this to keep the socket out of the legacy output broadcast. */
 		subscribed: () => subscribed,
 		/** Socket went away; the runner drops its reference. */
 		detach() {
 			state = "idle";
-			clearCaptureViewProof(null);
 		},
 	};
 }
