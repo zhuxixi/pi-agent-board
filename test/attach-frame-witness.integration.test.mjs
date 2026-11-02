@@ -12,7 +12,7 @@ import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { once } from "node:events";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import test from "node:test";
 
 import { atomicWriteJson } from "../src/core/atomic.mjs";
@@ -299,6 +299,68 @@ test("23b1 fix1 F2 (owned main): no-hello identity, token enable, marker strippi
 	subscriber.destroy();
 	socket.destroy();
 });
+
+for (const legacy of [false, true]) {
+	test(`reporter S-then-idle (${legacy ? "legacy main" : "owned main"}): attach reveals the committed snapshot at the legacy cap`, async (t) => {
+		// Child: one ordinary content line, then after enable a real S marker and
+		// eternal silence — the live regression shape (tracker stays candidate-open,
+		// so snapshots carry viewProof unavailable forever while the session idles).
+		const childScript = `
+const fs = require("node:fs");
+const file = process.argv[1];
+process.stdout.write("\\u001b[?1049h\\u001b[?25l");
+process.stdout.write("IDLE-E2E VISIBLE LINE\\r\\n");
+let sent = false;
+setInterval(() => {
+  if (sent) return; // keep the process (and the runner host) alive after S
+  let token = "";
+  try { token = fs.readFileSync(file, "utf8").trim(); } catch {}
+  if (!token) return;
+  process.stdout.write("\\u001bP> agent-board-frame/1 ; " + token + " ; S ; 1 ; 0 ; 80\\u001b\\\\");
+  sent = true;
+}, 40);
+`;
+		const { root, viewId, socketPath, tokenFile } = await startHost(t, { legacy, script: childScript });
+		const reporter = createConnection(socketPath);
+		await once(reporter, "connect");
+		const reporterMessages = listen(reporter);
+		send(reporter, { type: "hello", clientId: "frame-reporter", frameWitness: { protocol: 1 } });
+		const enable = await waitFor(() => reporterMessages.find((msg) => msg.type === "frame_witness_enable"), 15000);
+		writeFileSync(tokenFile, enable.token);
+		// Wait until the runner parser has SEEN the S marker (frameId advanced),
+		// then attach. Whether the runner-side candidate object later reads open
+		// or cleared is recorded below; the component contract under test is the
+		// cap-time reveal with a non-covered proof channel either way.
+		try {
+			await waitFor(() => {
+				const witness = readHost(root, viewId)?.frameWitness;
+				return witness && (witness.lastFrameId ?? 0) >= 1 ? witness : null;
+			}, 15000, "runner saw the S marker");
+		} catch (error) {
+			t.diagnostic(`S wait failed: host=${JSON.stringify(readHost(root, viewId)?.frameWitness)} reporterMessages=${JSON.stringify(reporterMessages.slice(0, 6))}`);
+			throw error;
+		}
+		const witness0 = readHost(root, viewId)?.frameWitness;
+		assert.equal((witness0?.lastFrameId ?? 0) >= 1, true, "the S marker reached the runner parser");
+		assert.equal(witness0?.proofs ?? 0, 0, "no F ever completes the idle candidate");
+		// Drive a REAL component in a transform-types child (TS parameter
+		// properties cannot load under strip-only) against the live socket.
+		const driver = spawnSync(process.execPath, [
+			"--experimental-transform-types",
+			resolve("test-support/attach-idle-socket-driver.ts"),
+			socketPath,
+			"8000",
+			"IDLE-E2E VISIBLE LINE",
+		], { encoding: "utf8", timeout: 20000 });
+		const driverLine = (driver.stdout ?? "").trim().split("\n").filter(Boolean).at(-1);
+		const driven = driverLine ? JSON.parse(driverLine) : null;
+		t.diagnostic(`driver: exit=${driver.status} result=${driverLine ?? null} stderr=${(driver.stderr ?? "").slice(-300)}`);
+		assert.equal(driven?.attaching, false, "the attach settles at the legacy cap instead of waiting forever");
+		assert.equal(driven?.showsContent, true, `the revealed surface shows the committed model content (${JSON.stringify(driven)})`);
+		t.diagnostic(`runner witness after reveal: ${JSON.stringify(readHost(root, viewId)?.frameWitness)}`);
+		reporter.destroy();
+	});
+}
 
 for (const legacy of [false, true]) {
 	test(`plain resize (${legacy ? "legacy main" : "owned main"}): an actual geometry change emits exactly one target intent`, async (t) => {

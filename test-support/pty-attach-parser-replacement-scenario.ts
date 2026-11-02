@@ -748,6 +748,58 @@ async function run(): Promise<{ ok: boolean; checks: Check[] }> {
 		}
 	});
 
+	await check("deadline-expired idle proof-unavailable reveals the committed snapshot (legacy downgrade)", async () => {
+		const h = harness();
+		const c = internals(h.component);
+		try {
+			// Live regression shape (post-#261): same-size snapshot, complete frame,
+			// but the proof channel never covers the baseline (child emitted S and
+			// went idle => viewProof unavailable/candidate-open forever).
+			c.handleAttachEvent("mode", "protocol");
+			(h.component as unknown as { onSocketData: (text: string) => void }).onSocketData(
+				`${JSON.stringify({ type: "status", status: { frameWitness: { enabled: true } }, generation: "gen-1" })}\n`,
+			);
+			c.handleAttachEvent("snapshotBegin", { cols: h.component["cols"], rows: h.component["rows"] });
+			c.handleAttachEvent("snapshotReady", {
+				frame: "\x1b[2J\x1b[H\x1b[?2026h\x1b[1;1HIDLE CURRENT SCREEN\x1b[?2026l",
+				nextSeq: 2,
+				viewProof: { status: "unavailable", reason: "candidate-open", proof: null, throughSeq: null, cursorVisible: null },
+				viewProofRecords: [],
+			});
+			c.startAttachSettle();
+			await waitFor(() => c.localHydrationState === "complete" && c.committedView !== null, "idle snapshot hydrates and commits");
+			// Drive the same expiry entry the real 2500 ms cap timer invokes.
+			c.handleAttachHardTimeout(c.attachWaitToken);
+			assert(c.attaching === false, "deadline expiry reveals the complete snapshot instead of waiting forever");
+			const visible = h.component.render(80).join("\n");
+			assert(visible.includes("IDLE CURRENT SCREEN"), "the revealed surface is the committed snapshot content");
+			assert(c.deadlineState === "expired", "the wait is recorded as expired");
+			return { attaching: c.attaching, reason: c.notReadyReason };
+		} finally {
+			h.component.dispose();
+		}
+	});
+
+	await check("deadline-expired empty baseline still never publishes (downgrade guard)", async () => {
+		const h = harness();
+		const c = internals(h.component);
+		try {
+			c.handleAttachEvent("mode", "protocol");
+			(h.component as unknown as { onSocketData: (text: string) => void }).onSocketData(
+				`${JSON.stringify({ type: "status", status: { frameWitness: { enabled: true } }, generation: "gen-1" })}\n`,
+			);
+			c.handleAttachEvent("snapshotBegin", { cols: h.component["cols"], rows: h.component["rows"], empty: true });
+			c.handleAttachEvent("snapshotReady", { empty: true, nextSeq: 1 });
+			c.startAttachSettle();
+			c.handleAttachHardTimeout(c.attachWaitToken);
+			assert(c.attaching === true, "an empty baseline keeps the original never-publish wait");
+			assert(c.deadlineState === "expired", "expiry is still recorded");
+			return { attaching: c.attaching, deadlineState: c.deadlineState };
+		} finally {
+			h.component.dispose();
+		}
+	});
+
 	return { ok: checks.every((entry) => entry.ok), checks };
 }
 
