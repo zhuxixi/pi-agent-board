@@ -6,6 +6,7 @@ import { createConnection, type Socket } from "node:net";
 import type { Component, KeybindingsManager, RgbColor, TUI, TerminalColorScheme, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { resolveAttachDeleteKey } from "../core/attach-delete.mjs";
+import { resolveAttachDetachChord } from "../core/attach-detach.mjs";
 import { findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
 import { createAttachOutputRenderScheduler, detectCursorDesync, isPtyCursorHidden, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
 import { evaluateAttachReconnect, shouldEscapeAttach } from "../core/pty-attach-reconnect.mjs";
@@ -431,25 +432,11 @@ export class PtyAttachComponent implements Component {
 			this.send({ type: "input", data });
 			return;
 		}
-		if (matchesKey(data, "ctrl+\\")) {
-			// Unconditional, terminal-independent escape (issue #126): 0x1c is a
-			// single raw ASCII byte every terminal forwards unchanged in raw
-			// mode — no modifier-encoding dependency like Ctrl+Left (macOS
-			// Terminal.app never emits it, WezTerm consumes it for tab
-			// switching). Only caveat (documented in README): layouts where
-			// `\` sits on AltGr may never produce this byte; the escape ladder
-			// still covers those. matchesKey also covers the kitty CSI-u and
-			// modifyOtherKeys encodings of the same chord.
-			this.detach();
-			return;
-		}
-		if (matchesKey(data, Key.ctrl("left"))) {
-			// Explicit detach chord (issue #89): single ← is gated on editor state
-			// (it doubles as cursor-left inside a non-empty draft), so a user with
-			// a draft had no way out short of Ctrl+C/D, which kills the child Pi.
-			// Ctrl+← is unambiguous intent — detach unconditionally, regardless of
-			// editor state or socket liveness (same always-exitable guarantee as
-			// the disconnected-← escape, issue #48).
+		if (resolveAttachDetachChord(data)) {
+			// Issue #266: unconditional detach chords — Ctrl+\ (raw 0x1c, #126),
+			// Ctrl+← (#89) and Alt+H (vim h = left). Bare ← stays gated on the
+			// pushed editor_state; a chord needs no gate. Rationale and the
+			// encoding matrix live in src/core/attach-detach.mjs.
 			this.detach();
 			return;
 		}

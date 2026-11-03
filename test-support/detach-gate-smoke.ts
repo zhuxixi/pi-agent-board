@@ -23,6 +23,9 @@
 //       and the kill switch silences it.
 //   P13. Issue #161 A7: the same settle delivery over the new-API-only tui
 //       (queryTerminalColors, pi-tui >= 0.99) — one 997;2 for a light reply.
+//   R1-R6/R8. Issue #266: Alt+H detaches unconditionally in every
+//       editor/socket quadrant, cancels an armed delete confirm first, leaves
+//       other keys to the child, and never half-applies a coalesced segment.
 // Run via `node --experimental-transform-types` (TS parameter properties).
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
@@ -815,5 +818,87 @@ async function runStaleSocketIdentityScenario(): Promise<boolean> {
 }
 
 out.staleSocketEventsDoNotClearCurrent = await runStaleSocketIdentityScenario();
+
+// R1. Issue #266: Alt+H detaches unconditionally while a draft sits in the
+// editor — the same guarantee as Ctrl+← (#89), with no editor gate.
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat content\r\n");
+	(fixtureInternals<{ onSocketData: (t: string) => void }>(attach)).onSocketData(JSON.stringify({ type: "editor_state", empty: false }) + "\n");
+	(fixtureInternals<{ connected: boolean }>(attach)).connected = true;
+	attach.handleInput("\x1bh");
+	out.altHDetachesOnDraft = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	attach.dispose();
+}
+
+// R2. Issue #266: the chord also detaches from a genuinely empty editor —
+// same unconditional guarantee on the other side of the gate.
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat content\r\n> \x1b[7m \x1b[27m");
+	(fixtureInternals<{ onSocketData: (t: string) => void }>(attach)).onSocketData(JSON.stringify({ type: "editor_state", empty: true }) + "\n");
+	(fixtureInternals<{ connected: boolean }>(attach)).connected = true;
+	attach.handleInput("\x1bh");
+	out.altHDetachesOnEmptyEditor = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	attach.dispose();
+}
+
+// R3. Issue #266: the null quadrant — no editor_state ever pushed — still
+// detaches: the chord never consults the gate.
+{
+	const { attach, sent, didDetach } = makeAttach();
+	await writeToTerm(attach, "chat content\r\n");
+	(fixtureInternals<{ connected: boolean }>(attach)).connected = true;
+	attach.handleInput("\x1bh");
+	out.altHDetachesWithoutEditorState = didDetach() && sent.length === 1 && sent[0].type === "detach";
+	attach.dispose();
+}
+
+// R4. Issue #266: while disconnected the chord still ends the surface and the
+// key is never forwarded as input (same contract as Ctrl+\ on a dead socket).
+{
+	const { attach, sent, resultAction } = makeAttach();
+	attach.handleInput("\x1bh");
+	out.altHDetachesWhileDisconnected = resultAction() === "detached" && !sent.some((m) => m.type === "input");
+	attach.dispose();
+}
+
+// R5. Issue #266 + #147: with the delete confirm armed the chord cancels the
+// confirm and detaches — it never archives and never forwards the chord.
+{
+	const { attach, sent, resultAction } = makeAttach();
+	attach.handleInput("\x18");
+	attach.handleInput("\x1bh");
+	out.altHCancelsThenDetaches = resultAction() === "detached"
+		&& !sent.some((m) => m.type === "input")
+		&& sent.filter((m) => m.type === "detach").length === 1;
+	attach.dispose();
+}
+
+// R6. Issue #266 isolation: keys that are NOT the chord still reach the child
+// unchanged — bare h, shifted Alt+H and ordinary text.
+{
+	let allForwarded = true;
+	for (const data of ["h", "\x1bH", "abc"]) {
+		const probe = makeAttach();
+		(fixtureInternals<{ connected: boolean }>(probe.attach)).connected = true;
+		probe.attach.handleInput(data);
+		allForwarded = allForwarded && !probe.didDetach()
+			&& probe.sent.length === 1 && probe.sent[0].type === "input" && probe.sent[0].data === data;
+		probe.attach.dispose();
+	}
+	out.altHLeavesOtherKeysToTheChild = allForwarded;
+}
+
+// R8. Issue #266 review focus: a chord coalesced with another chord in ONE read
+// is not a match — the whole segment is forwarded unchanged, never half-applied.
+{
+	const { attach, sent, didDetach } = makeAttach();
+	(fixtureInternals<{ connected: boolean }>(attach)).connected = true;
+	attach.handleInput("\x1bh\x1bh");
+	out.altHCoalescedSegmentForwards = !didDetach()
+		&& sent.length === 1 && sent[0].type === "input" && sent[0].data === "\x1bh\x1bh";
+	attach.dispose();
+}
 
 console.log(JSON.stringify(out));

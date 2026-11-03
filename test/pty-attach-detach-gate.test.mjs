@@ -54,6 +54,14 @@ test("attach detach gate: ctrl+] passes through, ← reads only editor_state", (
 	assert.equal(parsed.ctrlBackslashDetachesViaKittyEncoding, true, "Ctrl+\\ must detach from the kitty CSI-u encoding (issue #126)");
 	assert.equal(parsed.ctrlBackslashDetachesViaModifyOtherKeys, true, "Ctrl+\\ must detach from the modifyOtherKeys encoding (issue #126)");
 	assert.equal(parsed.printableQStillForwardsToChild, true, "printable keys must still forward to the child (issue #126 isolation)");
+	// Issue #266: Alt+H joins the unconditional detach set (vim h = left).
+	assert.equal(parsed.altHDetachesOnDraft, true, "Alt+H must detach with a pushed draft (issue #266)");
+	assert.equal(parsed.altHDetachesOnEmptyEditor, true, "Alt+H must detach from an empty editor (issue #266)");
+	assert.equal(parsed.altHDetachesWithoutEditorState, true, "Alt+H must detach with no editor_state at all (issue #266)");
+	assert.equal(parsed.altHDetachesWhileDisconnected, true, "Alt+H must end the surface while disconnected (issue #266)");
+	assert.equal(parsed.altHCancelsThenDetaches, true, "Alt+H must cancel an armed delete confirm and detach, never archive (issue #266)");
+	assert.equal(parsed.altHLeavesOtherKeysToTheChild, true, "h, Alt+Shift+H and text must still reach the child (issue #266)");
+	assert.equal(parsed.altHCoalescedSegmentForwards, true, "a coalesced chord segment must be forwarded unchanged (issue #266)");
 	// Issue #128: terminal capability forwarding — child queries reach the real
 	// terminal, scheme events bridge back as 997 reports, settle uses one
 	// tracked background probe, and kitty/DA stays excluded.
