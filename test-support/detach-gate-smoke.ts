@@ -23,9 +23,10 @@
 //       and the kill switch silences it.
 //   P13. Issue #161 A7: the same settle delivery over the new-API-only tui
 //       (queryTerminalColors, pi-tui >= 0.99) — one 997;2 for a light reply.
-//   R1-R6/R8. Issue #266: Alt+H detaches unconditionally in every
-//       editor/socket quadrant, cancels an armed delete confirm first, leaves
-//       other keys to the child, and never half-applies a coalesced segment.
+//   R1-R8. Issue #266: Alt+H detaches unconditionally in every editor/socket
+//       quadrant, cancels an armed delete confirm first, leaves other keys to
+//       the child, never half-applies a coalesced segment, and is advertised by
+//       the live header and the loading hint.
 // Run via `node --experimental-transform-types` (TS parameter properties).
 import { mkdtempSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
@@ -899,6 +900,22 @@ out.staleSocketEventsDoNotClearCurrent = await runStaleSocketIdentityScenario();
 	out.altHCoalescedSegmentForwards = !didDetach()
 		&& sent.length === 1 && sent[0].type === "input" && sent[0].data === "\x1bh\x1bh";
 	attach.dispose();
+}
+
+// R7. Issue #266: the surface advertises the chord — the live header and the
+// loading hint both name Alt+H next to the existing chords.
+{
+	const loading = makeAttach();
+	const loadingLines = loading.attach.render(80).join("\n");
+	const loadingMentions = loadingLines.includes("Alt+H");
+	loading.attach.dispose();
+	const live = makeAttach();
+	await writeToTerm(live.attach, "chat content\r\n");
+	// The header is 89 display columns once the third chord is added; clip() at
+	// 80 truncates mid-chord (pre-existing clipping — the pre-task header was
+	// already 84 cols and lost " detach"). Render wide enough to name the chord.
+	out.headerMentionsAltH = live.attach.render(100)[0].includes("Alt+H") && loadingMentions;
+	live.attach.dispose();
 }
 
 console.log(JSON.stringify(out));

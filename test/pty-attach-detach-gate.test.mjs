@@ -44,6 +44,7 @@ test("attach detach gate: ctrl+] passes through, ← reads only editor_state", (
 	assert.equal(parsed.ctrlLeftDetachesOnEmptyInput, true, "Ctrl+← must detach from an empty editor too (issue #89)");
 	assert.equal(parsed.headerMentionsCtrlLeft, true, "the live header must advertise the Ctrl+← chord (issue #89)");
 	assert.equal(parsed.headerMentionsCtrlBackslash, true, "the live header must advertise the unconditional Ctrl+\\ chord (issue #126)");
+	assert.equal(parsed.headerMentionsAltH, true, "the live header and loading hint must advertise the Alt+H chord (issue #266)");
 	// Issue #126: Ctrl+\ is the unconditional, terminal-independent escape —
 	// every editor/socket quadrant detaches, across all three real-world
 	// keyboard encodings (raw 0x1c, kitty CSI-u, modifyOtherKeys).

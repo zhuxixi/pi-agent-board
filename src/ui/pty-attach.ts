@@ -559,7 +559,7 @@ export class PtyAttachComponent implements Component {
 			? this.theme.fg("accent", this.theme.bold(` Delete "${truncateToWidth(this.opts.title, 24, "")}"? `)) +
 			  this.theme.fg("muted", "y confirms · any other key cancels")
 			: this.theme.fg("accent", this.theme.bold(` ${this.opts.title} `)) +
-			  this.theme.fg("muted", `${this.status} · opens links · drag selects+copies · Ctrl+←/Ctrl+\\ detach`);
+			  this.theme.fg("muted", `${this.status} · opens links · drag selects+copies · Ctrl+←/Ctrl+\\/Alt+H detach`);
 		return [clip(header, width), ...body.map((l) => clipTerminalLine(l, width)), this.theme.fg("dim", "─".repeat(width))];
 	}
 
@@ -575,7 +575,7 @@ export class PtyAttachComponent implements Component {
 		out.push(center(this.theme.fg("accent", this.theme.bold(title)), width));
 		out.push(center(this.theme.fg("muted", detail), width));
 		out.push("");
-		out.push(center(this.theme.fg("dim", "Ctrl+←/Ctrl+\\ to detach"), width));
+		out.push(center(this.theme.fg("dim", "Ctrl+←/Ctrl+\\/Alt+H to detach"), width));
 		while (out.length < height) out.push("");
 		return out.slice(0, height);
 	}
