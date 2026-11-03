@@ -1,3 +1,5 @@
+import { validateFrameMetadata } from "./attach-frame-proof.mjs";
+
 /**
  * Decide whether the next attach repaint should force a full clear.
  *
@@ -83,6 +85,10 @@ export function createAttachOutputRenderScheduler(requestRender, delayMs = ATTAC
 			}, delayMs);
 			timer.unref?.();
 		},
+		cancel() {
+			if (timer) clearTimeout(timer);
+			timer = null;
+		},
 		dispose() {
 			disposed = true;
 			if (timer) clearTimeout(timer);
@@ -119,4 +125,105 @@ export function detectCursorDesync(buf, cursor) {
 	}
 	if (!cell) return "misaligned";
 	return cell.isInverse() ? "aligned" : "misaligned";
+}
+
+/**
+ * Source-comparison gate for a committed view projection (spec §4.2/§4.3).
+ * A projection may be shown only while every identity axis still matches the
+ * current connection/baseline/parser/geometry target. Missing/unknown facts and
+ * a closed component always fail closed.
+ */
+export function canPublishAttachView(viewIdentity, currentIdentity) {
+	if (viewIdentity === null || typeof viewIdentity !== "object" || Array.isArray(viewIdentity)) return false;
+	if (currentIdentity === null || typeof currentIdentity !== "object" || Array.isArray(currentIdentity)) return false;
+	if (viewIdentity.closed === true || currentIdentity.closed === true) return false;
+	const known = (value) => value !== null && value !== undefined && !(typeof value === "string" && value.length === 0) && !(typeof value === "number" && !Number.isFinite(value));
+	for (const key of ["connectionToken", "baselineToken", "generation", "parser", "geometryRevision", "targetCols", "targetRows"]) {
+		if (!known(viewIdentity[key]) || !known(currentIdentity[key])) return false;
+		if (viewIdentity[key] !== currentIdentity[key]) return false;
+	}
+	if (!Number.isInteger(viewIdentity.targetCols) || viewIdentity.targetCols < 1) return false;
+	if (!Number.isInteger(viewIdentity.targetRows) || viewIdentity.targetRows < 1) return false;
+	if (!Number.isInteger(viewIdentity.geometryRevision) || viewIdentity.geometryRevision < 0) return false;
+	return true;
+}
+
+/**
+ * Pure §4 presentation decision. It consumes only immutable facts — no clock,
+ * timer, terminal or I/O. `deadlineState:"expired"` can only change a WAIT
+ * reason; it can never upgrade an incomplete view to publish. Legacy decisions
+ * stay independent of proof facts.
+ *
+ * @param {{
+ *   closed?: boolean,
+ *   mode?: "undecided" | "protocol" | "legacy" | "raw" | string,
+ *   baselineState?: "unverified" | "hydrating" | "valid-empty" | "valid-content" | "undecided" | string,
+ *   localParseComplete?: boolean,
+ *   frameState?: "unknown" | "open" | "complete" | string,
+ *   openSyncBlock?: boolean,
+ *   openCandidate?: boolean,
+ *   contentAvailable?: boolean,
+ *   contentKind?: "complete" | "boot" | "raw" | string,
+ *   localSeq?: number,
+ *   viewProof?: any,
+ *   viewIdentity?: any,
+ *   currentIdentity?: any,
+ *   targetCols?: number,
+ *   targetRows?: number,
+ *   geometryRevision?: number,
+ *   requiredGeometryRevision?: number,
+ *   resizeIntentRequired?: boolean,
+ *   resizeIntentSatisfied?: boolean,
+ *   intentId?: number,
+ *   deadlineState?: "pending" | "expired",
+ * }} state
+ * @returns {{ action: "closed" | "legacy" | "wait" | "publish", reason: string }}
+ */
+export function decideAttachPresentation(state) {
+	if (state === null || typeof state !== "object" || Array.isArray(state)) return { action: "wait", reason: "state-missing" };
+	if (state.closed === true) return { action: "closed", reason: "closed" };
+	if (state.mode === "closed") return { action: "closed", reason: "closed" };
+	if (state.mode === "legacy") return { action: "legacy", reason: "legacy-mode" };
+	const wait = (reason) => ({
+		action: "wait",
+		reason: state.deadlineState === "expired" ? `deadline-expired:${reason}` : reason,
+	});
+	if (state.mode !== "protocol") return wait(`mode-${state.mode ?? "unknown"}`);
+	if (state.baselineState !== "valid-content" && state.baselineState !== "valid-empty") {
+		if (state.baselineState === "hydrating") return wait("baseline-hydrating");
+		if (state.baselineState === "unverified") return wait("baseline-unverified");
+		return wait("baseline-unknown");
+	}
+	if (state.localParseComplete !== true) return wait("local-parse-incomplete");
+	if (state.frameState === "open") return wait("sync-open");
+	if (state.frameState !== "complete") return wait("frame-incomplete");
+	if (state.openSyncBlock === true) return wait("sync-open");
+	if (state.openCandidate === true) return wait("candidate-open");
+	if (state.baselineState === "valid-empty") {
+		if (!Number.isInteger(state.localSeq) || state.localSeq < 1) return wait("empty-baseline-needs-live-complete");
+	}
+	if (state.contentKind === "boot") return wait("boot-content");
+	if (state.contentKind === "raw") return wait("raw-content");
+	if (state.contentKind !== "complete") return wait("content-kind-unknown");
+	if (state.contentAvailable !== true) return wait("content-missing");
+	if (!Number.isInteger(state.targetCols) || state.targetCols < 1) return wait("geometry-unknown");
+	if (!Number.isInteger(state.targetRows) || state.targetRows < 1) return wait("geometry-unknown");
+	const coverage = state.viewProof;
+	if (coverage === null || typeof coverage !== "object" || Array.isArray(coverage)) return wait("view-proof-missing");
+	if (coverage.status !== "covered") return wait(`view-proof-${coverage.status ?? "unknown"}`);
+	if (!Number.isInteger(coverage.throughSeq)) return wait("view-proof-invalid");
+	if (!Number.isInteger(state.localSeq) || coverage.throughSeq < state.localSeq) return wait("view-proof-behind");
+	if (coverage.throughSeq > state.localSeq) return wait("view-proof-future");
+	if (coverage.proof === null || typeof coverage.proof !== "object" || Array.isArray(coverage.proof)) return wait("view-proof-missing");
+	if (coverage.proof.marker !== "F" || !Number.isInteger(coverage.proof.seq) || coverage.proof.seq > coverage.throughSeq) return wait("view-proof-invalid");
+	const metadata = validateFrameMetadata(coverage.proof.metadata);
+	if (!metadata.ok) return wait("view-proof-invalid");
+	if (metadata.value.cols !== state.targetCols || metadata.value.rows !== state.targetRows) return wait("proof-geometry-mismatch");
+	if (state.requiredGeometryRevision !== undefined && metadata.value.geometryRevision !== state.requiredGeometryRevision) return wait("geometry-revision");
+	if (state.resizeIntentRequired === true) {
+		if (state.resizeIntentSatisfied !== true) return wait("resize-intent");
+		if (metadata.value.intentId !== state.intentId || metadata.value.intentId === 0) return wait("resize-intent");
+	}
+	if (!canPublishAttachView(state.viewIdentity, state.currentIdentity)) return wait("identity-mismatch");
+	return { action: "publish", reason: "complete" };
 }

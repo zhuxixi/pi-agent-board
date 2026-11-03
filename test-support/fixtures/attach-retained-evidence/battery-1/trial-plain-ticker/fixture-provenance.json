@@ -1,0 +1,9 @@
+{
+  "sourceRoot": "/home/elling/work/git-repo/pi-agent-board/.pi/worktrees/issue-222-attach-ready/.superpowers/sdd/2026-10-23-issue-222-attach-ready/task-15-integration-parentfix2-artifacts/battery-1/trial-plain-ticker",
+  "files": {
+    "summary.json": "554da4b9aaa4adc74541743721f434d368dd9fbfe396193057d43a331581c683",
+    "cleanup.json": "3052d9d1a07024eee6001ce396c0b54ab92ef344d25cad598fff1ad13c13fbd6",
+    "child-events.jsonl": "21e259c7ce8867ecb67df262b08a40f31479e4c865b084c571f21cab09bbc6a1",
+    "observations.json": "1322094b65ab8eddf7c094d044afbbf0c65efba0f3ddc36c916241fb8ea9d140"
+  }
+}

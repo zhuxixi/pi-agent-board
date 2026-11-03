@@ -1,0 +1,10 @@
+{
+  "sourceRoot": "/home/elling/work/git-repo/pi-agent-board/.pi/worktrees/issue-222-attach-ready/.superpowers/sdd/2026-10-23-issue-222-attach-ready/task-16-theme-artifacts/t-on-time-attempt-1/trial-t-on-time",
+  "files": {
+    "summary.json": "56a2c4ca93314ac034fb11d204e2506a400245bcbd637582b6ff139328f9997f",
+    "cleanup.json": "5dbe76bda7cd4899abd5ef31ab147752192b72b142881e14465f3e570cda4ef3",
+    "child-events.jsonl": "8d1e6406f7454acd4db9b477b53a891e54ccc530b4d3c3c6ba6727eb56fe5c07",
+    "observations.json": "30d73bc05b0bd24a811d35f492be93d1c476a03e1a9ded29dca0d9657c59496f",
+    "inner-parser.json": "a094a1d3d2bff93cfacd5c9d9682a16d31428ef061280e1487295e05336b01e6"
+  }
+}

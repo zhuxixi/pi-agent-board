@@ -1,0 +1,9 @@
+{
+  "sourceRoot": "/home/elling/work/git-repo/pi-agent-board/.pi/worktrees/issue-222-attach-ready/.superpowers/sdd/2026-10-23-issue-222-attach-ready/task-15-integration-parentfix2-artifacts/battery-1/trial-split-status",
+  "files": {
+    "summary.json": "cf78fcc54f2a460e81d1a84366524fce72ce34102833526be59734705dbb0f2a",
+    "cleanup.json": "3052d9d1a07024eee6001ce396c0b54ab92ef344d25cad598fff1ad13c13fbd6",
+    "child-events.jsonl": "bb3b6fc5fba730d8da1060865ffba75b03f7b427c1baaeddc78448fb24cfd817",
+    "observations.json": "cf83d94b2b72bb31e6f7918fb4c719c0562b0b1c951feecb532c6f21f70d1f20"
+  }
+}

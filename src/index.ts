@@ -22,6 +22,18 @@ const TITLE_RUNNER_SCRIPT = fileURLToPath(new URL("../runner/title-runner.mjs", 
 const AUTO_STATE_RUNNER_SCRIPT = fileURLToPath(new URL("../runner/state-runner.mjs", import.meta.url));
 
 let hostedEditorReporter: { start(): void; stop(): void } | null = null;
+/**
+ * Issue #222 (23b1, FW-03/FW-04): hosted-child frame-witness reporter. It is
+ * capability-gated by the runner (`frame_witness_enable`) and only exists for hosted
+ * children with a view id and a TUI; it publishes NO attach readiness or proof — the
+ * runner only consumes the markers for its own bookkeeping until 23b2.
+ */
+let hostedFrameWitness: { stop(): void } | null = null;
+// F4: truthful session epoch source. A hosted runner child currently hosts exactly ONE
+// interactive session, so the first session_start is epoch 1; any additional actual
+// session_start increments it (and the runner-side intent lifecycle invalidates the old
+// candidates). No other topology is used here.
+let hostedSessionEpoch = 0;
 
 export default function piAgentBoard(pi: ExtensionAPI): void {
 	const root = defaultRoot();
@@ -110,6 +122,73 @@ export default function piAgentBoard(pi: ExtensionAPI): void {
 		}
 	};
 
+	async function startHostedFrameWitness(ctx: ExtensionContext): Promise<void> {
+		if (hostedFrameWitness !== null || !hostedViewId || !ctx.hasUI || !ctx.ui) return;
+		const { AttachFrameReporter } = await import("./core/attach-frame-reporter.mjs");
+		const socket = createConnection(
+			resolveControlEndpoint({
+				envSocketPath: process.env.AGENT_BOARD_CONTROL_SOCKET,
+				platform: process.platform as "win32" | "linux" | "darwin",
+				root,
+				viewId: hostedViewId,
+			}),
+		);
+		const reporter = new AttachFrameReporter({
+			ui: ctx.ui as never,
+			mode: "fullscreen", // F6: the sentinel factory rebinds from the ACTUAL public tui.mode
+			sessionEpoch: hostedSessionEpoch,
+			send: (message: unknown) => {
+				try {
+					socket.write(`${JSON.stringify(message)}\n`);
+				} catch {
+					/* socket errors surface through the error handler */
+				}
+			},
+		});
+		let installed = false;
+		let buffer = "";
+		socket.on("connect", () => reporter.announce());
+		socket.on("data", (chunk: Buffer) => {
+			buffer += chunk.toString("utf8");
+			let newline = buffer.indexOf("\n");
+			while (newline >= 0) {
+				const line = buffer.slice(0, newline);
+				buffer = buffer.slice(newline + 1);
+				try {
+					const message = JSON.parse(line) as { type?: string };
+					if (message.type === "frame_witness_enable") {
+						const negotiation = reporter.handleMessage(message);
+						if (negotiation.status === "enabled" && !installed) installed = reporter.install();
+					} else if (message.type === "frame_witness_intent") {
+						reporter.applyIntent(message);
+					}
+				} catch {
+					/* malformed runner message: ignore, the capability stays as it is */
+				}
+				newline = buffer.indexOf("\n");
+			}
+		});
+		let cleaned = false;
+		const cleanup = (reason: string) => {
+			if (cleaned) return;
+			cleaned = true;
+			try {
+				reporter.dispose(reason);
+			} catch {
+				/* never break the session over the frame witness */
+			}
+			try {
+				socket.destroy();
+			} catch {
+				/* already closed */
+			}
+			hostedFrameWitness = null;
+		};
+		socket.on("error", () => cleanup("socket-error"));
+		socket.on("close", () => cleanup("socket-close"));
+		hostedFrameWitness = { stop: () => cleanup("session-shutdown") };
+	}
+
 	pi.on("session_start", async (event, ctx) => {
 		if (isHostedChild && !hostedEditorReporter && typeof ctx.ui?.getEditorText === "function" && hostedViewId) {
 			const { createEditorStateReporter } = await import("./core/editor-state-reporter.mjs");
@@ -126,6 +205,20 @@ export default function piAgentBoard(pi: ExtensionAPI): void {
 				})),
 			});
 			hostedEditorReporter.start();
+		}
+		if (isHostedChild) {
+			hostedSessionEpoch += 1;
+			try {
+				// P2: an actual additional session_start invalidates the old witness (its
+				// epoch is stale) and starts a new one with the new epoch.
+				if (hostedFrameWitness !== null) {
+					hostedFrameWitness.stop();
+					hostedFrameWitness = null;
+				}
+				await startHostedFrameWitness(ctx);
+			} catch {
+				/* the frame witness must never break a hosted session */
+			}
 		}
 		updateStatus(ctx);
 		if (event.reason === "startup" && !isHostedChild && pi.getFlag("agent-board") === true && ctx.hasUI) {
@@ -154,6 +247,14 @@ export default function piAgentBoard(pi: ExtensionAPI): void {
 		}
 	};
 
+	pi.on("session_shutdown", () => {
+		try {
+			hostedFrameWitness?.stop();
+		} catch {
+			/* best effort */
+		}
+		hostedFrameWitness = null;
+	});
 	pi.on("input", async (event, ctx) => syncForeground(event, ctx));
 	pi.on("before_agent_start", async (event, ctx) => syncForeground(event, ctx));
 	pi.on("agent_start", async (event, ctx) => syncForeground(event, ctx));

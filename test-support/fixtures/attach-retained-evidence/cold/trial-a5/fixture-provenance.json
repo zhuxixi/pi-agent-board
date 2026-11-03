@@ -1,0 +1,9 @@
+{
+  "sourceRoot": "/home/elling/work/git-repo/pi-agent-board/.pi/worktrees/issue-222-attach-ready/.superpowers/sdd/2026-10-23-issue-222-attach-ready/task-16-a5-artifacts/a5-attempt-1/trial-a5",
+  "files": {
+    "summary.json": "9964b23ff81c440cc7969d514f0a411f6109eff616b3023255d27f7e47347db4",
+    "cleanup.json": "5dbe76bda7cd4899abd5ef31ab147752192b72b142881e14465f3e570cda4ef3",
+    "child-events.jsonl": "ca11ca7afbb36c24d450e09b96c4082d92ed157f330ebafa5422aa8dab38695a",
+    "observations.json": "f661f4a9df92ae2a85234316168513c471525ceca34bcaf8ef6e824f06b84612"
+  }
+}

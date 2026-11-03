@@ -1,0 +1,9 @@
+{
+  "sourceRoot": "/home/elling/work/git-repo/pi-agent-board/.pi/worktrees/issue-222-attach-ready/.superpowers/sdd/2026-10-23-issue-222-attach-ready/task-15-integration-parentfix2-artifacts/battery-1/trial-plain-status",
+  "files": {
+    "summary.json": "89f177ce1d4a40a56428a6841e9864956d31b39220076c7579243d663991d6df",
+    "cleanup.json": "3052d9d1a07024eee6001ce396c0b54ab92ef344d25cad598fff1ad13c13fbd6",
+    "child-events.jsonl": "bbe4e4a8fe920e196c8b0f2d5b809a6d49ebb52e0591918076491bc98c3e9931",
+    "observations.json": "7f8e3574df1a7761868380b6ca9972890b66936c9073ba7b56517b5aa472a4fd"
+  }
+}

@@ -1,0 +1,86 @@
+{
+  "observations": [
+    {
+      "grid": [
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        },
+        {
+          "text": ""
+        }
+      ]
+    }
+  ],
+  "fixtureDerivation": {
+    "kind": "exact-grid-text-projection",
+    "sourceObservationIndex": 0,
+    "sourceObservationCount": 55,
+    "selection": "first observation; C/T audit requires only retained file presence"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "sourceRoot": "/home/elling/work/git-repo/pi-agent-board/.pi/worktrees/issue-222-attach-ready/.superpowers/sdd/2026-10-23-issue-222-attach-ready/task-16-theme-artifacts/t-late-attempt-1/trial-t-late",
+  "files": {
+    "summary.json": "22310eb6417464de4ef4c961fd885caebb6bac42366322ff2239b32b5985300e",
+    "cleanup.json": "5dbe76bda7cd4899abd5ef31ab147752192b72b142881e14465f3e570cda4ef3",
+    "child-events.jsonl": "3184ba2bb9edc3aeac3a7377a8e8ecb1fbba8088c017b105312116b4e15fa4ae",
+    "observations.json": "55e7f927ad26fcbee2fe71adee5155538382d8fa36fb70e4c125dde1582070aa",
+    "inner-parser.json": "73e0299fd4bb0aa34bed37c18056e6ce7fe5405c23404588e5780d097271e3f3"
+  }
+}

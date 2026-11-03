@@ -1,0 +1,571 @@
+{
+  "ok": true,
+  "caseId": "T-late",
+  "declared": {
+    "caseId": "T-late",
+    "producerScript": "theme",
+    "hostSize": {
+      "cols": 80,
+      "rows": 22
+    },
+    "seedFrame": {
+      "id": "T0",
+      "rows": [
+        "T0 HEADER theme surface",
+        "T0 UPPER reply history one",
+        "T0 UPPER reply history two",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "T0 MIDDLE divider",
+        "T0 LOWER reply history three",
+        "T0 LOWER reply history four",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "T0 THEME pending",
+        "T0 TAIL assistant final answer",
+        "",
+        "T0 INPUT >"
+      ],
+      "note": "seed enables the alternate screen AND bracketed paste in the same write; the authoritative hydrate scan sets the component's input-readiness flag (pty-attach.ts:1803)"
+    },
+    "reply": {
+      "timing": "late",
+      "backgroundReplyHex": "1b5d31313b7267623a666666662f666666662f6666666607",
+      "da1Hex": "1b5b3f313b3263"
+    },
+    "expectedReport": "997;2",
+    "redrawFrame": {
+      "id": "T1",
+      "rows": [
+        "T1 HEADER theme surface",
+        "T1 UPPER reply history one",
+        "T1 UPPER reply history two",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "T1 MIDDLE divider",
+        "T1 LOWER reply history three",
+        "T1 LOWER reply history four",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "T1 THEME light applied",
+        "T1 TAIL assistant final answer",
+        "",
+        "T1 INPUT >"
+      ],
+      "cursorWorkArea": {
+        "x": 10,
+        "y": 21,
+        "visible": false
+      }
+    },
+    "probeTimeoutMs": 500,
+    "classification": "full literal rows + cursor via the accepted oracle; loading only by exact loading literals; unrecognized states are unknown, never 'other means loading'"
+  },
+  "seedProof": {
+    "ok": true,
+    "method": "runner-capture-replay at 80x22 (independent raw terminal), BEFORE the attach was mounted",
+    "rows": [
+      "T0 HEADER theme surface",
+      "T0 UPPER reply history one",
+      "T0 UPPER reply history two",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "T0 MIDDLE divider",
+      "T0 LOWER reply history three",
+      "T0 LOWER reply history four",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "T0 THEME pending",
+      "T0 TAIL assistant final answer",
+      "",
+      "T0 INPUT >"
+    ],
+    "literalRows": [
+      "T0 HEADER theme surface",
+      "T0 UPPER reply history one",
+      "T0 UPPER reply history two",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "T0 MIDDLE divider",
+      "T0 LOWER reply history three",
+      "T0 LOWER reply history four",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "T0 THEME pending",
+      "T0 TAIL assistant final answer",
+      "",
+      "T0 INPUT >"
+    ]
+  },
+  "componentBaseline": {
+    "snapshotBegin": {
+      "type": "snapshot_begin",
+      "snapshotSeq": 1,
+      "cols": 80,
+      "rows": 22,
+      "frameVersion": 1,
+      "generation": "2c54186a-3fd9-4b1e-965a-6af650b1c913"
+    },
+    "snapshotEnd": {
+      "type": "snapshot_end",
+      "nextSeq": 2,
+      "scrollbackLines": 0
+    },
+    "initialRxTypes": [
+      "hello",
+      "status",
+      "hello",
+      "snapshot_begin",
+      "snapshot_frame",
+      "snapshot_end"
+    ]
+  },
+  "zeroResize": {
+    "ok": true,
+    "resizeCommands": []
+  },
+  "inputReadyFacts": {
+    "childInputReadyBeforeReply": true,
+    "note": "authoritative hydrate scan sets the flag (pty-attach.ts:1803); read-only observation, never written"
+  },
+  "colorQuery": {
+    "candidates": [
+      {
+        "writeIndex": 8,
+        "at": 810.476596
+      }
+    ],
+    "identity": "attach-settle-probe (sole candidate)"
+  },
+  "timeoutWait": {
+    "waitedMsUpperBound": 487.8035719999999,
+    "timeoutDiagnosticReceiptAt": 1311.673597,
+    "note": "the diagnostic receipt timestamp is the exact log-and-delegate callback fact; waitedMs is a polling upper bound"
+  },
+  "reply": {
+    "timing": "late",
+    "injectedAt": 1318.568581,
+    "backgroundReplyHex": "1b5d31313b7267623a666666662f666666662f6666666607",
+    "da1Hex": "1b5b3f313b3263"
+  },
+  "delivery": {
+    "messages": [
+      {
+        "at": 1320.162847,
+        "dataHas997": true,
+        "report": "997;2"
+      }
+    ],
+    "childThemeReports": [
+      {
+        "scheme": "light",
+        "monoNs": "369658646987329",
+        "wallMs": 1792813358631
+      }
+    ]
+  },
+  "themeRedraw": {
+    "committed": true,
+    "observationIndex": 23,
+    "boundaryParsedAt": 1373.005082,
+    "rows": [
+      "T1 HEADER theme surface",
+      "T1 UPPER reply history one",
+      "T1 UPPER reply history two",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "T1 MIDDLE divider",
+      "T1 LOWER reply history three",
+      "T1 LOWER reply history four",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "T1 THEME light applied",
+      "T1 TAIL assistant final answer",
+      "",
+      "T1 INPUT >"
+    ],
+    "outerCursor": {
+      "x": 10,
+      "y": 22,
+      "absoluteY": 22,
+      "visible": false
+    },
+    "childLogicalCursor": {
+      "x": 10,
+      "y": 21,
+      "visible": false
+    },
+    "childRepaintWrites": [
+      {
+        "writeIndex": 1,
+        "frame": "T1",
+        "bytes": 472,
+        "sha256": "ebf6fc179c856bc22b493941caf44297dd645a5dfa23c72d8440bfb8bd7ba4f0",
+        "monoNs": "369658647527610",
+        "wallMs": 1792813358632
+      }
+    ]
+  },
+  "postFirstContentCommits": [
+    {
+      "index": 21,
+      "kind": "unframed",
+      "boundaryParsedAt": 822.501923,
+      "cursor": {
+        "x": 10,
+        "y": 22,
+        "absoluteY": 22,
+        "visible": false
+      },
+      "identity": "t0-complete"
+    },
+    {
+      "index": 22,
+      "kind": "unframed",
+      "boundaryParsedAt": 1371.764253,
+      "cursor": {
+        "x": 10,
+        "y": 22,
+        "absoluteY": 22,
+        "visible": false
+      },
+      "identity": "t0-complete"
+    },
+    {
+      "index": 23,
+      "kind": "frame",
+      "boundaryParsedAt": 1373.005082,
+      "cursor": {
+        "x": 10,
+        "y": 22,
+        "absoluteY": 22,
+        "visible": false
+      },
+      "identity": "t1-complete"
+    },
+    {
+      "index": 24,
+      "kind": "unframed",
+      "boundaryParsedAt": 1373.589839,
+      "cursor": {
+        "x": 10,
+        "y": 22,
+        "absoluteY": 22,
+        "visible": false
+      },
+      "identity": "t1-complete"
+    }
+  ],
+  "schemeDiagnostics": [
+    {
+      "receiptAt": 1311.673597,
+      "details": {
+        "outcome": "timeout",
+        "probeApi": "colors"
+      }
+    },
+    {
+      "receiptAt": 1320.306268,
+      "details": {
+        "outcome": "reported",
+        "probeApi": "colors",
+        "report": "997;2",
+        "late": true
+      }
+    }
+  ],
+  "predicates": [
+    {
+      "id": "T-late-P1",
+      "proposed": "a (timely or late) real color reply is followed by a child-originated complete synchronized theme redraw committed on the outer terminal",
+      "verdict": "CONSISTENT",
+      "evidence": {
+        "deliveryCount": 1,
+        "themeReportCount": 1,
+        "childRepaintWriteCount": 1,
+        "t1CommitCount": 1,
+        "totalCommitsAfterFirstContent": 1,
+        "note": "counts are reported separately; exactly-one outer render is NOT a product requirement (status/ticker/input scheduling may repaint an identical valid view). A single consistent witness is not a sufficiency proof."
+      }
+    },
+    {
+      "id": "T-late-P2",
+      "proposed": "the color reply path re-opens the loading state or commits an unidentified frame after first content",
+      "verdict": "REFUTED",
+      "evidence": {
+        "anomalousFrames": [],
+        "note": "no loading reappearance and no unidentified frame after first content (REFUTED = the bad behavior was not observed)"
+      }
+    }
+  ],
+  "teardownViolations": [],
+  "postTeardownAnalysis": {
+    "stageRule": "exact observer write identity: first write containing EXIT_ALT_SCREEN; stop-entry = the stop write's sync-entry window (pre-stop content, stop-sequence cursor); stop stage = full 24-row source-grounded layout (tui-alt-screen.js:209-228), cursor (0,23) visible",
+    "stopWriteIndices": [
+      14
+    ],
+    "activeBoundary": 34,
+    "observationCounts": {
+      "total": 37,
+      "active": 34,
+      "stopEntry": 1,
+      "stopStage": 2
+    },
+    "activeFailures": [
+      {
+        "index": 20,
+        "category": "inverse-cells",
+        "expected": {
+          "screen": "t0-complete",
+          "inverseCells": []
+        },
+        "actual": {
+          "extraInverseCells": [
+            {
+              "x": 10,
+              "y": 21
+            }
+          ],
+          "missingInverseCells": [],
+          "kind": "frame",
+          "note": null
+        }
+      },
+      {
+        "index": 21,
+        "category": "inverse-cells",
+        "expected": {
+          "screen": "t0-complete",
+          "inverseCells": []
+        },
+        "actual": {
+          "extraInverseCells": [
+            {
+              "x": 10,
+              "y": 21
+            }
+          ],
+          "missingInverseCells": [],
+          "kind": "unframed",
+          "note": null
+        }
+      },
+      {
+        "index": 22,
+        "category": "inverse-cells",
+        "expected": {
+          "screen": "t0-complete",
+          "inverseCells": []
+        },
+        "actual": {
+          "extraInverseCells": [
+            {
+              "x": 10,
+              "y": 21
+            }
+          ],
+          "missingInverseCells": [],
+          "kind": "unframed",
+          "note": "sync-entry"
+        }
+      }
+    ],
+    "chromeViolations": [],
+    "stopEntry": {
+      "results": [
+        {
+          "index": 34,
+          "closeWriteIndex": 14,
+          "rowsMatchFinalContent": true,
+          "chromeViolations": [],
+          "actualCursor": {
+            "x": 10,
+            "y": 22,
+            "absoluteY": 22,
+            "visible": true
+          },
+          "note": "pre-stop content with the stop sequence's showCursor already queued; cursor visibility is stop-contract data here"
+        }
+      ],
+      "violations": []
+    },
+    "stopStage": {
+      "expectedRows": [
+        "T1 HEADER theme surface",
+        "T1 UPPER reply history one",
+        "T1 UPPER reply history two",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "T1 MIDDLE divider",
+        "T1 LOWER reply history three",
+        "T1 LOWER reply history four",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "T1 THEME light applied",
+        "T1 TAIL assistant final answer",
+        "",
+        "T1 INPUT >",
+        "────────────────────────────────────────────────────────────────────────────────",
+        ""
+      ],
+      "expectedCursor": {
+        "x": 0,
+        "y": 23,
+        "visible": true
+      },
+      "results": [
+        {
+          "index": 35,
+          "kind": "frame",
+          "closeWriteIndex": 14,
+          "rowsMatch": true,
+          "cursorMatch": true,
+          "actualRows": [
+            "T1 HEADER theme surface",
+            "T1 UPPER reply history one",
+            "T1 UPPER reply history two",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "T1 MIDDLE divider",
+            "T1 LOWER reply history three",
+            "T1 LOWER reply history four",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "T1 THEME light applied",
+            "T1 TAIL assistant final answer",
+            "",
+            "T1 INPUT >",
+            "────────────────────────────────────────────────────────────────────────────────",
+            ""
+          ],
+          "actualCursor": {
+            "x": 0,
+            "y": 23,
+            "absoluteY": 23,
+            "visible": true
+          }
+        },
+        {
+          "index": 36,
+          "kind": "unframed",
+          "closeWriteIndex": 14,
+          "rowsMatch": true,
+          "cursorMatch": true,
+          "actualRows": [
+            "T1 HEADER theme surface",
+            "T1 UPPER reply history one",
+            "T1 UPPER reply history two",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "T1 MIDDLE divider",
+            "T1 LOWER reply history three",
+            "T1 LOWER reply history four",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "T1 THEME light applied",
+            "T1 TAIL assistant final answer",
+            "",
+            "T1 INPUT >",
+            "────────────────────────────────────────────────────────────────────────────────",
+            ""
+          ],
+          "actualCursor": {
+            "x": 0,
+            "y": 23,
+            "absoluteY": 23,
+            "visible": true
+          }
+        }
+      ],
+      "violations": []
+    }
+  },
+  "holds": [
+    {
+      "after": "post-redraw-watch",
+      "plannedMs": 300,
+      "actualMs": 300.29031499999996,
+      "openFrame": false,
+      "startAt": 1381.365096,
+      "endAt": 1681.655411
+    }
+  ],
+  "cleanup": {
+    "childExited": true,
+    "runnerExited": true,
+    "runnerExitCode": 0,
+    "forcedKills": [],
+    "childAliveAfter": false,
+    "runnerAliveAfter": false,
+    "rootRemoved": true,
+    "rootRetainedForEvidence": false,
+    "ok": true
+  },
+  "artifactErrors": [],
+  "error": null,
+  "artifactDir": ".superpowers/sdd/2026-10-23-issue-222-attach-ready/task-16-theme-artifacts/t-late-attempt-1/trial-t-late"
+}
