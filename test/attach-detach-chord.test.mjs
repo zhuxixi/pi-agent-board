@@ -27,6 +27,8 @@ const NEGATIVE = [
 	["ctrl+alt+h kitty", "\x1b[104;7u"],
 	["shift+alt+h kitty", "\x1b[104;4u"],
 	["alt+h with text codepoint", "\x1b[104;3;104u"],
+	// The spec's D3 unbinds Alt+←: chord-shaped but not a detach chord.
+	["alt+left xterm", "\x1b[1;3D"],
 	["plain text", "abc"],
 	["lone escape", "\x1b"],
 	["ctrl+] passthrough", "\x1d"],

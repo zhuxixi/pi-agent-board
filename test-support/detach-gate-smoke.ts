@@ -877,10 +877,11 @@ out.staleSocketEventsDoNotClearCurrent = await runStaleSocketIdentityScenario();
 }
 
 // R6. Issue #266 isolation: keys that are NOT the chord still reach the child
-// unchanged — bare h, shifted Alt+H and ordinary text.
+// unchanged — bare h, shifted Alt+H, ordinary text, and Alt+← (unbound by the
+// spec's D3).
 {
 	let allForwarded = true;
-	for (const data of ["h", "\x1bH", "abc"]) {
+	for (const data of ["h", "\x1bH", "abc", "\x1b[1;3D"]) {
 		const probe = makeAttach();
 		(fixtureInternals<{ connected: boolean }>(probe.attach)).connected = true;
 		probe.attach.handleInput(data);
@@ -906,8 +907,8 @@ out.staleSocketEventsDoNotClearCurrent = await runStaleSocketIdentityScenario();
 // loading hint both name Alt+H next to the existing chords.
 {
 	const loading = makeAttach();
-	const loadingLines = loading.attach.render(80).join("\n");
-	const loadingMentions = loadingLines.includes("Alt+H");
+	const loadingLines = loading.attach.render(80);
+	const loadingMentions = loadingLines.some((line) => line.includes("Alt+H") && line.includes("to detach"));
 	loading.attach.dispose();
 	const live = makeAttach();
 	await writeToTerm(live.attach, "chat content\r\n");
