@@ -26,7 +26,7 @@ test("step 23b2c2: parser replacement, callback fences, empty reset and observer
 		assert.equal(result.status, 0, `scenario failed: ${(result.stderr ?? "").slice(-2000)}\n${JSON.stringify(parsed, null, 2)}`);
 		assert.equal(parsed.ok, true, JSON.stringify(parsed, null, 2));
 		assert.deepEqual(parsed.checks.filter((check) => !check.ok), []);
-		assert.equal(parsed.checks.length, 30);
+		assert.equal(parsed.checks.length, 32);
 		assert.deepEqual(
 			parsed.checks.map((check) => check.name),
 			[
@@ -60,6 +60,8 @@ test("step 23b2c2: parser replacement, callback fences, empty reset and observer
 				"reporter capability loss restores the legacy attach deadline",
 				"deadline-expired idle proof-unavailable reveals the committed snapshot (legacy downgrade)",
 				"deadline-expired empty baseline still never publishes (downgrade guard)",
+				"Kitty bridge is rebound and the old bridge disposed on parser replacement",
+				"committed view keeps Kitty images anchored when scrolled, header/footer clear",
 			],
 		);
 	} finally {

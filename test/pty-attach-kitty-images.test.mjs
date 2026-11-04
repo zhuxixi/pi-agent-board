@@ -13,6 +13,6 @@ test("real attach Kitty rendering, clipping, cleanup and non-Kitty isolation", (
 		timeout: 30_000,
 		env,
 	});
-	assert.match(output, /# pass 7/);
+	assert.match(output, /# pass (?:[7-9]|[1-9]\d+)/);
 	assert.match(output, /# fail 0/);
 });

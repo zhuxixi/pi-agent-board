@@ -234,3 +234,27 @@ test("image cache evicts oldest uploads rather than growing without bound", asyn
 	assert.equal([...line.matchAll(/a=p,/g)].length, 32);
 	assert.ok(line.includes("i=33,"));
 });
+
+test("plain chunks keep their string identity even after an image was uploaded", async (t) => {
+	const f = fixture(t);
+	await f.feed(upload());
+	const plain = "plain text after image";
+	assert.equal(f.images.transform(plain), plain, "identity preserved for later non-image chunks");
+});
+
+test("a reset with live placements still emits the reset token", async (t) => {
+	const f = fixture(t);
+	await f.feed(upload());
+	assert.ok(f.project().some((line) => line.includes("a=p")));
+	await f.feed("\x1b[2J\x1b[Hclean", true);
+	assert.ok(f.project().every((line) => !line), "placements cleared by the parser-ordered reset");
+});
+
+test("hasPlacements() reports whether project() can emit anything", async (t) => {
+	const f = fixture(t);
+	assert.equal(f.images.hasPlacements(), false, "empty before any image");
+	await f.feed(upload());
+	assert.equal(f.images.hasPlacements(), true);
+	await f.feed(apc("a=d,d=A"));
+	assert.equal(f.images.hasPlacements(), false, "cleared after deleting all placements");
+});

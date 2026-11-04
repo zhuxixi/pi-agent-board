@@ -1147,7 +1147,7 @@ export class PtyAttachComponent implements Component {
 		const rows: CommittedRow[] = [];
 		// Capture image APCs with the committed grid so recovery can outlive
 		// the parser and its Kitty markers during an authoritative resnapshot.
-		const kittyLines = this.kittyImages?.project(Array(end - start).fill(""), start, end - start);
+		const kittyLines = this.kittyImages?.hasPlacements() ? this.kittyImages.project(Array(end - start).fill(""), start, end - start) : undefined;
 		for (let lineIndex = start; lineIndex < end; lineIndex += 1) {
 			const line = buf.getLine(lineIndex);
 			const cells: SnapshotCell[] = [];

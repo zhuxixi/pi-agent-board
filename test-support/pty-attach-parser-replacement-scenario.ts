@@ -800,6 +800,58 @@ async function run(): Promise<{ ok: boolean; checks: Check[] }> {
 		}
 	});
 
+	await check("Kitty bridge is rebound and the old bridge disposed on parser replacement", async () => {
+		const h = harness();
+		const c = internals(h.component);
+		try {
+			enterModernCommitted(h.component);
+			const before = c.kittyImages;
+			assert(before, "bridge exists by default");
+			let previousDisposed = 0;
+			const originalDispose = before.dispose.bind(before);
+			before.dispose = () => { previousDisposed += 1; originalDispose(); };
+			c.handleAttachEvent("snapshotBegin", { cols: 80, rows: 22 });
+			c.handleAttachEvent("snapshotReady", { frame: "\x1b[2J\x1b[H\x1b[?2026h\x1b[3;1H\x1b_Ga=T,f=100,i=42,c=5,r=2,C=1;aGVsbG8=\x1b\\\x1b[?2026l", nextSeq: 1 });
+			await waitFor(() => c.kittyImages !== before, "bridge rebound");
+			assert(c.kittyImages !== before, "bridge must be recreated for the new parser");
+			assert(previousDisposed === 1, "the previous bridge was disposed on replacement");
+			await new Promise((resolve) => c.term.write("", resolve));
+			const projected = c.kittyImages.project(Array(22).fill(""), 0, 22);
+			assert(projected.some((l) => l.includes("a=p")), "new bridge tracks the replacement frame image");
+			return { rebound: true, previousDisposed };
+		} finally {
+			h.component.dispose();
+		}
+	});
+
+	await check("committed view keeps Kitty images anchored when scrolled, header/footer clear", async () => {
+		const h = harness();
+		const c = internals(h.component);
+		try {
+			enterModernCommitted(h.component);
+			c.handleAttachEvent("snapshotBegin", { cols: 80, rows: 22 });
+			c.handleAttachEvent("snapshotReady", { frame: "\x1b[2J\x1b[H\x1b[?2026h\x1b[3;1H\x1b_Ga=T,f=100,i=42,c=5,r=2,C=1;aGVsbG8=\x1b\\\x1b[?2026l", nextSeq: 1 });
+			await waitFor(() => h.component.render(80).some((l) => l.includes("a=p")), "committed image projected");
+			const frameLines = h.component.render(80);
+			assert(!frameLines[0].includes("\x1b_G"), "header clear");
+			assert(!frameLines[frameLines.length - 1].includes("\x1b_G"), "footer clear");
+			// Scrolled commit: image and text are captured from the same `start`, so
+			// the image must stay on its buffer row relative to the scrolled view.
+			c.viewportTop = 1;
+			c.handleAttachEvent("snapshotBegin", { cols: 80, rows: 22 });
+			c.handleAttachEvent("snapshotReady", { frame: "\x1b[2J\x1b[H\x1b[?2026h\x1b[3;1H\x1b_Ga=T,f=100,i=42,c=5,r=2,C=1;aGVsbG8=\x1b\\\x1b[?2026l", nextSeq: 2, resnapshot: true });
+			await waitFor(() => h.component.render(80).some((l) => l.includes("a=p")), "scrolled committed image projected");
+			const scrolled = h.component.render(80);
+			assert(!scrolled[0].includes("\x1b_G"), "scrolled header clear");
+			assert(!scrolled[scrolled.length - 1].includes("\x1b_G"), "scrolled footer clear");
+			const imageRow = scrolled.findIndex((l) => l.includes("a=p"));
+			assert(imageRow > 0 && imageRow < scrolled.length - 1, "image row stays inside the body");
+			return { scrolledImageRow: imageRow };
+		} finally {
+			h.component.dispose();
+		}
+	});
+
 	return { ok: checks.every((entry) => entry.ok), checks };
 }
 

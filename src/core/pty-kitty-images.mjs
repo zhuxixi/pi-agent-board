@@ -107,8 +107,12 @@ export function createPtyKittyImages(term, onClearScrollback = () => {}) {
 			parts.push(command(controlsString(first ? { ...upload, m: more ? "1" : "0" } : { m: more ? "1" : "0" }), data.slice(i, i + 4096)));
 		}
 		removeImage(original.i);
+		const joined = parts.join("");
 		images.set(original.i, {
-			controls: original, sequence: parts.join(""), bytes: data.length,
+			controls: original, sequence: joined, bytes: data.length,
+			// Cached so project() re-concats only the small header per frame instead
+			// of re-slicing a potentially multi-MB payload string on every render.
+			payloadCommands: joined.slice(joined.indexOf(";")),
 			uploadControls: { ...upload, m: data.length > 4096 ? "1" : "0" },
 			heightPx: sourceImageHeight(original, data),
 		});
@@ -143,8 +147,17 @@ export function createPtyKittyImages(term, onClearScrollback = () => {}) {
 		return true;
 	});
 	return {
+		/** Cheap gate for hot paths: no placements means project() is a no-op. */
+		hasPlacements() { return placements.size > 0; },
 		transform(data, reset = false) {
 			if (reset) carry = "";
+			// Zero-copy fast path: return the ORIGINAL string identity when the chunk
+			// contains no Kitty APC and has no escape-prefix suffix a later chunk could
+			// complete into `\x1b_G`. Only `\x1b` / `\x1b_` tails can split that prefix
+			// (an ESC-[ tail cannot). A reset with live placements must keep the reset
+			// token so the parser-ordered handler clears them. Preserving identity also
+			// keeps the attach write-instrumentation `===` frame match working.
+			if (!carry && !data.includes(PREFIX) && !/\x1b_?$/.test(data) && !(reset && placements.size > 0)) return data;
 			const input = carry + data;
 			carry = "";
 			let out = reset ? `\x1b]${OSC};reset\x07` : "";
@@ -202,7 +215,7 @@ export function createPtyKittyImages(term, onClearScrollback = () => {}) {
 				const uploadHeader = { ...image.uploadControls, c: controls.c, r: controls.r };
 				// Re-uploading on each projected render is idempotent but can resend large
 				// payloads; upload-once/place-only would need host-terminal cache tracking.
-				const upload = `${PREFIX}${controlsString(uploadHeader)}${image.sequence.slice(image.sequence.indexOf(";"))}`;
+				const upload = `${PREFIX}${controlsString(uploadHeader)}${image.payloadCommands}`;
 				// The outer TUI supplies the screen row; only the column is adjusted.
 				out[targetRow] = `\x1b7\x1b[${p.col + 1}G${upload}${command(controlsString(controls))}\x1b8${out[targetRow]}`;
 			}
