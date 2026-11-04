@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { readdirSync, readFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -109,9 +110,13 @@ function containsStatement(statement, predicate) {
 
 /**
  * List every statement pair where one writes `process.stdout` and the next one
- * calls `process.exit`. `console.*` is deliberately not matched: those payloads
- * are short human-readable lines, and the spec keeps them out of scope.
- * A write inside `try` with the exit in `finally` is not covered.
+ * calls `process.exit`. `console.*` is deliberately not matched: the spec keeps
+ * those sites out of scope for issue #270.
+ * Three boundaries: a write inside `try` with the exit in `finally` is not
+ * covered; only statement-adjacent pairs are flagged, so `write(x);
+ * cleanup(); exit(0)` is not seen; and deferred or aliased forms such as
+ * `write(x); setTimeout(() => process.exit(0))` or
+ * `const out = process.stdout; out.write(x); process.exit(0)` are not seen.
  */
 export function findUnguardedStdoutExits(sourceText, fileName) {
 	const file = ts.createSourceFile(fileName, sourceText, ts.ScriptTarget.Latest, true, fileName.endsWith(".ts") ? ts.ScriptKind.TS : ts.ScriptKind.JS);
@@ -153,6 +158,7 @@ test("stdout-flush: the detector flags the shape and accepts the guards", () => 
 		["plain write then exit", `process.stdout.write("x");\nprocess.exit(0);`],
 		["conditional write then exit", `if (ready) process.stdout.write(carry);\nprocess.exit(1);`],
 		["block-wrapped write then exit", `if (ready) { process.stdout.write(token); }\nprocess.exit(0);`],
+		["pair nested in the first of two sibling ifs", `if (dryRun) { process.stdout.write("x"); process.exit(0); }\nif (approved !== "1") { process.exit(2); }`],
 	];
 	for (const [label, source] of violations) {
 		assert.equal(findUnguardedStdoutExits(source, "sample.mjs").length, 1, `must flag: ${label}`);
@@ -180,4 +186,20 @@ test("stdout-flush: no test-support file writes stdout immediately before proces
 		[],
 		`write-then-exit must go through exitAfterStdout():\n${offenders.map((entry) => `${entry.file}:${entry.line}`).join("\n")}`,
 	);
+});
+
+const FORMAL_RUNNER = fileURLToPath(new URL("../test-support/formal-measurement/formal-runner.mjs", import.meta.url));
+
+test("stdout-flush: a harness whose dry-run used exit for control flow stays terminal", () => {
+	const artifactsRoot = mkdtempSync(join(tmpdir(), "formal-dry-run-"));
+	try {
+		const result = spawnSync(process.execPath, [FORMAL_RUNNER, "--artifacts", artifactsRoot], { encoding: "utf8", timeout: 120_000 });
+		assert.equal(result.status, 0, `dry-run must exit 0; stderr:\n${result.stderr}`);
+		assert.equal(result.stderr.trim(), "", "a dry-run must not print the execution refusal");
+		const parsed = JSON.parse(result.stdout.trim().split("\n").filter(Boolean).pop());
+		assert.equal(parsed.dryRun, true);
+		assert.equal(parsed.ok, true);
+	} finally {
+		rmSync(artifactsRoot, { recursive: true, force: true });
+	}
 });
