@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { readdirSync, readFileSync } from "node:fs";
+import { join, relative } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+
+import ts from "typescript";
 
 import { writeThenExit } from "../test-support/stdout-flush.mjs";
 
@@ -77,4 +81,103 @@ test("stdout-flush: a 256 KiB result survives a reader that starts late", async 
 	assert.equal(result.code, 0, `probe must exit 0; stderr:\n${result.stderr}`);
 	const parsed = JSON.parse(result.stdout);
 	assert.equal(parsed.payload.length, 262144, "every byte of the payload must reach the reader");
+});
+
+const TEST_SUPPORT_ROOT = fileURLToPath(new URL("../test-support/", import.meta.url));
+
+const isPropertyAccessOn = (node, name, receiver) =>
+	ts.isPropertyAccessExpression(node) && node.name.text === name && receiver(node.expression);
+const isProcessIdentifier = (node) => ts.isIdentifier(node) && node.text === "process";
+const isStdoutReceiver = (node) => isPropertyAccessOn(node, "stdout", isProcessIdentifier);
+const isCallStatement = (statement, property, receiver) =>
+	ts.isExpressionStatement(statement) &&
+	ts.isCallExpression(statement.expression) &&
+	isPropertyAccessOn(statement.expression.expression, property, receiver);
+const writesStdout = (statement) => isCallStatement(statement, "write", isStdoutReceiver);
+const exitsProcess = (statement) => isCallStatement(statement, "exit", isProcessIdentifier);
+
+/** Unwrap `if`/block so `if (ready) process.stdout.write(x)` counts as a write. */
+function containsStatement(statement, predicate) {
+	if (predicate(statement)) return true;
+	if (ts.isIfStatement(statement)) {
+		return containsStatement(statement.thenStatement, predicate) ||
+			(statement.elseStatement !== undefined && containsStatement(statement.elseStatement, predicate));
+	}
+	if (ts.isBlock(statement)) return statement.statements.some((child) => containsStatement(child, predicate));
+	return false;
+}
+
+/**
+ * List every statement pair where one writes `process.stdout` and the next one
+ * calls `process.exit`. `console.*` is deliberately not matched: those payloads
+ * are short human-readable lines, and the spec keeps them out of scope.
+ * A write inside `try` with the exit in `finally` is not covered.
+ */
+export function findUnguardedStdoutExits(sourceText, fileName) {
+	const file = ts.createSourceFile(fileName, sourceText, ts.ScriptTarget.Latest, true, fileName.endsWith(".ts") ? ts.ScriptKind.TS : ts.ScriptKind.JS);
+	const found = [];
+	const visit = (node) => {
+		if (node.statements !== undefined) {
+			for (let index = 0; index + 1 < node.statements.length; index += 1) {
+				const previous = node.statements[index];
+				const next = node.statements[index + 1];
+				// Two sibling conditionals are independent paths, never one drain-then-exit
+				// sequence: `if (dryRun) { write; exit; } if (guard) { …; exit(2); }` would
+				// otherwise pair the two outer ifs. A real pair inside their blocks is found
+				// by the recursion into each block.
+				if (ts.isIfStatement(previous) && ts.isIfStatement(next)) continue;
+				if (containsStatement(previous, writesStdout) && containsStatement(next, exitsProcess)) {
+					const { line } = file.getLineAndCharacterOfPosition(previous.getStart(file));
+					found.push({ file: fileName, line: line + 1 });
+				}
+			}
+		}
+		ts.forEachChild(node, visit);
+	};
+	visit(file);
+	return found;
+}
+
+function testSupportFiles(directory) {
+	const files = [];
+	for (const entry of readdirSync(directory, { withFileTypes: true })) {
+		const path = join(directory, entry.name);
+		if (entry.isDirectory()) files.push(...testSupportFiles(path));
+		else if (/\.(ts|mjs|js)$/.test(entry.name)) files.push(path);
+	}
+	return files;
+}
+
+test("stdout-flush: the detector flags the shape and accepts the guards", () => {
+	const violations = [
+		["plain write then exit", `process.stdout.write("x");\nprocess.exit(0);`],
+		["conditional write then exit", `if (ready) process.stdout.write(carry);\nprocess.exit(1);`],
+		["block-wrapped write then exit", `if (ready) { process.stdout.write(token); }\nprocess.exit(0);`],
+	];
+	for (const [label, source] of violations) {
+		assert.equal(findUnguardedStdoutExits(source, "sample.mjs").length, 1, `must flag: ${label}`);
+	}
+	const accepted = [
+		["write with an exit callback", `process.stdout.write("x", () => process.exit(0));`],
+		["shared helper", `exitAfterStdout("x", 0);`],
+		["console.log then exit", `console.log("x");\nprocess.exit(0);`],
+		["then writes, catch exits", `run().then((r) => { process.stdout.write(JSON.stringify(r)); }).catch(() => { process.exit(1); });`],
+		["sibling conditionals never pair", `if (dryRun) { process.stdout.write("x"); }\nif (approved !== "1") { process.exit(2); }`],
+		["flush, then conditional helper exit", `process.stdout.write("echo:hi\\n");\nif (exiting) exitAfterStdout("", 0);`],
+	];
+	for (const [label, source] of accepted) {
+		assert.deepEqual(findUnguardedStdoutExits(source, "sample.mjs"), [], `must accept: ${label}`);
+	}
+});
+
+test("stdout-flush: no test-support file writes stdout immediately before process.exit", () => {
+	const offenders = [];
+	for (const path of testSupportFiles(TEST_SUPPORT_ROOT)) {
+		offenders.push(...findUnguardedStdoutExits(readFileSync(path, "utf8"), relative(TEST_SUPPORT_ROOT, path)));
+	}
+	assert.deepEqual(
+		offenders,
+		[],
+		`write-then-exit must go through exitAfterStdout():\n${offenders.map((entry) => `${entry.file}:${entry.line}`).join("\n")}`,
+	);
 });
