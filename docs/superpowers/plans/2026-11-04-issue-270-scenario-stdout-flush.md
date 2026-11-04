@@ -200,7 +200,10 @@ function runProbeWithSlowReader(bytes, delayMs = 250) {
 		const child = spawn(process.execPath, [PROBE, "--bytes", String(bytes)], { stdio: ["ignore", "pipe", "pipe"] });
 		const chunks = [];
 		let stderr = "";
-		child.stdout.pause();
+		// No stdout listener yet: the stream stays paused, nobody reads the pipe, and
+		// the kernel buffer (64 KiB) fills — the issue #270 condition. Do NOT add
+		// `child.stdout.pause()` here: an explicit pause() sets flowing = false and the
+		// delayed `.on("data")` below would never resume the stream (the test hangs).
 		child.stderr.on("data", (chunk) => { stderr += chunk; });
 		child.on("error", fail);
 		child.on("close", (code) => settle({ code, stdout: Buffer.concat(chunks).toString("utf8"), stderr }));
@@ -255,7 +258,7 @@ cp test-support/stdout-flush-probe.mjs /tmp/stdout-flush-probe.bak
 #   process.exit(0);
 node --test test/scenario-stdout-flush.test.mjs
 ```
-Expected: FAIL with `Unterminated string in JSON` or a payload shorter than 262144. Then:
+Expected: FAIL with `Unexpected end of JSON input` (empty stdout) or a payload shorter than 262144. Then:
 
 ```bash
 cp /tmp/stdout-flush-probe.bak test-support/stdout-flush-probe.mjs
