@@ -189,11 +189,20 @@ test("stdout-flush: no test-support file writes stdout immediately before proces
 });
 
 const FORMAL_RUNNER = fileURLToPath(new URL("../test-support/formal-measurement/formal-runner.mjs", import.meta.url));
+const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 
+// This test deliberately spawns the real runner binary rather than a stub, so it
+// must supply the baseline tree the runner hashes into its source identity.
 test("stdout-flush: a harness whose dry-run used exit for control flow stays terminal", () => {
 	const artifactsRoot = mkdtempSync(join(tmpdir(), "formal-dry-run-"));
 	try {
-		const result = spawnSync(process.execPath, [FORMAL_RUNNER, "--artifacts", artifactsRoot], { encoding: "utf8", timeout: 120_000 });
+		const result = spawnSync(process.execPath, [FORMAL_RUNNER, "--artifacts", artifactsRoot], {
+			encoding: "utf8",
+			timeout: 120_000,
+			// CI has no sibling `issue-222-attach-baseline` checkout; without this the
+			// runner's identity hashing fails with ENOENT before it can dry-run.
+			env: { ...process.env, FORMAL_BASELINE_REPO: REPO_ROOT },
+		});
 		assert.equal(result.status, 0, `dry-run must exit 0; stderr:\n${result.stderr}`);
 		assert.equal(result.stderr.trim(), "", "a dry-run must not print the execution refusal");
 		const parsed = JSON.parse(result.stdout.trim().split("\n").filter(Boolean).pop());

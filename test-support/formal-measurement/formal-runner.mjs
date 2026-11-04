@@ -10,7 +10,13 @@ import { parseRunnerArgs } from "./runner-args.mjs";
 import { exitAfterStdout } from "../stdout-flush.mjs";
 
 const repo = resolve(dirname(new URL(import.meta.url).pathname), "../..");
-const baselineRepo = resolve(repo, "../issue-222-attach-baseline");
+// The sibling baseline checkout exists only in the measurement owner's workspace.
+// FORMAL_BASELINE_REPO lets a caller (a test, or a CI run) point the identity
+// hashing at a tree that is actually present; without it the historical sibling
+// path is assumed, exactly as before.
+const baselineRepo = process.env.FORMAL_BASELINE_REPO === undefined
+	? resolve(repo, "../issue-222-attach-baseline")
+	: resolve(process.env.FORMAL_BASELINE_REPO);
 const options = parseRunnerArgs(process.argv.slice(2));
 const artifactsRoot = resolve(options.artifacts ?? join(repo, ".superpowers/sdd/2026-10-23-issue-222-attach-ready/task-31-artifacts/formal-run"));
 const execute = options.execute;
