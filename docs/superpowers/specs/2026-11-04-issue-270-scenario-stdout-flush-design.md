@@ -151,8 +151,13 @@ A6 用 PR 上的真实 CI 运行代替人工验证。这是分类结论，不是
 
 ## 6. 非目标与保证边界
 
-- **不覆盖** `console.log(x); process.exit(n)`（`test-support/**` 共 11 处）：它们输出人读短行，
-  不是机器解析的结果通道。若日后某个 `console` 输出长到 64 KiB 量级，再扩守卫口径。
+- **不覆盖** `console.log(x); process.exit(n)`（`test-support/**` 共 11 处）：这是本 issue 的范围取舍，
+  不是因为这些站点安全。其中至少 6 处 —— `pty-attach-frame-overflow-scenario.ts:378`、
+  `pty-attach-mouse-mode-scenario.ts:94`、`pty-attach-wheel-scenario.ts:187`、
+  `pty-attach-selection-mirror-scenario.ts:260`、`attach-idle-socket-driver.ts:49`、
+  `attach-idle-candidate-open-harness.mjs:75` —— 都是 `console.log(JSON.stringify(result)); process.exit(...)`，
+  测试侧用 `JSON.parse(...)` 消费，与本 issue 修的是同一种失效模式，只是 payload 还小才没有暴露。
+  把其中机器解析的站点改成 flush 后退出由后续 issue 跟踪；在那之前它们同属定时炸弹。
 - **不覆盖** `process.stderr.write(...)` + `exit` 的报错分支（stderr，量级为几百字节）。
 - **不覆盖** 产品代码（`src/`、`runner/`）里的 `process.exit`：那里是命令行的正常退出路径，不在测试夹具范畴。
 - **不修** #211（场景未消费的 stdout 管道）与 #95（real-process 测试的普遍 flake）：本 issue 是确定性截断，
