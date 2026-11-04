@@ -55,6 +55,7 @@ import { claimHost, createView, readHost } from "../src/core/store.mjs";
 import type { PtyAttachComponent as PtyAttachComponentType } from "../src/ui/pty-attach.ts";
 import { formalMeasurementVersion } from "./formal-measurement/version.mjs";
 import { holdFormalObservation } from "./formal-measurement/observation.mjs";
+import { exitAfterStdout } from "./stdout-flush.mjs";
 
 // ---------------------------------------------------------------------------
 // Geometry and literal content contract (producer report, task-15).
@@ -4449,8 +4450,7 @@ if (isMain) {
 		: runCaseDiag({ caseId: cli.caseId, artifactDir: cli.artifactDir });
 	run
 		.then((result) => {
-			process.stdout.write(JSON.stringify(result) + "\n");
-			process.exit(0);
+			exitAfterStdout(JSON.stringify(result) + "\n", 0);
 		})
 		.catch((err) => {
 			process.stderr.write(`pty-attach-ready-scenario: battery harness error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);

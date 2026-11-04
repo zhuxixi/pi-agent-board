@@ -47,6 +47,7 @@ import { AttachPresentationObserver, asTerminal } from "./attach-presentation-fi
 import { WORK_AREA, createDiagCleanup, diagCleanupOk, killOwnedDiagProcesses, projectObservationToWorkArea, s17GenerationCursor, s17GenerationRowsText } from "./pty-attach-ready-scenario.ts";
 import { createView, readHost } from "../src/core/store.mjs";
 import { formalObservationEnabled } from "./formal-measurement/observation.mjs";
+import { exitAfterStdout } from "./stdout-flush.mjs";
 
 // PtyAttachComponent / DashboardComponent / dashboardAttachLoop use TS
 // parameter properties; import them LAZILY inside the trial driver so this
@@ -1379,8 +1380,7 @@ if (isMain) {
 	if (existsSync(cli.artifactDir)) cliError(`artifact dir already exists (overwrite refused): ${cli.artifactDir}`);
 	runEntryTrial22({ artifactDir: cli.artifactDir, mode: cli.caseId === "B" ? "busy" : "quiet" })
 		.then((result) => {
-			process.stdout.write(JSON.stringify(result) + "\n");
-			process.exit(0);
+			exitAfterStdout(JSON.stringify(result) + "\n", 0);
 		})
 		.catch((err) => {
 			process.stderr.write(`attach-ready-entry-scenario: trial harness error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);

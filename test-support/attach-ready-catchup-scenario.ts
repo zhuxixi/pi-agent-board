@@ -38,6 +38,7 @@ import xtermHeadless from "@xterm/headless";
 import { createTerminalModel, defaultParserFactory, feedOutput, whenIdle } from "../src/core/terminal-model.mjs";
 import { createTerminalSubscription } from "../src/core/terminal-attach-protocol.mjs";
 import { createTerminalAttachClient } from "../src/core/terminal-attach-client.mjs";
+import { exitAfterStdout } from "./stdout-flush.mjs";
 
 const { Terminal: HeadlessTerminal } = /** @type {any} */ (xtermHeadless);
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
@@ -365,8 +366,7 @@ if (isMain) {
 	if (existsSync(cli.artifactDir)) cliError(`artifact dir already exists (overwrite refused): ${cli.artifactDir}`);
 	runCatchupCase({ artifactDir: cli.artifactDir })
 		.then((result) => {
-			process.stdout.write(JSON.stringify(result) + "\n");
-			process.exit(0);
+			exitAfterStdout(JSON.stringify(result) + "\n", 0);
 		})
 		.catch((err) => {
 			process.stderr.write(`attach-ready-catchup-scenario: trial harness error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);

@@ -47,6 +47,7 @@ import {
 import { scrollableHistoryLines } from "../src/core/pty-scroll.mjs";
 import { formalMeasurementVersion } from "./formal-measurement/version.mjs";
 import { holdFormalObservation } from "./formal-measurement/observation.mjs";
+import { exitAfterStdout } from "./stdout-flush.mjs";
 
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const now = () => performance.now();
@@ -1219,8 +1220,7 @@ if (isMain) {
 	const cli = parseMatrixCli(process.argv.slice(2));
 	runCase20A({ caseId: cli.caseId, artifactDir: cli.artifactDir })
 		.then((result) => {
-			process.stdout.write(JSON.stringify(result) + "\n");
-			process.exit(0);
+			exitAfterStdout(JSON.stringify(result) + "\n", 0);
 		})
 		.catch((err) => {
 			process.stderr.write(`pty-attach-matrix-scenario: harness error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);

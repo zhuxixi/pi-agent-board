@@ -52,6 +52,7 @@ import {
 } from "./pty-attach-ready-scenario.ts";
 import { formalMeasurementVersion } from "./formal-measurement/version.mjs";
 import { holdFormalObservation } from "./formal-measurement/observation.mjs";
+import { exitAfterStdout } from "./stdout-flush.mjs";
 
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const now = () => performance.now();
@@ -4007,8 +4008,7 @@ if (isMain) {
 	const cli = parse20BCli(process.argv.slice(2));
 	runCase20B({ caseId: cli.caseId, artifactDir: cli.artifactDir, repeat: cli.repeat })
 		.then((result) => {
-			process.stdout.write(JSON.stringify(result) + "\n");
-			process.exit(typeof result.exitCode === "number" ? result.exitCode : 0);
+			exitAfterStdout(JSON.stringify(result) + "\n", typeof result.exitCode === "number" ? result.exitCode : 0);
 		})
 		.catch((err) => {
 			process.stderr.write(`pty-attach-20b-scenario: harness error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);

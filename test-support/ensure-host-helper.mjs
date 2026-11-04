@@ -17,6 +17,7 @@
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createService } from "../src/runtime/service.mjs";
+import { exitAfterStdout } from "./stdout-flush.mjs";
 
 const here = (rel) => resolve(fileURLToPath(new URL(".", import.meta.url)), rel);
 
@@ -41,5 +42,4 @@ try {
 } catch (err) {
 	result = { ok: false, error: err instanceof Error ? err.message : String(err) };
 }
-process.stdout.write(`ENSURE_RESULT ${JSON.stringify(result)}\n`);
-process.exit(0);
+exitAfterStdout(`ENSURE_RESULT ${JSON.stringify(result)}\n`, 0);

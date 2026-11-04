@@ -10,6 +10,7 @@ import { spawn } from "node:child_process";
 import { spawn as spawnPty } from "node-pty";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { exitAfterStdout } from "./stdout-flush.mjs";
 
 const OPEN = "\x1b[?2026h";
 const CLOSE = "\x1b[?2026l";
@@ -134,14 +135,12 @@ if (geometryMode) {
 		if (typeof cols === "number" && typeof rows === "number") inner.resize(cols, rows);
 	});
 	inner.onExit(({ exitCode }) => {
-		if (tokenReady && carry.length > 0) process.stdout.write(carry);
-		process.exit(exitCode ?? 0);
+		exitAfterStdout(tokenReady && carry.length > 0 ? carry : "", exitCode ?? 0);
 	});
 } else {
 	inner.stdout.on("data", onInnerData);
 	inner.on("exit", (code) => {
-		if (tokenReady && carry.length > 0) process.stdout.write(carry);
-		process.exit(code ?? 0);
+		exitAfterStdout(tokenReady && carry.length > 0 ? carry : "", code ?? 0);
 	});
 	inner.on("error", (error) => {
 		process.stderr.write(`frame wrapper child error: ${error.message}\n`);

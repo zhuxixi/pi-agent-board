@@ -42,6 +42,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { AttachPresentationObserver, type PresentationObservation } from "./attach-presentation-fixture.ts";
 import { WORK_AREA, withDiagTrial } from "./pty-attach-ready-scenario.ts";
+import { exitAfterStdout } from "./stdout-flush.mjs";
 
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const now = () => performance.now();
@@ -653,8 +654,7 @@ if (isMain) {
 	else run = runInteractiveComponentCase({ artifactDir: cli.artifactDir, mode: "scroll", inputs: ["\x1b[<64;1;1M", "\x1b[<64;1;1M", "\x1b[<64;1;1M"] });
 	run
 		.then((result) => {
-			process.stdout.write(JSON.stringify(result) + "\n");
-			process.exit(0);
+			exitAfterStdout(JSON.stringify(result) + "\n", 0);
 		})
 		.catch((err) => {
 			process.stderr.write(`attach-ready-interactions-scenario: trial harness error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);

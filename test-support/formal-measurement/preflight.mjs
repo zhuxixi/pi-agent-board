@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { WARMUPS_PER_VERSION, OBSERVATION_MS, B_UPDATE_MS, TRIAL_CAP_MS, HARD_OPPORTUNITY_MS, CELLS, scheduleFor } from "./matrix.mjs";
 import { extractTrialMetrics } from "./trial-metrics.mjs";
+import { exitAfterStdout } from "../stdout-flush.mjs";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const root = resolve(process.argv[2] ?? join(repo, ".superpowers/sdd/2026-10-23-issue-222-attach-ready/task-31-artifacts/preflight-full"));
@@ -132,5 +133,4 @@ writeFileSync(join(root, "preflight-meta.json"), JSON.stringify({
 }, null, 2));
 const failures = records.filter((record) => record.infrastructureError !== null);
 for (const record of failures) process.stderr.write(`preflight failure ${record.version}/${record.caseId}: ${record.infrastructureError}\n`);
-process.stdout.write(JSON.stringify({ ok: failures.length === 0, root, records: records.length, failures: failures.length }) + "\n");
-process.exit(failures.length === 0 ? 0 : 1);
+exitAfterStdout(JSON.stringify({ ok: failures.length === 0, root, records: records.length, failures: failures.length }) + "\n", failures.length === 0 ? 0 : 1);

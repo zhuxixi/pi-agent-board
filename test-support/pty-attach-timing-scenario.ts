@@ -41,6 +41,7 @@ import {
 	type AttachSurfaceDims,
 	type DiagCleanup,
 } from "./pty-attach-ready-scenario.ts";
+import { exitAfterStdout } from "./stdout-flush.mjs";
 
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const CONTROLLED_CHILD = resolve(REPO_ROOT, "test-support/fake-pty-pi.mjs");
@@ -1650,8 +1651,7 @@ if (isMain) {
 	const cli = parse21ACli(process.argv.slice(2));
 	runCase21A({ caseId: cli.caseId, artifactDir: cli.artifactDir })
 		.then((result) => {
-			process.stdout.write(JSON.stringify(result) + "\n");
-			process.exit(typeof result.exitCode === "number" ? result.exitCode : 0);
+			exitAfterStdout(JSON.stringify(result) + "\n", typeof result.exitCode === "number" ? result.exitCode : 0);
 		})
 		.catch((err) => {
 			process.stderr.write(`pty-attach-timing-scenario: harness error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);

@@ -2,6 +2,7 @@
 // Run via `node --experimental-transform-types` (TS parameter properties).
 import { PtyAttachComponent } from "../src/ui/pty-attach.ts";
 import { instrumentInnerParser } from "./pty-attach-ready-scenario.ts";
+import { exitAfterStdout } from "./stdout-flush.mjs";
 
 const theme = { fg: (_c: string, text: string) => text, bold: (text: string) => text };
 const keybindings = {} as never;
@@ -805,8 +806,7 @@ async function run(): Promise<{ ok: boolean; checks: Check[] }> {
 
 run()
 	.then((result) => {
-		process.stdout.write(`${JSON.stringify(result)}\n`);
-		process.exit(result.ok ? 0 : 1);
+		exitAfterStdout(`${JSON.stringify(result)}\n`, result.ok ? 0 : 1);
 	})
 	.catch((err) => {
 		process.stderr.write(`parser-replacement-scenario: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);

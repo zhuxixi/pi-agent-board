@@ -19,6 +19,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import pty from "node-pty";
 import { decodeFrameMarker, MAX_FRAME_MARKER_BYTES } from "../src/core/attach-frame-proof.mjs";
+import { exitAfterStdout } from "./stdout-flush.mjs";
 
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const PROBE = resolve(REPO_ROOT, "test-support/pi23a-production-probe-extension.ts");
@@ -314,5 +315,4 @@ try {
 	}
 	write("result.json", result);
 }
-process.stdout.write(`${JSON.stringify({ status: result.status, artifactDir: ARTIFACT_DIR, markers: result.markers?.count ?? 0 })}\n`);
-process.exit(result.status === "completed" ? 0 : 1);
+exitAfterStdout(`${JSON.stringify({ status: result.status, artifactDir: ARTIFACT_DIR, markers: result.markers?.count ?? 0 })}\n`, result.status === "completed" ? 0 : 1);

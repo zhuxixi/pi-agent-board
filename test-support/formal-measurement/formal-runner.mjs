@@ -7,6 +7,7 @@ import { spawnSync } from "node:child_process";
 import { buildFormalPlan, buildReplacementPlan, classifyTrial } from "./formal-plan.mjs";
 import { extractTrialMetrics } from "./trial-metrics.mjs";
 import { parseRunnerArgs } from "./runner-args.mjs";
+import { exitAfterStdout } from "../stdout-flush.mjs";
 
 const repo = resolve(dirname(new URL(import.meta.url).pathname), "../..");
 const baselineRepo = resolve(repo, "../issue-222-attach-baseline");
@@ -21,8 +22,7 @@ const plan = options.scope === "replacement"
 mkdirSync(artifactsRoot, { recursive: true });
 writeFileSync(join(artifactsRoot, "formal-plan.json"), JSON.stringify(plan, null, 2) + "\n");
 if (dryRun) {
-	process.stdout.write(JSON.stringify({ ok: true, dryRun: true, artifactsRoot, formalTotal: plan.formalTotal, warmupTotal: plan.warmupTotal, candidateFormal: plan.candidateFormal, baselineFormal: plan.baselineFormal }) + "\n");
-	process.exit(0);
+	exitAfterStdout(JSON.stringify({ ok: true, dryRun: true, artifactsRoot, formalTotal: plan.formalTotal, warmupTotal: plan.warmupTotal, candidateFormal: plan.candidateFormal, baselineFormal: plan.baselineFormal }) + "\n", 0);
 }
 if (process.env.FORMAL_APPROVED !== "1") {
 	process.stderr.write("formal-runner: refusing execution; set FORMAL_APPROVED=1 only after step31 acceptance/step32\n");
