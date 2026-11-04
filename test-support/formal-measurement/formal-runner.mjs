@@ -11,9 +11,12 @@ import { exitAfterStdout } from "../stdout-flush.mjs";
 
 const repo = resolve(dirname(new URL(import.meta.url).pathname), "../..");
 // The sibling baseline checkout exists only in the measurement owner's workspace.
-// FORMAL_BASELINE_REPO lets a caller (a test, or a CI run) point the identity
-// hashing at a tree that is actually present; without it the historical sibling
-// path is assumed, exactly as before.
+// FORMAL_BASELINE_REPO lets a caller (a test, or a CI run) point the runner at a
+// tree that is actually present; without it the historical sibling path is assumed,
+// exactly as before. Scope of the override: it re-roots everything derived from
+// `baselineRepo` — the source-identity hashing AND, once `--execute-formal` is
+// allowed, the baseline trials' cwd and script argv. It is meant for dry-run and CI
+// checks only: executing a formal battery under it would measure the wrong tree.
 const baselineRepo = process.env.FORMAL_BASELINE_REPO === undefined
 	? resolve(repo, "../issue-222-attach-baseline")
 	: resolve(process.env.FORMAL_BASELINE_REPO);
