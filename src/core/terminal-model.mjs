@@ -1,4 +1,5 @@
 import xtermHeadless from "@xterm/headless";
+import { createPtyKittyImages } from "./pty-kitty-images.mjs";
 
 // @xterm/headless is CommonJS; named import from ESM fails, so destructure.
 const { Terminal } = /** @type {any} */ (xtermHeadless);
@@ -30,7 +31,9 @@ export const DEFAULT_RING_BYTE_CAP = 4 * 1024 * 1024;
  * @param {{ cols: number, rows: number, scrollback: number }} opts
  */
 export function defaultParserFactory({ cols, rows, scrollback }) {
-	return new Terminal({ cols, rows, scrollback, allowProposedApi: true });
+	const parser = new Terminal({ cols, rows, scrollback, allowProposedApi: true });
+	parser._agentBoardKittyImages = createPtyKittyImages(parser);
+	return parser;
 }
 
 /**
@@ -117,7 +120,9 @@ export function feedOutput(model, data) {
 	// Increment before write so a synchronously-firing callback still observes
 	// consistent accounting.
 	model.pendingWrites += 1;
-	model.parser.write(data, () => {
+	// Preserve raw ring bytes for subscribers; track Kitty APCs in parser order
+	// so snapshots retain graphics that xterm/headless would otherwise discard.
+	model.parser.write(model.parser._agentBoardKittyImages?.transform(data) ?? data, () => {
 		model.pendingWrites -= 1;
 		if (model.pendingWrites === 0 && model.idleWaiters.length > 0) {
 			const waiters = model.idleWaiters;

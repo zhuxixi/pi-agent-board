@@ -92,10 +92,12 @@ export function recordCwdLaunch(root, cwd) {
 /**
  * Ranked candidates: count desc, then lastUsed desc; home appended at the
  * end when absent so the user's home dir is always one keystroke away.
+ * `limit` is an optional cap for callers that explicitly want one; the
+ * default returns the whole history so the launch picker can search it.
  * @param {string} root @param {number=} limit
  * @returns {Array<{path: string, count: number}>}
  */
-export function rankedCwdCandidates(root, limit = 8) {
+export function rankedCwdCandidates(root, limit = Number.POSITIVE_INFINITY) {
 	const stats = readCwdStats(root);
 	const rows = Object.entries(stats.entries).map(([dir, entry]) => ({
 		path: dir,

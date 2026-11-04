@@ -129,3 +129,13 @@ test("browseTabCompletion: empty suggestions -> null; out-of-range index clamps"
 	assert.equal(res.usedIndex, 0);
 });
 
+test("nextCwdPickerState searches matches below the 8th ranked entry (issue #262)", () => {
+	const bigRanked = Array.from({ length: 12 }, (_, i) => ({
+		path: `/ranked/dir-${String(i + 1).padStart(2, "0")}`,
+		count: 100 - i,
+	}));
+	const state = nextCwdPickerState("dir-10", bigRanked, "/tmp");
+	assert.equal(state.mode, "favorites");
+	assert.deepEqual(state.suggestions, [bigRanked[9].path]);
+});
+

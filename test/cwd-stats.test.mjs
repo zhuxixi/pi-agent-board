@@ -191,3 +191,21 @@ test("rankedCwdCandidates appends home with its real count when sliced out by li
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("rankedCwdCandidates defaults to the full history with no 8-entry cap (issue #262)", () => {
+	const root = freshRoot();
+	try {
+		const dirs = Array.from({ length: 10 }, (_, i) => `/dir-${String(i + 1).padStart(2, "0")}`);
+		writeViews(root, dirs.map((dir, i) => [`v${i}`, dir, 1000 - i]));
+		seedCwdStatsFromViews(root);
+		const ranked = rankedCwdCandidates(root);
+		assert.deepEqual(
+			ranked.slice(0, 10),
+			dirs.map((dir) => ({ path: dir, count: 1 })),
+		);
+		assert.equal(ranked.length, 11);
+		assert.deepEqual(ranked[10], { path: os.homedir(), count: 0 });
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});

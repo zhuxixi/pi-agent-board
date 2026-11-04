@@ -752,7 +752,7 @@ export class DashboardComponent implements Component {
 		if (picker === "cwd") {
 			try {
 				ensureCwdStatsSeeded(this.deps.root);
-				launch.cwdRanked = existingCwdCandidates(rankedCwdCandidates(this.deps.root, 8));
+				launch.cwdRanked = existingCwdCandidates(rankedCwdCandidates(this.deps.root));
 			} catch {
 				launch.cwdRanked = [];
 			}

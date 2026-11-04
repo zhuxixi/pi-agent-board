@@ -6,6 +6,7 @@ import { createConnection, type Socket } from "node:net";
 import type { Component, KeybindingsManager, RgbColor, TUI, TerminalColorScheme, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { resolveAttachDeleteKey } from "../core/attach-delete.mjs";
+import { createPtyKittyImages } from "../core/pty-kitty-images.mjs";
 import { findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
 import { canPublishAttachView, createAttachOutputRenderScheduler, decideAttachPresentation, detectCursorDesync, isPtyCursorHidden, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
 import { evaluateAttachReconnect, shouldEscapeAttach } from "../core/pty-attach-reconnect.mjs";
@@ -169,7 +170,7 @@ interface BufferCellLike {
 	isOverline(): number;
 }
 
-interface CommittedRow { cells: SnapshotLine; }
+interface CommittedRow { cells: SnapshotLine; kittyPrefix: string; }
 
 interface CommittedView {
 	identity: {
@@ -329,6 +330,7 @@ export class PtyAttachComponent implements Component {
 	private readonly mouseWheelLines = resolveWheelLines();
 	/** Current local parser. Replaced atomically at an accepted snapshotReady. */
 	private term: XtermLike;
+	private kittyImages: ReturnType<typeof createPtyKittyImages> | null;
 	/** Monotonic identity axes: one per accepted socket / authoritative baseline / parser. */
 	private connectionToken = 0;
 	private baselineToken = 0;
@@ -458,6 +460,9 @@ export class PtyAttachComponent implements Component {
 		// parameter property is set regardless of the TS loader's field-init semantics.
 		this.imeCoalesceUninstall = installImeCursorCoalesce(this.tui);
 		this.term = new Terminal({ cols: this.cols, rows: this.rows, scrollback: 2000, allowProposedApi: true });
+		this.kittyImages = process.env.AGENT_BOARD_FORWARD_IMAGES !== "0"
+			? createPtyKittyImages(this.term, () => { this.historyFloor = 0; })
+			: null;
 		this.parserObservers = this.installParserObservers(this.term, this.parserEpoch);
 		this.parserObservationSupported = this.parserObservers.length > 0;
 		if (!this.parserObservationSupported) this.attachClient.forceLegacy("parser_observation_unavailable");
@@ -823,13 +828,24 @@ export class PtyAttachComponent implements Component {
 		}
 		const nextEpoch = this.parserEpoch + 1;
 		const observers = this.installParserObservers(next, nextEpoch);
+		let nextImages: ReturnType<typeof createPtyKittyImages> | null = null;
+		try {
+			if (this.kittyImages) nextImages = createPtyKittyImages(next, () => { this.historyFloor = 0; });
+		} catch {
+			for (const observer of observers) observer.dispose();
+			try { next.dispose?.(); } catch { /* best effort */ }
+			return false;
+		}
 		if (observers.length === 0) {
+			nextImages?.dispose();
 			try { next.dispose?.(); } catch { /* best effort */ }
 			return false;
 		}
 		const previous = this.term;
 		const previousObservers = this.parserObservers;
+		const previousImages = this.kittyImages;
 		this.term = next;
+		this.kittyImages = nextImages;
 		this.parserObservers = observers;
 		this.parserEpoch = nextEpoch;
 		this.baselineToken += 1;
@@ -846,6 +862,7 @@ export class PtyAttachComponent implements Component {
 		for (const observer of previousObservers) {
 			try { observer.dispose(); } catch { /* best effort */ }
 		}
+		previousImages?.dispose();
 		try { previous.dispose?.(); } catch { /* best effort */ }
 		return true;
 	}
@@ -855,6 +872,8 @@ export class PtyAttachComponent implements Component {
 			try { observer.dispose(); } catch { /* best effort */ }
 		}
 		this.parserObservers = [];
+		this.kittyImages?.dispose();
+		this.kittyImages = null;
 		try { this.term.dispose?.(); } catch { /* best effort */ }
 	}
 
@@ -1126,6 +1145,9 @@ export class PtyAttachComponent implements Component {
 		const start = Math.max(0, Math.min(this.viewportTop ?? this.liveBottomViewportTop(height), Math.max(0, buf.length - height)));
 		const end = Math.min(buf.length, start + height);
 		const rows: CommittedRow[] = [];
+		// Capture image APCs with the committed grid so recovery can outlive
+		// the parser and its Kitty markers during an authoritative resnapshot.
+		const kittyLines = this.kittyImages?.project(Array(end - start).fill(""), start, end - start);
 		for (let lineIndex = start; lineIndex < end; lineIndex += 1) {
 			const line = buf.getLine(lineIndex);
 			const cells: SnapshotCell[] = [];
@@ -1139,7 +1161,7 @@ export class PtyAttachComponent implements Component {
 					cells.push(SnapshotCell.fromBufferCell(cell, osc8UriForCell(term, cell)));
 				}
 			}
-			rows.push({ cells: new SnapshotLine(cells) });
+			rows.push({ cells: new SnapshotLine(cells), kittyPrefix: kittyLines?.[lineIndex - start] ?? "" });
 		}
 		const cursor = projectPtyCursor(buf, start, height);
 		this.committedView = {
@@ -2535,7 +2557,8 @@ export class PtyAttachComponent implements Component {
 		if (process.env.AGENT_BOARD_FORWARD_IMAGES !== "0") {
 			const { sequences, carry } = extractTerminalPassthroughSequences(this.passthroughCarry + data);
 			this.passthroughCarry = carry;
-			toWrite.push(...sequences);
+			// Kitty placements belong to projected grid rows, not the host's parked cursor.
+			toWrite.push(...sequences.filter((seq) => !seq.startsWith(KITTY_IMAGE_PREFIX)));
 		}
 		if (process.env.AGENT_BOARD_FORWARD_TERMINAL_QUERIES !== "0") {
 			// Issue #128 D1: forward the child's terminal capability queries
@@ -2623,7 +2646,9 @@ export class PtyAttachComponent implements Component {
 		// decrementing it would cancel a new-epoch write and allow premature publish.
 		this.parserWritesInFlight += 1;
 		try {
-			term.write(data, () => {
+			// snapshotReady already replaced the parser and Kitty bridge; injecting an
+			// extra reset OSC into its frame would disturb complete-frame observation.
+			term.write(this.kittyImages?.transform(data) ?? data, () => {
 				if (this.parserEpoch !== parserEpoch) return;
 				if (this.parserWritesInFlight > 0) this.parserWritesInFlight -= 1;
 			const currentIdentity = {
@@ -2663,7 +2688,7 @@ export class PtyAttachComponent implements Component {
 		const out: string[] = [];
 		for (let index = 0; index < view.rows.length && out.length < height; index += 1) {
 			const lineIndex = view.start + index;
-			out.push(lineToAnsi(view.rows[index].cells, SnapshotCell.empty(), this.term, lineIndex, selection, view.cursor, view.cursorHidden));
+			out.push(view.rows[index].kittyPrefix + lineToAnsi(view.rows[index].cells, SnapshotCell.empty(), this.term, lineIndex, selection, view.cursor, view.cursorHidden));
 		}
 		return { lines: out, cursor: view.cursor };
 	}
@@ -2687,7 +2712,7 @@ export class PtyAttachComponent implements Component {
 			out.push(lineToAnsi(buf.getLine(i), reusable, this.term, i, selection, cursor, cursorHidden));
 		}
 		if (out.length === 0) out.push("Waiting for PTY output…");
-		return { lines: out.slice(-height), cursor };
+		return { lines: this.kittyImages?.project(out.slice(-height), start, height) ?? out.slice(-height), cursor };
 	}
 
 	private close(gracefulSocket = false): void {
@@ -2960,9 +2985,9 @@ function clip(line: string, width: number): string {
 
 function clipTerminalLine(line: string, width: number): string {
 	// pi-tui's width helpers are ANSI-aware, but OSC sequences are terminal
-	// protocols rather than SGR styling. Avoid truncating inside OSC 8 hyperlinks;
-	// these lines are already projected from an xterm buffer sized to the viewport.
-	return line.includes("\x1b]") ? line : clip(line, width);
+	// protocols rather than SGR styling. Preserve complete OSC 8 links and Kitty
+	// APCs; these lines are projected from a buffer already sized to the viewport.
+	return line.includes("\x1b]") || line.includes(KITTY_IMAGE_PREFIX) ? line : clip(line, width);
 }
 
 function osc8UriForCell(term: XtermLike, cell: BufferCellLike): string {
