@@ -332,8 +332,15 @@ export function findUnguardedStdoutExits(sourceText, fileName) {
 	const visit = (node) => {
 		if (node.statements !== undefined) {
 			for (let index = 0; index + 1 < node.statements.length; index += 1) {
-				if (containsStatement(node.statements[index], writesStdout) && containsStatement(node.statements[index + 1], exitsProcess)) {
-					const { line } = file.getLineAndCharacterOfPosition(node.statements[index].getStart(file));
+				const previous = node.statements[index];
+				const next = node.statements[index + 1];
+				// Two sibling conditionals are independent paths, never one drain-then-exit
+				// sequence: `if (dryRun) { write; exit; } if (guard) { …; exit(2); }` would
+				// otherwise pair the two outer ifs. A real pair inside their blocks is found
+				// by the recursion into each block.
+				if (ts.isIfStatement(previous) && ts.isIfStatement(next)) continue;
+				if (containsStatement(previous, writesStdout) && containsStatement(next, exitsProcess)) {
+					const { line } = file.getLineAndCharacterOfPosition(previous.getStart(file));
 					found.push({ file: fileName, line: line + 1 });
 				}
 			}
@@ -369,6 +376,7 @@ test("stdout-flush: the detector flags the shape and accepts the guards", () => 
 		["console.log then exit", `console.log("x");\nprocess.exit(0);`],
 		["then writes, catch exits", `run().then((r) => { process.stdout.write(JSON.stringify(r)); }).catch(() => { process.exit(1); });`],
 		["flush, then conditional helper exit", `process.stdout.write("echo:hi\\n");\nif (exiting) exitAfterStdout("", 0);`],
+		["sibling conditionals never pair", `if (dryRun) { process.stdout.write("x"); }\nif (approved !== "1") { process.exit(2); }`],
 	];
 	for (const [label, source] of accepted) {
 		assert.deepEqual(findUnguardedStdoutExits(source, "sample.mjs"), [], `must accept: ${label}`);

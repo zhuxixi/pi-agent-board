@@ -108,13 +108,17 @@ export function exitAfterStdout(text, code = 0) {
 - 纯函数 `findUnguardedStdoutExits(text, fileName)` 定义在本文件内（唯一使用方是守卫测试，
   不额外引入模块）：AST 解析 → 遍历所有语句列表 → 相邻语句对里「前句写 stdout、后句 `exit`」
   记为违例；`if` / block 递归展开。
+- **兄弟条件分支不配对**：前後两句都是 `if` 时直接跳过 —— 两个并列条件分支是相互独立的路径，
+  不是同一条「先 drain 再退出」序列（否则 `formal-runner.mjs` 的 `if (dryRun) { write; exit }`
+  会与后面那个 `if (FORMAL_APPROVED…) { … exit(2) }` 误配）；块内部的真实相邻由递归单独发现。
 - **谓词钉死**：只匹配 `process.stdout.write(...)` 的表达式语句；`console.log` / `console.info` /
   `console.error` **不**计入（§6 显式非目标，`test-support/**` 里有 11 处 `console.log(x); process.exit(n)`，
   计进来会让守卫与自己的非目标打架）。
 - 守卫：扫描 `test-support/**/*.{ts,mjs,js}`，断言违例数 0，失败时打印 `file:line` 清单。
-- 自测：合成样本表（违例 3 条、合法 5 条）断言判定口径，防止守卫空转。违例样本包含
-  「`if (x) write(...)` 后跟 `exit`」与「模板字符串写入」；合法样本包含「`write` 带回调」、
-  「`exitAfterStdout`」、**「`console.log` 紧邻 `exit`」**、以及「`.then` 里写 / `.catch` 里 exit」。
+- 自测：合成样本表（违例 3 条、合法 6 条）断言判定口径，防止守卫空转。违例样本为
+  「直接写后 `exit`」「`if (x) write(...)` 后跟 `exit`」「`if (x) { write }` 后跟 `exit`」；
+  合法样本为「`write` 带回调」「`exitAfterStdout`」**「`console.log` 紧邻 `exit`」**
+  「`.then` 里写 / `.catch` 里 exit」「写后接条件式 helper 退出」「兄弟条件分支」。
 
 ## 4. 验收矩阵
 
