@@ -258,3 +258,18 @@ test("hasPlacements() reports whether project() can emit anything", async (t) =>
 	await f.feed(apc("a=d,d=A"));
 	assert.equal(f.images.hasPlacements(), false, "cleared after deleting all placements");
 });
+
+test("a reset during an in-flight chunked upload does not pass through (CR #275)", async (t) => {
+	const f = fixture(t);
+	// Mid-flight chunked upload: transmission open, no placement yet.
+	await f.feed(apc("a=T,f=100,i=42,c=5,r=2,m=1", "A".repeat(4000)));
+	// A reset carrying no Kitty content must NOT take the fast path, so the
+	// parser-ordered reset token still runs and drops the stale transmission.
+	await f.feed("\x1b[2J\x1b[Hfresh", true);
+	// A new upload after the reset must start clean, not append to the old chunks.
+	await f.feed(apc("a=T,f=100,i=7,c=5,r=2,C=1", "aGVsbG8="));
+	const line = f.project()[0];
+	assert.ok(line.includes("i=7"), "fresh image stored");
+	assert.ok(line.includes("aGVsbG8="), "fresh payload intact");
+	assert.ok(!line.includes("AAAA"), "no stale bytes from the interrupted upload");
+});

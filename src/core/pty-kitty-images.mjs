@@ -155,9 +155,11 @@ export function createPtyKittyImages(term, onClearScrollback = () => {}) {
 			// contains no Kitty APC and has no escape-prefix suffix a later chunk could
 			// complete into `\x1b_G`. Only `\x1b` / `\x1b_` tails can split that prefix
 			// (an ESC-[ tail cannot). A reset with live placements must keep the reset
-			// token so the parser-ordered handler clears them. Preserving identity also
-			// keeps the attach write-instrumentation `===` frame match working.
-			if (!carry && !data.includes(PREFIX) && !/\x1b_?$/.test(data) && !(reset && placements.size > 0)) return data;
+			// token so the parser-ordered handler clears them and any in-flight chunked
+			// upload (a reset with a pending transmission but no placement yet must not
+			// pass through either). Preserving identity also keeps the attach
+			// write-instrumentation `===` frame match working.
+			if (!carry && !data.includes(PREFIX) && !/\x1b_?$/.test(data) && !(reset && (placements.size > 0 || transmission))) return data;
 			const input = carry + data;
 			carry = "";
 			let out = reset ? `\x1b]${OSC};reset\x07` : "";
