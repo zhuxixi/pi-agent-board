@@ -227,6 +227,23 @@ test("snapshot_begin carries the model's externalOutputActive fact (empty baseli
 	assert.equal(begin.externalOutputActive, false);
 });
 
+test("ownership transition inside the async capture window is sampled at capture end (issue #278)", async () => {
+	const model = realModel({ cols: 80, rows: 22 });
+	feedOutput(model, "PI_PROMPT"); // seq 1
+	const { sub, messages, waitUntil } = subscriber(model);
+	sub.handleMessage({ type: "subscribe_terminal" }); // async capture starts now
+	// The external editor's synced alt-screen exit lands INSIDE the capture
+	// window (fed synchronously before the capture continuation runs): it is
+	// part of the captured DTO, never of the catch-up flush, so the begin fact
+	// must be sampled at capture end or it would stay stale forever.
+	feedOutput(model, "\x1b[?2026h\x1b[?1049l\x1b[?2026lNVIM"); // seq 2
+	await waitUntil(() => messages.some((m) => m.type === "snapshot_end"), "snapshot_end");
+	const begin = messages.find((m) => m.type === "snapshot_begin");
+	assert.equal(begin.snapshotSeq, 2, "the transition chunk is inside the captured DTO");
+	assert.equal(model.externalOutputActive, true, "capture-end model fact is external");
+	assert.equal(begin.externalOutputActive, true, "begin fact must correspond to the captured DTO");
+});
+
 test("snapshot_begin carries externalOutputActive=true while an external editor owns the screen (issue #278)", async () => {
 	const model = realModel({ cols: 80, rows: 22 });
 	feedOutput(model, "\x1b[?1049h"); // Pi startup alt entry: NOT external ownership
