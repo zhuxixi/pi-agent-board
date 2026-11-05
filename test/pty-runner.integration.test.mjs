@@ -431,7 +431,9 @@ test("pty-runner honors screenLogMaxBytes from host config", async () => {
 				return false;
 			}
 		});
-		send(socket, { type: "input", data: "exit\n" });
+		// A huge canonical input line can swallow a following shell command under
+		// load; use the runner's stop protocol after the output has been logged.
+		send(socket, { type: "terminate" });
 		await waitFor(() => readHost(root, "cap1")?.endedAt != null);
 		// Compaction happens synchronously inside onData; size must settle ≤ cap.
 		const size = await waitFor(() => {

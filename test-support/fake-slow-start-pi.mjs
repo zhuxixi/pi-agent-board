@@ -8,6 +8,7 @@
  *  ready banner: the runner applies a cached resize on first child output, so
  *  a post-banner signal must already be hooked. */
 import { appendFileSync } from "node:fs";
+import { exitAfterStdout } from "./stdout-flush.mjs";
 
 const reportSize = () => {
 	try {
@@ -32,6 +33,6 @@ process.stdin.on("data", (chunk) => {
 		.replace(/\r/g, "<CR>")
 		.replace(/\n/g, "<NL>");
 	process.stdout.write(`echo:${visible}\n`);
-	if (text.includes("exit")) process.exit(0);
+	if (text.includes("exit")) exitAfterStdout("", 0);
 });
 setInterval(() => {}, 1000);

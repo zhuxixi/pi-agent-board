@@ -15,7 +15,7 @@ test("crowded dashboard keeps the selected row visible above and below scroll ma
 	assert.equal(JSON.parse(out).ok, true);
 });
 
-test("list arrow-key navigation wraps around at both ends (issue #52)", () => {
+test("list navigation includes section headings and wraps; peek still wraps sessions (issue #52)", () => {
 	// dashboard.ts uses TS parameter properties, which strip-only mode rejects;
 	// --experimental-transform-types handles them (Node 22.7+ / 24).
 	const out = execFileSync(process.execPath, ["--experimental-transform-types", PROBE], {
@@ -26,7 +26,7 @@ test("list arrow-key navigation wraps around at both ends (issue #52)", () => {
 	assert.equal(ids.length, 3, "probe must see 3 rows");
 	assert.deepEqual(
 		seq,
-		[ids[0], ids[1], ids[2], ids[0], ids[2], ids[0]],
-		"list and peek navigation wrap around at both ends",
+		[ids[0], ids[1], ids[2], null, ids[0], null, ids[2], ids[0]],
+		"list wraps through its heading; peek navigation remains session-only",
 	);
 });

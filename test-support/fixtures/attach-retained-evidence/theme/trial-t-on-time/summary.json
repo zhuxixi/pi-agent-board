@@ -1,0 +1,619 @@
+{
+  "ok": true,
+  "caseId": "T-on-time",
+  "declared": {
+    "caseId": "T-on-time",
+    "producerScript": "theme",
+    "hostSize": {
+      "cols": 80,
+      "rows": 22
+    },
+    "seedFrame": {
+      "id": "T0",
+      "rows": [
+        "T0 HEADER theme surface",
+        "T0 UPPER reply history one",
+        "T0 UPPER reply history two",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "T0 MIDDLE divider",
+        "T0 LOWER reply history three",
+        "T0 LOWER reply history four",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "T0 THEME pending",
+        "T0 TAIL assistant final answer",
+        "",
+        "T0 INPUT >"
+      ],
+      "note": "seed enables the alternate screen AND bracketed paste in the same write; the authoritative hydrate scan sets the component's input-readiness flag (pty-attach.ts:1803)"
+    },
+    "reply": {
+      "timing": "on-time",
+      "backgroundReplyHex": "1b5d31313b7267623a303030302f303030302f3030303007",
+      "da1Hex": "1b5b3f313b3263"
+    },
+    "expectedReport": "997;1",
+    "redrawFrame": {
+      "id": "T1",
+      "rows": [
+        "T1 HEADER theme surface",
+        "T1 UPPER reply history one",
+        "T1 UPPER reply history two",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "T1 MIDDLE divider",
+        "T1 LOWER reply history three",
+        "T1 LOWER reply history four",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "T1 THEME dark applied",
+        "T1 TAIL assistant final answer",
+        "",
+        "T1 INPUT >"
+      ],
+      "cursorWorkArea": {
+        "x": 10,
+        "y": 21,
+        "visible": false
+      }
+    },
+    "probeTimeoutMs": 500,
+    "classification": "full literal rows + cursor via the accepted oracle; loading only by exact loading literals; unrecognized states are unknown, never 'other means loading'"
+  },
+  "seedProof": {
+    "ok": true,
+    "method": "runner-capture-replay at 80x22 (independent raw terminal), BEFORE the attach was mounted",
+    "rows": [
+      "T0 HEADER theme surface",
+      "T0 UPPER reply history one",
+      "T0 UPPER reply history two",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "T0 MIDDLE divider",
+      "T0 LOWER reply history three",
+      "T0 LOWER reply history four",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "T0 THEME pending",
+      "T0 TAIL assistant final answer",
+      "",
+      "T0 INPUT >"
+    ],
+    "literalRows": [
+      "T0 HEADER theme surface",
+      "T0 UPPER reply history one",
+      "T0 UPPER reply history two",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "T0 MIDDLE divider",
+      "T0 LOWER reply history three",
+      "T0 LOWER reply history four",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "T0 THEME pending",
+      "T0 TAIL assistant final answer",
+      "",
+      "T0 INPUT >"
+    ]
+  },
+  "componentBaseline": {
+    "snapshotBegin": {
+      "type": "snapshot_begin",
+      "snapshotSeq": 1,
+      "cols": 80,
+      "rows": 22,
+      "frameVersion": 1,
+      "generation": "9019776b-b1b3-4544-9796-2b81508b981b"
+    },
+    "snapshotEnd": {
+      "type": "snapshot_end",
+      "nextSeq": 2,
+      "scrollbackLines": 0
+    },
+    "initialRxTypes": [
+      "hello",
+      "status",
+      "hello",
+      "snapshot_begin",
+      "snapshot_frame",
+      "snapshot_end"
+    ]
+  },
+  "zeroResize": {
+    "ok": true,
+    "resizeCommands": []
+  },
+  "inputReadyFacts": {
+    "childInputReadyBeforeReply": true,
+    "note": "authoritative hydrate scan sets the flag (pty-attach.ts:1803); read-only observation, never written"
+  },
+  "colorQuery": {
+    "candidates": [
+      {
+        "writeIndex": 8,
+        "at": 814.776145
+      }
+    ],
+    "identity": "attach-settle-probe (sole candidate)"
+  },
+  "timeoutWait": null,
+  "reply": {
+    "timing": "on-time",
+    "injectedAt": 842.487935,
+    "backgroundReplyHex": "1b5d31313b7267623a303030302f303030302f3030303007",
+    "da1Hex": "1b5b3f313b3263"
+  },
+  "delivery": {
+    "messages": [
+      {
+        "at": 843.794228,
+        "dataHas997": true,
+        "report": "997;1"
+      }
+    ],
+    "childThemeReports": [
+      {
+        "scheme": "dark",
+        "monoNs": "369018585907119",
+        "wallMs": 1792812718570
+      }
+    ]
+  },
+  "themeRedraw": {
+    "committed": true,
+    "observationIndex": 23,
+    "boundaryParsedAt": 898.524374,
+    "rows": [
+      "T1 HEADER theme surface",
+      "T1 UPPER reply history one",
+      "T1 UPPER reply history two",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "T1 MIDDLE divider",
+      "T1 LOWER reply history three",
+      "T1 LOWER reply history four",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "T1 THEME dark applied",
+      "T1 TAIL assistant final answer",
+      "",
+      "T1 INPUT >"
+    ],
+    "outerCursor": {
+      "x": 10,
+      "y": 22,
+      "absoluteY": 22,
+      "visible": false
+    },
+    "childLogicalCursor": {
+      "x": 10,
+      "y": 21,
+      "visible": false
+    },
+    "childRepaintWrites": [
+      {
+        "writeIndex": 1,
+        "frame": "T1",
+        "bytes": 471,
+        "sha256": "4b32d01bb51b2c02e00085e137c2f15d6434a2a33fae035b7efdd21f8d744d53",
+        "monoNs": "369018586389034",
+        "wallMs": 1792812718570
+      }
+    ]
+  },
+  "postFirstContentCommits": [
+    {
+      "index": 21,
+      "kind": "unframed",
+      "boundaryParsedAt": 825.388662,
+      "cursor": {
+        "x": 10,
+        "y": 22,
+        "absoluteY": 22,
+        "visible": false
+      },
+      "identity": "t0-complete"
+    },
+    {
+      "index": 22,
+      "kind": "unframed",
+      "boundaryParsedAt": 897.454239,
+      "cursor": {
+        "x": 10,
+        "y": 22,
+        "absoluteY": 22,
+        "visible": false
+      },
+      "identity": "t0-complete"
+    },
+    {
+      "index": 23,
+      "kind": "frame",
+      "boundaryParsedAt": 898.524374,
+      "cursor": {
+        "x": 10,
+        "y": 22,
+        "absoluteY": 22,
+        "visible": false
+      },
+      "identity": "t1-complete"
+    },
+    {
+      "index": 24,
+      "kind": "unframed",
+      "boundaryParsedAt": 899.096466,
+      "cursor": {
+        "x": 10,
+        "y": 22,
+        "absoluteY": 22,
+        "visible": false
+      },
+      "identity": "t1-complete"
+    }
+  ],
+  "schemeDiagnostics": [
+    {
+      "receiptAt": 844.005616,
+      "details": {
+        "outcome": "reported",
+        "probeApi": "colors",
+        "report": "997;1"
+      }
+    }
+  ],
+  "predicates": [
+    {
+      "id": "T-on-time-P1",
+      "proposed": "a (timely or late) real color reply is followed by a child-originated complete synchronized theme redraw committed on the outer terminal",
+      "verdict": "CONSISTENT",
+      "evidence": {
+        "deliveryCount": 1,
+        "themeReportCount": 1,
+        "childRepaintWriteCount": 1,
+        "t1CommitCount": 1,
+        "totalCommitsAfterFirstContent": 1,
+        "note": "counts are reported separately; exactly-one outer render is NOT a product requirement (status/ticker/input scheduling may repaint an identical valid view). A single consistent witness is not a sufficiency proof."
+      }
+    },
+    {
+      "id": "T-on-time-P2",
+      "proposed": "the color reply path re-opens the loading state or commits an unidentified frame after first content",
+      "verdict": "REFUTED",
+      "evidence": {
+        "anomalousFrames": [],
+        "note": "no loading reappearance and no unidentified frame after first content (REFUTED = the bad behavior was not observed)"
+      }
+    }
+  ],
+  "teardownViolations": [],
+  "postTeardownAnalysis": {
+    "stageRule": "exact observer write identity: first write containing EXIT_ALT_SCREEN; stop stage = full 24-row source-grounded layout (tui-alt-screen.js:209-228), cursor (0,23) visible",
+    "stopWriteIndices": [
+      14
+    ],
+    "activeBoundary": 34,
+    "observationCounts": {
+      "total": 37,
+      "active": 34,
+      "stopStage": 3
+    },
+    "activeFailures": [
+      {
+        "index": 20,
+        "category": "inverse-cells",
+        "expected": {
+          "screen": "t0-complete",
+          "inverseCells": []
+        },
+        "actual": {
+          "extraInverseCells": [
+            {
+              "x": 10,
+              "y": 21
+            }
+          ],
+          "missingInverseCells": [],
+          "kind": "frame",
+          "note": null
+        }
+      },
+      {
+        "index": 21,
+        "category": "inverse-cells",
+        "expected": {
+          "screen": "t0-complete",
+          "inverseCells": []
+        },
+        "actual": {
+          "extraInverseCells": [
+            {
+              "x": 10,
+              "y": 21
+            }
+          ],
+          "missingInverseCells": [],
+          "kind": "unframed",
+          "note": null
+        }
+      },
+      {
+        "index": 22,
+        "category": "inverse-cells",
+        "expected": {
+          "screen": "t0-complete",
+          "inverseCells": []
+        },
+        "actual": {
+          "extraInverseCells": [
+            {
+              "x": 10,
+              "y": 21
+            }
+          ],
+          "missingInverseCells": [],
+          "kind": "unframed",
+          "note": "sync-entry"
+        }
+      }
+    ],
+    "chromeViolations": [],
+    "stopStage": {
+      "expectedRows": [
+        "T1 HEADER theme surface",
+        "T1 UPPER reply history one",
+        "T1 UPPER reply history two",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "T1 MIDDLE divider",
+        "T1 LOWER reply history three",
+        "T1 LOWER reply history four",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "T1 THEME dark applied",
+        "T1 TAIL assistant final answer",
+        "",
+        "T1 INPUT >",
+        "────────────────────────────────────────────────────────────────────────────────",
+        ""
+      ],
+      "expectedCursor": {
+        "x": 0,
+        "y": 23,
+        "visible": true
+      },
+      "results": [
+        {
+          "index": 34,
+          "kind": "unframed",
+          "closeWriteIndex": 14,
+          "rowsMatch": false,
+          "cursorMatch": false,
+          "actualRows": [
+            " s15 host exited · opens links · drag selects+copies · Ctrl+←/Ctrl+\\ detach",
+            "T1 HEADER theme surface",
+            "T1 UPPER reply history one",
+            "T1 UPPER reply history two",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "T1 MIDDLE divider",
+            "T1 LOWER reply history three",
+            "T1 LOWER reply history four",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "T1 THEME dark applied",
+            "T1 TAIL assistant final answer",
+            "",
+            "T1 INPUT >",
+            "────────────────────────────────────────────────────────────────────────────────"
+          ],
+          "actualCursor": {
+            "x": 10,
+            "y": 22,
+            "absoluteY": 22,
+            "visible": true
+          }
+        },
+        {
+          "index": 35,
+          "kind": "frame",
+          "closeWriteIndex": 14,
+          "rowsMatch": true,
+          "cursorMatch": true,
+          "actualRows": [
+            "T1 HEADER theme surface",
+            "T1 UPPER reply history one",
+            "T1 UPPER reply history two",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "T1 MIDDLE divider",
+            "T1 LOWER reply history three",
+            "T1 LOWER reply history four",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "T1 THEME dark applied",
+            "T1 TAIL assistant final answer",
+            "",
+            "T1 INPUT >",
+            "────────────────────────────────────────────────────────────────────────────────",
+            ""
+          ],
+          "actualCursor": {
+            "x": 0,
+            "y": 23,
+            "absoluteY": 23,
+            "visible": true
+          }
+        },
+        {
+          "index": 36,
+          "kind": "unframed",
+          "closeWriteIndex": 14,
+          "rowsMatch": true,
+          "cursorMatch": true,
+          "actualRows": [
+            "T1 HEADER theme surface",
+            "T1 UPPER reply history one",
+            "T1 UPPER reply history two",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "T1 MIDDLE divider",
+            "T1 LOWER reply history three",
+            "T1 LOWER reply history four",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "T1 THEME dark applied",
+            "T1 TAIL assistant final answer",
+            "",
+            "T1 INPUT >",
+            "────────────────────────────────────────────────────────────────────────────────",
+            ""
+          ],
+          "actualCursor": {
+            "x": 0,
+            "y": 23,
+            "absoluteY": 23,
+            "visible": true
+          }
+        }
+      ],
+      "violations": [
+        {
+          "index": 34,
+          "kind": "unframed",
+          "closeWriteIndex": 14,
+          "rowsMatch": false,
+          "cursorMatch": false,
+          "actualRows": [
+            " s15 host exited · opens links · drag selects+copies · Ctrl+←/Ctrl+\\ detach",
+            "T1 HEADER theme surface",
+            "T1 UPPER reply history one",
+            "T1 UPPER reply history two",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "T1 MIDDLE divider",
+            "T1 LOWER reply history three",
+            "T1 LOWER reply history four",
+            "",
+            "",
+            "",
+            "",
+            "",
+            "T1 THEME dark applied",
+            "T1 TAIL assistant final answer",
+            "",
+            "T1 INPUT >",
+            "────────────────────────────────────────────────────────────────────────────────"
+          ],
+          "actualCursor": {
+            "x": 10,
+            "y": 22,
+            "absoluteY": 22,
+            "visible": true
+          }
+        }
+      ]
+    }
+  },
+  "holds": [
+    {
+      "after": "post-redraw-watch",
+      "plannedMs": 300,
+      "actualMs": 300.11923000000013,
+      "openFrame": false,
+      "startAt": 905.008254,
+      "endAt": 1205.127484
+    }
+  ],
+  "cleanup": {
+    "childExited": true,
+    "runnerExited": true,
+    "runnerExitCode": 0,
+    "forcedKills": [],
+    "childAliveAfter": false,
+    "runnerAliveAfter": false,
+    "rootRemoved": true,
+    "rootRetainedForEvidence": false,
+    "ok": true
+  },
+  "artifactErrors": [],
+  "error": null,
+  "artifactDir": ".superpowers/sdd/2026-10-23-issue-222-attach-ready/task-16-theme-artifacts/t-on-time-attempt-1/trial-t-on-time"
+}

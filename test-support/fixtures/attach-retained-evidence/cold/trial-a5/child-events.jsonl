@@ -1,0 +1,16 @@
+{"event":"start","script":"cold","pid":1888620,"cols":80,"rows":22,"protocol":"RS(0x1E) + JSON + LF(0x0A); commands: {\"cmd\":\"step\",\"step\":N} strictly in order, {\"cmd\":\"exit\"}","clock":{"mono":"process.hrtime.bigint (ns, arbitrary origin)","wall":"Date.now (ms)","note":"child clock has no proven common origin with any parent clock; timings are emission/write-callback facts only"},"monoNs":"367109297895985","wallMs":1792810809282}
+{"event":"stdin-raw-at-start","isRaw":true,"note":"actual process.stdin.isRaw after the shared footer's startup setRawMode(true); null under non-TTY stdin","monoNs":"367109299244481","wallMs":1792810809283}
+{"event":"command","step":1,"raw":"{\"cmd\":\"step\",\"step\":1}","monoNs":"367109386849227","wallMs":1792810809371}
+{"event":"stdout-write","script":"cold","step":1,"frame":"BOOT","phase":"boot","writeIndex":0,"bytes":59,"sha256":"85c828db54a9b214e05bcf52239a48dec2a4f800a0c51d76090a8df0666404ca","monoNs":"367109387265329","wallMs":1792810809371}
+{"event":"stdout-write-flushed","writeIndex":0,"monoNs":"367109387730595","wallMs":1792810809372}
+{"event":"command","step":2,"raw":"{\"cmd\":\"step\",\"step\":2}","monoNs":"367109653860799","wallMs":1792810809638}
+{"event":"stdout-write","script":"cold","step":2,"frame":"MODES","phase":"input-mode","writeIndex":1,"bytes":16,"sha256":"0dcd4ec2bdc278b14c4685e5195d59a28f7ef3a6b1826441f57f604a2986b79a","monoNs":"367109654143058","wallMs":1792810809638,"dataHex":"1b5b3f31303439681b5b3f3230303468"}
+{"event":"stdout-write-flushed","writeIndex":1,"monoNs":"367109654341705","wallMs":1792810809638}
+{"event":"command","step":3,"raw":"{\"cmd\":\"step\",\"step\":3}","monoNs":"367109876877704","wallMs":1792810809861}
+{"event":"stdout-write","script":"cold","step":3,"frame":"E1","phase":"open","writeIndex":2,"bytes":235,"sha256":"d09a72db7305f11ce0632b46830bfd3b6317c7f0733f03233e750ae6a1f7e8c3","monoNs":"367109877367847","wallMs":1792810809861}
+{"event":"stdout-write-flushed","writeIndex":2,"monoNs":"367109877675314","wallMs":1792810809862}
+{"event":"command","step":4,"raw":"{\"cmd\":\"step\",\"step\":4}","monoNs":"367110277903675","wallMs":1792810810262}
+{"event":"stdout-write","script":"cold","step":4,"frame":"E1","phase":"closed","writeIndex":3,"bytes":238,"sha256":"0c3dfa95c330efd83aea68cf99de5c06ca444a38e288ceca799f9466dc876223","monoNs":"367110278521106","wallMs":1792810810263}
+{"event":"stdout-write-flushed","writeIndex":3,"monoNs":"367110279071970","wallMs":1792810810263}
+{"event":"command","raw":"{\"cmd\":\"exit\"}","monoNs":"367110341825359","wallMs":1792810810326}
+{"event":"exit","monoNs":"367110341909855","wallMs":1792810810326}

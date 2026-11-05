@@ -24,20 +24,20 @@ const service = createService({
 	launchTitle: () => ({ pid: null, configPath: "/no/title-config.json" }),
 });
 
-const writes = [];
+const writes: string[] = [];
 const tui = {
-	terminal: { rows: 24, cols: 80, columns: 80, write: (d) => writes.push(d) },
+	terminal: { rows: 24, cols: 80, columns: 80, write: (d: string) => writes.push(d) },
 	requestRender: () => {},
 };
-const theme = { fg: (_c, t) => t, bold: (t) => t, bg: (_c, t) => t };
+const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t, bg: (_c: string, t: string) => t };
 const keybindings = {};
 
 let dashboard;
 try {
 	dashboard = new DashboardComponent(
-		tui,
-		theme,
-		keybindings,
+		tui as never,
+		theme as never,
+		keybindings as never,
 		() => {},
 		{
 			service,
@@ -67,9 +67,9 @@ else if (typeof dashboard.invalidate === "function") dashboard.invalidate();
 let attach;
 try {
 	attach = new PtyAttachComponent(
-		tui,
-		theme,
-		keybindings,
+		tui as never,
+		theme as never,
+		keybindings as never,
 		() => {},
 		{ socketPath: "/no/such/socket", title: "smoke" },
 	);

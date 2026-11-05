@@ -1,0 +1,2 @@
+7aa94fd12c85993e9ee8c5fc2b858ad86338400fbbf05217f1fff47f7d0a2dfc  .superpowers/sdd/2026-10-23-issue-222-attach-ready/task-23a-smoke-artifacts/fullscreen-4-1793048803/probe.jsonl
+fffe61aaef04bbcd837a27205778bbc287136417526fa1ecfed788fe9d3961dd  .superpowers/sdd/2026-10-23-issue-222-attach-ready/task-23a-smoke-artifacts/fullscreen-4-1793048803/result.json

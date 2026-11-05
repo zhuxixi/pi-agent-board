@@ -6,7 +6,7 @@ import { DashboardComponent } from "../src/ui/dashboard.ts";
 
 const now = Date.now();
 
-function fakeRow(id, { hostActive = false, alive = false, semanticState = null } = {}) {
+function fakeRow(id: string, { hostActive = false, alive = false, semanticState = null }: { hostActive?: boolean; alive?: boolean; semanticState?: string | null } = {}) {
 	return {
 		meta: { id, name: id, cwd: "/r", updatedAt: now },
 		state: semanticState
@@ -20,14 +20,14 @@ function fakeRow(id, { hostActive = false, alive = false, semanticState = null }
 	};
 }
 
-const results = {};
+const results: Record<string, unknown> = {};
 const tui = { terminal: { rows: 24, cols: 80, columns: 80, write: () => {} }, requestRender: () => {} };
-const theme = { fg: (_c, t) => t, bold: (t) => t, bg: (_c, t) => t };
+const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t, bg: (_c: string, t: string) => t };
 
-function makeDashboard(rows, { prewarmResult = { ok: true }, doneCapture } = {}) {
-	const service = {
+function makeDashboard(rows: any[], { prewarmResult = { ok: true }, doneCapture }: { prewarmResult?: { ok: boolean; error?: string } | null; doneCapture?: any[] } = {}) {
+	const service: any = {
 		rows: () => rows,
-		row: (id) => rows.find((r) => r.meta.id === id) ?? null,
+		row: (id: string) => rows.find((r) => r.meta.id === id) ?? null,
 		prewarmHost: undefined,
 		reply: async () => ({ ok: true, sent: true }),
 	};
@@ -38,7 +38,7 @@ function makeDashboard(rows, { prewarmResult = { ok: true }, doneCapture } = {})
 			return prewarmResult;
 		};
 	}
-	const dash = new DashboardComponent(tui, theme, {}, (r) => doneCapture?.push(r), {
+	const dash: any = new DashboardComponent(tui as never, theme as never, {} as never, (r) => doneCapture?.push(r), {
 		service: service as never,
 		root: "/r",
 		defaultCwd: "/r",
@@ -81,7 +81,7 @@ function makeDashboard(rows, { prewarmResult = { ok: true }, doneCapture } = {})
 
 // S3: hostActive busy row attaches directly — no confirm prompt, stopFirst:false.
 {
-	const done = [];
+	const done: any[] = [];
 	const { dash } = makeDashboard(
 		[fakeRow("hosted1", { hostActive: true, alive: true, semanticState: "working" })],
 		{ doneCapture: done },
@@ -95,7 +95,7 @@ function makeDashboard(rows, { prewarmResult = { ok: true }, doneCapture } = {})
 
 // S4: busy non-host row goes through the stopFirst confirm; done not called yet.
 {
-	const done = [];
+	const done: any[] = [];
 	const { dash } = makeDashboard(
 		[fakeRow("busy1", { alive: true, semanticState: "working" })],
 		{ doneCapture: done },

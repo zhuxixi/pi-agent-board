@@ -9,8 +9,9 @@
 import { readFileSync } from "node:fs";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
 import type { Component, EditorTheme, KeybindingsManager, TUI } from "@earendil-works/pi-tui";
-import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Key, matchesKey, parseKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { requestDashboardRender } from "../core/dashboard-render.mjs";
+import { readFoldedSections, saveFoldedSections } from "../core/dashboard-prefs.mjs";
 import { normalizeGenericStatusText } from "../core/derive.mjs";
 import { firstSentence, truncate } from "../core/heuristics.mjs";
 import {
@@ -36,6 +37,8 @@ import { type Row } from "../core/store.mjs";
 import type { createService } from "../runtime/service.mjs";
 
 type Service = ReturnType<typeof createService>;
+type SectionState = keyof typeof GROUP_LABELS;
+type ListTarget = { kind: "section"; state: SectionState } | { kind: "row"; state: SectionState; id: string };
 type PtyIssue = {
 	id: string;
 	title: string;
@@ -129,6 +132,10 @@ export class DashboardComponent implements Component {
 	private rows: Row[] = [];
 	private orderedIds: string[] = [];
 	private selectedId: string | null = null;
+	private selectedSection: SectionState | null = null;
+	private foldedSections = new Set<SectionState>();
+	private listTargets: ListTarget[] = [];
+	private selectedBodyLine = 0;
 	private selectedIds = new Set<string>();
 	private input = "";
 	private filterQuery = "";
@@ -177,6 +184,7 @@ export class DashboardComponent implements Component {
 		// Issue #147: the post-delete reopen carries the Deleted notice here —
 		// the component is new each open, so an inline notice cannot travel.
 		if (deps.initialNotice) this.notice(deps.initialNotice, "info");
+		this.foldedSections = new Set(readFoldedSections(deps.root));
 		try {
 			this.lastLaunchPrefs = this.deps.service.getLaunchPrefs?.() ?? null;
 		} catch {
@@ -193,16 +201,31 @@ export class DashboardComponent implements Component {
 		const all = this.deps.service.rows();
 		this.rows = this.filterQuery ? filterRows(all, this.filterQuery) : all;
 		const groups = groupRowsByFolder(this.rows, Date.now());
-		this.orderedIds = groups.flatMap((g) => g.folders.flatMap((f) => f.rows.map((r) => r.id)));
+		this.listTargets = groups.flatMap((group): ListTarget[] => [
+			{ kind: "section", state: group.state },
+			...(this.isSectionFolded(group.state) ? [] : group.folders.flatMap((folder) =>
+				folder.rows.map((row): ListTarget => ({ kind: "row", state: group.state, id: row.id })))),
+		]);
+		this.orderedIds = this.listTargets.flatMap((target) => target.kind === "row" ? [target.id] : []);
 		const visibleIds = new Set(this.orderedIds);
 		this.selectedIds = new Set([...this.selectedIds].filter((id) => visibleIds.has(id)));
-		if (this.orderedIds.length === 0) {
+		if (this.selectedId && visibleIds.has(this.selectedId)) {
+			this.selectedSection = null;
+		} else if (this.selectedId) {
+			// A row can move into a folded section while the board is polling.
+			const row = this.rows.find((row) => row.meta.id === this.selectedId);
+			this.selectedSection = row ? rowState(row) : null;
 			this.selectedId = null;
-			if (this.mode === "select") this.mode = "list";
-		} else if (!this.selectedId || !this.orderedIds.includes(this.selectedId)) {
-			this.selectedId = this.orderedIds[0];
 		}
-		if (this.selectedId && this.selectedId !== previousSelected) this.prewarmScheduler.schedule();
+		if (this.selectedSection && !groups.some((group) => group.state === this.selectedSection)) this.selectedSection = null;
+		if (!this.selectedId && !this.selectedSection) {
+			// Preserve the existing initial focus on a session when one is visible.
+			this.selectedId = this.orderedIds[0] ?? null;
+			if (!this.selectedId) this.selectedSection = this.listTargets[0]?.state ?? null;
+		}
+		if (this.orderedIds.length === 0 && this.mode === "select") this.mode = "list";
+		if (!this.selectedId) this.prewarmScheduler.cancel();
+		else if (this.selectedId !== previousSelected) this.prewarmScheduler.schedule();
 	}
 
 	private selectedRow(): Row | null {
@@ -264,15 +287,47 @@ export class DashboardComponent implements Component {
 	}
 
 	private moveSelection(delta: number): void {
-		if (this.orderedIds.length === 0) return;
-		const cur = this.selectedId ? this.orderedIds.indexOf(this.selectedId) : 0;
-		const len = this.orderedIds.length;
-		// Wrap around both ends: down past last -> first, up past first -> last.
-		const next = (((cur < 0 ? 0 : cur) + delta) % len + len) % len;
-		const nextId = this.orderedIds[next];
-		if (nextId === this.selectedId) return;
-		this.selectedId = nextId;
-		this.prewarmScheduler.schedule();
+		// Batch selection still navigates sessions only, never section headings.
+		const targets: ListTarget[] = this.mode === "select"
+			? this.listTargets.filter((target) => target.kind === "row")
+			: this.listTargets;
+		if (targets.length === 0) return;
+		const cur = targets.findIndex((target) => target.kind === "section"
+			? target.state === this.selectedSection
+			: target.id === this.selectedId);
+		const next = (((cur < 0 ? 0 : cur) + delta) % targets.length + targets.length) % targets.length;
+		const target = targets[next];
+		this.selectedId = target.kind === "row" ? target.id : null;
+		this.selectedSection = target.kind === "section" ? target.state : null;
+		if (this.selectedId) this.prewarmScheduler.schedule();
+		else this.prewarmScheduler.cancel();
+	}
+
+	private isSectionFolded(state: SectionState): boolean {
+		// Search results remain discoverable without discarding saved folds.
+		return !this.filterQuery.trim() && this.foldedSections.has(state);
+	}
+
+	private toggleSectionFold(folded?: boolean): void {
+		const row = this.selectedRow();
+		const state = this.selectedSection ?? (row ? rowState(row) : null);
+		if (!state) return;
+		if (this.filterQuery.trim()) {
+			this.notifyInputState("Clear the filter to fold sections", "muted");
+			return;
+		}
+		if (folded ?? !this.foldedSections.has(state)) this.foldedSections.add(state);
+		else this.foldedSections.delete(state);
+		// Header focus keeps a collapsed section reachable and never leaves a
+		// hidden session as the target of attach/delete/hold actions.
+		this.selectedId = null;
+		this.selectedSection = state;
+		this.refresh();
+		try {
+			saveFoldedSections(this.deps.root, this.foldedSections);
+		} catch {
+			this.notifyInputState("Fold changed for now; could not save preference", "warning");
+		}
 	}
 
 	private prewarmSelected(): void {
@@ -360,14 +415,20 @@ export class DashboardComponent implements Component {
 		if (!matchesKey(data, Key.ctrl("x"))) this.deleteArm = null;
 		if (matchesKey(data, Key.up) || data === "k") return void this.moveSelection(-1);
 		if (matchesKey(data, Key.down) || data === "j") return void this.moveSelection(1);
+		// Older pi-tui matchesKey misses unmodified modifyOtherKeys Tab, even
+		// though parseKey decodes it correctly (some terminal/tmux paths use it).
+		if (matchesKey(data, Key.tab) || parseKey(data) === Key.tab) return this.toggleSectionFold();
+		if (this.selectedSection && matchesKey(data, Key.left)) return this.toggleSectionFold(true);
+		if (this.selectedSection && (matchesKey(data, Key.right) || data === "l")) return this.toggleSectionFold(false);
 		if (matchesKey(data, Key.right) || data === ">" || data === "l") return this.attachSelected();
 		if (data === "v") return this.openSessionView();
 		if (data === "e") return this.openEvidenceView();
 		if (matchesKey(data, Key.enter)) {
 			if (this.input.trim()) return this.openLaunchDialog();
+			if (this.selectedSection) return this.toggleSectionFold();
 			return this.attachSelected();
 		}
-		if (matchesKey(data, Key.space)) return this.openPeek();
+		if (matchesKey(data, Key.space)) return this.selectedSection ? this.toggleSectionFold() : this.openPeek();
 		if (data === "m") return this.startSelectionMode();
 		if (data === "/") return this.startFilter();
 		if (data === "?") return this.openHelp("list");
@@ -752,7 +813,7 @@ export class DashboardComponent implements Component {
 		if (picker === "cwd") {
 			try {
 				ensureCwdStatsSeeded(this.deps.root);
-				launch.cwdRanked = existingCwdCandidates(rankedCwdCandidates(this.deps.root, 8));
+				launch.cwdRanked = existingCwdCandidates(rankedCwdCandidates(this.deps.root));
 			} catch {
 				launch.cwdRanked = [];
 			}
@@ -1359,8 +1420,11 @@ export class DashboardComponent implements Component {
 				"! pty",
 			]);
 		}
+		if (this.selectedSection && !this.input.trim()) {
+			return this.hintLine("SECTION", "accent", ["tab/enter fold", "← collapse", "→ expand", "↑↓ navigate", "i insert", "/ filter", "? help", "esc exit"]);
+		}
 		const primary = this.input.trim() ? "enter launch" : live ? "enter attach live" : "enter resume";
-		const hints = ["i insert", primary, "→/l attach", "m multi-select", ...(unread > 0 ? [`•${unread} unread`] : []), "d done", "h hold", "space peek", "v transcript", "e evidence", "ctrl+n new session", "ctrl+r rename", "x delete (y/N)", "ctrl+x x2 quick", "X delete state", "/ filter", "! pty", "? help"];
+		const hints = ["i insert", primary, "tab fold", "→/l attach", "m multi-select", ...(unread > 0 ? [`•${unread} unread`] : []), "d done", "h hold", "space peek", "v transcript", "e evidence", "ctrl+n new session", "ctrl+r rename", "x delete (y/N)", "ctrl+x x2 quick", "X delete state", "/ filter", "! pty", "? help"];
 		if (this.input.trim()) hints.splice(1, 0, "esc clear");
 		return this.hintLine("NORMAL", "muted", hints);
 	}
@@ -1422,13 +1486,17 @@ export class DashboardComponent implements Component {
 		const now = Date.now();
 		const groups = groupRowsByFolder(this.rows, now);
 		const out: string[] = [];
+		this.selectedBodyLine = 0;
 		for (const g of groups) {
 			if (out.length > 0) out.push("");
+			if (this.selectedSection === g.state) this.selectedBodyLine = out.length;
 			out.push(this.renderStageHeader(g.state, g.label, g.rowCount, width));
+			if (this.isSectionFolded(g.state)) continue;
 			const showFolderHeaders = g.showFolders;
 			for (const folder of g.folders) {
 				if (showFolderHeaders) out.push(this.renderFolderHeader(g.state, folder, width));
 				for (const rv of folder.rows) {
+					if (rv.id === this.selectedId) this.selectedBodyLine = out.length;
 					out.push(this.renderRow(rv, width, { showFolder: !showFolderHeaders, indent: showFolderHeaders ? 4 : 2 }));
 				}
 			}
@@ -1438,10 +1506,12 @@ export class DashboardComponent implements Component {
 
 	private renderStageHeader(state: keyof typeof GROUP_LABELS, label: string, count: number, width: number): string {
 		const t = this.theme;
-		const glyph = stateGlyph(state, state === "working");
-		const title = stageFg(state, t.bold(`${glyph} ${label.toUpperCase()}`));
-		const countText = t.fg("dim", ` ${count}`);
-		const ruleWidth = Math.max(0, width - visibleWidth(`${glyph} ${label.toUpperCase()} ${count}`) - 2);
+		const disclosure = this.isSectionFolded(state) ? "▸" : "▾";
+		const marker = this.selectedSection === state ? "›" : " ";
+		const text = `${marker}${disclosure} ${label.toUpperCase()}`;
+		const title = stageFg(state, t.bold(text));
+		const countText = t.fg("dim", ` (${count})`);
+		const ruleWidth = Math.max(0, width - visibleWidth(`${text} (${count})`) - 1);
 		return clip(`${title}${countText} ${t.fg("borderMuted", "─".repeat(ruleWidth))}`, width);
 	}
 
@@ -1700,19 +1770,19 @@ export class DashboardComponent implements Component {
 	private renderHelp(width: number): string[] {
 		const t = this.theme;
 		const rows: Array<[string, string]> = [
-			["normal", "Dashboard owns keys; i enters insert mode"],
-			["insert", "Editor owns text keys; / is literal, arrows move cursor"],
+			["normal/insert", "Normal: board keys; i enters insert; Esc returns to normal"],
 			["i", "Enter insert/compose mode; then / is literal for slash commands"],
 			["m", "Enter multi-select mode from the board list"],
 			["enter", "Normal/insert with draft: open start-session dialog; empty: attach/resume"],
 			["shift+enter", "Insert a newline while in insert/reply"],
 			["esc", "Insert → normal; Normal with draft clears; empty quits standalone dashboard"],
-			["↑/↓ or j/k", "Normal: move selection; Insert: move cursor"],
+			["↑/↓ or j/k", "Normal: navigate sessions and section headings; Insert: move cursor"],
+			["tab", "Fold/unfold the selected section (or session's section); remembered on reopen"],
 			["ctrl/alt+←/→", "Jump by word in insert mode"],
-			["→ / > / l", "Attach to the selected real Pi session"],
+			["→ / > / l", "Session: attach; section heading: →/l expand / ← collapse"],
 			["d", "Confirm and mark selected inactive session done"],
 			["h", "Hold / unhold the selected inactive session (on-hold state)"],
-			["space", "Peek when input is empty; in multi-select: toggle current row"],
+			["space", "Session: peek; section: fold/unfold; multi-select: toggle row"],
 			["e", "Open evidence / diagnostics panel for selected session"],
 			["/", "Filter in normal mode; use i then / for slash commands"],
 			["?", "Open the key help overlay (list and multi-select)"],
@@ -1773,16 +1843,10 @@ export class DashboardComponent implements Component {
 	}
 
 	/** Keep the selected row visible within `capacity` lines, with scroll markers. */
-	private windowBody(body: string[], capacity: number): { lines: string[] } {
+	private windowBody(body: string[], capacity: number, selLine = this.selectedBodyLine): { lines: string[] } {
 		if (body.length <= capacity) {
 			this.scrollTop = 0;
 			return { lines: body };
-		}
-		// Find the line index of the selected row (best effort: match its rendered prefix).
-		let selLine = 0;
-		if (this.selectedId) {
-			const idx = body.findIndex((l) => l.includes("›"));
-			selLine = idx >= 0 ? idx : 0;
 		}
 		// The boundary lines can become scroll markers, so keep selection inside
 		// them. On tiny viewports, prioritize the selected row over markers.
@@ -1792,7 +1856,8 @@ export class DashboardComponent implements Component {
 		this.scrollTop = Math.max(0, Math.min(this.scrollTop, body.length - capacity));
 		// The first session can follow both a stage and a folder header. Those
 		// lines aren't selectable, so reveal them when the first session fits.
-		if (this.selectedId === this.orderedIds[0] && selLine < capacity) this.scrollTop = 0;
+		const atStart = this.selectedSection === this.listTargets[0]?.state || this.selectedId === this.orderedIds[0];
+		if (atStart && selLine < capacity) this.scrollTop = 0;
 		const slice = body.slice(this.scrollTop, this.scrollTop + capacity);
 		const more = body.length - this.scrollTop - capacity;
 		if (this.scrollTop > 0 && selLine !== this.scrollTop) slice[0] = this.theme.fg("dim", `  ↑ ${this.scrollTop + 1} more`);

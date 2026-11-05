@@ -127,11 +127,13 @@ Shortcuts are scoped to the view where they are available:
 
 | Key | Action |
 | --- | --- |
-| `Up` / `Down` / `j` / `k` | Move the selection. |
+| `Up` / `Down` / `j` / `k` | Move between sessions and section headings; wraps at both ends. |
 | `i` | Enter INSERT mode for a new task. |
-| `Enter` | Open Start session for a draft, or attach/resume when the input is empty. |
-| `Right` / `>` / `l` | Attach to the selected session. |
-| `Space` | Open Peek. |
+| `Enter` | Open Start session for a draft; otherwise attach/resume a session, or fold/unfold a section heading. |
+| `Tab` | Fold/unfold the selected section, or the section containing the selected session. |
+| `Right` / `>` / `l` | Attach to the selected session. On a section heading, `Right` / `l` expands it. |
+| `Left` | Collapse the selected section heading. |
+| `Space` | Open Peek for a session, or fold/unfold a section heading. |
 | `v` | Open the read-only transcript. |
 | `e` | Open Evidence / Diagnostics. |
 | `/` | Enter filter mode. |
@@ -220,7 +222,7 @@ PTY attach opens the real interactive Pi session. `Ctrl+Left` detaches and retur
 
 Automatic light/dark themes work in attach sessions too. The child Pi's background-color probe (OSC 11) and its color-scheme change notification switch are forwarded to your real terminal; replies and notifications flow back to the child when your terminal answers — a terminal that never answers keeps the dark fallback. Attach also re-probes the background once when it settles, so the theme is correct from the first frame without re-selecting it in `/settings`. All of this is on by default; set `AGENT_BOARD_FORWARD_TERMINAL_QUERIES=0` to disable it. Not covered: keyboard-protocol negotiation (kitty flags / DA1) is not forwarded — the child negotiates once at spawn, before any attach client exists, and forwarding it would retune the shared real-terminal keyboard stack — so modifier-key encoding can still differ from a directly-run Pi (the modifyOtherKeys fallback applies).
 
-The attach surface can forward terminal clipboard and image/file passthrough sequences. These behaviors can be disabled individually in [Configuration](#configuration). Cold hosts may briefly show a loading/reconnect surface while their PTY becomes ready.
+The attach surface can forward terminal clipboard and image/file passthrough sequences. Kitty-protocol images emitted by Pi are anchored to their session rows, retained through snapshots/reattach, and cropped to the visible portion while scrolling; they do not draw over the attach header/footer. This applies to the Kitty graphics protocol, not only the Kitty terminal. Cached direct uploads are bounded to 32 images / 32 MiB. Text-only sessions and iTerm2 image passthrough retain their existing behavior. These behaviors can be disabled individually in [Configuration](#configuration). Cold hosts may briefly show a loading/reconnect surface while their PTY becomes ready.
 
 ## States, Grouping, and Filters
 
@@ -238,6 +240,8 @@ Agent Board separates a session's semantic task state from whether a worker proc
 | **Stopped** | The user stopped the active work. |
 
 Rows are grouped by state. When a state contains sessions from multiple directories, rows are grouped by folder within that state. Pinned rows and folders come first, then creation order remains stable; activity does not reshuffle the list. New agent activity is marked unread with stronger row glyphs and header/footer counts. Replies sent while a session is busy enter a durable FIFO follow-up queue and are delivered when the session is ready; a `qN` badge shows queued follow-ups.
+
+Section headings are keyboard-selectable. Press `Tab` to fold/unfold a section (also works from one of its sessions); folded headings retain their counts, such as `▸ DONE (18)`. `Enter` or `Space` also toggles a heading, while `Left` collapses and `Right` expands it. Fold choices are saved per board in `<root>/dashboard-prefs.json` and survive closing/reopening or attaching/detaching. Session actions such as delete, hold, and attach do nothing while a heading is selected. Multi-select and Peek navigation skip folded sessions. Search temporarily reveals matching folded sections without changing saved choices; clear the filter before changing folds.
 
 Press `/` to enter filter mode. Filter tokens are case-insensitive and can be combined with free-text terms:
 

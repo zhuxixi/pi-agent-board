@@ -90,6 +90,11 @@
  *   terminals), or loading baseline for `empty`. Empty baselines carry no frame.
  * - `output` — live/replay chunk data (protocol-managed only), including gate
  *   strays emitted during `reconciling`.
+ * - `viewProofRecord` — sanitized S/F/A view-proof record from live/catch-up/replay,
+ *   in receive order. It is an independent fact, never readiness.
+ * - `viewProof` — sanitized current coverage from `view_proof_state` (replay end or
+ *   reporter reset). Optional `snapshotReady.viewProof` is the snapshot_end coverage
+ *   with begin/state fallback; both are independent of transport validation.
  * - `resubscribing` — the client sent a recovery subscribe itself. The plan
  *   contract originally made resubscribe UI-actionable; it is internal now
  *   (send is injected and socket-scoped) so the UI wiring stays minimal —
@@ -127,7 +132,12 @@
  * escape hatch and deterministic legacy-test switch.
  */
 
-import { TERMINAL_FRAME_VERSION } from "./terminal-attach-protocol.mjs";
+import {
+	MAX_VIEW_PROOF_RECORDS,
+	TERMINAL_FRAME_VERSION,
+	VIEW_PROOF_PROTOCOL_VERSION,
+	sanitizeViewProofRecord,
+} from "./terminal-attach-protocol.mjs";
 import { classifyCommandAck, encodeCommand, CONTROL_ERROR_CODES, TERMINAL_ERROR_CODES } from "./control-protocol.mjs";
 
 /**
@@ -136,8 +146,8 @@ import { classifyCommandAck, encodeCommand, CONTROL_ERROR_CODES, TERMINAL_ERROR_
 
 /**
  * @typedef {(
- *   event: "mode" | "snapshotBegin" | "snapshotReady" | "output" | "resubscribing" | "protocolError" |
- *          "cmdAck" | "reconciled" | "epochReset",
+ *   event: "mode" | "snapshotBegin" | "snapshotReady" | "output" | "viewProof" | "viewProofRecord" |
+ *          "resubscribing" | "protocolError" | "cmdAck" | "reconciled" | "epochReset",
  *   payload?: any,
  * ) => void} AttachClientEmit
  */
@@ -155,6 +165,42 @@ const RESIZE_RETRY_DELAY_MS = 300;
  *   forceLegacy?: boolean,
  * }} AttachClientOptions
  */
+
+const VIEW_PROOF_STATUSES = new Set(["covered", "unavailable", "unknown"]);
+
+function unknownViewProof(reason) {
+	return { status: "unknown", reason, proof: null, throughSeq: null, cursorVisible: null };
+}
+
+/** Bounded coverage sanitizer: accepts only tracker-shaped fields and a valid F proof. */
+export function sanitizeViewProofCoverage(value) {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+	if (!VIEW_PROOF_STATUSES.has(value.status)) return null;
+	if (value.reason !== null && value.reason !== undefined && typeof value.reason !== "string") return null;
+	if (value.throughSeq !== null && value.throughSeq !== undefined && (!Number.isInteger(value.throughSeq) || value.throughSeq < 0)) return null;
+	if (value.cursorVisible !== null && value.cursorVisible !== undefined && typeof value.cursorVisible !== "boolean") return null;
+	const status = value.status;
+	let proof = null;
+	if (value.proof !== null && value.proof !== undefined) {
+		proof = sanitizeViewProofRecord(value.proof);
+		if (proof === null || proof.marker !== "F") return null;
+	}
+	if (status === "covered" && (proof === null || !Number.isInteger(value.throughSeq))) return null;
+	if (status === "covered" && proof.seq > value.throughSeq) return null;
+	let previousComplete = null;
+	if (value.previousComplete !== null && value.previousComplete !== undefined) {
+		previousComplete = sanitizeViewProofRecord(value.previousComplete);
+		if (previousComplete === null || previousComplete.marker !== "F") return null;
+	}
+	return {
+		status,
+		reason: typeof value.reason === "string" ? value.reason : null,
+		proof,
+		throughSeq: Number.isInteger(value.throughSeq) ? value.throughSeq : null,
+		cursorVisible: typeof value.cursorVisible === "boolean" ? value.cursorVisible : null,
+		...(previousComplete === null ? {} : { previousComplete }),
+	};
+}
 
 /** @type {NonNullable<AttachClientOptions["scheduleTimeout"]>} */
 const defaultScheduleTimeout = (delayMs, fn) => {
@@ -238,13 +284,32 @@ export function createTerminalAttachClient({
 	// catch-up flush outputs, then end — one microtask batch, tiny by contract
 	// (ring pressure during capture yields resnapshot_required, not an
 	// unbounded flush). Buffered here so the UI applies frame-then-flush in
-	// exact order after snapshotReady.
-	/** @type {{ frame: string | null, empty: boolean, resnapshot: boolean, beginSeq: number, flush: { seq: number, data: string }[] }} */
-	let partial = { frame: null, empty: false, resnapshot: false, beginSeq: 0, flush: [] };
+	// exact order after snapshotReady. View-proof facts are bounded and cleared
+	// with every new capture/resync.
+	const emptyPartial = () => ({
+		frame: null,
+		empty: false,
+		resnapshot: false,
+		beginSeq: 0,
+		flush: [],
+		viewProofBegin: null,
+		viewProofState: null,
+		viewProofRecords: [],
+		viewProofRecordsDropped: false,
+	});
+	/** @type {ReturnType<typeof emptyPartial>} */
+	let partial = emptyPartial();
 
 	const send = (msg) => {
 		rawSend(msg);
 	};
+
+	const subscribeMessage = (extra = {}) => ({
+		type: "subscribe_terminal",
+		frameVersion: TERMINAL_FRAME_VERSION,
+		viewProof: VIEW_PROOF_PROTOCOL_VERSION,
+		...extra,
+	});
 
 	const fireProbeTimer = () => {
 		cancelProbeTimer();
@@ -300,9 +365,9 @@ export function createTerminalAttachClient({
 		// not strand the client outside both paths. Once protocol is decided the
 		// timer is meaningless and gets cancelled.
 		if (modeDecided) cancelProbeTimer();
-		partial = { frame: null, empty: false, resnapshot: false, beginSeq: 0, flush: [] };
+		partial = emptyPartial();
 		state = "resyncing";
-		send({ type: "subscribe_terminal", frameVersion: TERMINAL_FRAME_VERSION });
+		send(subscribeMessage());
 		emit("resubscribing", { reason });
 	};
 
@@ -352,13 +417,9 @@ export function createTerminalAttachClient({
 		reconnectFromGeneration = null;
 		cancelReconcileTimer();
 		lastSeq = effective;
-		partial = { frame: null, empty: false, resnapshot: false, beginSeq: 0, flush: [] };
+		partial = emptyPartial();
 		state = "resyncing";
-		send(
-			effective > 0
-				? { type: "subscribe_terminal", frameVersion: TERMINAL_FRAME_VERSION, sinceSeq: effective }
-				: { type: "subscribe_terminal", frameVersion: TERMINAL_FRAME_VERSION },
-		);
+		send(effective > 0 ? subscribeMessage({ sinceSeq: effective }) : subscribeMessage());
 		return cursor;
 	};
 
@@ -450,14 +511,27 @@ export function createTerminalAttachClient({
 		// captured geometry — empty baselines included, so a child that has not
 		// produced output yet still gets corrected BEFORE its first bytes land.
 		if (typeof msg.cols === "number" && typeof msg.rows === "number") {
-			emit("snapshotBegin", { cols: msg.cols, rows: msg.rows });
+			emit("snapshotBegin", {
+				cols: msg.cols,
+				rows: msg.rows,
+				...(msg.empty === true ? { empty: true } : {}),
+				...(typeof msg.generation === "string" ? { generation: msg.generation } : {}),
+			});
+		}
+		let beginCoverage = null;
+		if (msg.viewProof !== undefined) {
+			beginCoverage = sanitizeViewProofCoverage(msg.viewProof);
+			if (beginCoverage === null) {
+				emit("protocolError", { code: "view_proof_invalid", message: "snapshot_begin.viewProof" });
+				beginCoverage = unknownViewProof("invalid-view-proof");
+			}
 		}
 		partial = {
-			frame: null,
+			...emptyPartial(),
 			empty: msg.empty === true,
 			resnapshot: msg.resnapshot === true,
 			beginSeq: typeof msg.snapshotSeq === "number" ? msg.snapshotSeq : 0,
-			flush: [],
+			viewProofBegin: beginCoverage,
 		};
 		state = "collecting";
 		if (partial.empty) {
@@ -485,6 +559,29 @@ export function createTerminalAttachClient({
 			return;
 		}
 		snapshotFailures = 0; // a verified snapshot pays back the recovery budget
+		let endCoverage = null;
+		if (msg.viewProof !== undefined) {
+			endCoverage = sanitizeViewProofCoverage(msg.viewProof);
+			if (endCoverage === null) {
+				emit("protocolError", { code: "view_proof_invalid", message: "snapshot_end.viewProof" });
+				endCoverage = unknownViewProof("invalid-view-proof");
+			}
+		}
+		let viewProof = endCoverage ?? partial.viewProofState ?? partial.viewProofBegin;
+		let viewProofRecords = partial.viewProofRecords;
+		if (viewProof !== null && viewProof.status === "covered" && viewProof.throughSeq > nextSeq - 1) {
+			viewProof = unknownViewProof("view-proof-future");
+		}
+		if (partial.viewProofRecordsDropped) {
+			viewProof = unknownViewProof("records-dropped");
+			viewProofRecords = [];
+		} else if (viewProofRecords.length > 0) {
+			// A record after the baseline needs its catch-up output segment. Missing it
+			// means the client cannot prove the receipt order; never keep "covered".
+			const flushSeqs = new Set(partial.flush.map((chunk) => chunk.seq));
+			const missing = viewProofRecords.some((record) => record.seq > partial.beginSeq && !flushSeqs.has(record.seq));
+			if (missing && (viewProof === null || viewProof.status === "covered")) viewProof = unknownViewProof("proof-output-gap");
+		}
 		emit("snapshotReady", {
 			frame: partial.frame ?? undefined,
 			empty: partial.empty || undefined,
@@ -493,6 +590,8 @@ export function createTerminalAttachClient({
 			// Optional field: omit the key for a runner that predates it, so the
 			// event shape stays exactly what old consumers assert on.
 			...(typeof msg.scrollbackLines === "number" ? { scrollbackLines: msg.scrollbackLines } : {}),
+			...(viewProof === null ? {} : { viewProof }),
+			...(viewProofRecords.length > 0 ? { viewProofRecords } : {}),
 		});
 		for (const chunk of partial.flush) emit("output", chunk.data);
 		lastSeq = nextSeq - 1;
@@ -545,6 +644,11 @@ export function createTerminalAttachClient({
 					fallbackToLegacy("frame_version_mismatch");
 					return true;
 				}
+				if (msg.code === "view_proof_version_mismatch") {
+					// Conservative: never fake modern proof for an incompatible runner.
+					fallbackToLegacy("view_proof_version_mismatch");
+					return true;
+				}
 				if (msg.code === "snapshot_failed" || msg.code === "invalid_since_seq") {
 					if (state === "probing" || state === "resyncing" || state === "collecting") {
 						resyncOrFail(msg.code);
@@ -584,6 +688,56 @@ export function createTerminalAttachClient({
 					return true;
 				}
 				return false; // UI-owned status errors
+			}
+			case "view_proof": {
+				const record = sanitizeViewProofRecord(msg.record);
+				if (record === null) {
+					emit("protocolError", { code: "view_proof_invalid", message: "view_proof.record" });
+					return true;
+				}
+				if (state === "collecting") {
+					if (partial.viewProofRecords.length >= MAX_VIEW_PROOF_RECORDS) partial.viewProofRecordsDropped = true;
+					else partial.viewProofRecords.push(record);
+					return true;
+				}
+				if (state === "live" || state === "resyncing") {
+					if (record.seq > lastSeq) {
+						emit("protocolError", { code: "view_proof_future", message: `seq ${record.seq} > ${lastSeq}` });
+						return true;
+					}
+					emit("viewProofRecord", record);
+					return true;
+				}
+				return true; // probing/reconciling: pre-subscribe stray
+			}
+			case "view_proof_state": {
+				let coverage = sanitizeViewProofCoverage(msg.viewProof);
+				if (coverage === null) {
+					emit("protocolError", { code: "view_proof_invalid", message: "view_proof_state.viewProof" });
+					coverage = unknownViewProof("invalid-view-proof");
+				}
+				if ((state === "live" || state === "resyncing") && coverage.status === "covered" && coverage.throughSeq > lastSeq) {
+					emit("protocolError", { code: "view_proof_future", message: `throughSeq ${coverage.throughSeq} > ${lastSeq}` });
+					coverage = unknownViewProof("view-proof-future");
+				}
+				if (state === "collecting") {
+					partial.viewProofState = coverage;
+					return true;
+				}
+				if (state === "resyncing") {
+					// Zero-output replay completion: the state message is the only
+					// proof-bearing completion signal. Normal replay completes on output.
+					decideProtocol();
+					snapshotFailures = 0;
+					state = "live";
+					emit("viewProof", coverage);
+					return true;
+				}
+				if (state === "live") {
+					emit("viewProof", coverage);
+					return true;
+				}
+				return true; // probing/reconciling: pre-subscribe stray
 			}
 			case "snapshot_begin": {
 				if (typeof msg.generation === "string" && msg.generation) generation = msg.generation;
@@ -710,7 +864,7 @@ export function createTerminalAttachClient({
 			return;
 		}
 		if (state !== "probing") return;
-		send({ type: "subscribe_terminal", frameVersion: TERMINAL_FRAME_VERSION });
+		send(subscribeMessage());
 		fireProbeTimer();
 	}
 
@@ -729,13 +883,13 @@ export function createTerminalAttachClient({
 	function reconnect(cursorSeq) {
 		if (state === "closed" || state === "legacy") return;
 		if (state === "probing") {
-			send({ type: "subscribe_terminal", frameVersion: TERMINAL_FRAME_VERSION });
+			send(subscribeMessage());
 			fireProbeTimer();
 			return;
 		}
 		seq = 0; // per-connection ordering resets with the socket (spec D4)
 		snapshotFailures = 0; // fresh connection, fresh recovery budget
-		partial = { frame: null, empty: false, resnapshot: false, beginSeq: 0, flush: [] };
+		partial = emptyPartial();
 		if (!instanceId) {
 			issueReconnectSubscribe(cursorSeq);
 			return;
@@ -792,6 +946,19 @@ export function createTerminalAttachClient({
 		onDisconnect,
 		handleMessage,
 		close,
+		/** Bounded fresh seq-less resync request (no timer/retry loop here). */
+		requestResync(reason = "requested") {
+			if (state === "closed" || state === "legacy") return false;
+			resync(reason);
+			return true;
+		},
+		/** Conservative public legacy decision (used for observer-unavailable). */
+		forceLegacy(reason = "forced") {
+			if (state === "closed") return false;
+			if (state === "legacy") return true;
+			fallbackToLegacy(reason);
+			return true;
+		},
 		/** @returns {"probing" | "protocol" | "legacy" | "closed"} UI-facing mode */
 		getMode() {
 			if (state === "collecting" || state === "live" || state === "resyncing" || state === "reconciling") return "protocol";

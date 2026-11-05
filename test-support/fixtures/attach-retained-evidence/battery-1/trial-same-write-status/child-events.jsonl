@@ -1,0 +1,14 @@
+{"event":"start","script":"same-write","pid":1852424,"cols":80,"rows":22,"protocol":"RS(0x1E) + JSON + LF(0x0A); commands: {\"cmd\":\"step\",\"step\":N} strictly in order, {\"cmd\":\"exit\"}","clock":{"mono":"process.hrtime.bigint (ns, arbitrary origin)","wall":"Date.now (ms)","note":"child clock has no proven common origin with any parent clock; timings are emission/write-callback facts only"},"monoNs":"356340240351933","wallMs":1792778010446}
+{"event":"stdout-write","script":"same-write","step":0,"frame":"F0","phase":"seed","writeIndex":0,"bytes":465,"sha256":"9cc80f0f164bab5dd1b572b13f390079d63efc7b00aa1542f3389e62d73edcb5","monoNs":"356340241594369","wallMs":1792778010447}
+{"event":"stdout-write-flushed","writeIndex":0,"monoNs":"356340242266922","wallMs":1792778010447}
+{"event":"command","step":1,"raw":"{\"cmd\":\"step\",\"step\":1}","monoNs":"356340764637748","wallMs":1792778010970}
+{"event":"stdout-write","script":"same-write","step":1,"frame":"F1","phase":"open","writeIndex":1,"bytes":233,"sha256":"dbc9d3d8b4ce6618d214bac2f2173977b9e8116d375ebe87a0460714a915d292","monoNs":"356340765146411","wallMs":1792778010970}
+{"event":"stdout-write-flushed","writeIndex":1,"monoNs":"356340765387031","wallMs":1792778010971}
+{"event":"command","step":2,"raw":"{\"cmd\":\"step\",\"step\":2}","monoNs":"356340882704309","wallMs":1792778011088}
+{"event":"stdout-write","script":"same-write","step":2,"frame":"F1>F2","phase":"close-open","writeIndex":2,"bytes":471,"sha256":"838ac7bbf6a1413efdcb05147ecf1f62e1e9350d9258af45286e025970cd34db","monoNs":"356340883078825","wallMs":1792778011088}
+{"event":"stdout-write-flushed","writeIndex":2,"monoNs":"356340883283507","wallMs":1792778011089}
+{"event":"command","step":3,"raw":"{\"cmd\":\"step\",\"step\":3}","monoNs":"356341155299821","wallMs":1792778011361}
+{"event":"stdout-write","script":"same-write","step":3,"frame":"F2","phase":"closed","writeIndex":3,"bytes":238,"sha256":"24cde99b579c2d3f51f091af858d6a6980c8f5b476346434fa0bcc541f89482c","monoNs":"356341155779620","wallMs":1792778011361}
+{"event":"stdout-write-flushed","writeIndex":3,"monoNs":"356341156186307","wallMs":1792778011361}
+{"event":"command","raw":"{\"cmd\":\"exit\"}","monoNs":"356341216195417","wallMs":1792778011421}
+{"event":"exit","monoNs":"356341216370725","wallMs":1792778011422}

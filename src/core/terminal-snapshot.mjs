@@ -62,6 +62,7 @@ const RGB_MARKER = 0x1000000;
  * @property {SnapshotCell[][]} viewport rows of the viewport grid
  * @property {SnapshotCell[][]} scrollback up to scrollbackCap lines directly
  *   above the viewport, oldest first
+ * @property {string[]} [kittyImageLines] graphical lines across scrollback + viewport
  * @property {boolean} scrollbackTruncated true when more scrollback existed
  *   than the cap allowed
  */
@@ -153,6 +154,7 @@ export async function captureTerminalSnapshot(model, { scrollbackCap = DEFAULT_S
 	/** @type {SnapshotCell[][]} */
 	const scrollback = [];
 	for (let k = take; k >= 1; k--) scrollback.push(captureLine(buffer, baseY - k, cols));
+	const kittyImageLines = parser._agentBoardKittyImages?.project(Array(take + rows).fill(""), baseY - take, take + rows);
 	return {
 		version: TERMINAL_SNAPSHOT_VERSION,
 		kind: "terminal_snapshot",
@@ -164,6 +166,7 @@ export async function captureTerminalSnapshot(model, { scrollbackCap = DEFAULT_S
 		viewport,
 		scrollback,
 		scrollbackTruncated: available > scrollbackCap,
+		...(kittyImageLines?.some(Boolean) ? { kittyImageLines } : {}),
 	};
 }
 
@@ -340,14 +343,21 @@ export async function synthesizeFullRedrawFrame(source) {
 	// wrap-pending row advances exactly one line). The last viewport row gets
 	// no trailing newline (it would fire an extra scroll); the cursor park
 	// below positions the cursor afterwards.
+	// Emit graphics with their original rows. Historical placements then scroll
+	// into history with their text, rather than being CUP-positioned into the
+	// current viewport or lost at a resnapshot.
+	let imageRow = 0;
 	for (const line of dto.scrollback) {
+		parts.push(dto.kittyImageLines?.[imageRow++] ?? "");
 		emitRow(parts, line);
 		parts.push("\r\n");
 	}
 	for (let y = 0; y < dto.rows - 1; y++) {
+		parts.push(dto.kittyImageLines?.[imageRow++] ?? "");
 		emitRow(parts, dto.viewport[y] ?? []);
 		parts.push("\r\n");
 	}
+	parts.push(dto.kittyImageLines?.[imageRow] ?? "");
 	emitRow(parts, dto.viewport[dto.rows - 1] ?? []);
 	parts.push(modesSequence(dto.modes));
 	parkCursor(parts, dto);

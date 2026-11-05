@@ -35,18 +35,26 @@ const dash = new DashboardComponent(tui, theme, keybindings, (r) => doneCalls.pu
 
 // TS-private is runtime-accessible; read white-box state for assertions.
 const ids = dash.orderedIds;
-const out = { ids, list: [], select: [], peek: [], attach: [], negative: [], scroll: [], text: {}, notices: [], busyL: null };
+const out: any = { ids, list: [], select: [], peek: [], attach: [], negative: [], scroll: [], text: {}, notices: [], busyL: null };
 
 // A1: list j/k == arrow keys (wrap at both ends); j must not pop the INSERT toast.
 dash.handleInput("j"); out.list.push(dash.selectedId);
 out.notices.push(dash.inputNotice === null);
 dash.handleInput("j"); out.list.push(dash.selectedId);
-dash.handleInput("j"); out.list.push(dash.selectedId); // wrap last -> first
-dash.handleInput("k"); out.list.push(dash.selectedId); // wrap first -> last
+dash.handleInput("j"); out.list.push(dash.selectedId); // wrap last -> first section heading
+out.wrappedSection = dash.selectedSection;
+dash.handleInput("k"); out.list.push(dash.selectedId); // wrap heading -> last session
 // RF1: uppercase J stays on the printable fallback (current behavior pinned).
 dash.handleInput("J"); out.notices.push(dash.inputNotice !== null);
 // RF5: bracketed paste containing j/k/l must not move the selection.
 dash.handleInput("\x1b[200~jkl\x1b[201~"); out.list.push(dash.selectedId);
+// Headings are navigation targets too: arrow keys must visit the same targets.
+dash.selectedId = ids[0]; dash.selectedSection = null;
+out.listArrows = [];
+for (const arrow of ["\x1b[B", "\x1b[B", "\x1b[B", "\x1b[A"]) {
+	dash.handleInput(arrow);
+	out.listArrows.push(dash.selectedId);
+}
 
 // A2: select mode j/k move the selection (wrap).
 dash.mode = "select"; dash.selectedId = ids[0];

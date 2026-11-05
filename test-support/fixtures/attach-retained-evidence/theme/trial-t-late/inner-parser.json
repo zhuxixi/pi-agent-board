@@ -1,0 +1,49 @@
+[
+  {
+    "kind": "csi-open",
+    "at": 554.141777,
+    "alreadyOpen": false
+  },
+  {
+    "kind": "csi-close",
+    "at": 554.269034,
+    "matched": true
+  },
+  {
+    "kind": "enqueue",
+    "at": 556.871387,
+    "bytes": 2142,
+    "sha256": "3fd6c4f75925a1a160f73dd6c381ab90dfec2e84dcffec8fa2928b04a96254ea"
+  },
+  {
+    "kind": "csi-close",
+    "at": 558.865041,
+    "matched": false
+  },
+  {
+    "kind": "drain",
+    "at": 558.890886,
+    "sha256": "3fd6c4f75925a1a160f73dd6c381ab90dfec2e84dcffec8fa2928b04a96254ea"
+  },
+  {
+    "kind": "enqueue",
+    "at": 1325.710954,
+    "bytes": 472,
+    "sha256": "ebf6fc179c856bc22b493941caf44297dd645a5dfa23c72d8440bfb8bd7ba4f0"
+  },
+  {
+    "kind": "csi-open",
+    "at": 1325.892581,
+    "alreadyOpen": false
+  },
+  {
+    "kind": "csi-close",
+    "at": 1326.230276,
+    "matched": true
+  },
+  {
+    "kind": "drain",
+    "at": 1326.24141,
+    "sha256": "ebf6fc179c856bc22b493941caf44297dd645a5dfa23c72d8440bfb8bd7ba4f0"
+  }
+]
