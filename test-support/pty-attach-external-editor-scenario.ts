@@ -56,10 +56,21 @@ function enterModernCommitted(component: PtyAttachComponent): void {
 	c.rows = 22;
 }
 
+// Harness fidelity (Task 3 review): wire fields live on exactly one event —
+// `externalOutputActive` only on snapshotBegin (runner capture-end sample),
+// `resnapshot` only on snapshotReady. No ownership mirroring into snapshotReady.
 function emitSnapshot(component: PtyAttachComponent, frame: string, extra: Record<string, unknown> = {}) {
 	const c = component as unknown as { handleAttachEvent: (event: string, payload: unknown) => void };
-	c.handleAttachEvent("snapshotBegin", { cols: 80, rows: 22, ...extra });
-	c.handleAttachEvent("snapshotReady", { frame, nextSeq: 1, ...("externalOutputActive" in extra ? { externalOutputActive: (extra as any).externalOutputActive } : {}) });
+	c.handleAttachEvent("snapshotBegin", {
+		cols: 80,
+		rows: 22,
+		...("externalOutputActive" in extra ? { externalOutputActive: (extra as any).externalOutputActive } : {}),
+	});
+	c.handleAttachEvent("snapshotReady", {
+		frame,
+		nextSeq: 1,
+		...("resnapshot" in extra ? { resnapshot: (extra as any).resnapshot } : {}),
+	});
 }
 
 function pushLive(component: PtyAttachComponent, data: string): void {
