@@ -12,7 +12,9 @@ test("vim j/k/l bindings mirror the arrow keys across board modes (issue #229)",
 	const { ids } = out;
 	assert.equal(ids.length, 3, "probe must see 3 rows");
 	// A1: list j/k wrap like the arrows; j/k never pop the INSERT toast.
-	assert.deepEqual(out.list, [ids[1], ids[2], ids[0], ids[2], ids[2]], "j down x2, wrap; k wrap; paste no-move");
+	assert.deepEqual(out.list, [ids[1], ids[2], null, ids[2], ids[2]], "j down x2, wrap to heading; k wraps back; paste no-move");
+	assert.ok(out.wrappedSection, "the wrapped target is a section heading, not a lost selection");
+	assert.deepEqual(out.list.slice(0, 4), out.listArrows, "j/k and arrows traverse the same session/header targets");
 	assert.deepEqual(out.notices, [true, true], "j: no INSERT toast; J: keeps the printable fallback");
 	// A2: select mode j/k move (wrap).
 	assert.deepEqual(out.select, [ids[1], ids[0], ids[2]]);

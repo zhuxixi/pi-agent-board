@@ -55,9 +55,9 @@ try {
 	const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t, bg: (_c: string, t: string) => t };
 	const keybindings = {};
 	const dashboard = new DashboardComponent(
-		tui,
-		theme,
-		keybindings,
+		tui as never,
+		theme as never,
+		keybindings as never,
 		() => {},
 		{
 			service,

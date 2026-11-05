@@ -4,12 +4,14 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import { createView } from "../src/core/store.mjs";
 import { createService } from "../src/runtime/service.mjs";
 import { DashboardComponent } from "../src/ui/dashboard.ts";
 
 const root = mkdtempSync(join(tmpdir(), "agentview-scroll-"));
-let dashboard;
+// Runtime-only probe: inspect TS-private navigation state deliberately.
+let dashboard: any;
 try {
 	for (let i = 0; i < 30; i++) {
 		createView(root, { id: `v${i}`, name: `session-${i}`, cwd: root });
@@ -28,8 +30,8 @@ try {
 		terminal: { rows: 24, cols: 120, columns: 120, write: () => {} },
 		requestRender: () => {},
 	};
-	const theme = { fg: (_c, text) => text, bold: (text) => text, bg: (_c, text) => text };
-	dashboard = new DashboardComponent(tui, theme, {}, () => {}, {
+	const theme = { fg: (_c: string, text: string) => text, bold: (text: string) => text, bg: (_c: string, text: string) => text };
+	dashboard = new DashboardComponent(tui as never, theme as never, {} as never, () => {}, {
 		service, root, defaultCwd: root, availableModels: [],
 		currentModel: null, currentThinkingLevel: "off",
 	});
@@ -38,7 +40,7 @@ try {
 	dashboard.scrollTop = 1;
 	const selected = "  › running session";
 	const body = ["RUNNING", selected, ...Array.from({ length: 10 }, (_, i) => `row ${i}`)];
-	assert.ok(dashboard.windowBody(body, 5).lines.includes(selected), "up marker must not overwrite selection");
+	assert.ok(dashboard.windowBody(body, 5, 1).lines.includes(selected), "up marker must not overwrite selection");
 
 	// Every selection must survive both clipping boundaries, even on a resize
 	// leaving only one or two body lines. Counts include the replaced lines.
@@ -47,7 +49,7 @@ try {
 			for (let sel = 0; sel < 12; sel++) {
 				dashboard.scrollTop = start;
 				const body = Array.from({ length: 12 }, (_, i) => i === sel ? selected : `row ${i}`);
-				const { lines } = dashboard.windowBody(body, capacity);
+				const { lines } = dashboard.windowBody(body, capacity, sel);
 				assert.ok(lines.includes(selected), `selection ${sel}, start ${start}, capacity ${capacity}`);
 				assert.ok(lines.length <= capacity);
 				if (lines[0].includes("↑")) {
@@ -60,17 +62,23 @@ try {
 		}
 	}
 
+	// Compare only the stable marker/name prefix: a second renderRows call can
+	// advance the age column, and the viewport may add trailing whitespace.
+	const visiblePrefix = (line: string) => line.trimEnd().slice(0, 20);
+	const hasVisiblePrefix = (frame: string[], bodyLine: string) =>
+		frame.some((line) => visiblePrefix(line) === visiblePrefix(bodyLine));
+
 	// Drive public input and render after every step, including wraparound and
 	// changing terminal height while the viewport is scrolled down.
 	for (const height of [24, 16, 12, 24]) {
 		tui.terminal.rows = height;
 		for (const key of ["\x1b[B", "\x1b[A"]) {
-			for (let step = 0; step <= dashboard.orderedIds.length; step++) {
-				const row = service.rows().find((row) => row.meta.id === dashboard.selectedId);
-				const lines = dashboard.render(120);
+			for (let step = 0; step <= dashboard.listTargets.length; step++) {
+				const lines: string[] = dashboard.render(120).map(stripVTControlCharacters);
 				assert.equal(lines.length, height);
-				assert.ok(lines.some((line) => line.includes("›") && line.includes(row.meta.name)),
-					`selected ${row.meta.name} must be visible at height ${height}`);
+				const body: string[] = dashboard.renderRows(120).map(stripVTControlCharacters);
+				assert.ok(hasVisiblePrefix(lines, body[dashboard.selectedBodyLine]),
+					`selected row or heading must be visible at height ${height}`);
 				dashboard.handleInput(key);
 			}
 		}
@@ -89,36 +97,39 @@ try {
 		const groupedService = {
 			...service,
 			rows: () => rows,
-			row: (id) => rows.find((row) => row.meta.id === id),
+			row: (id: string) => rows.find((row) => row.meta.id === id),
 			prewarmHost: () => ({ ok: false }),
 		};
 		for (const width of [120, 60]) {
 			for (const height of [24, 16]) {
 				tui.terminal.rows = height;
-				dashboard = new DashboardComponent(tui, theme, {}, () => {}, {
-					service: groupedService, root, defaultCwd: root, availableModels: [],
+				dashboard = new DashboardComponent(tui as never, theme as never, {} as never, () => {}, {
+					service: groupedService as never, root, defaultCwd: root, availableModels: [],
 					currentModel: null, currentThinkingLevel: "off",
 				});
-				// Start at the bottom, then walk up to the first session.
+				// Up visits the first heading, then wraps to the bottom.
+				dashboard.handleInput("\x1b[A");
 				dashboard.handleInput("\x1b[A");
 				dashboard.render(width);
 				assert.ok(dashboard.scrollTop > 0, "fixture must overflow the screen");
-				for (let step = 1; step < dashboard.orderedIds.length; step++) {
+				for (let step = 1; step < dashboard.listTargets.length - 1; step++) {
 					dashboard.handleInput("\x1b[A");
 					dashboard.render(width);
 				}
 				assert.equal(dashboard.selectedId, dashboard.orderedIds[0]);
-				const frame = dashboard.render(width);
+				const frame: string[] = dashboard.render(width).map(stripVTControlCharacters);
 				assert.equal(dashboard.scrollTop, 0, `${firstState}: first session must reveal the true top at ${width}x${height}`);
-				const body = dashboard.renderRows(width);
-				assert.ok(frame.includes(body[0]), "first section header must be visible");
-				assert.ok(frame.includes(body[1]), "first folder header must be visible");
+				const body: string[] = dashboard.renderRows(width).map(stripVTControlCharacters);
+				assert.ok(hasVisiblePrefix(frame, body[0]), "first section header must be visible");
+				assert.ok(hasVisiblePrefix(frame, body[1]), "first folder header must be visible");
 				assert.ok(!frame.some((line) => /↑ \d+ more/.test(line)), "no hidden lines above the first section");
-				// Wrapping from the last session to the first must reveal headers too.
+				// Wrap from the last session to the first heading.
+				dashboard.handleInput("\x1b[A");
 				dashboard.handleInput("\x1b[A");
 				dashboard.render(width);
 				dashboard.handleInput("\x1b[B");
 				dashboard.render(width);
+				assert.equal(dashboard.selectedSection, firstState, "downward wrap lands on the first heading");
 				assert.equal(dashboard.scrollTop, 0, "downward wrap must reveal the true top");
 				dashboard.dispose();
 			}

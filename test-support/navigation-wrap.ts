@@ -25,14 +25,14 @@ const service = createService({
 	launchTitle: () => ({ pid: null, configPath: "/no/title-config.json" }),
 });
 
-const writes = [];
+const writes: string[] = [];
 const tui = {
-	terminal: { rows: 24, cols: 80, columns: 80, write: (d) => writes.push(d) },
+	terminal: { rows: 24, cols: 80, columns: 80, write: (d: string) => writes.push(d) },
 	requestRender: () => {},
 };
-const theme = { fg: (_c, t) => t, bold: (t) => t, bg: (_c, t) => t };
+const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t, bg: (_c: string, t: string) => t };
 
-const dash = new DashboardComponent(tui, theme, {}, () => {}, {
+const dash: any = new DashboardComponent(tui as never, theme as never, {} as never, () => {}, {
 	service,
 	root,
 	defaultCwd: root,
@@ -49,10 +49,20 @@ dash.handleInput("\x1b[B"); // ↓ -> ids[1]
 seq.push(dash.selectedId);
 dash.handleInput("\x1b[B"); // ↓ -> ids[2]
 seq.push(dash.selectedId);
-dash.handleInput("\x1b[B"); // ↓ at last -> WRAP to ids[0]
+dash.handleInput("\x1b[B"); // ↓ at last -> WRAP to section heading
 seq.push(dash.selectedId);
-dash.handleInput("\x1b[A"); // ↑ at first -> WRAP to ids[2]
+assertSection();
+dash.handleInput("\x1b[B"); // heading -> first session
 seq.push(dash.selectedId);
+dash.handleInput("\x1b[A"); // first session -> heading
+seq.push(dash.selectedId);
+assertSection();
+dash.handleInput("\x1b[A"); // heading -> WRAP to last session
+seq.push(dash.selectedId);
+
+function assertSection() {
+	if (dash.selectedSection !== "queued") throw new Error("wrap must land on the section heading");
+}
 
 // Peek mode: stepping down from the last row wraps to the first.
 dash.peekId = ids[2];

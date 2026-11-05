@@ -4450,6 +4450,7 @@ if (isMain) {
 		: runCaseDiag({ caseId: cli.caseId, artifactDir: cli.artifactDir });
 	run
 		.then((result) => {
+			// Large battery results exceed one pipe write; wait for the flush before exiting.
 			exitAfterStdout(JSON.stringify(result) + "\n", 0);
 		})
 		.catch((err) => {

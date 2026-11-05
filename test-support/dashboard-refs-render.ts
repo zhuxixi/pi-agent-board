@@ -22,7 +22,7 @@ try {
 		source: "command",
 		url: "https://github.com/o/r/issues/40",
 		lastIndex: 0,
-	};
+	} as const;
 	const pr = {
 		kind: "pr",
 		number: 45,
@@ -31,7 +31,7 @@ try {
 		source: "command",
 		url: "https://github.com/o/r/pull/45",
 		lastIndex: 1,
-	};
+	} as const;
 	const mention = {
 		kind: "issue",
 		number: 7,
@@ -40,7 +40,7 @@ try {
 		source: "mention",
 		url: null,
 		lastIndex: 2,
-	};
+	} as const;
 	writeCodeRefs(root, {
 		version: 1,
 		viewId: "v1",
@@ -72,9 +72,9 @@ try {
 	const theme = { fg: (_c: string, t: string) => t, bold: (t: string) => t, bg: (_c: string, t: string) => t };
 	const keybindings = {};
 	const dashboard = new DashboardComponent(
-		tui,
-		theme,
-		keybindings,
+		tui as never,
+		theme as never,
+		keybindings as never,
 		() => {},
 		{
 			service,

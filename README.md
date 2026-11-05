@@ -127,11 +127,13 @@ Shortcuts are scoped to the view where they are available:
 
 | Key | Action |
 | --- | --- |
-| `Up` / `Down` / `j` / `k` | Move the selection. |
+| `Up` / `Down` / `j` / `k` | Move between sessions and section headings; wraps at both ends. |
 | `i` | Enter INSERT mode for a new task. |
-| `Enter` | Open Start session for a draft, or attach/resume when the input is empty. |
-| `Right` / `>` / `l` | Attach to the selected session. |
-| `Space` | Open Peek. |
+| `Enter` | Open Start session for a draft; otherwise attach/resume a session, or fold/unfold a section heading. |
+| `Tab` | Fold/unfold the selected section, or the section containing the selected session. |
+| `Right` / `>` / `l` | Attach to the selected session. On a section heading, `Right` / `l` expands it. |
+| `Left` | Collapse the selected section heading. |
+| `Space` | Open Peek for a session, or fold/unfold a section heading. |
 | `v` | Open the read-only transcript. |
 | `e` | Open Evidence / Diagnostics. |
 | `/` | Enter filter mode. |
@@ -238,6 +240,8 @@ Agent Board separates a session's semantic task state from whether a worker proc
 | **Stopped** | The user stopped the active work. |
 
 Rows are grouped by state. When a state contains sessions from multiple directories, rows are grouped by folder within that state. Pinned rows and folders come first, then creation order remains stable; activity does not reshuffle the list. New agent activity is marked unread with stronger row glyphs and header/footer counts. Replies sent while a session is busy enter a durable FIFO follow-up queue and are delivered when the session is ready; a `qN` badge shows queued follow-ups.
+
+Section headings are keyboard-selectable. Press `Tab` to fold/unfold a section (also works from one of its sessions); folded headings retain their counts, such as `▸ DONE (18)`. `Enter` or `Space` also toggles a heading, while `Left` collapses and `Right` expands it. Fold choices are saved per board in `<root>/dashboard-prefs.json` and survive closing/reopening or attaching/detaching. Session actions such as delete, hold, and attach do nothing while a heading is selected. Multi-select and Peek navigation skip folded sessions. Search temporarily reveals matching folded sections without changing saved choices; clear the filter before changing folds.
 
 Press `/` to enter filter mode. Filter tokens are case-insensitive and can be combined with free-text terms:
 
