@@ -825,10 +825,12 @@ export class PtyAttachComponent implements Component {
 				// Runner-synthesized hydration frames wrap their content in their own
 				// ?2026 window; that wrapper clear is not a real ownership return.
 				this.screenOwnerResyncPending = true;
-			} else {
+			} else if (this.attachMode !== "legacy") {
 				this.externalOutputActive = current.externalOutputActive;
 				this.resetExternalProjectionInteraction();
 			}
+			// Legacy mode: no adoption and no interaction cleanup — a Ctrl+G handoff
+			// must not destroy selection/scroll state on the raw-buffer surface.
 		}
 		if (syncCloseMarker) this.commitCommittedView(term, epoch);
 	}

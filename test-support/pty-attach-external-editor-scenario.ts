@@ -272,6 +272,24 @@ async function run(): Promise<{ ok: boolean; checks: Check[] }> {
 			c.handleAttachEvent("mode", "legacy");
 			assert(renderText(h.component).includes("NVIM_VISIBLE_PROBE_1"), "legacy projection renders the live buffer");
 			assertEqual(c.externalOutputActive, false, "legacy fallback resets ownership");
+			// Fix-round regression: legacy mode must not run ownership adoption or
+			// interaction cleanup. Seed interaction state, then drive the synced
+			// alt-screen-exit handoff a Ctrl+G would emit; legacy keeps everything.
+			c.viewportTop = 0;
+			c.selection = { anchor: { line: 0, col: 0 }, focus: { line: 0, col: 5 } };
+			c.selectionDragging = true;
+			c.lastClickPoint = { line: 0, col: 1 };
+			c.lastClickAt = Date.now();
+			const seededSelection = c.selection;
+			const seededClickPoint = c.lastClickPoint;
+			const eventsBefore = c.parserObserverEvents;
+			pushLive(h.component, PI_STOP);
+			await waitFor(() => c.parserObserverEvents >= eventsBefore + 2, "synced handoff bytes parsed");
+			assertEqual(c.externalOutputActive, false, "legacy handoff never activates ownership");
+			assertEqual(c.viewportTop, 0, "legacy handoff keeps the scroll viewport");
+			assertEqual(c.selection, seededSelection, "legacy handoff keeps the selection");
+			assertEqual(c.selectionDragging, true, "legacy handoff keeps the drag flag");
+			assertEqual(c.lastClickPoint, seededClickPoint, "legacy handoff keeps the click point");
 			return { legacy: true };
 		} finally {
 			h.component.dispose();
