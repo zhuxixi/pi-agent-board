@@ -713,7 +713,7 @@ export class PtyAttachComponent implements Component {
 			? this.theme.fg("accent", this.theme.bold(` Delete "${truncateToWidth(this.opts.title, 24, "")}"? `)) +
 			  this.theme.fg("muted", "y confirms · any other key cancels")
 			: this.theme.fg("accent", this.theme.bold(` ${this.opts.title} `)) +
-			  this.theme.fg("muted", `${this.status} · opens links · drag selects+copies · Ctrl+←/Ctrl+\\/Alt+H detach`);
+			  this.theme.fg("muted", `${this.status} · links · select+copy · Ctrl+←/Ctrl+\\/Alt+H detach`);
 		return [clip(header, width), ...body.map((l) => clipTerminalLine(l, width)), this.theme.fg("dim", "─".repeat(width))];
 	}
 

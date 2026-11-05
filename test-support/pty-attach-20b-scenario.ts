@@ -1834,7 +1834,7 @@ async function runLegacy(artifactDir: string): Promise<Record<string, unknown>> 
 				// Settle/probe evidence on the real public seams (retained writes).
 				const writes = h.primary.observer.writes;
 				const probeQuery = writes.find((write) => write.data.includes("\x1b]11;?")) ?? null;
-				const settleWrite = writes.find((write) => write.data.includes("attached · opens links")) ?? null;
+				const settleWrite = writes.find((write) => write.data.includes("attached · links")) ?? null;
 				const settleOutcomes = (h.primary.diagnostics as Array<{ code?: string; details?: { outcome?: string } }>)
 					.filter((event) => event.code === "attach_settle_scheme")
 					.map((event) => event.details?.outcome ?? "unknown");

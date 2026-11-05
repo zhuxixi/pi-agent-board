@@ -74,7 +74,7 @@ test("step 20B: classifyWindowRows separates content halves from loading/blank/c
 	assert.equal(s.classifyWindowRows(["gen-2 F0 HEADER x"], gen), "content-foreign");
 	assert.equal(s.classifyWindowRows(["", "", ""], gen), "blank");
 	assert.equal(s.classifyWindowRows(["⠋ Loading \"s15\"…"], gen), "loading");
-	assert.equal(s.classifyWindowRows([" s15 attached · opens links · Ctrl+←/Ctrl+\\ detach"], gen), "chrome");
+	assert.equal(s.classifyWindowRows([" s15 attached · links · select+copy · Ctrl+←/Ctrl+\\/Alt+H detach"], gen), "chrome");
 });
 
 test("step 20B: reconnect status evidence comes from retained transitions, not a later attached state", async () => {

@@ -106,9 +106,9 @@ export const LOADING_DETAILS = {
  * connect, attached after, "host exited" after the child's exit broadcast.
  */
 export const HEADER_BY_STATUS = {
-	connecting: ` ${TITLE} ` + "connecting · opens links · drag selects+copies · Ctrl+←/Ctrl+\\ detach",
-	attached: ` ${TITLE} ` + "attached · opens links · drag selects+copies · Ctrl+←/Ctrl+\\ detach",
-	hostExited: ` ${TITLE} ` + "host exited · opens links · drag selects+copies · Ctrl+←/Ctrl+\\ detach",
+	connecting: ` ${TITLE} ` + "connecting · links · select+copy · Ctrl+←/Ctrl+\\/Alt+H detach",
+	attached: ` ${TITLE} ` + "attached · links · select+copy · Ctrl+←/Ctrl+\\/Alt+H detach",
+	hostExited: ` ${TITLE} ` + "host exited · links · select+copy · Ctrl+←/Ctrl+\\/Alt+H detach",
 } as const;
 
 /** Footer chrome literal: the component's divider row. */

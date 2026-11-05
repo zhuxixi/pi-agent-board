@@ -1244,8 +1244,8 @@ test("step 15 integration: loading-banner expectations are pinned to literal spi
 	assert.equal(starting[10], " ".repeat(25) + "Starting the session host… 0s");
 	assert.equal(starting[9], " ".repeat(32) + '⠇ Loading "s15"…');
 	// The declared chrome literals are pinned too (identity theme, width 80).
-	assert.equal(scenario.HEADER_BY_STATUS.attached, " s15 attached · opens links · drag selects+copies · Ctrl+←/Ctrl+\\ detach");
-	assert.equal(scenario.HEADER_BY_STATUS.connecting, " s15 connecting · opens links · drag selects+copies · Ctrl+←/Ctrl+\\ detach");
+	assert.equal(scenario.HEADER_BY_STATUS.attached, " s15 attached · links · select+copy · Ctrl+←/Ctrl+\\/Alt+H detach");
+	assert.equal(scenario.HEADER_BY_STATUS.connecting, " s15 connecting · links · select+copy · Ctrl+←/Ctrl+\\/Alt+H detach");
 	assert.equal(scenario.FOOTER_ROW, "─".repeat(80));
 });
 

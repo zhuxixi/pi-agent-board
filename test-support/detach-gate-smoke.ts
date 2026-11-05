@@ -912,10 +912,11 @@ out.staleSocketEventsDoNotClearCurrent = await runStaleSocketIdentityScenario();
 	loading.attach.dispose();
 	const live = makeAttach();
 	await writeToTerm(live.attach, "chat content\r\n");
-	// The header is 89 display columns once the third chord is added; clip() at
-	// 80 truncates mid-chord (pre-existing clipping — the pre-task header was
-	// already 84 cols and lost " detach"). Render wide enough to name the chord.
-	out.headerMentionsAltH = live.attach.render(100)[0].includes("Alt+H") && loadingMentions;
+	// The header tail was compressed for #266 ("links · select+copy") so every
+	// status — up to the worst transient "starting host… 999s" (75 cols) —
+	// keeps the full chord list visible at the standard 80 columns; the s15
+	// battery (HEADER_BY_STATUS) pins the same literals.
+	out.headerMentionsAltH = live.attach.render(80)[0].includes("Alt+H") && loadingMentions;
 	live.attach.dispose();
 }
 
