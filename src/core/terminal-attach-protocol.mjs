@@ -230,6 +230,10 @@ export function createTerminalSubscription({ model, send: rawSend, generation, v
 				// client detect a runner replacement from the snapshot answer alone.
 				...(generation ? { generation } : {}),
 			});
+			// Issue #278: the model's current screen-owner fact rides every
+			// snapshot begin (empty baseline and captured frame alike) so a late
+			// subscriber can tell Pi-owned frames from external editor output.
+			begin.externalOutputActive = model.externalOutputActive === true;
 			if (empty) {
 				// Runner (re)started and the new child has produced no output yet:
 				// the "host starting" baseline. No frame; live output starts at seq 1.

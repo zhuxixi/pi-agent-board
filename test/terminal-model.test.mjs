@@ -190,6 +190,35 @@ test("real @xterm/headless parser renders text split across chunk boundaries cor
 	assert.equal(redCell.getFgColor(), 1);
 });
 
+test("real parser tracks external output ownership across synced alt-screen exits (issue #278)", async () => {
+	// Pi startup: alt entry + an unsynchronized open/close pair — never external.
+	const model = createTerminalModel({ cols: 80, rows: 22 });
+	assert.equal(model.externalOutputActive, false);
+	feedOutput(model, "\x1b[?1049h\x1b[?2026hPI\x1b[?2026l");
+	await whenIdle(model);
+	assert.equal(model.externalOutputActive, false);
+	// External editor: synced alt-screen exit marks external ownership; the
+	// later alt entry alone does not clear it.
+	feedOutput(model, "\x1b[?2026h\x1b[?1049l\x1b[?2026l\x1b[?1049hNVIM");
+	await whenIdle(model);
+	assert.equal(model.externalOutputActive, true);
+	// Pi restore: unsynced ?1049l is a pass-through; the next sync open clears it.
+	feedOutput(model, "\x1b[?1049l\x1b[?1049h\x1b[?2026hPI_RESTORE");
+	await whenIdle(model);
+	assert.equal(model.externalOutputActive, false);
+});
+
+test("fake parsers without registerCsiHandler keep externalOutputActive false", async () => {
+	// The adapter's empty-array path: no parser API, no observers, no crashes —
+	// seq/ring behavior is unchanged and the fact stays at its default.
+	const model = createTerminalModel({ parserFactory: fakeParserFactory() });
+	assert.equal(model.externalOutputActive, false);
+	feedOutput(model, "\x1b[?2026h\x1b[?1049l\x1b[?2026l");
+	await whenIdle(model);
+	assert.equal(model.externalOutputActive, false);
+	assert.equal(model.lastSeq, 1);
+});
+
 test("resizeTerminalModel updates dimensions and parser", async () => {
 	const model = createTerminalModel({
 		cols: 20,
