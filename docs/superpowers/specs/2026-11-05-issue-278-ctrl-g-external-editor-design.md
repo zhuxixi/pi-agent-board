@@ -3,6 +3,7 @@
 Drafted: kimi-coding/k3.1-pro (selected) · kimi-coding/k3.1-pro (physical) @ 2026-11-05T22:01:37+08:00
 Revised: kimi-coding/k3.1-pro (selected) · kimi-coding/k3.1-pro (physical) @ 2026-11-05T22:25:23+08:00
 Revised: kimi-coding/k3.1-pro (selected) · kimi-coding/k3.1-pro (physical) @ 2026-11-05T23:23:04+08:00
+Revised: kimi-coding/k3.1-pro (selected) · kimi-coding/k3.1-pro (physical) @ 2026-11-05T23:27:52+08:00
 
 - Issue: https://github.com/zhuxixi/pi-agent-board/issues/278
 - Target base: `origin/main` `4bb836e9c9bb25c653bb6160e0d45a26e9348078` (approved design reviewed at `c71add85130d760684135c07d9ad2178d548a924`; intervening attach change is a one-line Kitty projection optimization with no contract impact)
@@ -63,7 +64,7 @@ Therefore alternate-screen state alone is not an ownership signal. A synchronize
 | D1 | Add a pure screen-owner reducer shared by runner terminal model and attach component. | One tested definition prevents runner/UI transition drift. |
 | D2 | Enter external/live only on `?1049l` observed while synchronized output is open; leave on the next `?2026h`. | Matches real Pi/Nvim order and does not misclassify Pi's startup alternate screen. |
 | D3 | Runner retains the boolean for its whole child lifetime and includes it as optional `externalOutputActive` in `snapshot_begin`; client forwards it to `snapshotBegin`. | Supports attach/resnapshot while the editor is already open without process-name heuristics. |
-| D4 | Add one component predicate for visible committed projection: modern mode AND NOT external/live AND NOT hydrating. Use it at every visible/interaction fork. | Rendering and interaction must address the same surface; hydration must not expose partial snapshots. |
+| D4 | Add one component predicate for visible committed projection: modern mode AND (NOT external/live OR hydrating). Use it at every visible/interaction fork. | Rendering and interaction must address the same surface; hydration must retain committed/blank protection rather than exposing a partial live snapshot. |
 | D5 | Keep `commitCommittedView()`, readiness, proof, recovery, and identity mechanisms in modern mode; only visible projection ownership changes. | A synchronized Pi stop can still commit a complete view; Pi restore must not publish its open/partial frame. |
 | D6 | On external/live entry and exit, clear selection, pending click, auto-scroll, and stale viewport coordinates; follow the live bottom. | Old Pi/Nvim buffer offsets are not valid across screen ownership changes. |
 | D7 | Preserve external/live across same-generation resize and parser replacement, but suspend it while hydration is in progress. Adopt the runner boolean at each new snapshot; reset on new generation, epoch reset, close/dispose, or legacy fallback. | Resize must not make Nvim invisible again; reconnect must not show a partial or stale surface. |
@@ -104,7 +105,7 @@ A thin adapter registers `? h/l` xterm handlers, returns `false` to preserve def
 
 `createTerminalSubscription()` copies the model boolean into non-empty and empty `snapshot_begin` messages as `externalOutputActive`. The value is sampled with the snapshot metadata after parser idle. Catch-up output remains authoritative for any transition after that sample.
 
-`terminal-attach-client` validates the field as an optional boolean and includes it in `snapshotBegin`. A present non-boolean value (for example `"yes"` or `1`) is a protocol error: emit `protocolError` and follow the existing recovery path, never silently treating it as absent or true. A2 must pin this failure branch in `test/terminal-attach-client.test.mjs`. The client does not invent `true` when the field is absent. For an older runner with no field, a same-generation component preserves its locally observed state; a fresh component starts false. This is the compatibility boundary, not a claim that an old runner can identify an already-open editor retrospectively.
+`terminal-attach-client` validates the field as an optional boolean and includes it in `snapshotBegin`. A present non-boolean value (for example `"yes"` or `1`) is a protocol error: emit `protocolError`, omit the field from `snapshotBegin`, and leave the existing recovery state machine unchanged; never silently treat the value as absent or true. A2 must pin this failure branch in `test/terminal-attach-client.test.mjs`. The client does not invent `true` when the field is absent. For an older runner with no field, a same-generation component preserves its locally observed state; a fresh component starts false. This is the compatibility boundary, not a claim that an old runner can identify an already-open editor retrospectively.
 
 No token, process name, command line, editor content, or host credential enters this field.
 
@@ -114,8 +115,7 @@ Add a single internal predicate (working name `usesCommittedProjection()`):
 
 ```text
 modernCommittedMode()
-&& !externalOutputActive
-&& localHydrationState !== "hydrating"
+&& (!externalOutputActive || localHydrationState === "hydrating")
 ```
 
 Use this predicate in:
