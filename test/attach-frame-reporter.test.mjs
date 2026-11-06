@@ -94,7 +94,7 @@ function enabledReporter(options = {}) {
 	const sent = [];
 	const mode = options.mode ?? "fullscreen";
 	tui.mode = mode;
-	const reporter = new AttachFrameReporter({ ui, mode, sessionEpoch: 1, send: (message) => sent.push(message) });
+	const reporter = new AttachFrameReporter({ ui, mode, sessionEpoch: 1, send: (message) => sent.push(message), onUnavailable: options.onUnavailable });
 	reporter.announce();
 	assert.equal(reporter.handleMessage({ type: "frame_witness_enable", protocol: 1, token: TOKEN, instanceId: "inst-1", sessionEpoch: 1 }).status, "enabled");
 	assert.equal(reporter.install(), true);
@@ -551,4 +551,16 @@ test("dispose aborts via drain before state flip", () => {
 	reporter.dispose("test");
 	const markers = written.map(decodeFrameMarker).filter(Boolean);
 	assert(markers.some(m => m.kind === "A"));
+});
+
+test("onUnavailable is called on marker failure", () => {
+	const onUnavailableCalls = [];
+	const { reporter, terminal, written, renderPass } = enabledReporter({
+		onUnavailable: (reason) => onUnavailableCalls.push(reason),
+		failWrite: { mode: "throw", matches: (text) => text.startsWith("\u001bP>") },
+	});
+	renderPass();
+	terminal.write(FULL);
+	assert.equal(reporter.state, "failed");
+	assert.equal(onUnavailableCalls.length, 1);
 });

@@ -119,8 +119,9 @@ export class AttachFrameReporter {
 	#consumedRequestIds = new Set();
 	#intentId = 0;
 	#writtenFrames = new Set(); // frameId where S was successfully written to underlying terminal
+	#onUnavailable = () => {};
 
-	constructor({ ui, send = (_message) => {}, mode = "fullscreen", rendererEpoch = 1, sessionEpoch = 0, now = () => Date.now() }) {
+	constructor({ ui, send = (_message) => {}, mode = "fullscreen", rendererEpoch = 1, sessionEpoch = 0, now = () => Date.now(), onUnavailable = () => {} }) {
 		if (!ui || typeof ui.setWidget !== "function") throw new Error("AttachFrameReporter requires ctx.ui.setWidget");
 		if (!MODES.has(mode)) throw new Error(`unknown renderer mode: ${mode}`);
 		this.#ui = ui;
@@ -129,6 +130,7 @@ export class AttachFrameReporter {
 		this.#rendererEpoch = rendererEpoch;
 		this.#sessionEpoch = sessionEpoch;
 		this.#now = now;
+		this.#onUnavailable = onUnavailable;
 		this.#evaluator = new FrameCandidateEvaluator({ mode, rendererEpoch, sessionEpoch, frameIdCounter: this.#frameIdCounter });
 	}
 
@@ -655,6 +657,7 @@ export class AttachFrameReporter {
 		if (this.#markerFailure === null) this.#markerFailure = { at: this.#now(), reason };
 		this.#unknown.push({ what: "marker", reason });
 		this.#state = "failed";
+		this.#onUnavailable(reason);
 	}
 
 	/** Drain pending F/A decisions from the evaluator. S is emitted inline in the write

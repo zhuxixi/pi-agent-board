@@ -124,25 +124,21 @@ export default function piAgentBoard(pi: ExtensionAPI): void {
 
 	async function startHostedFrameWitness(ctx: ExtensionContext): Promise<void> {
 		if (hostedFrameWitness !== null || !hostedViewId || !ctx.hasUI || !ctx.ui) return;
-		const { AttachFrameReporter } = await import("./core/attach-frame-reporter.mjs");
-		const socket = createConnection(
-			resolveControlEndpoint({
-				envSocketPath: process.env.AGENT_BOARD_CONTROL_SOCKET,
-				platform: process.platform as "win32" | "linux" | "darwin",
-				root,
-				viewId: hostedViewId,
-			}),
-		);
-		const reporter = new AttachFrameReporter({
-			ui: ctx.ui as never,
-			mode: "fullscreen", // F6: the sentinel factory rebinds from the ACTUAL public tui.mode
+		const { createHostedFrameWitness } = await import("./core/hosted-frame-witness.mjs");
+		const socketPath = resolveControlEndpoint({
+			envSocketPath: process.env.AGENT_BOARD_CONTROL_SOCKET,
+			platform: process.platform as "win32" | "linux" | "darwin",
+			root,
+			viewId: hostedViewId,
+		});
+		const { reporter, socket, cleanup } = createHostedFrameWitness({
+			socketPath,
 			sessionEpoch: hostedSessionEpoch,
-			send: (message: unknown) => {
-				try {
-					socket.write(`${JSON.stringify(message)}\n`);
-				} catch {
-					/* socket errors surface through the error handler */
-				}
+			ui: ctx.ui as never,
+			onUnavailable: (reason: string) => {
+				// Internal failure revokes the capability: close the socket so the runner
+				// cleans up and broadcasts frameWitness.enabled:false.
+				cleanup(`reporter-unavailable:${reason}`);
 			},
 		});
 		let installed = false;
@@ -168,24 +164,6 @@ export default function piAgentBoard(pi: ExtensionAPI): void {
 				newline = buffer.indexOf("\n");
 			}
 		});
-		let cleaned = false;
-		const cleanup = (reason: string) => {
-			if (cleaned) return;
-			cleaned = true;
-			try {
-				reporter.dispose(reason);
-			} catch {
-				/* never break the session over the frame witness */
-			}
-			try {
-				socket.destroy();
-			} catch {
-				/* already closed */
-			}
-			hostedFrameWitness = null;
-		};
-		socket.on("error", () => cleanup("socket-error"));
-		socket.on("close", () => cleanup("socket-close"));
 		hostedFrameWitness = { stop: () => cleanup("session-shutdown") };
 	}
 
