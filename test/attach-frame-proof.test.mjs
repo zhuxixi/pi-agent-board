@@ -512,3 +512,27 @@ test("fix2 annotation: an OSC 8 split across writes completes as an annotation (
 	const fin = e.op({ kind: "write", text: HIDE });
 	assert.deepEqual(kinds([...fin.decisions, ...e.finishWrite({ ...FACT, mode: "regular" })]), ["F"]);
 });
+
+test("collectTerminalDecisions returns decisions after lastCollectedSeq", () => {
+	const e = new FrameCandidateEvaluator({ mode: "fullscreen" });
+	// Trigger a size pair to create a candidate
+	e.sizeRead("columns", 80);
+	e.sizeRead("rows", 24);
+	const decisions = e.collectTerminalDecisions();
+	assert(decisions.length > 0);
+	assert(decisions.every(d => typeof d.seq === "number"));
+	// Second collect returns empty (already collected)
+	assert.deepEqual(e.collectTerminalDecisions(), []);
+});
+
+test("markEmitted prevents re-collection", () => {
+	const e = new FrameCandidateEvaluator({ mode: "fullscreen" });
+	e.sizeRead("columns", 80);
+	e.sizeRead("rows", 24);
+	const decisions = e.collectTerminalDecisions();
+	const firstSeq = decisions[0].seq;
+	e.markEmitted(firstSeq);
+	// Even if we collect again, the marked decision is excluded
+	const again = e.collectTerminalDecisions();
+	assert(!again.some(d => d.seq === firstSeq));
+});
