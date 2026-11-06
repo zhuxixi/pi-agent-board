@@ -315,11 +315,11 @@ export class AttachFrameReporter {
 	/** Renderer mode change: carry the frameId counter, rebind the grammar. */
 	setMode(mode, { rendererEpoch = this.#rendererEpoch + 1 } = {}) {
 		if (!MODES.has(mode)) throw new Error(`unknown renderer mode: ${mode}`);
-		// Drain mode-changed abort from the OLD evaluator before replacing it.
-		// If a cross-write escape is pending, abandon it first so deferred decisions are not lost.
-		this.#evaluator.abandonPendingEscape();
-		this.#evaluator.abort("mode-changed");
-		this.#drainTerminalDecisions();
+		// Capture the old evaluator so its deferred decisions can be drained after
+		// the new one is installed and the terminal is re-bound.
+		const oldEvaluator = this.#evaluator;
+		oldEvaluator.abandonPendingEscape();
+		oldEvaluator.abort("mode-changed");
 		this.#mode = mode;
 		this.#rendererEpoch = rendererEpoch;
 		this.#evaluator = new FrameCandidateEvaluator({
@@ -330,6 +330,10 @@ export class AttachFrameReporter {
 		});
 		this.#sentinelTui = null;
 		this.#focusApi = "unknown";
+		// Drain the OLD evaluator's decisions. If the terminal is not yet bound
+		// (e.g. called from #createSentinel before #attachTerminal), the drain
+		// will be deferred until #attachTerminal completes.
+		this.#drainTerminalDecisions(oldEvaluator);
 		return [];
 	}
 
@@ -411,6 +415,8 @@ export class AttachFrameReporter {
 			this.#state = "unsupported";
 			return;
 		}
+		// Capture the old evaluator before replacing it
+		const oldEvaluator = this.#evaluator;
 		this.#rendererEpoch += 1;
 		this.#mode = observed;
 		this.#evaluator = new FrameCandidateEvaluator({
@@ -421,10 +427,10 @@ export class AttachFrameReporter {
 		});
 		this.#sentinelTui = tui;
 		this.#attachTerminal(tui);
-		// Drain deferred decisions AFTER re-binding the terminal (raw write is available again).
+		// Drain the OLD evaluator's deferred decisions AFTER re-binding the terminal.
 		// Abandon any pending cross-write escape first so deferred decisions are not lost.
-		this.#evaluator.abandonPendingEscape();
-		this.#drainTerminalDecisions();
+		oldEvaluator.abandonPendingEscape();
+		this.#drainTerminalDecisions(oldEvaluator);
 	}
 
 	#attachTerminal(tui) {
@@ -682,17 +688,17 @@ export class AttachFrameReporter {
 		}
 	}
 
-	/** Drain pending F/A decisions from the evaluator. S is emitted inline in the write
-	 *  wrapper and marked emitted immediately; F/A are only emitted here.
-	 *  Skips emission if a cross-write escape sequence is pending (torn control sequence).
+	/** Drain pending F/A decisions from the given evaluator (defaults to current).
+	 *  S is emitted inline in the write wrapper and marked emitted immediately;
+	 *  F/A are only emitted here. Skips emission if a cross-write escape is pending.
 	 *  Call abandonPendingEscape() first when replacing the evaluator to force-drain. */
-	#drainTerminalDecisions() {
-		if (this.#evaluator.pendingEscape) {
+	#drainTerminalDecisions(evaluator = this.#evaluator) {
+		if (evaluator.pendingEscape) {
 			// A cross-write control sequence is unclosed; defer F/A emission to avoid
 			// inserting a marker mid-sequence (which would corrupt the stream).
 			return;
 		}
-		const decisions = this.#evaluator.collectTerminalDecisions();
+		const decisions = evaluator.collectTerminalDecisions();
 		for (const decision of decisions) {
 			if (decision.kind === "S") {
 				throw new Error("S decision in drain: programming error");
