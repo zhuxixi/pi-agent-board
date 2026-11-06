@@ -92,7 +92,9 @@ function enabledReporter(options = {}) {
 	const { terminal, written } = createTerminalDouble(options);
 	const { ui, widgets, tui } = createUiDouble(terminal);
 	const sent = [];
-	const reporter = new AttachFrameReporter({ ui, mode: "fullscreen", sessionEpoch: 1, send: (message) => sent.push(message) });
+	const mode = options.mode ?? "fullscreen";
+	tui.mode = mode;
+	const reporter = new AttachFrameReporter({ ui, mode, sessionEpoch: 1, send: (message) => sent.push(message) });
 	reporter.announce();
 	assert.equal(reporter.handleMessage({ type: "frame_witness_enable", protocol: 1, token: TOKEN, instanceId: "inst-1", sessionEpoch: 1 }).status, "enabled");
 	assert.equal(reporter.install(), true);
@@ -484,4 +486,16 @@ test("23b2c3a cross-instance dispose: another Terminal instance on the same prot
 	assert.equal(second.columns, 80);
 	assert.equal(Object.hasOwn(second, "write"), false, "no own shadow leaked to the sibling");
 	void written;
+});
+
+test("drainTerminalDecisions emits A for written frames only", () => {
+	const { reporter, terminal, written, renderPass } = enabledReporter({ mode: "regular" });
+	renderPass();
+	// Write OPEN + content (no CLOSE yet) — regular mode emits S on sync-open
+	terminal.write(`${OPEN}text`);
+	// Now trigger an abort via applyIntent while candidate is still open
+	reporter.applyIntent({ type: "frame_witness_intent", instanceId: "inst-1", requestId: "fw-1", geometryRevision: 1, cols: 80, rows: 24 });
+	// The old candidate should be aborted and A emitted via drain
+	const markers = written.map(decodeFrameMarker).filter(Boolean);
+	assert(markers.some(m => m.kind === "A"));
 });

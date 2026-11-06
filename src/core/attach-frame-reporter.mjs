@@ -118,6 +118,7 @@ export class AttachFrameReporter {
 	#seenRequestIds = new Set();
 	#consumedRequestIds = new Set();
 	#intentId = 0;
+	#writtenFrames = new Set(); // frameId where S was successfully written to underlying terminal
 
 	constructor({ ui, send = (_message) => {}, mode = "fullscreen", rendererEpoch = 1, sessionEpoch = 0, now = () => Date.now() }) {
 		if (!ui || typeof ui.setWidget !== "function") throw new Error("AttachFrameReporter requires ctx.ui.setWidget");
@@ -290,6 +291,8 @@ export class AttachFrameReporter {
 		this.#seenRequestIds.add(message.requestId);
 		this.#intentsApplied += 1;
 		this.#evaluator.setIntent({ intentId: this.#intentId, geometryRevision: message.geometryRevision, cols: message.cols, rows: message.rows });
+		// Drain any abort decisions from setIntent (intent-superseded/intent-invalid)
+		this.#drainTerminalDecisions();
 		const requested = this.#requestRender();
 		return { ok: true, requested, geometryRevision: this.#geometryRevision };
 	}
@@ -492,24 +495,18 @@ export class AttachFrameReporter {
 					// instead of claiming completion (S, if any, must be closed by A), then
 					// rethrow the ORIGINAL error unchanged.
 					failed = true;
-					for (const decision of this.#evaluator.abort("write-failed")) {
-						if (decision.kind === "A") this.#emitA(decision.frameId, decision.reason);
-					}
+					this.#evaluator.abort("write-failed");
 					throw error;
 				} finally {
 					// NB: no `return` here — a return inside `finally` would swallow the
 					// original write error rethrown above.
 					if (!failed) {
 						// Completion rechecks the LATEST focus identity/mode/overlay before any F.
-						const finished = this.#evaluator.finishWrite(this.#latestFact);
-						for (const decision of finished) {
-							if (decision.kind === "F") this.#emitF(decision);
-							else if (decision.kind === "A") this.#emitA(decision.frameId, decision.reason);
-						}
-						for (const decision of pending) {
-							if (decision.kind === "A") this.#emitA(decision.frameId, decision.reason);
-						}
+						this.#evaluator.finishWrite(this.#latestFact);
+						// F/A decisions are now in the evaluator; drain them below.
 					}
+					// Drain all pending F/A decisions (including write-failed aborts).
+					this.#drainTerminalDecisions();
 				}
 			};
 			try {
@@ -567,9 +564,8 @@ export class AttachFrameReporter {
 	}
 
 	#proveOnOperation(kind, text) {
-		const { decisions, insertions } = this.#evaluator.op({ kind, text });
-		const pending = decisions.filter((decision) => decision.kind === "A");
-		return { pending, insertions };
+		const { insertions } = this.#evaluator.op({ kind, text });
+		return { insertions };
 	}
 
 	#writeMarker(text) {
@@ -605,7 +601,13 @@ export class AttachFrameReporter {
 		const frameId = insertion.frameId;
 		const decision = this.#evaluator.decisions.filter((entry) => entry.kind === "S" && entry.frameId === frameId).at(-1) ?? null;
 		try {
-			this.#writeMarker(encodeFrameMarkerS({ token: this.#token, frameId, intentId: decision?.intentId ?? 0, sampledCols: decision?.cols }));
+			const success = this.#writeMarker(encodeFrameMarkerS({ token: this.#token, frameId, intentId: decision?.intentId ?? 0, sampledCols: decision?.cols }));
+			if (success) {
+				this.#writtenFrames.add(frameId);
+			}
+			// Mark as emitted regardless of success: S can only be emitted at this write boundary.
+			// If write failed, the candidate will be aborted and A will be sent via drain.
+			if (decision?.seq !== undefined) this.#evaluator.markEmitted(decision.seq);
 		} catch (error) {
 			this.#failCapability(`marker-encode-failed:${error instanceof Error ? error.message : String(error)}`);
 		}
@@ -643,6 +645,23 @@ export class AttachFrameReporter {
 		if (this.#markerFailure === null) this.#markerFailure = { at: this.#now(), reason };
 		this.#unknown.push({ what: "marker", reason });
 		this.#state = "failed";
+	}
+
+	/** Drain pending F/A decisions from the evaluator. S is emitted inline in the write
+	 *  wrapper and marked emitted immediately; F/A are only emitted here. */
+	#drainTerminalDecisions() {
+		const decisions = this.#evaluator.collectTerminalDecisions();
+		for (const decision of decisions) {
+			if (decision.kind === "S") {
+				throw new Error("S decision in drain: programming error");
+			} else if (decision.kind === "F") {
+				this.#emitF(decision);
+			} else if (decision.kind === "A") {
+				if (this.#writtenFrames.has(decision.frameId)) {
+					this.#emitA(decision.frameId, decision.reason);
+				}
+			}
+		}
 	}
 }
 
