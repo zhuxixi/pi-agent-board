@@ -120,6 +120,7 @@ export class AttachFrameReporter {
 	#writtenFrames = new Set(); // frameId where S was successfully written to underlying terminal
 	#onUnavailable = () => {};
 	#failCapabilityCalled = false;
+	#stashedEvaluator = null; // old evaluator with deferred decisions, drained after #attachTerminal
 
 	constructor({ ui, send = (_message) => {}, mode = "fullscreen", rendererEpoch = 1, sessionEpoch = 0, now = () => Date.now(), onUnavailable = () => {} }) {
 		if (!ui || typeof ui.setWidget !== "function") throw new Error("AttachFrameReporter requires ctx.ui.setWidget");
@@ -312,7 +313,9 @@ export class AttachFrameReporter {
 		return false;
 	}
 
-	/** Renderer mode change: carry the frameId counter, rebind the grammar. */
+	/** Renderer mode change: carry the frameId counter, rebind the grammar.
+	 *  The old evaluator's deferred decisions are drained immediately if the terminal
+	 *  is already bound; otherwise stashed for #createSentinel to drain after attach. */
 	setMode(mode, { rendererEpoch = this.#rendererEpoch + 1 } = {}) {
 		if (!MODES.has(mode)) throw new Error(`unknown renderer mode: ${mode}`);
 		// Capture the old evaluator so its deferred decisions can be drained after
@@ -330,10 +333,12 @@ export class AttachFrameReporter {
 		});
 		this.#sentinelTui = null;
 		this.#focusApi = "unknown";
-		// Drain the OLD evaluator's decisions. If the terminal is not yet bound
-		// (e.g. called from #createSentinel before #attachTerminal), the drain
-		// will be deferred until #attachTerminal completes.
-		this.#drainTerminalDecisions(oldEvaluator);
+		// Drain immediately if terminal is bound; otherwise stash for later
+		if (this.#terminalWrite !== null) {
+			this.#drainTerminalDecisions(oldEvaluator);
+		} else {
+			this.#stashedEvaluator = oldEvaluator;
+		}
 		return [];
 	}
 
@@ -367,6 +372,11 @@ export class AttachFrameReporter {
 			if (this.#state === "enabled") this.#state = "unsupported";
 		}
 		this.#attachTerminal(tui);
+		// Drain any stashed old evaluator's deferred decisions AFTER the terminal is bound
+		if (this.#stashedEvaluator !== null) {
+			this.#drainTerminalDecisions(this.#stashedEvaluator);
+			this.#stashedEvaluator = null;
+		}
 		return {
 			render: () => {
 				this.#renderPasses += 1;
