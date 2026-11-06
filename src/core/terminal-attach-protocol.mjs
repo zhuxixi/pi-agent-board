@@ -231,6 +231,9 @@ export function createTerminalSubscription({ model, send: rawSend, generation, v
 				...(generation ? { generation } : {}),
 			});
 			if (empty) {
+				// Issue #278: an empty model has parsed no output, so the screen-owner
+				// fact is always false here; sample it for shape uniformity.
+				begin.externalOutputActive = model.externalOutputActive === true;
 				// Runner (re)started and the new child has produced no output yet:
 				// the "host starting" baseline. No frame; live output starts at seq 1.
 				// The resnapshot marker applies here too: a client presenting a stale
@@ -251,6 +254,12 @@ export function createTerminalSubscription({ model, send: rawSend, generation, v
 				return;
 			}
 			const dto = await captureTerminalSnapshot(model);
+			// Issue #278: sample the screen-owner fact WITH the snapshot metadata
+			// (after parser idle), never at capture start — a synchronized ?1049l
+			// landing inside the capture window is already part of the DTO, and the
+			// catch-up flush covers only chunks past dto.snapshotSeq, so a begin
+			// sampled at capture start would report stale false forever.
+			begin.externalOutputActive = model.externalOutputActive === true;
 			begin.snapshotSeq = dto.snapshotSeq;
 			begin.cols = dto.cols;
 			begin.rows = dto.rows;

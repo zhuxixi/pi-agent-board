@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createTerminalModel, feedOutput, ringChunksAfter } from "../src/core/terminal-model.mjs";
+import { createTerminalModel, feedOutput, ringChunksAfter, whenIdle } from "../src/core/terminal-model.mjs";
 import {
 	createTerminalSubscription,
 	TERMINAL_FRAME_VERSION,
@@ -215,6 +215,54 @@ test("empty model: host-starting baseline without frame", async () => {
 	});
 	assert.equal(messages.find((m) => m.type === "snapshot_frame"), undefined, "no frame for an empty baseline");
 	assert.equal(types(messages), "snapshot_begin,snapshot_end");
+});
+
+test("snapshot_begin carries the model's externalOutputActive fact (empty baseline, issue #278)", async () => {
+	const model = realModel();
+	const { sub, messages, waitUntil } = subscriber(model);
+	sub.handleMessage({ type: "subscribe_terminal" });
+	await waitUntil(() => messages.some((m) => m.type === "snapshot_end"), "snapshot_end");
+	const begin = messages.find((m) => m.type === "snapshot_begin");
+	assert.equal(begin.empty, true);
+	assert.equal(begin.externalOutputActive, false);
+});
+
+test("ownership transition inside the async capture window is sampled at capture end (issue #278)", async () => {
+	const model = realModel({ cols: 80, rows: 22 });
+	feedOutput(model, "PI_PROMPT"); // seq 1
+	const { sub, messages, waitUntil } = subscriber(model);
+	sub.handleMessage({ type: "subscribe_terminal" }); // async capture starts now
+	// The external editor's synced alt-screen exit lands INSIDE the capture
+	// window (fed synchronously before the capture continuation runs): it is
+	// part of the captured DTO, never of the catch-up flush, so the begin fact
+	// must be sampled at capture end or it would stay stale forever.
+	feedOutput(model, "\x1b[?2026h\x1b[?1049l\x1b[?2026lNVIM"); // seq 2
+	await waitUntil(() => messages.some((m) => m.type === "snapshot_end"), "snapshot_end");
+	const begin = messages.find((m) => m.type === "snapshot_begin");
+	assert.equal(begin.snapshotSeq, 2, "the transition chunk is inside the captured DTO");
+	assert.equal(model.externalOutputActive, true, "capture-end model fact is external");
+	assert.equal(begin.externalOutputActive, true, "begin fact must correspond to the captured DTO");
+});
+
+test("snapshot_begin carries externalOutputActive=true while an external editor owns the screen (issue #278)", async () => {
+	const model = realModel({ cols: 80, rows: 22 });
+	feedOutput(model, "\x1b[?1049h"); // Pi startup alt entry: NOT external ownership
+	feedOutput(model, "\x1b[?2026h\x1b[?1049l\x1b[?2026l\x1b[?1049hNVIM"); // synced alt exit → external
+	await whenIdle(model);
+	assert.equal(model.externalOutputActive, true, "fixture must be in external state");
+	const { sub, messages, waitUntil } = subscriber(model);
+	sub.handleMessage({ type: "subscribe_terminal" });
+	await waitUntil(() => messages.some((m) => m.type === "snapshot_end"), "snapshot_end");
+	const begin = messages.find((m) => m.type === "snapshot_begin");
+	assert.equal(begin.empty, undefined, "non-empty snapshot path");
+	assert.equal(begin.externalOutputActive, true);
+	// A later resnapshot after Pi restores the screen reports the cleared fact.
+	feedOutput(model, "\x1b[?2026hPI_RESTORE");
+	await whenIdle(model);
+	const { sub: sub2, messages: messages2, waitUntil: waitUntil2 } = subscriber(model);
+	sub2.handleMessage({ type: "subscribe_terminal" });
+	await waitUntil2(() => messages2.some((m) => m.type === "snapshot_end"), "second snapshot_end");
+	assert.equal(messages2.find((m) => m.type === "snapshot_begin").externalOutputActive, false);
 });
 
 test("snapshot_end carries the runner-side scrollback line count", async () => {

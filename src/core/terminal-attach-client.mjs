@@ -507,6 +507,17 @@ export function createTerminalAttachClient({
 	const beginCollecting = (msg) => {
 		decideProtocol();
 		cancelProbeTimer();
+		// Issue #278: optional screen-owner fact. Validate before emitting; an
+		// invalid value is reported (never coerced, never resynced over) and the
+		// key is simply omitted from the payload, like an absent one.
+		const external = msg.externalOutputActive;
+		const externalValid = external === undefined || typeof external === "boolean";
+		if (!externalValid) {
+			emit("protocolError", {
+				code: "external_output_active_invalid",
+				message: "snapshot_begin.externalOutputActive",
+			});
+		}
 		// Size-sync hook (CR R1 blocking): every begin carries the runner's
 		// captured geometry — empty baselines included, so a child that has not
 		// produced output yet still gets corrected BEFORE its first bytes land.
@@ -516,6 +527,7 @@ export function createTerminalAttachClient({
 				rows: msg.rows,
 				...(msg.empty === true ? { empty: true } : {}),
 				...(typeof msg.generation === "string" ? { generation: msg.generation } : {}),
+				...(typeof external === "boolean" ? { externalOutputActive: external } : {}),
 			});
 		}
 		let beginCoverage = null;

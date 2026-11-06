@@ -1,4 +1,5 @@
 import xtermHeadless from "@xterm/headless";
+import { installAttachScreenOwnerObservers } from "./attach-screen-owner.mjs";
 import { createPtyKittyImages } from "./pty-kitty-images.mjs";
 
 // @xterm/headless is CommonJS; named import from ESM fails, so destructure.
@@ -58,6 +59,9 @@ export function defaultParserFactory({ cols, rows, scrollback }) {
  * @property {RingChunk[]} ring oldest-first retained chunks
  * @property {number} ringBytes total buffered bytes across ring chunks
  * @property {number} evictedThrough highest seq evicted from the ring; 0 when nothing was evicted
+ * @property {boolean} externalOutputActive issue #278: true while an external
+ *   editor owns the screen (synchronized ?1049l observed by the parser adapter);
+ *   transported to attach clients via snapshot_begin
  */
 
 /**
@@ -83,7 +87,7 @@ export function createTerminalModel({
 	ringByteCap = DEFAULT_RING_BYTE_CAP,
 	parserFactory = defaultParserFactory,
 } = {}) {
-	return {
+	const model = {
 		parserFactory,
 		parser: parserFactory({ cols, rows, scrollback }),
 		cols,
@@ -97,7 +101,19 @@ export function createTerminalModel({
 		ring: [],
 		ringBytes: 0,
 		evictedThrough: 0,
+		externalOutputActive: false,
 	};
+	// Issue #278: observe ?2026/?1049 CSI traffic on the real parser and mirror
+	// the screen-owner fact onto the model. Read the fact from every transition
+	// callback (never from previous/current reference equality — `l`-final
+	// semantic no-ops may still allocate a fresh state object). Parsers without
+	// registerCsiHandler (test fakes) install no observers and keep the default.
+	installAttachScreenOwnerObservers(model.parser, {
+		onTransition: ({ current }) => {
+			model.externalOutputActive = current.externalOutputActive === true;
+		},
+	});
+	return model;
 }
 
 /**

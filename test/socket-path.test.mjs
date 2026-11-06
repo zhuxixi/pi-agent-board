@@ -33,7 +33,8 @@ test("instance-specific host config and endpoint paths are unique per instance",
 	const s1 = hostEndpointPathFor("linux", "/root", "view_1", "aaa");
 	const s2 = hostEndpointPathFor("linux", "/root", "view_1", "bbb");
 	assert.notEqual(s1, s2);
-	assert.match(s1, /views\/view_1\/control\.aaa\.sock$/);
+	assert.match(s1, /views\/view_1\/control\.[0-9a-f]{8}\.sock$/);
+	assert.ok(s1.length <= 104, `POSIX control socket path must stay under the macOS AF_UNIX 104-byte limit, got ${s1.length}`);
 	const p1 = hostEndpointPathFor("win32", "C:\\root", "view_1", "aaa");
 	assert.match(p1, /^\\\\.\\pipe\\pi-agent-board-view_1-[0-9a-f]{8}$/);
 	assert.ok(p1.length <= 256);

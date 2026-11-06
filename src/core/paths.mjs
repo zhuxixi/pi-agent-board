@@ -93,18 +93,25 @@ export function resolveControlEndpoint({ envSocketPath, platform, root, viewId }
 /**
  * Per-instance control endpoint. Each new host instance binds its own socket/pipe,
  * so a superseded runner can never unlink the current owner's endpoint (issue #70).
- * win32 pipe names embed an 8-hex hash of the instanceId to stay under the 256-char limit.
+ * win32 pipe names and POSIX socket suffixes embed an 8-hex hash of the instanceId
+ * to stay under their platform length limits (256 chars on win32 / AF_UNIX sun_path
+ * of 104 on macOS and 108 on Linux). See issue #276.
  * @param {"win32"|"linux"|"darwin"} platform
  * @param {string} root
  * @param {string} viewId
  * @param {string} instanceId
  */
 export function hostEndpointPathFor(platform, root, viewId, instanceId) {
+	const hash = createHash("sha256").update(String(instanceId)).digest("hex").slice(0, 8);
 	if (platform === "win32") {
-		const hash = createHash("sha256").update(String(instanceId)).digest("hex").slice(0, 8);
 		return `\\\\.\\pipe\\pi-agent-board-${viewId}-${hash}`;
 	}
-	return path.join(viewDir(root, viewId), `control.${instanceId}.sock`);
+	// POSIX: cap the instance suffix to an 8-hex sha256 hash so the full path stays
+	// under the AF_UNIX sun_path limit (104 on macOS, 108 on Linux) even with a long
+	// $HOME (e.g. /Users/<long-username>). The raw 32-char instanceId could push the
+	// path to ~109 bytes and trigger `listen EINVAL`, killing the PTY host and
+	// failing every agent-board session. Mirrors the win32 length capping (issue #276).
+	return path.join(viewDir(root, viewId), `control.${hash}.sock`);
 }
 /** @param {string} root @param {string} viewId */
 export const screenLogPath = (root, viewId) => path.join(viewDir(root, viewId), "screen.log");

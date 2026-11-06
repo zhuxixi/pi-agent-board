@@ -7,6 +7,7 @@ import type { Component, KeybindingsManager, RgbColor, TUI, TerminalColorScheme,
 import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { resolveAttachDeleteKey } from "../core/attach-delete.mjs";
 import { resolveAttachDetachChord } from "../core/attach-detach.mjs";
+import { createAttachScreenOwnerState, installAttachScreenOwnerObservers } from "../core/attach-screen-owner.mjs";
 import { createPtyKittyImages } from "../core/pty-kitty-images.mjs";
 import { findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
 import { canPublishAttachView, createAttachOutputRenderScheduler, decideAttachPresentation, detectCursorDesync, isPtyCursorHidden, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
@@ -260,6 +261,13 @@ class SnapshotLine implements BufferLineLike {
 
 type MousePoint = { line: number; col: number };
 type ScreenCell = { row: number; col: number };
+/** Issue #278: one ownership-adapter transition (attach-screen-owner.mjs). */
+type AttachScreenOwnerTransition = {
+	previous: { syncOpen: boolean; externalOutputActive: boolean };
+	current: { syncOpen: boolean; externalOutputActive: boolean };
+	syncOpenMarker: boolean;
+	syncCloseMarker: boolean;
+};
 /** Issue #187: `screenAnchor` is the RAW reported cell of the press; the drag/click
  * decision compares it against the release cell, because buffer coordinates drift
  * while the session streams. Absent on word selections (they are created on release). */
@@ -341,6 +349,13 @@ export class PtyAttachComponent implements Component {
 	private replacementFailureCount = 0;
 	private parserSyncOpen = false;
 	private parserObserverEvents = 0;
+	/** Issue #278: true while an external editor (Ctrl+G Nvim) owns the child screen. */
+	private externalOutputActive = false;
+	/** Set when an ownership transition arrived while an authoritative frame was
+	 *  hydrating: the frame's own wrapper sync window must not clear external
+	 *  ownership, so the adapter is re-synced from component state once the
+	 *  hydration write completes (design D7: suspend, then preserve). */
+	private screenOwnerResyncPending = false;
 	private collectingConnectionToken = 0;
 	private collectingBaselineToken = 0;
 	private collectingParserEpoch = 0;
@@ -767,34 +782,72 @@ export class PtyAttachComponent implements Component {
 		this.done({ action: "detached" });
 	}
 
-		/** Install the component's public ?2026 observers; false return keeps xterm defaults. */
+	/** Install the component's public ?2026 observers; false return keeps xterm defaults.
+	 *  Issue #278: the ownership adapter tracks ?2026 sync windows around ?1049
+	 *  alt-screen exits so external editor output can be projected live. */
 	private installParserObservers(term: XtermLike, epoch: number): Array<{ dispose(): void }> {
 		try {
-			const parser = term.parser;
-			if (!parser || typeof parser.registerCsiHandler !== "function") return [];
-			const has2026 = (params: readonly (number | number[])[]) => params.some((p) => p === 2026 || (Array.isArray(p) && p.includes(2026)));
-			return [
-				parser.registerCsiHandler({ prefix: "?", final: "h" }, (params) => {
-					if (this.closed || this.term !== term || this.parserEpoch !== epoch) return false;
-					if (has2026(params)) {
-						this.parserSyncOpen = true;
-						this.parserObserverEvents += 1;
-					}
-					return false;
-				}),
-				parser.registerCsiHandler({ prefix: "?", final: "l" }, (params) => {
-					if (this.closed || this.term !== term || this.parserEpoch !== epoch) return false;
-					if (has2026(params)) {
-						this.parserSyncOpen = false;
-						this.parserObserverEvents += 1;
-						this.commitCommittedView(term, epoch);
-					}
-					return false;
-				}),
-			];
+			return installAttachScreenOwnerObservers(term, {
+				initialState: createAttachScreenOwnerState(this.externalOutputActive),
+				// The .mjs adapter infers an untyped default callback; the transition
+				// handler below carries the exact shape (cast at this assignment only).
+				onTransition: ((info: AttachScreenOwnerTransition) => {
+					this.handleScreenOwnerTransition(term, epoch, info);
+				}) as () => void,
+			});
 		} catch {
 			return [];
 		}
+	}
+
+	/** Apply one ownership-adapter transition to the component: sync-window
+	 *  bookkeeping, interaction cleanup on an external-flag change, and the
+	 *  committed-view commit at a real sync close. */
+	private handleScreenOwnerTransition(term: XtermLike, epoch: number, { previous, current, syncOpenMarker, syncCloseMarker }: AttachScreenOwnerTransition): void {
+		if (this.closed || this.term !== term || this.parserEpoch !== epoch) return;
+		this.parserSyncOpen = current.syncOpen;
+		if (syncOpenMarker || syncCloseMarker) this.parserObserverEvents += 1;
+		if (current.externalOutputActive !== previous.externalOutputActive) {
+			if (this.localHydrationState === "hydrating") {
+				// Runner-synthesized hydration frames wrap their content in their own
+				// ?2026 window; that wrapper clear is not a real ownership return.
+				this.screenOwnerResyncPending = true;
+			} else if (this.attachMode !== "legacy") {
+				this.externalOutputActive = current.externalOutputActive;
+				this.resetExternalProjectionInteraction();
+			}
+			// Legacy mode: no adoption and no interaction cleanup — a Ctrl+G handoff
+			// must not destroy selection/scroll state on the raw-buffer surface.
+		}
+		if (syncCloseMarker) this.commitCommittedView(term, epoch);
+	}
+
+	/** Reinstall the ownership observers on the current parser after a hydration
+	 *  window that suppressed frame-wrapper ownership transitions: the adapter
+	 *  re-initializes from the component's preserved external ownership. The
+	 *  observed sync-window position is kept; failure keeps the old observers. */
+	private resyncScreenOwnerAdapter(term: XtermLike, epoch: number): void {
+		const syncOpen = this.parserSyncOpen;
+		const observers = this.installParserObservers(term, epoch);
+		if (observers.length === 0) return;
+		for (const observer of this.parserObservers) {
+			try { observer.dispose(); } catch { /* best effort */ }
+		}
+		this.parserObservers = observers;
+		this.parserSyncOpen = syncOpen;
+	}
+
+	/** Side-effect boundary for an external-ownership change: stale Pi interaction
+	 *  geometry (viewport/selection/clicks) must not leak onto the external or
+	 *  restored surface. Never sends input and never forces a parser read. */
+	private resetExternalProjectionInteraction(): void {
+		this.clearSelectionAutoScroll();
+		this.clearPendingClick();
+		this.selection = null;
+		this.selectionDragging = false;
+		this.lastClickPoint = null;
+		this.lastClickAt = 0;
+		this.viewportTop = null;
 	}
 
 	/**
@@ -1197,6 +1250,15 @@ export class PtyAttachComponent implements Component {
 
 	private modernCommittedMode(): boolean {
 		return this.attachMode === "protocol" && this.frameWitnessAvailable;
+	}
+
+	/** Visible/interaction fork (issue #278): the committed projection is used in
+	 *  modern mode except while an external editor owns the screen — then the live
+	 *  buffer is projected/addressed. Hydration keeps committed blank protection
+	 *  even under external ownership, so an open frame never leaks partial rows. */
+	private usesCommittedProjection(): boolean {
+		return this.modernCommittedMode() &&
+			(!this.externalOutputActive || this.localHydrationState === "hydrating");
 	}
 
 	private committedViewValid(): boolean {
@@ -1838,12 +1900,12 @@ export class PtyAttachComponent implements Component {
 	}
 
 	private interactionLine(lineIndex: number): BufferLineLike | null {
-		if (this.modernCommittedMode()) return this.committedLineAt(lineIndex);
+		if (this.usesCommittedProjection()) return this.committedLineAt(lineIndex);
 		return this.term.buffer.active.getLine(lineIndex) ?? null;
 	}
 
 	private interactionNullCell(): BufferCellLike {
-		return this.modernCommittedMode() ? SnapshotCell.empty() : this.term.buffer.active.getNullCell();
+		return this.usesCommittedProjection() ? SnapshotCell.empty() : this.term.buffer.active.getNullCell();
 	}
 
 	private mousePointForEvent(row: number, col: number, clampToBody: boolean): MousePoint | null {
@@ -1851,7 +1913,7 @@ export class PtyAttachComponent implements Component {
 		const bodyRow = row - 2;
 		if (!clampToBody && (bodyRow < 0 || bodyRow >= height)) return null;
 		const clampedRow = clampInt(bodyRow, 0, Math.max(0, height - 1));
-		if (this.modernCommittedMode()) {
+		if (this.usesCommittedProjection()) {
 			const view = this.activeCommittedView();
 			if (view === null) return null;
 			const line = clampInt(view.start + clampedRow, view.start, Math.max(view.start, view.end - 1));
@@ -2135,7 +2197,7 @@ export class PtyAttachComponent implements Component {
 
 	private tryScrollBy(linesUp: number): boolean {
 		const height = this.bodyHeight();
-		if (this.modernCommittedMode()) {
+		if (this.usesCommittedProjection()) {
 			// The committed view is the only visible cache. Record the requested
 			// viewport intent but let the child own history: the display stays on
 			// the current complete range until a later verified boundary.
@@ -2351,14 +2413,17 @@ export class PtyAttachComponent implements Component {
 				this.clearJiggleStartTimer();
 				if (this.connected) this.jiggleRetry.start(this.cols, this.rows);
 			}
-			if (this.attachMode === "legacy") this.restoreLegacyDeadlines();
+			if (this.attachMode === "legacy") {
+				this.externalOutputActive = false;
+				this.restoreLegacyDeadlines();
+			}
 			// Legacy decided during the undecided window: the race-guard timer
 			// already fired at 100ms (≪ the 1500ms probe timeout) — nothing to do.
 			return;
 		}
 		if (event === "snapshotBegin") {
 			// Collecting identity only: replacement happens at snapshotReady.
-			const beginGeneration = (payload ?? {}) as { generation?: unknown; empty?: unknown };
+			const beginGeneration = (payload ?? {}) as { generation?: unknown; empty?: unknown; externalOutputActive?: unknown };
 			if (beginGeneration.empty === true) {
 				// Empty baseline invalidates old views/proof AT THE BEGIN, before
 				// any status/hello render can present the dead generation again.
@@ -2377,7 +2442,17 @@ export class PtyAttachComponent implements Component {
 					this.committedView = null;
 					this.invalidateRecoveryView();
 					this.invalidateViewProof("generation-change");
+					// New-generation state starts unowned; only a validated snapshot
+					// boolean below may adopt external ownership for this generation.
+					this.externalOutputActive = false;
 				}
+			}
+			// Issue #278: the runner samples external ownership at capture end into
+			// snapshot_begin. A validated boolean adopts it (running the interaction
+			// cleanup on change); an absent field preserves same-generation local state.
+			if (typeof beginGeneration.externalOutputActive === "boolean" && beginGeneration.externalOutputActive !== this.externalOutputActive) {
+				this.externalOutputActive = beginGeneration.externalOutputActive;
+				this.resetExternalProjectionInteraction();
 			}
 			this.collectingConnectionToken = this.connectionToken;
 			this.collectingBaselineToken = this.baselineToken;
@@ -2520,6 +2595,7 @@ export class PtyAttachComponent implements Component {
 			this.committedView = null;
 			this.invalidateRecoveryView();
 			this.invalidateViewProof("epoch-reset");
+			this.externalOutputActive = false;
 		}
 		// "viewProof"/"viewProofRecord": independent protocol facts in this stage;
 		// the component has no readiness/publish hook for them yet.
@@ -2656,6 +2732,12 @@ export class PtyAttachComponent implements Component {
 			if (opts.authoritative) {
 				this.historyFloor = historyFloorAfterHydrate(term.buffer.active.baseY, opts.scrollbackLines);
 				this.localHydrationState = "complete";
+				if (this.screenOwnerResyncPending) {
+					// The hydrating frame's wrapper sync window is fully parsed now;
+					// restore adapter/component ownership agreement before committing.
+					this.screenOwnerResyncPending = false;
+					this.resyncScreenOwnerAdapter(term, parserEpoch);
+				}
 				if (!this.parserSyncOpen) this.commitCommittedView(term, parserEpoch);
 			}
 			this.receivedOutput = true;
@@ -2682,7 +2764,7 @@ export class PtyAttachComponent implements Component {
 
 	private project(height: number): { lines: string[]; cursor: { row: number; col: number } | null } {
 		if (this.closed) return { lines: [], cursor: null };
-		if (this.modernCommittedMode()) return this.projectCommitted(height);
+		if (this.usesCommittedProjection()) return this.projectCommitted(height);
 		const out: string[] = [];
 		const buf = this.term.buffer.active;
 		const selection = normalizeSelection(this.selection);
@@ -2712,6 +2794,7 @@ export class PtyAttachComponent implements Component {
 		this.closed = true;
 		this.attachWaitToken += 1;
 		this.committedView = null;
+		this.externalOutputActive = false;
 		this.recoveryView = null;
 		this.recoveryGeneration = null;
 		this.disposeCurrentParser();

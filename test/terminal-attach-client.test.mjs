@@ -499,6 +499,50 @@ test("snapshotBegin event carries begin geometry (size-sync hook, CR R1 blocking
 	assert.deepEqual(eventsOf(e2, "snapshotBegin"), [{ cols: 80, rows: 24, empty: true }]);
 });
 
+test("snapshot_begin.externalOutputActive=true reaches the snapshotBegin payload (issue #278)", () => {
+	const { client, events } = harness();
+	client.start();
+	client.handleMessage(begin({ externalOutputActive: true }));
+	assert.equal(events.find((event) => event.event === "snapshotBegin").payload.externalOutputActive, true);
+	assert.deepEqual(eventsOf(events, "protocolError"), []);
+});
+
+test("snapshot_begin.externalOutputActive=false reaches the snapshotBegin payload (issue #278)", () => {
+	const { client, events } = harness();
+	client.start();
+	client.handleMessage(begin({ externalOutputActive: false }));
+	assert.equal(events.find((event) => event.event === "snapshotBegin").payload.externalOutputActive, false);
+	assert.deepEqual(eventsOf(events, "protocolError"), []);
+});
+
+test("absent snapshot_begin.externalOutputActive omits the key (older runner, issue #278)", () => {
+	const { client, events } = harness();
+	client.start();
+	client.handleMessage(begin());
+	const payload = events.find((event) => event.event === "snapshotBegin").payload;
+	assert.equal(Object.hasOwn(payload, "externalOutputActive"), false);
+	assert.deepEqual(eventsOf(events, "protocolError"), []);
+});
+
+test("invalid snapshot_begin.externalOutputActive: protocolError, key omitted, no resync/coercion (issue #278)", () => {
+	for (const bad of ["yes", 1, null]) {
+		const { client, sent, events } = harness();
+		client.start();
+		client.handleMessage(begin({ externalOutputActive: bad }));
+		assert.ok(
+			events.some((event) => event.event === "protocolError" && event.payload.code === "external_output_active_invalid"),
+			`invalid value ${JSON.stringify(bad)} must surface as external_output_active_invalid`,
+		);
+		const payload = events.find((event) => event.event === "snapshotBegin").payload;
+		assert.equal(Object.hasOwn(payload, "externalOutputActive"), false, "invalid values are never coerced into the payload");
+		// No resync: the snapshot flow continues and completes normally.
+		client.handleMessage(frame("FRAME"));
+		client.handleMessage(end(6));
+		assert.equal(eventsOf(events, "snapshotReady").length, 1);
+		assert.equal(sent.length, 1, "only the initial subscribe; an invalid field never triggers a resync");
+	}
+});
+
 test("onDisconnect cancels the probe deadline — a dead window cannot downgrade (CR R1 advisory)", () => {
 	const { client, sent, events, timers } = harness();
 	client.start();
