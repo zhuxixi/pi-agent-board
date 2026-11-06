@@ -690,12 +690,18 @@ export class AttachFrameReporter {
 
 	/** Drain pending F/A decisions from the given evaluator (defaults to current).
 	 *  S is emitted inline in the write wrapper and marked emitted immediately;
-	 *  F/A are only emitted here. Skips emission if a cross-write escape is pending.
+	 *  F/A are only emitted here. Skips emission if a cross-write escape is pending
+	 *  or the terminal is not bound (deferred until #attachTerminal completes).
 	 *  Call abandonPendingEscape() first when replacing the evaluator to force-drain. */
 	#drainTerminalDecisions(evaluator = this.#evaluator) {
 		if (evaluator.pendingEscape) {
 			// A cross-write control sequence is unclosed; defer F/A emission to avoid
 			// inserting a marker mid-sequence (which would corrupt the stream).
+			return;
+		}
+		if (this.#terminalWrite === null) {
+			// Terminal is detached (e.g. after terminal-stop). Defer emission until
+			// #attachTerminal re-binds the raw write.
 			return;
 		}
 		const decisions = evaluator.collectTerminalDecisions();

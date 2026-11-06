@@ -645,7 +645,7 @@ export class FrameCandidateEvaluator {
 			protocol: FRAME_WITNESS_PROTOCOL,
 			cols: decision.cols,
 			rows: decision.rows,
-			mode: this.#mode,
+			mode: decision.mode ?? this.#mode,
 			rendererEpoch: decision.rendererEpoch ?? this.#rendererEpoch,
 			sessionEpoch: this.#sessionEpoch,
 			focusPresent: decision.focusPresent === true,

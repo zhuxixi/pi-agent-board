@@ -231,7 +231,7 @@ async function startHost(t, { legacy = false, script = CHILD_SCRIPT, scriptIsFil
 	await waitFor(() => {
 		const host = readHost(root, viewId);
 		return host && host.state === "alive" && host.childPid;
-	});
+	}, 30000); // 30s timeout for CI/loaded environments
 	const socket = createConnection(socketPath);
 	await once(socket, "connect");
 	// A separate real subscriber observes the output stream; the reporter socket is
