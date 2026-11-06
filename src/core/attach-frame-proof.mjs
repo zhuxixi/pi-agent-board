@@ -407,6 +407,11 @@ export class FrameCandidateEvaluator {
 		return this.#decisions.slice();
 	}
 
+	/** Whether a cross-write escape sequence is pending (unclosed). */
+	get pendingEscape() {
+		return this.#pending !== null;
+	}
+
 	get markerFailures() {
 		return this.#markerFailures;
 	}

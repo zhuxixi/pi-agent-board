@@ -120,6 +120,7 @@ export class AttachFrameReporter {
 	#intentId = 0;
 	#writtenFrames = new Set(); // frameId where S was successfully written to underlying terminal
 	#onUnavailable = () => {};
+	#failCapabilityCalled = false;
 
 	constructor({ ui, send = (_message) => {}, mode = "fullscreen", rendererEpoch = 1, sessionEpoch = 0, now = () => Date.now(), onUnavailable = () => {} }) {
 		if (!ui || typeof ui.setWidget !== "function") throw new Error("AttachFrameReporter requires ctx.ui.setWidget");
@@ -616,12 +617,18 @@ export class AttachFrameReporter {
 			const success = this.#writeMarker(encodeFrameMarkerS({ token: this.#token, frameId, intentId: decision?.intentId ?? 0, sampledCols: decision?.cols }));
 			if (success) {
 				this.#writtenFrames.add(frameId);
+				// FIFO eviction to keep the set bounded (align with runner MAX_FINISHED_FRAME_IDS=4096)
+				if (this.#writtenFrames.size > 4096) {
+					const oldest = this.#writtenFrames.values().next().value;
+					this.#writtenFrames.delete(oldest);
+				}
 			}
+		} catch (error) {
+			this.#failCapability(`marker-encode-failed:${error instanceof Error ? error.message : String(error)}`);
+		} finally {
 			// Mark as emitted regardless of success: S can only be emitted at this write boundary.
 			// If write failed, the candidate will be aborted and A will be sent via drain.
 			if (decision?.seq !== undefined) this.#evaluator.markEmitted(decision.seq);
-		} catch (error) {
-			this.#failCapability(`marker-encode-failed:${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
 
@@ -657,12 +664,21 @@ export class AttachFrameReporter {
 		if (this.#markerFailure === null) this.#markerFailure = { at: this.#now(), reason };
 		this.#unknown.push({ what: "marker", reason });
 		this.#state = "failed";
-		this.#onUnavailable(reason);
+		if (!this.#failCapabilityCalled) {
+			this.#failCapabilityCalled = true;
+			this.#onUnavailable(reason);
+		}
 	}
 
 	/** Drain pending F/A decisions from the evaluator. S is emitted inline in the write
-	 *  wrapper and marked emitted immediately; F/A are only emitted here. */
+	 *  wrapper and marked emitted immediately; F/A are only emitted here.
+	 *  Skips emission if a cross-write escape sequence is pending (torn control sequence). */
 	#drainTerminalDecisions() {
+		if (this.#evaluator.pendingEscape) {
+			// A cross-write control sequence is unclosed; defer F/A emission to avoid
+			// inserting a marker mid-sequence (which would corrupt the stream).
+			return;
+		}
 		const decisions = this.#evaluator.collectTerminalDecisions();
 		for (const decision of decisions) {
 			if (decision.kind === "S") {

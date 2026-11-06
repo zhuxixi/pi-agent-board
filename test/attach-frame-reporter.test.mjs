@@ -7,6 +7,7 @@ import test from "node:test";
 
 import { AttachFrameReporter, ATTACH_FRAME_WIDGET_KEY, negotiateFrameWitness } from "../src/core/attach-frame-reporter.mjs";
 import { decodeFrameMarker } from "../src/core/attach-frame-proof.mjs";
+import { createFrameStreamParser } from "../src/core/attach-frame-stream.mjs";
 
 const OPEN = "\u001b[?2026h";
 const CLOSE = "\u001b[?2026l";
@@ -563,4 +564,26 @@ test("onUnavailable is called on marker failure", () => {
 	terminal.write(FULL);
 	assert.equal(reporter.state, "failed");
 	assert.equal(onUnavailableCalls.length, 1);
+});
+
+test("chained parser: no protocol errors after reporter cancellation paths", () => {
+	const { reporter, terminal, written, renderPass } = enabledReporter({ mode: "regular" });
+	renderPass();
+	terminal.write(`${OPEN}text`);
+	reporter.applyIntent({ type: "frame_witness_intent", instanceId: "inst-1", requestId: "fw-1", geometryRevision: 1, cols: 80, rows: 24 });
+	const parser = createFrameStreamParser({ token: TOKEN, instanceId: "inst-1", sessionEpoch: 1 });
+	for (const chunk of written) parser.push(chunk);
+	const { diagnostics } = parser.snapshot();
+	assert.equal(diagnostics.length, 0, `no protocol errors: ${JSON.stringify(diagnostics)}`);
+});
+
+test("chained parser: no protocol errors after mode change", () => {
+	const { reporter, terminal, written, renderPass } = enabledReporter({ mode: "regular" });
+	renderPass();
+	terminal.write(`${OPEN}text`);
+	reporter.setMode("fullscreen");
+	const parser = createFrameStreamParser({ token: TOKEN, instanceId: "inst-1", sessionEpoch: 1 });
+	for (const chunk of written) parser.push(chunk);
+	const { diagnostics } = parser.snapshot();
+	assert.equal(diagnostics.length, 0, `no protocol errors: ${JSON.stringify(diagnostics)}`);
 });

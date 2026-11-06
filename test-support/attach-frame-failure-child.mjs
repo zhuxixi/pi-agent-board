@@ -50,8 +50,9 @@ const { reporter, socket, cleanup } = createHostedFrameWitness({
 	ui,
 	onUnavailable: (reason) => {
 		console.error(`onUnavailable called: ${reason}`);
-		// Destroy the socket to signal the runner to clean up
-		socket.destroy();
+		// Use the helper's cleanup to trigger the full production cleanup path:
+		// reporter.dispose → socket.destroy → runner cleanup
+		cleanup(`reporter-unavailable:${reason}`);
 	},
 });
 
@@ -86,8 +87,9 @@ socket.on("data", (chunk) => {
 	}
 });
 
-socket.on("error", () => {
-	// Expected: socket is destroyed after onUnavailable
+socket.on("error", (err) => {
+	// Expected: socket is destroyed after onUnavailable. Swallow ECONNRESET.
+	if (err.code !== "ECONNRESET") console.error("socket error:", err.message);
 });
 
 socket.on("close", () => {
