@@ -499,3 +499,56 @@ test("drainTerminalDecisions emits A for written frames only", () => {
 	const markers = written.map(decodeFrameMarker).filter(Boolean);
 	assert(markers.some(m => m.kind === "A"));
 });
+
+test("sizeRead resample aborts previous candidate via drain", () => {
+	const { reporter, terminal, written, renderPass } = enabledReporter({ mode: "regular" });
+	renderPass();
+	terminal.write(`${OPEN}text`);
+	// Trigger resample via size read
+	void terminal.columns;
+	void terminal.rows;
+	// New candidate opens
+	renderPass();
+	terminal.write(`${OPEN}text${CLOSE}`);
+	const markers = written.map(decodeFrameMarker).filter(Boolean);
+	// Should have S(1), A(1), S(2) in order
+	const kinds = markers.map(m => m.kind);
+	assert.deepEqual(kinds, ["S", "A", "S"]);
+});
+
+test("setMode mode-changed aborts via drain before evaluator replacement", () => {
+	const { reporter, terminal, written, renderPass } = enabledReporter({ mode: "regular" });
+	renderPass();
+	terminal.write(`${OPEN}text`);
+	// Directly call setMode to trigger mode change
+	reporter.setMode("fullscreen");
+	const markers = written.map(decodeFrameMarker).filter(Boolean);
+	assert(markers.some(m => m.kind === "A" && m.reason === "mode-changed"));
+});
+
+test("terminal-stop aborts via drain before restoring shadows", () => {
+	const { reporter, terminal, written, renderPass } = enabledReporter({ mode: "regular" });
+	renderPass();
+	terminal.write(`${OPEN}text`);
+	terminal.stop();
+	const markers = written.map(decodeFrameMarker).filter(Boolean);
+	assert(markers.some(m => m.kind === "A" && m.reason === "terminal-stop"));
+});
+
+test("sentinel dispose aborts via drain before restoring shadows", () => {
+	const { reporter, terminal, written, renderPass, widget } = enabledReporter({ mode: "regular" });
+	renderPass();
+	terminal.write(`${OPEN}text`);
+	widget.component.dispose();
+	const markers = written.map(decodeFrameMarker).filter(Boolean);
+	assert(markers.some(m => m.kind === "A" && m.reason === "sentinel-dispose"));
+});
+
+test("dispose aborts via drain before state flip", () => {
+	const { reporter, terminal, written, renderPass } = enabledReporter({ mode: "regular" });
+	renderPass();
+	terminal.write(`${OPEN}text`);
+	reporter.dispose("test");
+	const markers = written.map(decodeFrameMarker).filter(Boolean);
+	assert(markers.some(m => m.kind === "A"));
+});

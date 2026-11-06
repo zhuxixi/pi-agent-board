@@ -313,7 +313,9 @@ export class AttachFrameReporter {
 	/** Renderer mode change: carry the frameId counter, rebind the grammar. */
 	setMode(mode, { rendererEpoch = this.#rendererEpoch + 1 } = {}) {
 		if (!MODES.has(mode)) throw new Error(`unknown renderer mode: ${mode}`);
-		const produced = this.#evaluator.abort("mode-changed");
+		// Drain mode-changed abort from the OLD evaluator before replacing it
+		this.#evaluator.abort("mode-changed");
+		this.#drainTerminalDecisions();
 		this.#mode = mode;
 		this.#rendererEpoch = rendererEpoch;
 		this.#evaluator = new FrameCandidateEvaluator({
@@ -324,15 +326,17 @@ export class AttachFrameReporter {
 		});
 		this.#sentinelTui = null;
 		this.#focusApi = "unknown";
-		return produced;
+		return [];
 	}
 
 	/** Session-scoped teardown: stop proving and restore every own shadow. */
 	dispose(reason = "dispose") {
-		const produced = this.#evaluator.stop();
+		this.#evaluator.stop();
+		// Drain stop decisions BEFORE flipping state to disposed (otherwise #emitA's enabled guard swallows them)
+		this.#drainTerminalDecisions();
 		const restores = this.#restoreShadows(reason);
 		this.#state = "disposed";
-		return { decisions: produced, restores };
+		return { restores };
 	}
 
 	#createSentinel(tui) {
@@ -376,7 +380,9 @@ export class AttachFrameReporter {
 				// A disposed sentinel always aborts the open candidate. Only a REAL teardown
 				// (not the disposal that a re-registration triggers synchronously) stops
 				// proving and restores the wrappers.
-				this.#pendingAfterDispose.push(...this.#evaluator.abort("sentinel-dispose"));
+				this.#evaluator.abort("sentinel-dispose");
+				// Drain abort decisions before restoring shadows
+				this.#drainTerminalDecisions();
 				if (this.#superseding) return;
 				this.#restoreShadows("sentinel-dispose");
 				this.#terminal = null;
@@ -443,6 +449,8 @@ export class AttachFrameReporter {
 			const getter = () => {
 				const value = ownBefore !== undefined ? ownBefore.get.call(terminal) : typeof descriptor?.get === "function" ? descriptor.get.call(terminal) : undefined;
 				this.#evaluator.sizeRead(key, value);
+				// Drain any abort decisions from sizeRead (resampled)
+				this.#drainTerminalDecisions();
 				return value;
 			};
 			try {
@@ -523,6 +531,8 @@ export class AttachFrameReporter {
 			const wrapper = (...args) => {
 				if (this.#state === "enabled") {
 					this.#evaluator.abort(`terminal-${key}`);
+					// Drain abort decisions before restoring shadows
+					this.#drainTerminalDecisions();
 					if (key === "stop") {
 						// A renderer stop (mode switch / teardown) aborts the candidate and
 						// detaches the adapter, but the capability stays armed: the next
