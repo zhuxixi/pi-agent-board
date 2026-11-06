@@ -189,6 +189,10 @@ export class AttachFrameReporter {
 		return this.#evaluator.decisions;
 	}
 
+	get writtenFrames() {
+		return [...this.#writtenFrames];
+	}
+
 	get frameIdCounter() {
 		return this.#frameIdCounter;
 	}
@@ -425,8 +429,9 @@ export class AttachFrameReporter {
 			this.#state = "unsupported";
 			return;
 		}
-		// Capture the old evaluator before replacing it
-		const oldEvaluator = this.#evaluator;
+		// Capture the old evaluator before replacing it (may be a stashed one from stop)
+		const oldEvaluator = this.#stashedEvaluator ?? this.#evaluator;
+		this.#stashedEvaluator = null;
 		this.#rendererEpoch += 1;
 		this.#mode = observed;
 		this.#evaluator = new FrameCandidateEvaluator({
@@ -562,7 +567,12 @@ export class AttachFrameReporter {
 			const wrapper = (...args) => {
 				if (this.#state === "enabled") {
 					this.#evaluator.abort(`terminal-${key}`);
-					// Drain abort decisions before restoring shadows
+					// If a cross-write escape is pending, the abort decision is deferred.
+					// Stash the evaluator so reactivation can drain it after re-binding.
+					if (this.#evaluator.pendingEscape) {
+						this.#stashedEvaluator = this.#evaluator;
+					}
+					// Drain abort decisions before restoring shadows (may be deferred by pendingEscape)
 					this.#drainTerminalDecisions();
 					if (key === "stop") {
 						// A renderer stop (mode switch / teardown) aborts the candidate and

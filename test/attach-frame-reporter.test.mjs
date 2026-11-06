@@ -587,3 +587,53 @@ test("chained parser: no protocol errors after mode change", () => {
 	const { diagnostics } = parser.snapshot();
 	assert.equal(diagnostics.length, 0, `no protocol errors: ${JSON.stringify(diagnostics)}`);
 });
+
+test("stashed evaluator: torn-escape + stop + mode-differing re-registration delivers deferred A", () => {
+	const { reporter, terminal, written, renderPass, tui } = enabledReporter({ mode: "regular" });
+	renderPass();
+	// Write OPEN + text (S emitted), then a write ending mid-escape (torn)
+	terminal.write(`${OPEN}text`);
+	terminal.write("\u001b[1;"); // torn CSI escape
+	// Stop the terminal (A deferred by pendingEscape guard, terminal nulled)
+	terminal.stop();
+	// Re-register with a differing mode (triggers setMode + #createSentinel)
+	tui.mode = "fullscreen";
+	reporter.install();
+	// The deferred A for frameId 1 should now be emitted
+	const markers = written.map(decodeFrameMarker).filter(Boolean);
+	const aMarkers = markers.filter(m => m.kind === "A");
+	assert.equal(aMarkers.length, 1, "deferred A is emitted after re-registration");
+	assert.equal(aMarkers[0].frameId, 1);
+	assert.equal(reporter.state, "enabled", "capability stays enabled");
+	// Chained parser: no open candidate, no diagnostics
+	const parser = createFrameStreamParser({ token: TOKEN, instanceId: "inst-1", sessionEpoch: 1 });
+	for (const chunk of written) parser.push(chunk);
+	const { openFrameId, diagnostics } = parser.snapshot();
+	assert.equal(openFrameId, null, "no open candidate after re-registration");
+	assert.equal(diagnostics.length, 0, `no protocol errors: ${JSON.stringify(diagnostics)}`);
+});
+
+test("stashed evaluator: torn-escape + stop + same-mode reactivation delivers deferred A", () => {
+	const { reporter, terminal, written, renderPass, widget } = enabledReporter({ mode: "regular" });
+	renderPass();
+	// Write OPEN + text (S emitted), then a write ending mid-escape (torn)
+	terminal.write(`${OPEN}text`);
+	terminal.write("\u001b[1;"); // torn CSI escape
+	// Stop the terminal (A deferred by pendingEscape guard, terminal nulled)
+	terminal.stop();
+	// Re-register with the SAME mode (triggers #reactivate on the EXISTING widget)
+	// Do NOT call reporter.install() — that creates a new widget. Instead, render the old widget.
+	widget.component.render(80);
+	// The deferred A for frameId 1 should now be emitted
+	const markers = written.map(decodeFrameMarker).filter(Boolean);
+	const aMarkers = markers.filter(m => m.kind === "A");
+	assert.equal(aMarkers.length, 1, "deferred A is emitted after same-mode reactivation");
+	assert.equal(aMarkers[0].frameId, 1);
+	assert.equal(reporter.state, "enabled", "capability stays enabled");
+	// Chained parser: no open candidate, no diagnostics
+	const parser = createFrameStreamParser({ token: TOKEN, instanceId: "inst-1", sessionEpoch: 1 });
+	for (const chunk of written) parser.push(chunk);
+	const { openFrameId, diagnostics } = parser.snapshot();
+	assert.equal(openFrameId, null, "no open candidate after reactivation");
+	assert.equal(diagnostics.length, 0, `no protocol errors: ${JSON.stringify(diagnostics)}`);
+});
