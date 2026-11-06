@@ -108,7 +108,6 @@ export class AttachFrameReporter {
 	#lastMetadata = null;
 	#suspensions = 0;
 	#latestFact = null;
-	#pendingAfterDispose = [];
 	#superseding = false;
 	#instanceId = null;
 	#intentRequestId = null;
@@ -316,7 +315,9 @@ export class AttachFrameReporter {
 	/** Renderer mode change: carry the frameId counter, rebind the grammar. */
 	setMode(mode, { rendererEpoch = this.#rendererEpoch + 1 } = {}) {
 		if (!MODES.has(mode)) throw new Error(`unknown renderer mode: ${mode}`);
-		// Drain mode-changed abort from the OLD evaluator before replacing it
+		// Drain mode-changed abort from the OLD evaluator before replacing it.
+		// If a cross-write escape is pending, abandon it first so deferred decisions are not lost.
+		this.#evaluator.abandonPendingEscape();
 		this.#evaluator.abort("mode-changed");
 		this.#drainTerminalDecisions();
 		this.#mode = mode;
@@ -410,6 +411,9 @@ export class AttachFrameReporter {
 			this.#state = "unsupported";
 			return;
 		}
+		// Abandon any pending cross-write escape before replacing the evaluator
+		this.#evaluator.abandonPendingEscape();
+		this.#drainTerminalDecisions();
 		this.#rendererEpoch += 1;
 		this.#mode = observed;
 		this.#evaluator = new FrameCandidateEvaluator({
@@ -470,7 +474,7 @@ export class AttachFrameReporter {
 			const wrapper = (...args) => {
 				const text = typeof args[0] === "string" ? args[0] : "";
 				if (this.#state !== "enabled") return original.apply(terminal, args);
-				const { pending, insertions } = this.#proveOnOperation(key, text);
+				const { insertions } = this.#proveOnOperation(key, text);
 				let failed = false;
 				try {
 					if (insertions.length === 0) return original.apply(terminal, args);
@@ -506,6 +510,12 @@ export class AttachFrameReporter {
 					// instead of claiming completion (S, if any, must be closed by A), then
 					// rethrow the ORIGINAL error unchanged.
 					failed = true;
+					// Mark any S decisions from THIS write as emitted before aborting:
+					// the S insertion point has passed and the S was never written, so the
+					// drain must not throw on them.
+					for (const decision of this.#evaluator.collectTerminalDecisions()) {
+						if (decision.kind === "S") this.#evaluator.markEmitted(decision.seq);
+					}
 					this.#evaluator.abort("write-failed");
 					throw error;
 				} finally {
@@ -672,7 +682,8 @@ export class AttachFrameReporter {
 
 	/** Drain pending F/A decisions from the evaluator. S is emitted inline in the write
 	 *  wrapper and marked emitted immediately; F/A are only emitted here.
-	 *  Skips emission if a cross-write escape sequence is pending (torn control sequence). */
+	 *  Skips emission if a cross-write escape sequence is pending (torn control sequence).
+	 *  Call abandonPendingEscape() first when replacing the evaluator to force-drain. */
 	#drainTerminalDecisions() {
 		if (this.#evaluator.pendingEscape) {
 			// A cross-write control sequence is unclosed; defer F/A emission to avoid

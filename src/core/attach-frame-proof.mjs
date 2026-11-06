@@ -412,6 +412,14 @@ export class FrameCandidateEvaluator {
 		return this.#pending !== null;
 	}
 
+	/** Abandon any pending cross-write escape and return whether one was abandoned.
+	 *  Used before replacing the evaluator so deferred F/A decisions can be drained. */
+	abandonPendingEscape() {
+		if (this.#pending === null) return false;
+		this.#pending = null;
+		return true;
+	}
+
 	get markerFailures() {
 		return this.#markerFailures;
 	}

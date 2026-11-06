@@ -38,8 +38,8 @@
 ## Task 6: 全套验收
 - [x] Run targeted tests
 - [x] Run npm run verify
-- [ ] Local CR
-- [ ] Final commit
+- [x] Local CR
+- [x] Final commit
 
 ## Rulings
 
