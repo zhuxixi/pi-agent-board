@@ -189,10 +189,6 @@ export class AttachFrameReporter {
 		return this.#evaluator.decisions;
 	}
 
-	get writtenFrames() {
-		return [...this.#writtenFrames];
-	}
-
 	get frameIdCounter() {
 		return this.#frameIdCounter;
 	}
@@ -378,6 +374,7 @@ export class AttachFrameReporter {
 		this.#attachTerminal(tui);
 		// Drain any stashed old evaluator's deferred decisions AFTER the terminal is bound
 		if (this.#stashedEvaluator !== null) {
+			this.#stashedEvaluator.abandonPendingEscape();
 			this.#drainTerminalDecisions(this.#stashedEvaluator);
 			this.#stashedEvaluator = null;
 		}

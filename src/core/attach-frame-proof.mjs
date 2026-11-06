@@ -412,10 +412,6 @@ export class FrameCandidateEvaluator {
 		return this.#pending !== null;
 	}
 
-	get lastCollectedSeq() {
-		return this.#lastCollectedSeq;
-	}
-
 	/** Abandon any pending cross-write escape and return whether one was abandoned.
 	 *  Used before replacing the evaluator so deferred F/A decisions can be drained. */
 	abandonPendingEscape() {
