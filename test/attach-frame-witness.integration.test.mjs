@@ -191,7 +191,7 @@ setInterval(() => {
 }, 50);
 `;
 
-async function startHost(t, { legacy = false, script = CHILD_SCRIPT } = {}) {
+async function startHost(t, { legacy = false, script = CHILD_SCRIPT, scriptIsFile = false } = {}) {
 	const root = freshRoot();
 	const viewId = `v${++counter}`;
 	const meta = createView(root, { id: viewId, name: "fw", cwd: process.cwd() });
@@ -202,6 +202,8 @@ async function startHost(t, { legacy = false, script = CHILD_SCRIPT } = {}) {
 		claimHost(root, { viewId, instanceId, configPath, socketPath, claimAt: Date.now(), claimPid: process.pid, claimIdentity: null, cols: 80, rows: 24 });
 	}
 	const tokenFile = join(root, "token.txt");
+	// When scriptIsFile is true, run the script as a module file instead of inline -e.
+	const piArgsPrefix = scriptIsFile ? [script, tokenFile] : ["-e", script, tokenFile];
 	atomicWriteJson(configPath, {
 		root,
 		viewId,
@@ -210,7 +212,7 @@ async function startHost(t, { legacy = false, script = CHILD_SCRIPT } = {}) {
 		cwd: process.cwd(),
 		initialPrompt: null,
 		piCommand: process.execPath,
-		piArgsPrefix: ["-e", script, tokenFile],
+		piArgsPrefix,
 		model: null,
 		tools: null,
 		env: { AGENT_BOARD_ALLOW_PIPE_FALLBACK: "1" },
@@ -833,3 +835,18 @@ test("23b2c3a legacy summary: replacement and child-exit write the actual epoch/
 	first.destroy();
 	socket.destroy();
 });
+
+for (const legacy of [false, true]) {
+	test(`internal marker failure revokes capability via onUnavailable (${legacy ? "legacy main" : "owned main"})`, async (t) => {
+		const childScript = resolve("test-support/attach-frame-failure-child.mjs");
+		const { root, viewId, socketPath, subscriberMessages } = await startHost(t, { legacy, script: childScript, scriptIsFile: true });
+		// The child fixture creates a real reporter, negotiates, and injects a marker failure.
+		// onUnavailable → socket.destroy → runner cleanup → enabled:false broadcast.
+		const disabled = await waitFor(
+			() => subscriberMessages.find((msg) => msg.type === "status" && msg.status?.frameWitness?.enabled === false),
+			15000,
+		);
+		assert.equal(disabled.status.frameWitness.enabled, false);
+		await waitFor(() => readHost(root, viewId)?.frameWitness?.enabled === false, 5000);
+	});
+}
