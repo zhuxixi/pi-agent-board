@@ -411,9 +411,6 @@ export class AttachFrameReporter {
 			this.#state = "unsupported";
 			return;
 		}
-		// Abandon any pending cross-write escape before replacing the evaluator
-		this.#evaluator.abandonPendingEscape();
-		this.#drainTerminalDecisions();
 		this.#rendererEpoch += 1;
 		this.#mode = observed;
 		this.#evaluator = new FrameCandidateEvaluator({
@@ -424,6 +421,10 @@ export class AttachFrameReporter {
 		});
 		this.#sentinelTui = tui;
 		this.#attachTerminal(tui);
+		// Drain deferred decisions AFTER re-binding the terminal (raw write is available again).
+		// Abandon any pending cross-write escape first so deferred decisions are not lost.
+		this.#evaluator.abandonPendingEscape();
+		this.#drainTerminalDecisions();
 	}
 
 	#attachTerminal(tui) {
@@ -510,11 +511,12 @@ export class AttachFrameReporter {
 					// instead of claiming completion (S, if any, must be closed by A), then
 					// rethrow the ORIGINAL error unchanged.
 					failed = true;
-					// Mark any S decisions from THIS write as emitted before aborting:
+					// Mark any unemitted S decisions as emitted before aborting:
 					// the S insertion point has passed and the S was never written, so the
-					// drain must not throw on them.
-					for (const decision of this.#evaluator.collectTerminalDecisions()) {
-						if (decision.kind === "S") this.#evaluator.markEmitted(decision.seq);
+					// drain must not throw on them. Use the non-consuming decisions getter
+					// to avoid dropping deferred F/A decisions from earlier writes.
+					for (const decision of this.#evaluator.decisions) {
+						if (decision.kind === "S" && !decision.emitted) this.#evaluator.markEmitted(decision.seq);
 					}
 					this.#evaluator.abort("write-failed");
 					throw error;
