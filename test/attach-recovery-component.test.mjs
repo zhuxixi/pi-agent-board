@@ -140,11 +140,12 @@ test("T4 a) quiet protocol+witness: 249ms still attaching, 250ms records the bud
 	assert.equal(at249.budget.timerPending, true);
 	assert.equal(at250.budget.elapsed, true, "250ms fires the budget callback through the attach-lifetime fence");
 	assert.equal(at250.budget.timerPending, false);
-	// T4 scope: evaluateAttachReady does not consume the budget fact yet (T6
-	// wires it); the callback ran and recorded the fact without publishing.
-	assert.equal(at250.attaching, true);
-	assert.equal(at250.publishabilityState, "wait");
-	assert.ok(at250.notReadyReason, "the wait keeps a named reason");
+	// T6 wiring: the budget fact reaches the policy, which publishes the
+	// committed view degraded exactly at the 250ms boundary (no cap involved).
+	assert.equal(at250.attaching, false);
+	assert.equal(at250.settledAt, 250);
+	assert.equal(at250.publishabilityState, "ready");
+	assert.equal(at250.notReadyReason, null);
 });
 
 test("T4 b) reconnect before 250ms keeps the original budget deadline and settles on schedule", () => {
@@ -176,10 +177,11 @@ test("T4 b) reconnect before 250ms keeps the original budget deadline and settle
 	assert.equal(at250.attaching, true, "expiry alone publishes nothing (no valid view for the new connection yet)");
 	assert.equal(afterSnapshot2.committedView.present, true);
 	assert.equal(afterSnapshot2.committedView.connectionToken, 2, "the new connection rebuilds on a fresh baseline");
-	assert.equal(afterSnapshot2.attaching, true, "T4: the policy has no budget input yet, so the wait holds");
-	assert.equal(at2500.attaching, false, "the hard cap reveals the committed view on schedule");
-	assert.equal(at2500.settledAt, 2500);
-	assert.equal(at2500.deadlineState, "expired");
+	assert.equal(afterSnapshot2.attaching, false, "T6: a late snapshot after budget expiry re-evaluates immediately (D4 commit hook)");
+	assert.equal(afterSnapshot2.settledAt, 250);
+	assert.equal(at2500.attaching, false);
+	assert.equal(at2500.settledAt, 250, "settled at the budget deadline, not the cap");
+	assert.equal(at2500.deadlineState, "pending", "the cap timer never fired");
 });
 
 test("T4 b) an old-connection write callback cannot publish after reconnect (I3 identity fence)", () => {
@@ -328,7 +330,8 @@ test("T4 e) continuous complete frames every 25ms never reset or extend the budg
 	const final = run.parsed.final;
 	assert.equal(final.budget.elapsed, true);
 	assert.equal(final.budget.timerPending, false);
-	assert.equal(final.attaching, true, "streaming output alone settles nothing in T4 (policy wiring is T6)");
+	assert.equal(final.attaching, false, "T6: once the budget elapses mid-stream, the latest closed frame publishes");
+	assert.equal(final.settledAt, 250);
 	assert.equal(final.committedView.present, true, "streamed complete frames keep committing views");
 });
 
@@ -346,11 +349,12 @@ test("T5 a) latched capability loss keeps the committed path: no legacy restore,
 			{ op: "snapshot", proof: "unavailable-candidate-open", text: "LATCHED SCREEN" },
 			{ op: "status", witness: false },
 			{ op: "output", text: "POST-LOSS", syncClose: true },
-			{ op: "advance", ms: 2500 },
+			{ op: "advance", ms: 250 },
+			{ op: "advance", ms: 2250 },
 		],
 	});
 	assertScenarioOk("latched-loss", run);
-	const [afterHello, afterSnapshot, afterLoss, afterOutput, atCap] = readouts(run.parsed).slice(1);
+	const [afterHello, afterSnapshot, afterLoss, afterOutput, atBudget, atCap] = readouts(run.parsed).slice(1);
 	assert.equal(afterHello.witnessLatched, true, "the first capability observation latches");
 	assert.equal(afterSnapshot.witnessLatched, true);
 	assert.equal(afterLoss.witnessLatched, true, "capability loss never clears the latch (I6 latch layer)");
@@ -364,12 +368,14 @@ test("T5 a) latched capability loss keeps the committed path: no legacy restore,
 	assert.equal(afterOutput.callbacks.restoreLegacyDeadlines, 0);
 	assert.equal(afterOutput.committedPreview, "LATCHED SCREENPOST-LOSS", "a closed frame after loss still commits (view updates continue)");
 	assert.equal(afterOutput.committedViewValid, true);
-	assert.equal(atCap.witnessLatched, true, "the latch survives to the cap");
-	assert.equal(atCap.callbacks.restoreLegacyDeadlines, 0);
-	// T5 scope: the cap may still reveal (budget wiring is T6); assert the
-	// latch facts, not the settle timing.
+	assert.equal(atBudget.witnessLatched, true, "the latch survives past the budget");
+	assert.equal(atBudget.callbacks.restoreLegacyDeadlines, 0);
+	// T6: the latched loss keeps the policy path alive; the budget reveals the
+	// committed view long before the cap (settledAt 250 < 2500).
+	assert.equal(atBudget.attaching, false);
+	assert.equal(atBudget.settledAt, 250);
 	assert.equal(atCap.attaching, false);
-	assert.equal(atCap.settledAt, 2500);
+	assert.equal(atCap.witnessLatched, true);
 });
 
 test("T5 b) loss then resnapshot rebuilds the view from the new identity while the latch survives", () => {
@@ -397,7 +403,7 @@ test("T5 b) loss then resnapshot rebuilds the view from the new identity while t
 	assert.equal(afterSnapshot2.committedView.connectionToken, 1, "same component, same connection");
 	assert.equal(afterSnapshot2.committedPreview, "NEW SCREEN", "committed updates continue from the new identity");
 	assert.equal(afterSnapshot2.committedViewValid, true);
-	assert.equal(afterSnapshot2.attaching, true, "T5 rebuilds views; the publish wiring is T6");
+	assert.equal(afterSnapshot2.attaching, true, "the rebuild waits for the budget — the policy is the sole decider");
 });
 
 test("T5 c) loss with no closed frame keeps the old committed view (no fake refresh)", () => {
@@ -408,16 +414,19 @@ test("T5 c) loss with no closed frame keeps the old committed view (no fake refr
 			{ op: "snapshot", proof: "unavailable-candidate-open", text: "RETAINED SCREEN" },
 			{ op: "status", witness: false },
 			{ op: "output", text: "UNCLOSED CHUNK", syncClose: false },
-			{ op: "advance", ms: 2500 },
+			{ op: "advance", ms: 250 },
+			{ op: "advance", ms: 2250 },
 		],
 	});
 	assertScenarioOk("loss-no-close", run);
-	const [afterLoss, afterOutput, atCap] = readouts(run.parsed).slice(3);
+	const [afterLoss, afterOutput, atBudget, atCap] = readouts(run.parsed).slice(3);
 	assert.equal(afterLoss.committedPreview, "RETAINED SCREEN");
 	assert.equal(afterLoss.witnessLatched, true);
 	assert.equal(afterOutput.committedPreview, "RETAINED SCREEN", "an unclosed chunk never commits a view");
 	assert.equal(afterOutput.committedViewValid, true);
-	assert.equal(atCap.committedPreview, "RETAINED SCREEN", "the cap reveals the retained view, not a fake refresh");
+	assert.equal(atBudget.committedPreview, "RETAINED SCREEN", "the budget reveals the retained view, not a fake refresh");
+	assert.equal(atBudget.attaching, false);
+	assert.equal(atBudget.settledAt, 250, "the retained committed view publishes at the budget, not the cap");
 	assert.equal(atCap.attaching, false);
 	assert.equal(atCap.witnessLatched, true);
 });
@@ -455,7 +464,9 @@ test("T5 d) same-component reconnect keeps the latch; old view/proof invalidated
 	assert.equal(afterSnapshot2.committedPreview, "SCREEN-2");
 	assert.equal(afterSnapshot2.committedViewValid, true);
 	assert.equal(afterSnapshot2.witnessLatched, true);
-	assert.equal(atCap.attaching, false, "settles via the cap in T5 (budget wiring is T6)");
+	assert.equal(afterSnapshot2.attaching, false, "T6: the rebuilt view publishes immediately — the budget already elapsed");
+	assert.equal(afterSnapshot2.settledAt, 250);
+	assert.equal(atCap.attaching, false);
 });
 
 test("T5 e) never-latched protocol attach keeps the capability-absent legacy settle unchanged", () => {
@@ -542,4 +553,187 @@ test("T5 g) detach and dispose clear the latch: a new attach re-observes the cap
 	assertScenarioOk("dispose-clears-latch", disposeRun);
 	assert.equal(readouts(disposeRun.parsed)[3].witnessLatched, false, "dispose clears the latch too");
 	assert.equal(disposeRun.parsed.final.witnessLatched, false);
+});
+
+// Issue #284 T6: recovery-fact assembly + sticky invalid wiring (spec §3.1,
+// §3.1.1, D4). The policy alone decides the committed-degraded publish; the
+// deleted #265 idle-downgrade cap special case is asserted dead.
+
+test("T6 a) A07 quiet: budget expiry publishes the sync-closed committed view without the cap", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "none", text: "QUIET BASE" },
+			{ op: "output", text: "SYNC FRAME", syncClose: true },
+			{ op: "record", marker: "S" },
+			{ op: "advance", ms: 249 },
+			{ op: "advance", ms: 1 },
+		],
+	});
+	assertScenarioOk("t6-quiet", run);
+	const [afterOutput, afterS, at249, at250] = readouts(run.parsed).slice(3);
+	assert.equal(afterOutput.committedView.source, "sync-close", "the live sync-closed frame is the commit source");
+	assert.equal(afterOutput.committedView.contentKind, "complete", "a locally parsed closed frame is locally complete");
+	assert.equal(afterOutput.committedView.sourceCols, 80, "the actual source grid columns are recorded at commit");
+	assert.equal(afterOutput.committedView.sourceRows, 24, "the actual source grid rows are recorded at commit");
+	assert.equal(afterS.proofStatus, "missing", "a live S record classifies as missing evidence");
+	assert.equal(afterS.stickyInvalid, false);
+	assert.equal(afterS.attaching, true);
+	assert.equal(afterS.notReadyReason, "recovery-budget-pending", "the only failing degraded predicate is the budget");
+	assert.equal(at249.attaching, true, "249ms must not publish");
+	assert.equal(at249.budget.elapsed, false);
+	assert.equal(at250.attaching, false, "250ms budget expiry publishes the committed view degraded");
+	assert.equal(at250.settledAt, 250);
+	assert.equal(at250.publishabilityState, "ready");
+	assert.equal(at250.notReadyReason, null);
+	assert.equal(at250.deadlineState, "pending", "the settle happened without the 2500ms cap");
+	assert.equal(at250.proofStatus, "missing");
+	assert.equal(at250.budget.deadlineAt, 250, "the budget deadline is an attach-lifetime timestamp");
+	assert.equal(at250.witnessLatched, true);
+});
+
+test("T6 b) sticky invalid survives live S, no-proof, and capability loss; only covered or a new baseline recovers", () => {
+	const washSteps = [
+		{ op: "connect" },
+		{ op: "hello", witness: true, generation: "gen-1" },
+		{ op: "snapshot", proof: "output-gap", text: "WASH SCREEN" },
+		{ op: "advance", ms: 250 },
+		{ op: "record", marker: "S" },
+		{ op: "proofState", proof: "no-proof" },
+		{ op: "status", witness: false },
+		{ op: "advance", ms: 2250 },
+	];
+	const coveredRun = runScenario({ steps: [...washSteps, { op: "record", marker: "F" }] });
+	assertScenarioOk("t6-sticky-covered", coveredRun);
+	const [afterSnapshot, at250, afterS, afterNoProof, afterLoss, atCap, afterF] = readouts(coveredRun.parsed).slice(2);
+	assert.equal(afterSnapshot.proofStatus, "invalid", "an output-gap coverage classifies invalid (fail-closed)");
+	assert.equal(afterSnapshot.stickyInvalid, true, "the invalid fact is sticky on the current baseline");
+	assert.equal(afterSnapshot.attaching, true);
+	assert.equal(at250.attaching, true, "budget expiry cannot publish over a sticky invalid fact");
+	assert.equal(at250.budget.elapsed, true);
+	assert.equal(at250.proofStatus, "invalid");
+	assert.equal(afterS.attaching, true, "a live S record does not wash the sticky fact");
+	assert.equal(afterS.proofStatus, "invalid");
+	assert.equal(afterS.stickyInvalid, true);
+	assert.equal(afterS.latestViewProof.reason, "candidate-open");
+	assert.equal(afterNoProof.attaching, true, "a no-proof coverage does not wash the sticky fact");
+	assert.equal(afterNoProof.proofStatus, "invalid");
+	assert.equal(afterNoProof.latestViewProof.reason, "no-proof");
+	assert.equal(afterLoss.frameWitnessAvailable, false);
+	assert.equal(afterLoss.latestViewProof, null, "capability loss nulls the proof object");
+	assert.equal(afterLoss.witnessLatched, true);
+	assert.equal(afterLoss.stickyInvalid, true, "capability loss keeps the recorded failure fact (I6)");
+	assert.equal(atCap.attaching, true, "budget AND cap elapsed: neither publishes over sticky invalid");
+	assert.equal(atCap.settledAt, null);
+	assert.equal(atCap.deadlineState, "expired");
+	assert.equal(atCap.notReadyReason, "deadline-expired:proof-status-invalid");
+	assert.equal(afterF.attaching, false, "a real F record on the current baseline recovers the block");
+	assert.equal(afterF.proofStatus, "covered");
+	assert.equal(afterF.stickyInvalid, false);
+	assert.equal(afterF.stickyBaseline, null, "covered is the only in-baseline clear of the sticky fact");
+	assert.equal(afterF.settledAt, 2500);
+
+	const resnapshotRun = runScenario({ steps: [...washSteps, { op: "snapshot", resnapshot: true, proof: "unavailable-candidate-open", generation: "gen-2", text: "FRESH BASE" }] });
+	assertScenarioOk("t6-sticky-resnapshot", resnapshotRun);
+	const afterResnapshot = readouts(resnapshotRun.parsed).at(-1);
+	assert.equal(afterResnapshot.attaching, false, "a baseline identity change rebinds the sticky fact; the degraded path proceeds");
+	assert.equal(afterResnapshot.proofStatus, "missing");
+	assert.equal(afterResnapshot.stickyInvalid, false, "the stale binding (baseline 1) is inactive on baseline 2");
+	assert.equal(afterResnapshot.stickyBaseline, 1);
+	assert.equal(afterResnapshot.settledAt, 2500);
+});
+
+test("T6 c) an empty baseline waits past budget and cap (never publishes)", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", empty: true },
+			{ op: "advance", ms: 250 },
+			{ op: "advance", ms: 2250 },
+		],
+	});
+	assertScenarioOk("t6-empty", run);
+	const [at250, atCap] = readouts(run.parsed).slice(3);
+	assert.equal(at250.budget.elapsed, true);
+	assert.equal(at250.attaching, true, "no committed view means nothing to degrade to");
+	assert.equal(at250.notReadyReason, "committed-view-missing");
+	assert.equal(atCap.attaching, true, "the cap alone publishes nothing either");
+	assert.equal(atCap.settledAt, null);
+	assert.equal(atCap.deadlineState, "expired");
+	assert.equal(atCap.committedView, null);
+});
+
+test("T6 d) covered then invalidated never bypasses through the degraded path", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "none", text: "GATE SCREEN" },
+			{ op: "record", marker: "F", mismatchCols: true },
+			{ op: "advance", ms: 250 },
+			{ op: "proofState", proof: "output-gap" },
+			{ op: "advance", ms: 2250 },
+		],
+	});
+	assertScenarioOk("t6-covered-invalidated", run);
+	const [afterF, at250, afterGap, atCap] = readouts(run.parsed).slice(3);
+	assert.equal(afterF.latestViewProof.status, "covered", "a real F record covers");
+	assert.equal(afterF.attaching, true, "a geometry-mismatched proof keeps the F path waiting");
+	assert.equal(afterF.proofStatus, "covered");
+	assert.equal(at250.attaching, true, "proofStatus covered is not degradable");
+	assert.equal(at250.notReadyReason, "proof-status-covered");
+	assert.equal(afterGap.proofStatus, "invalid", "the gap invalidates the covered proof and sticks");
+	assert.equal(afterGap.stickyInvalid, true);
+	assert.equal(atCap.attaching, true, "no degraded bypass even with budget and cap elapsed");
+	assert.equal(atCap.settledAt, null);
+	assert.equal(atCap.notReadyReason, "deadline-expired:proof-status-invalid");
+});
+
+test("T6 e) producer-unfinished but locally-closed snapshot settles degraded; a later F keeps updating the view", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "unavailable-candidate-open", text: "HALF FRAME" },
+			{ op: "advance", ms: 250 },
+			{ op: "record", marker: "F" },
+			{ op: "output", text: "DONE", syncClose: true },
+		],
+	});
+	assertScenarioOk("t6-unfinished", run);
+	const [at250, afterF, afterOutput] = readouts(run.parsed).slice(3);
+	assert.equal(at250.attaching, false, "the locally closed synthetic snapshot settles via the budget");
+	assert.equal(at250.settledAt, 250);
+	assert.equal(at250.committedView.source, "snapshot");
+	assert.equal(at250.committedView.contentKind, "complete", "local closure is the completeness fact, not proof readiness");
+	assert.equal(at250.proofStatus, "missing");
+	assert.equal(afterF.latestViewProof.status, "covered", "the real F updates the proof channel after the degraded settle");
+	assert.equal(afterF.attaching, false);
+	assert.equal(afterF.callbacks.finishAttachTransition, 1, "no second settle for the late F");
+	assert.equal(afterOutput.committedPreview, "HALF FRAMEDONE", "the view keeps updating after the F");
+	assert.equal(afterOutput.callbacks.finishAttachTransition, 1);
+});
+
+test("T6 f) the cap alone no longer publishes: an open sync frame keeps waiting past the cap", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+		{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "unavailable-candidate-open", text: "CAP GATE" },
+			{ op: "output", text: "OPEN FRAME", openFrame: true },
+			{ op: "advance", ms: 250 },
+			{ op: "advance", ms: 2250 },
+		],
+	});
+	assertScenarioOk("t6-cap-open-frame", run);
+	const [at250, atCap] = readouts(run.parsed).slice(4);
+	assert.equal(at250.attaching, true, "an open local sync frame is never degradable");
+	assert.equal(at250.notReadyReason, "sync-open");
+	assert.equal(atCap.attaching, true, "the deleted #265 cap special case must not reveal an unclosed frame");
+	assert.equal(atCap.settledAt, null);
+	assert.equal(atCap.deadlineState, "expired");
+	assert.equal(atCap.notReadyReason, "deadline-expired:sync-open");
+	assert.equal(atCap.committedViewValid, true, "a committed view exists — only the policy blocks the reveal");
 });

@@ -28,7 +28,7 @@
 // The program is a list of step objects; the result (one JSON line on stdout)
 // carries a readout per step. Assertions live in
 // test/attach-recovery-component.test.mjs.
-import { PtyAttachComponent } from "../src/ui/pty-attach.ts";
+import { ATTACH_RECOVERY_BUDGET_MS, PtyAttachComponent } from "../src/ui/pty-attach.ts";
 import { exitAfterStdout } from "./stdout-flush.mjs";
 
 const theme = { fg: (_c: string, text: string) => text, bold: (text: string) => text };
@@ -141,7 +141,8 @@ function simulateConnect(c: any): void {
 
 /** Snapshot viewProof presets: the two real arrival shapes per candidate
  *  state (runner coverageFor `unavailable+candidate-*`, live record path
- *  `unknown+candidate-*`), plus missing-evidence and covered shapes. */
+ *  `unknown+candidate-*`), plus missing-evidence and invalid-coverage
+ *  shapes. */
 const VIEW_PROOF_PRESETS: Record<string, () => Record<string, unknown>> = {
 	"unavailable-candidate-open": () => ({ status: "unavailable", reason: "candidate-open", proof: null, throughSeq: null, cursorVisible: null }),
 	"unavailable-candidate-aborted": () => ({ status: "unavailable", reason: "candidate-aborted", proof: null, throughSeq: null, cursorVisible: null }),
@@ -149,13 +150,16 @@ const VIEW_PROOF_PRESETS: Record<string, () => Record<string, unknown>> = {
 	"unknown-candidate-aborted": () => ({ status: "unknown", reason: "candidate-aborted", proof: null, throughSeq: null, cursorVisible: null }),
 	"no-proof": () => ({ status: "unknown", reason: "no-proof", proof: null, throughSeq: null, cursorVisible: null }),
 	"no-output": () => ({ status: "unknown", reason: "no-output", proof: null, throughSeq: null, cursorVisible: null }),
+	"output-gap": () => ({ status: "unknown", reason: "output-gap", proof: null, throughSeq: null, cursorVisible: null }),
 };
 
-/** Frame-witness F metadata matching the component's current geometry. */
-function frameMetadata(c: any): Record<string, unknown> {
+/** Frame-witness F metadata matching the component's current geometry. A
+ *  `mismatchCols` step mints a metadata cols value that can never match the
+ *  local target, for F-path gates that must keep waiting. */
+function frameMetadata(c: any, mismatchCols = false): Record<string, unknown> {
 	return {
 		protocol: 1,
-		cols: c.cols,
+		cols: mismatchCols ? c.cols + 40 : c.cols,
 		rows: c.rows,
 		mode: "fullscreen",
 		rendererEpoch: 1,
@@ -237,7 +241,9 @@ async function applySnapshot(h: Harness, step: Record<string, any>, state: Scena
 async function applyOutput(h: Harness, step: Record<string, any>, state: ScenarioState): Promise<void> {
 	const c = h.component as any;
 	const raw = typeof step.data === "string" ? step.data : typeof step.text === "string" ? step.text : "OUTPUT";
-	const data = step.syncClose === false ? raw : `\x1b[?2026h${raw}\x1b[?2026l`;
+	// openFrame: a ?2026 window that never closes — the parser stays mid-frame,
+	// the frameState gate must keep the attach waiting (spec §3.1 predicate 3).
+	const data = step.openFrame === true ? `\x1b[?2026h${raw}` : step.syncClose === false ? raw : `\x1b[?2026h${raw}\x1b[?2026l`;
 	state.lastSeq = typeof step.seq === "number" ? step.seq : state.lastSeq + 1;
 	c.onSocketData(`${JSON.stringify({ type: "output", seq: state.lastSeq, data })}\n`);
 	if (state.held.length === 0) await waitFor(() => c.parserWritesInFlight === 0, "output parse drain", 1000);
@@ -252,13 +258,25 @@ function applyRecord(h: Harness, step: Record<string, any>, state: ScenarioState
 	const frameId = typeof step.frameId === "number" ? step.frameId : seq;
 	const record =
 		marker === "F"
-			? { marker, seq, frameId, metadata: step.metadata ?? frameMetadata(c) }
+			? { marker, seq, frameId, metadata: step.metadata ?? frameMetadata(c, step.mismatchCols === true) }
 			: marker === "S"
 				? { marker, seq, frameId }
 				: { marker, seq, frameId, ...(typeof step.reason === "string" ? { reason: step.reason } : {}) };
 	// Real path: the attach client sanitizes and seq-checks the record, then
 	// noteViewProofRecord runs on the component.
 	c.onSocketData(`${JSON.stringify({ type: "view_proof", record })}\n`);
+}
+
+/** Same-baseline coverage update through the REAL client path: a
+ *  view_proof_state message is sanitized by the client and re-emitted as the
+ *  component's `viewProof` event — the wire shape for no-proof / output-gap /
+ *  runner coverage updates that arrive WITHOUT a new snapshot (which would
+ *  change the baseline identity). */
+function applyProofState(h: Harness, step: Record<string, any>): void {
+	const c = h.component as any;
+	const viewProof = snapshotViewProof(step, c);
+	if (viewProof === undefined) throw new Error("proofState requires a proof preset or object");
+	c.onSocketData(`${JSON.stringify({ type: "view_proof_state", viewProof })}\n`);
 }
 
 function applyGeometry(h: Harness, step: Record<string, any>): void {
@@ -350,6 +368,9 @@ function readout(h: Harness, state: ScenarioState): Record<string, unknown> {
 			elapsed: c.budgetElapsed ?? null,
 			timerPending: (c.attachRecoveryBudgetTimer ?? null) !== null,
 			deadline: dueRelative(c.attachRecoveryBudgetTimer ?? null),
+			// Attach-lifetime deadline timestamp (virtual or wall, per the
+			// injected clock) — the diagnostics field's readout twin.
+			deadlineAt: (c.attachStartedAt ?? null) === null ? null : c.attachStartedAt + ATTACH_RECOVERY_BUDGET_MS,
 		},
 		timers: {
 			settlePending: (c.attachSettleTimer ?? null) !== null,
@@ -373,10 +394,20 @@ function readout(h: Harness, state: ScenarioState): Record<string, unknown> {
 						baselineToken: committed.identity.baselineToken,
 						generation: committed.identity.generation,
 						rows: committed.rows.length,
+						source: committed.source ?? null,
+						sourceCols: committed.sourceCols ?? null,
+						sourceRows: committed.sourceRows ?? null,
+						contentKind: committed.contentKind ?? null,
 					},
 		committedViewValid: c.committedViewValid(),
 		committedPreview: committedPreview(committed),
 		latestViewProof: proof === null || proof === undefined ? null : { status: proof.status ?? null, reason: proof.reason ?? null },
+		// Issue #284 §3.1.1 facts: the last classification assembled for the
+		// policy and the sticky-invalid binding (bound baseline token; the
+		// effective sticky state is binding === current baselineToken).
+		proofStatus: c.lastProofStatus ?? null,
+		stickyInvalid: (c.proofInvalidatedBaselineToken ?? null) !== null && c.proofInvalidatedBaselineToken === c.baselineToken,
+		stickyBaseline: c.proofInvalidatedBaselineToken ?? null,
 		viewProofRecordCount: c.viewProofRecordCount,
 		lastSeq: c.attachClient.getLastSeq(),
 		receivedOutput: c.receivedOutput === true,
@@ -416,6 +447,9 @@ async function applyStep(h: Harness, step: Record<string, any>, state: ScenarioS
 			break;
 		case "record":
 			applyRecord(h, step, state);
+			break;
+		case "proofState":
+			applyProofState(h, step);
 			break;
 		case "geometry":
 			applyGeometry(h, step);

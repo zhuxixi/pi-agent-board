@@ -6,6 +6,7 @@ import { createConnection, type Socket } from "node:net";
 import type { Component, KeybindingsManager, RgbColor, TUI, TerminalColorScheme, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { resolveAttachDeleteKey } from "../core/attach-delete.mjs";
+import { classifyProofStatus } from "../core/attach-recovery.mjs";
 import { resolveAttachDetachChord } from "../core/attach-detach.mjs";
 import { createAttachScreenOwnerState, installAttachScreenOwnerObservers } from "../core/attach-screen-owner.mjs";
 import { createPtyKittyImages } from "../core/pty-kitty-images.mjs";
@@ -97,8 +98,9 @@ const ATTACH_HARD_TIMEOUT_MS = 2500;
  * elapses, a protocol attach with a safely committed view but no covering F
  * proof may publish degraded (spec §3.2; the policy wiring lands with T6 —
  * this constant only owns the timer fact). Ordinary output and reconnect
- * re-entry never reset or extend it (invariant I5). */
-const ATTACH_RECOVERY_BUDGET_MS = 250;
+ * re-entry never reset or extend it (invariant I5). Exported for the
+ * component harness's diagnostic readouts. */
+export const ATTACH_RECOVERY_BUDGET_MS = 250;
 /** Protocol-race guard for legacy jiggle arming (issue #91 phase 4): the
  * undecided window must not pulse the child before the snapshot probe
  * resolves — a resize-free attach is the protocol-mode contract. Invisible
@@ -222,6 +224,14 @@ interface CommittedView {
 	cursorHidden: boolean;
 	viewportTop: number | null;
 	proofSeq: number | null;
+	/** Issue #284 §3.1 predicate 7 facts, recorded at commit: which path
+	 *  captured the grid, the grid's ACTUAL dimensions (the parser size at
+	 *  commit — the readiness assembly must never re-read the current target
+	 *  here), and the locally closed completeness classification. */
+	source: "snapshot" | "sync-close";
+	sourceCols: number;
+	sourceRows: number;
+	contentKind: "complete" | "unknown";
 }
 
 /** Primitive cell snapshot used by committed rendering and interactions. */
@@ -422,6 +432,16 @@ export class PtyAttachComponent implements Component {
 	 *  restore) until detach/dispose; same-component reconnects and view-layer
 	 *  invalidations (resnapshot/reset/baseline change) leave it alone. */
 	private witnessLatched = false;
+	/** Issue #284 failure-fact layer (spec §3.1.1/I6): the baseline token an
+	 *  unrecovered invalid proof classification was recorded on. The effective
+	 *  sticky state is (token === baselineToken); only a covered classification
+	 *  on this baseline or a new baseline identity (replaceParser at an
+	 *  accepted snapshotReady) clears/rebinds it. Capability loss — which nulls
+	 *  latestViewProof — deliberately keeps it. */
+	private proofInvalidatedBaselineToken: number | null = null;
+	/** Last §3.1.1 classification assembled for the policy (diagnostics/readout). */
+	private lastProofStatus: "none" | "missing" | "invalid" | "covered" | null = null;
+	private lastProofStickyInvalid = false;
 	/** Last complete modern projection installed at a real ?2026l boundary. */
 	private committedView: CommittedView | null = null;
 	/** Display-only same-generation/geometry recovery view; never readiness. */
@@ -879,7 +899,7 @@ export class PtyAttachComponent implements Component {
 			// Legacy mode: no adoption and no interaction cleanup — a Ctrl+G handoff
 			// must not destroy selection/scroll state on the raw-buffer surface.
 		}
-		if (syncCloseMarker) this.commitCommittedView(term, epoch);
+		if (syncCloseMarker) this.commitCommittedView(term, epoch, "sync-close");
 	}
 
 	/** Reinstall the ownership observers on the current parser after a hydration
@@ -1208,14 +1228,12 @@ export class PtyAttachComponent implements Component {
 	}
 
 	/** The 2500 ms cap never forces a modern publish of an UNFINISHED frame. It
-	 * records an explicit expired/degraded wait; legacy keeps its old reveal.
-	 * Idle-session downgrade (post-#261 regression): when the cap fires with a
-	 * COMPLETE committed snapshot already hydrated, no pending geometry intent,
-	 * and the proof channel never covered this baseline (e.g. the child emitted
-	 * S and went idle, so viewProof stays unavailable/candidate-open forever),
-	 * reveal that complete runner-synthesized frame through the standard legacy
-	 * transition instead of waiting for a proof that cannot arrive. Empty
-	 * baselines and geometry-gated waits keep the original never-publish wait. */
+	 *  records an explicit expired wait and hands the decision to the readiness
+	 *  policy: the 250 ms recovery budget (armed once at attach start) has long
+	 *  elapsed by then, so the degraded chain alone decides whether a safely
+	 *  committed view may be revealed — the #265 idle-downgrade special case is
+	 *  deleted (issue #284 §3.2); the policy owns every reveal. Legacy keeps its
+	 *  old reveal. */
 	private handleAttachHardTimeout(waitToken = this.attachWaitToken): void {
 		if (waitToken !== this.attachWaitToken) return;
 		this.attachHardTimeout = null;
@@ -1230,15 +1248,7 @@ export class PtyAttachComponent implements Component {
 		this.deadlineState = "expired";
 		this.notReadyReason = this.attachMode === "protocol" ? "deadline-expired:waiting-for-complete-frame" : "deadline-expired:mode-undecided";
 		this.publishabilityState = "unknown";
-		const proof = this.latestViewProof as { status?: string } | null;
-		if (
-			this.committedView !== null &&
-			!this.resizeIntentRequired &&
-			(proof === null || proof.status !== "covered")
-		) {
-			this.finishAttachTransition();
-			return;
-		}
+		this.evaluateAttachReady();
 		this.scheduleRender();
 	}
 
@@ -1275,8 +1285,11 @@ export class PtyAttachComponent implements Component {
 	}
 
 	/** Snapshot the visible complete grid at a real close boundary. Only
-	 *  primitives are copied; no xterm BufferLine/Cell survives this call. */
-	private commitCommittedView(term: XtermLike, epoch: number): void {
+	 *  primitives are copied; no xterm BufferLine/Cell survives this call.
+	 *  `source` records which path captured the grid (spec §3.1 predicate 7):
+	 *  "snapshot" — the authoritative hydration write of a validated non-empty
+	 *  snapshot frame; "sync-close" — a locally parsed closed ?2026 sync frame. */
+	private commitCommittedView(term: XtermLike, epoch: number, source: "snapshot" | "sync-close"): void {
 		if (this.closed || this.term !== term || this.parserEpoch !== epoch) return;
 		if (!this.modernCommittedMode() || this.localHydrationState === "hydrating") return;
 		const height = this.bodyHeight();
@@ -1303,6 +1316,24 @@ export class PtyAttachComponent implements Component {
 			rows.push({ cells: new SnapshotLine(cells), kittyPrefix: kittyLines?.[lineIndex - start] ?? "" });
 		}
 		const cursor = projectPtyCursor(buf, start, height);
+		// The grid's actual dimensions at commit (duck-typed xterm read; the
+		// parser is kept at this.cols/this.rows, but the fact must come from the
+		// captured grid itself, never be re-derived from the current target at
+		// assembly time — spec §3.1 predicate 4).
+		const dims = term as { cols?: unknown; rows?: unknown };
+		const sourceCols = typeof dims.cols === "number" && dims.cols > 0 ? dims.cols : this.cols;
+		const sourceRows = typeof dims.rows === "number" && dims.rows > 0 ? dims.rows : this.rows;
+		// §3.1 predicate 7 (locally closed completeness only — no semantic
+		// boot/raw claim without an F): a snapshot commit is complete when the
+		// validated non-empty frame finished hydrating (this method early-returns
+		// while hydrating, and empty baselines never write a frame); a sync-close
+		// commit is closed by definition. Anything else fails closed to "unknown".
+		const contentKind: "complete" | "unknown" =
+			source === "snapshot"
+				? this.protocolBaselineState === "valid-content" && this.localHydrationState === "complete" ? "complete" : "unknown"
+				: source === "sync-close"
+					? "complete"
+					: "unknown";
 		this.committedView = {
 			identity: this.currentViewIdentity(),
 			start,
@@ -1312,11 +1343,19 @@ export class PtyAttachComponent implements Component {
 			cursorHidden: isPtyCursorHidden(term),
 			viewportTop: this.viewportTop,
 			proofSeq: null,
+			source,
+			sourceCols,
+			sourceRows,
+			contentKind,
 		};
 		this.recoveryView = null;
 		this.recoveryGeneration = null;
 		this.emptyResetPending = false;
 		if (this.connected) this.status = "attached";
+		// Issue #284 D4 rendezvous: a successful commit is a convergence point.
+		// A late snapshot arriving after the budget expired re-evaluates
+		// immediately instead of waiting for the next cap (spec D4).
+		this.evaluateAttachReady();
 	}
 
 	private captureRecoveryView(): void {
@@ -1469,9 +1508,34 @@ export class PtyAttachComponent implements Component {
 		}
 	}
 
-	/** Pure fact assembly for the accepted decideAttachPresentation gate. */
+	/** Derive proofStatus through the §3.1.1 pure classifier and manage the
+	 *  sticky failure fact (the component-side duty of spec §3.1.1): any
+	 *  invalid classification binds to the CURRENT baseline; only a covered
+	 *  classification on this baseline or a new baseline identity
+	 *  (replaceParser at an accepted snapshotReady) clears/rebinds it.
+	 *  Capability loss (latestViewProof = null) keeps the recorded fact. */
+	private classifyLatestProof(): "none" | "missing" | "invalid" | "covered" {
+		const stickyInvalid = this.proofInvalidatedBaselineToken === this.baselineToken;
+		const proofStatus = classifyProofStatus(this.latestViewProof as Record<string, unknown> | null, stickyInvalid);
+		this.lastProofStatus = proofStatus;
+		this.lastProofStickyInvalid = stickyInvalid;
+		if (proofStatus === "invalid") this.proofInvalidatedBaselineToken = this.baselineToken;
+		else if (proofStatus === "covered") this.proofInvalidatedBaselineToken = null;
+		return proofStatus;
+	}
+
+	/** Fact assembly for the accepted decideAttachPresentation gate. Issue #284
+	 *  extends the assembly with the recovery facts (spec §3.1): the policy —
+	 *  and only the policy — decides the committed-degraded publish; a timer
+	 *  fact alone never publishes. */
 	private evaluateAttachReady(): void {
-		if (!this.attaching || this.closed || this.attachMode !== "protocol" || !this.frameWitnessAvailable) return;
+		if (!this.attaching || this.closed || this.attachMode !== "protocol") return;
+		// A latched attach keeps evaluating after capability loss (I6): the
+		// committed presentation path — and with it the recovery facts — stays
+		// alive until detach/dispose. Never-latched/legacy sessions keep the
+		// legacy deadline path untouched.
+		if (!this.modernCommittedMode()) return;
+		const proofStatus = this.classifyLatestProof();
 		if (this.parserWritesInFlight > 0) return;
 		if (this.committedView === null) {
 			this.notReadyReason = "committed-view-missing";
@@ -1486,6 +1550,7 @@ export class PtyAttachComponent implements Component {
 				: this.localHydrationState === "hydrating"
 					? "hydrating"
 					: this.protocolBaselineState;
+		const committedView = this.committedView;
 		const decision = decideAttachPresentation({
 			closed: this.closed,
 			mode: this.attachMode,
@@ -1506,9 +1571,20 @@ export class PtyAttachComponent implements Component {
 			resizeIntentSatisfied: this.resizeIntentSatisfied,
 			intentId: this.resizeIntentId,
 			deadlineState: this.deadlineState,
+			// Issue #284 recovery facts (spec §3.1): plain facts recorded on the
+			// committed view and by the §3.1.1 classifier. Supplying them opts the
+			// protocol call into the degraded chain inside the policy.
+			witnessLatched: this.witnessLatched,
+			committedViewValid: this.committedViewValid(),
+			committedViewSource: committedView.source,
+			committedViewCols: committedView.sourceCols,
+			committedViewRows: committedView.sourceRows,
+			committedContentKind: committedView.contentKind,
+			proofStatus,
+			budgetElapsed: this.budgetElapsed,
 		});
 		this.notReadyReason = decision.action === "wait" ? decision.reason : null;
-		if (decision.action === "publish") {
+		if (decision.action === "publish" || decision.action === "publish-degraded") {
 			this.publishabilityState = "ready";
 			this.finishAttachTransition();
 		} else if (decision.action === "wait") {
@@ -2857,7 +2933,7 @@ export class PtyAttachComponent implements Component {
 					this.screenOwnerResyncPending = false;
 					this.resyncScreenOwnerAdapter(term, parserEpoch);
 				}
-				if (!this.parserSyncOpen) this.commitCommittedView(term, parserEpoch);
+				if (!this.parserSyncOpen) this.commitCommittedView(term, parserEpoch, "snapshot");
 			}
 			this.receivedOutput = true;
 				this.deferAttachSettle();
@@ -2958,6 +3034,8 @@ export class PtyAttachComponent implements Component {
 		// Issue #284 latch layer: the latch is attach-scoped — detach/dispose
 		// ends this attach; a new component re-observes the capability fresh.
 		this.witnessLatched = false;
+		// Same attach scope for the sticky failure fact (spec §3.1.1/I6).
+		this.proofInvalidatedBaselineToken = null;
 		this.clearGracefulSocketCloseTimer();
 		const socket = this.socket;
 		this.socket = null;

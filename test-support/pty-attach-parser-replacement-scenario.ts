@@ -749,7 +749,7 @@ async function run(): Promise<{ ok: boolean; checks: Check[] }> {
 		}
 	});
 
-	await check("deadline-expired idle proof-unavailable reveals the committed snapshot (legacy downgrade)", async () => {
+	await check("budget-expired idle proof-unavailable reveals the committed snapshot; the cap alone no longer publishes", async () => {
 		const h = harness();
 		const c = internals(h.component);
 		try {
@@ -768,13 +768,20 @@ async function run(): Promise<{ ok: boolean; checks: Check[] }> {
 				viewProofRecords: [],
 			});
 			c.startAttachSettle();
+			// Deterministic budget expiry: drop the real wall timer, keep the armed
+			// fact, and drive the same callback entry the timer invokes.
+			c.clearAttachRecoveryBudget();
 			await waitFor(() => c.localHydrationState === "complete" && c.committedView !== null, "idle snapshot hydrates and commits");
-			// Drive the same expiry entry the real 2500 ms cap timer invokes.
+			// Issue #284 §3.2: the 2500 ms cap is diagnostics-only now — it records
+			// the expired wait and re-evaluates, but never publishes by itself.
 			c.handleAttachHardTimeout(c.attachWaitToken);
-			assert(c.attaching === false, "deadline expiry reveals the complete snapshot instead of waiting forever");
+			assert(c.attaching === true, "the cap alone no longer publishes — the policy owns the reveal");
+			assert(c.deadlineState === "expired", "the cap still records the expired wait");
+			// Drive the same expiry entry the real 250 ms recovery budget timer invokes.
+			c.handleAttachRecoveryBudgetTimeout();
+			assert(c.attaching === false, "budget expiry reveals the complete snapshot instead of waiting forever");
 			const visible = h.component.render(80).join("\n");
 			assert(visible.includes("IDLE CURRENT SCREEN"), "the revealed surface is the committed snapshot content");
-			assert(c.deadlineState === "expired", "the wait is recorded as expired");
 			return { attaching: c.attaching, reason: c.notReadyReason };
 		} finally {
 			h.component.dispose();

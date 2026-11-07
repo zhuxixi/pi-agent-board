@@ -58,7 +58,7 @@ test("step 23b2c2: parser replacement, callback fences, empty reset and observer
 				"step28: old wait-identity deadline callbacks are no-ops; current expiry still fires",
 				"step28: close adapter cancels old frame but a later unrelated render still works",
 				"reporter capability loss restores the legacy attach deadline",
-				"deadline-expired idle proof-unavailable reveals the committed snapshot (legacy downgrade)",
+				"budget-expired idle proof-unavailable reveals the committed snapshot; the cap alone no longer publishes",
 				"deadline-expired empty baseline still never publishes (downgrade guard)",
 				"Kitty bridge is rebound and the old bridge disposed on parser replacement",
 				"committed view keeps Kitty images anchored when scrolled, header/footer clear",
