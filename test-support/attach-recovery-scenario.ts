@@ -79,6 +79,7 @@ function createHarness(clockStart: number) {
 	const clock = createVirtualClock(clockStart);
 	const terminalWrites: string[] = [];
 	let renders = 0;
+	const diagnostics: unknown[] = [];
 	const tuiTerminal = { rows: 26, cols: 80, columns: 80, write: (data: string) => terminalWrites.push(data) };
 	const tui = {
 		terminal: tuiTerminal,
@@ -90,8 +91,13 @@ function createHarness(clockStart: number) {
 		socketPath: "/no/such/attach-recovery-socket",
 		title: "attach-recovery",
 		clock: { now: clock.now, schedule: clock.schedule, clear: clock.clear },
+		// T7: collect the settle diagnostics so tests can assert the recorded
+		// recovery facts (numbers/finite enums only).
+		onDiagnostic: (event: unknown) => {
+			diagnostics.push(event);
+		},
 	});
-	return { clock, component, tuiTerminal, terminalWrites, renderCount: () => renders };
+	return { clock, component, tuiTerminal, terminalWrites, renderCount: () => renders, diagnostics };
 }
 
 type Harness = ReturnType<typeof createHarness>;
@@ -408,6 +414,9 @@ function readout(h: Harness, state: ScenarioState): Record<string, unknown> {
 		proofStatus: c.lastProofStatus ?? null,
 		stickyInvalid: (c.proofInvalidatedBaselineToken ?? null) !== null && c.proofInvalidatedBaselineToken === c.baselineToken,
 		stickyBaseline: c.proofInvalidatedBaselineToken ?? null,
+		// Issue #284 §3.4: which path settled this attach (null while waiting).
+		readyReason: c.readyReason ?? null,
+		diagnosticsCount: h.diagnostics.length,
 		viewProofRecordCount: c.viewProofRecordCount,
 		lastSeq: c.attachClient.getLastSeq(),
 		receivedOutput: c.receivedOutput === true,
@@ -512,6 +521,7 @@ async function runProgram(program: Record<string, any>): Promise<Record<string, 
 		clockStart,
 		steps,
 		final,
+		diagnostics: h.diagnostics,
 	};
 }
 

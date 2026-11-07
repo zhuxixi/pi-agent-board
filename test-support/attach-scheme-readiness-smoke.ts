@@ -20,14 +20,18 @@ function fixture() {
 	};
 	const attach = new PtyAttachComponent(tui as never, { fg: (_c, text) => text, bold: text => text }, {} as never, () => {}, {
 		socketPath: "/nonexistent/scheme-readiness.sock", title: "scheme-readiness",
-		onDiagnostic: event => diagnostics.push(event),
+		// This smoke models the settle-scheme probe only; the #284 recovery
+		// settle record (attach_settle_ready) is out of scope and filtered.
+		onDiagnostic: event => {
+			if ((event as { code?: string }).code === "attach_settle_scheme") diagnostics.push(event);
+		},
 	});
 	// SAFETY: These are the real private members; replace only socket delivery
 	// and seed a connected transport. Readiness always uses production parsing.
 	const internals = attach as unknown as {
 		send: (msg: { type: string; data?: string }) => void;
 		connected: boolean;
-		finishAttachTransition: () => void;
+		finishAttachTransition: (source: string) => void;
 		handleAttachEvent: (event: string, payload: unknown) => void;
 	};
 	internals.connected = true;
@@ -35,7 +39,7 @@ function fixture() {
 	return {
 		attach, sent, diagnostics,
 		settle: async () => {
-			internals.finishAttachTransition();
+			internals.finishAttachTransition("legacy-settle");
 			await new Promise(resolve => setImmediate(resolve));
 		},
 		fireScheme: (scheme: "light" | "dark") => listener?.(scheme),

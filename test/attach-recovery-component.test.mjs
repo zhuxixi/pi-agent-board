@@ -720,7 +720,7 @@ test("T6 f) the cap alone no longer publishes: an open sync frame keeps waiting 
 	const run = runScenario({
 		steps: [
 			{ op: "connect" },
-		{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "hello", witness: true, generation: "gen-1" },
 			{ op: "snapshot", proof: "unavailable-candidate-open", text: "CAP GATE" },
 			{ op: "output", text: "OPEN FRAME", openFrame: true },
 			{ op: "advance", ms: 250 },
@@ -736,4 +736,188 @@ test("T6 f) the cap alone no longer publishes: an open sync frame keeps waiting 
 	assert.equal(atCap.deadlineState, "expired");
 	assert.equal(atCap.notReadyReason, "deadline-expired:sync-open");
 	assert.equal(atCap.committedViewValid, true, "a committed view exists — only the policy blocks the reveal");
+});
+
+// Issue #284 T7: readyReason recording + settle diagnostics (spec §3.4/D5).
+// Every settle records which path revealed the surface; the diagnostic record
+// carries numbers and finite enums only — never tokens, screen text, keys, or
+// raw terminal data.
+
+test("T7 a) readyReason complete: a covered F settle records the policy publish", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "covered", text: "F SETTLE" },
+			{ op: "noop" },
+		],
+	});
+	assertScenarioOk("t7-complete", run);
+	const afterSnapshot = readouts(run.parsed)[2];
+	assert.equal(afterSnapshot.attaching, false, "the covered F settles before the budget");
+	assert.equal(afterSnapshot.settledAt, 0);
+	assert.equal(afterSnapshot.readyReason, "complete");
+	assert.equal(run.parsed.final.readyReason, "complete");
+	const settle = run.parsed.diagnostics.filter((event) => event.code === "attach_settle_ready");
+	assert.equal(settle.length, 1, "exactly one settle diagnostic");
+	assert.equal(settle[0].level, "info");
+	assert.equal(settle[0].details.readyReason, "complete");
+	assert.equal(settle[0].details.witnessLatched, true);
+	assert.equal(settle[0].details.budgetDeadline, 250, "the budget deadline is recorded as a timestamp");
+	assert.equal(settle[0].details.budgetElapsed, false);
+	assert.equal(settle[0].details.proofStatus, "covered");
+	assert.equal(settle[0].details.committedView.source, "snapshot");
+	assert.equal(settle[0].details.latestViewProof.status, "covered");
+	assert.equal(settle[0].details.latestViewProof.reason, "exact-proof");
+});
+
+test("T7 b) readyReason committed-degraded: the budget settle records the recovery facts", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "none", text: "QUIET BASE" },
+			{ op: "output", text: "SYNC FRAME", syncClose: true },
+			{ op: "record", marker: "S" },
+			{ op: "advance", ms: 250 },
+		],
+	});
+	assertScenarioOk("t7-degraded", run);
+	const at250 = readouts(run.parsed).at(-1);
+	assert.equal(at250.attaching, false);
+	assert.equal(at250.settledAt, 250);
+	assert.equal(at250.readyReason, "committed-degraded");
+	const settle = run.parsed.diagnostics.filter((event) => event.code === "attach_settle_ready");
+	assert.equal(settle.length, 1);
+	const details = settle[0].details;
+	assert.equal(details.readyReason, "committed-degraded");
+	assert.equal(details.notReadyReason, null, "notReadyReason keeps its post-settle null semantics");
+	assert.equal(details.publishabilityState, "ready");
+	assert.equal(details.deadlineState, "pending");
+	assert.equal(details.witnessLatched, true);
+	assert.equal(details.budgetDeadline, 250);
+	assert.equal(details.budgetElapsed, true);
+	assert.equal(details.proofStatus, "missing");
+	assert.equal(details.proofStickyInvalid, false);
+	assert.equal(details.committedView.connectionToken, 1);
+	assert.equal(details.committedView.baselineToken, 1);
+	assert.equal(details.committedView.geometryRevision, 0);
+	assert.equal(details.committedView.source, "sync-close");
+	assert.equal(details.committedView.sourceCols, 80);
+	assert.equal(details.committedView.sourceRows, 24);
+	assert.equal(details.committedView.contentKind, "complete");
+	assert.equal(details.latestViewProof.status, "unknown");
+	assert.equal(details.latestViewProof.reason, "candidate-open");
+});
+
+test("T7 c) readyReason legacy-settle: the legacy settle timeout records its reveal", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "mode", value: "legacy" },
+			{ op: "advance", ms: 249 },
+			{ op: "advance", ms: 1 },
+		],
+	});
+	assertScenarioOk("t7-legacy-settle", run);
+	const at250 = readouts(run.parsed).at(-1);
+	assert.equal(at250.attaching, false);
+	assert.equal(at250.settledAt, 250);
+	assert.equal(at250.readyReason, "legacy-settle");
+	const settle = run.parsed.diagnostics.filter((event) => event.code === "attach_settle_ready");
+	assert.equal(settle.length, 1);
+	assert.equal(settle[0].details.readyReason, "legacy-settle");
+	assert.equal(settle[0].details.witnessLatched, false, "a legacy settle has no witness facts");
+	assert.equal(settle[0].details.proofStatus, null);
+	assert.equal(settle[0].details.committedView, null);
+	assert.equal(typeof settle[0].details.budgetDeadline, "number");
+});
+
+test("T7 d) readyReason legacy-cap: output-deferred legacy settle reveals at the cap", () => {
+	const steps = [
+		{ op: "connect" },
+		{ op: "mode", value: "legacy" },
+	];
+	// Each output re-defers the 250ms settle window; the 2500ms cap fires while
+	// a settle timer is still pending, so only the cap can reveal.
+	for (let index = 1; index <= 12; index += 1) {
+		steps.push({ op: "advance", ms: 200 });
+		steps.push({ op: "output", text: `KEEP-${index}` });
+	}
+	steps.push({ op: "advance", ms: 100 });
+	const run = runScenario({ steps });
+	assertScenarioOk("t7-legacy-cap", run);
+	const final = readouts(run.parsed).at(-1);
+	assert.equal(final.attaching, false);
+	assert.equal(final.settledAt, 2500);
+	assert.equal(final.readyReason, "legacy-cap");
+	const settle = run.parsed.diagnostics.filter((event) => event.code === "attach_settle_ready");
+	assert.equal(settle.length, 1);
+	assert.equal(settle[0].details.readyReason, "legacy-cap");
+});
+
+test("T7 e) settle diagnostics contain numbers and finite enums only", () => {
+	const runs = [
+		runScenario({
+			steps: [
+				{ op: "connect" },
+				{ op: "hello", witness: true, generation: "gen-1" },
+				{ op: "snapshot", proof: "covered", text: "SCREEN TEXT MUST NOT LEAK" },
+				{ op: "noop" },
+			],
+		}),
+		runScenario({
+			steps: [
+				{ op: "connect" },
+				{ op: "hello", witness: true, generation: "gen-1" },
+				{ op: "snapshot", proof: "none", text: "DEGRADED SCREEN TEXT" },
+				{ op: "advance", ms: 250 },
+			],
+		}),
+		runScenario({
+			steps: [
+				{ op: "connect" },
+				{ op: "mode", value: "legacy" },
+				{ op: "advance", ms: 250 },
+			],
+		}),
+	];
+	for (const run of runs) {
+		assertScenarioOk("t7-enum-only", run);
+		// The recovery settle records are the T7 scope; the pre-existing settle
+		// scheme probe patches (probeApi outcomes, color reports) keep their own
+		// shape and are filtered out here.
+		const settleEvents = run.parsed.diagnostics.filter((event) => event.code === "attach_settle_ready");
+		assert.ok(settleEvents.length >= 1, "each settling scenario recorded a recovery diagnostic");
+		for (const event of settleEvents) {
+			assert.equal(event.source, "attach");
+			const strings = [];
+			const walk = (value) => {
+				if (value === null || typeof value === "boolean") return;
+				if (typeof value === "number") {
+					assert.ok(Number.isFinite(value), "diagnostic numbers are finite");
+					return;
+				}
+				if (typeof value === "string") {
+					strings.push(value);
+					return;
+				}
+				if (Array.isArray(value)) {
+					for (const item of value) walk(item);
+					return;
+				}
+				if (value && typeof value === "object") {
+					for (const item of Object.values(value)) walk(item);
+					return;
+				}
+				assert.fail(`unsupported diagnostic leaf: ${String(value)}`);
+			};
+			walk(event.details);
+			for (const text of strings) {
+				// Finite enums and policy reason strings are lowercase identifier
+				// shapes — screen text, terminal data, and tokens never are.
+				assert.match(text, /^[a-z][a-z0-9:.-]*$/, `non-enum string leaked into diagnostics: ${text}`);
+			}
+		}
+	}
 });

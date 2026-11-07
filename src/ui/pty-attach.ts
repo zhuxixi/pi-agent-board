@@ -48,12 +48,51 @@ export interface AttachSettleDiagnosticPatch {
 	details: { probeApi?: string; outcome: string; report?: string; late?: boolean };
 }
 
+/** Issue #284 §3.4: which path settled this attach (recorded as readyReason). */
+export type AttachReadyReason = "complete" | "committed-degraded" | "legacy-settle" | "legacy-cap";
+
+/** Issue #284 §3.4/D5: recovery facts recorded at attach settle. Numbers and
+ *  finite enums only — never tokens, screen text, keys, or raw terminal data.
+ *  The committedView identity keeps the numeric axes the publish fence uses;
+ *  the wire generation id and the parser object are deliberately excluded as
+ *  non-numeric identity axes. */
+export interface AttachRecoveryFacts {
+	readyReason: AttachReadyReason;
+	notReadyReason: string | null;
+	publishabilityState: string;
+	deadlineState: string;
+	witnessLatched: boolean;
+	budgetDeadline: number;
+	budgetElapsed: boolean;
+	proofStatus: string | null;
+	proofStickyInvalid: boolean;
+	committedView: {
+		connectionToken: number;
+		baselineToken: number;
+		geometryRevision: number;
+		source: string;
+		sourceCols: number;
+		sourceRows: number;
+		contentKind: string;
+	} | null;
+	latestViewProof: { status: string | null; reason: string | null } | null;
+}
+
+/** Diagnostic patch emitted at attach settle with the #284 recovery facts. */
+export interface AttachRecoveryDiagnosticPatch {
+	source: string;
+	level: "info";
+	code: "attach_settle_ready";
+	message: string;
+	details: AttachRecoveryFacts;
+}
+
 export interface PtyAttachOptions {
 	socketPath: string;
 	screenLogPath?: string;
 	title: string;
 	/** Issue #161: receives settle-scheme diagnostic patches. Default: no-op. */
-	onDiagnostic?: (event: AttachSettleDiagnosticPatch) => void;
+	onDiagnostic?: (event: AttachSettleDiagnosticPatch | AttachRecoveryDiagnosticPatch) => void;
 	/** Issue #284: injectable clock for attach-lifecycle deadlines. The default
 	 *  (host clock + global timers) keeps the existing behavior untouched; the
 	 *  component harness injects a virtual time source and timer queue so the
@@ -442,6 +481,9 @@ export class PtyAttachComponent implements Component {
 	/** Last §3.1.1 classification assembled for the policy (diagnostics/readout). */
 	private lastProofStatus: "none" | "missing" | "invalid" | "covered" | null = null;
 	private lastProofStickyInvalid = false;
+	/** Issue #284 §3.4: which path settled this attach; null while still
+	 *  waiting (the wait reason stays in notReadyReason, semantics unchanged). */
+	private readyReason: AttachReadyReason | null = null;
 	/** Last complete modern projection installed at a real ?2026l boundary. */
 	private committedView: CommittedView | null = null;
 	/** Display-only same-generation/geometry recovery view; never readiness. */
@@ -1224,7 +1266,7 @@ export class PtyAttachComponent implements Component {
 		// keeps the committed path (issue #284 I6), so this timer may not consume
 		// the transition for it.
 		const legacyCompatible = this.attachMode === "legacy" || (this.attachMode === "protocol" && !this.modernCommittedMode());
-		if (legacyCompatible) this.finishAttachTransition();
+		if (legacyCompatible) this.finishAttachTransition("legacy-settle");
 	}
 
 	/** The 2500 ms cap never forces a modern publish of an UNFINISHED frame. It
@@ -1242,7 +1284,7 @@ export class PtyAttachComponent implements Component {
 		// back to the legacy reveal branch (issue #284 I6).
 		const legacyCompatible = this.attachMode === "legacy" || (this.attachMode === "protocol" && !this.modernCommittedMode());
 		if (legacyCompatible) {
-			this.finishAttachTransition();
+			this.finishAttachTransition("legacy-cap");
 			return;
 		}
 		this.deadlineState = "expired";
@@ -1258,7 +1300,7 @@ export class PtyAttachComponent implements Component {
 		if (!this.attaching || this.closed) return;
 		const now = this.clock.now();
 		if (now - this.attachStartedAt >= ATTACH_HARD_TIMEOUT_MS) {
-			this.finishAttachTransition();
+			this.finishAttachTransition("legacy-cap");
 			return;
 		}
 		const settleBase = this.lastOutputAt > 0 ? this.lastOutputAt : this.attachStartedAt;
@@ -1584,15 +1626,53 @@ export class PtyAttachComponent implements Component {
 			budgetElapsed: this.budgetElapsed,
 		});
 		this.notReadyReason = decision.action === "wait" ? decision.reason : null;
-		if (decision.action === "publish" || decision.action === "publish-degraded") {
+		if (decision.action === "publish") {
 			this.publishabilityState = "ready";
-			this.finishAttachTransition();
+			this.finishAttachTransition("complete");
+		} else if (decision.action === "publish-degraded") {
+			this.publishabilityState = "ready";
+			this.finishAttachTransition("committed-degraded");
 		} else if (decision.action === "wait") {
 			this.publishabilityState = this.deadlineState === "expired" ? "unknown" : "wait";
 		}
 	}
 
-	private finishAttachTransition(): void {
+	/** Issue #284 §3.4/D5: the settle record — numbers and finite enums only
+	 *  (see AttachRecoveryFacts). Captured inside finishAttachTransition before
+	 *  the wait state resets, so it keeps the LAST wait reason. */
+	private buildSettleDiagnostic(source: AttachReadyReason): AttachRecoveryDiagnosticPatch {
+		const committedView = this.committedView;
+		const proof = this.latestViewProof as { status?: string | null; reason?: string | null } | null;
+		return {
+			source: "attach",
+			level: "info",
+			code: "attach_settle_ready",
+			message: `attach settle ready via ${source}`,
+			details: {
+				readyReason: source,
+				notReadyReason: this.notReadyReason,
+				publishabilityState: this.publishabilityState,
+				deadlineState: this.deadlineState,
+				witnessLatched: this.witnessLatched,
+				budgetDeadline: this.attachStartedAt + ATTACH_RECOVERY_BUDGET_MS,
+				budgetElapsed: this.budgetElapsed,
+				proofStatus: this.lastProofStatus,
+				proofStickyInvalid: this.lastProofStickyInvalid,
+				committedView: committedView === null ? null : {
+					connectionToken: committedView.identity.connectionToken,
+					baselineToken: committedView.identity.baselineToken,
+					geometryRevision: committedView.identity.geometryRevision,
+					source: committedView.source,
+					sourceCols: committedView.sourceCols,
+					sourceRows: committedView.sourceRows,
+					contentKind: committedView.contentKind,
+				},
+				latestViewProof: proof === null || typeof proof !== "object" ? null : { status: proof.status ?? null, reason: proof.reason ?? null },
+			},
+		};
+	}
+
+	private finishAttachTransition(source: AttachReadyReason): void {
 		if (!this.attaching || this.closed) return;
 		// Note: jiggle retry chain is NOT cancelled here — it survives the settle
 		// transition because any successful jiggle triggers a fullRender which emits
@@ -1603,9 +1683,15 @@ export class PtyAttachComponent implements Component {
 		// selection) is acceptable in exchange for self-healing. When the child is
 		// healthy, the very first jiggle's fullRender is detected and the chain
 		// stops before settle ends, so no post-settle jiggle fires at all.
+		// Issue #284 §3.4: record which path settled BEFORE the wait state resets
+		// (the diagnostic keeps the last wait reason; notReadyReason semantics are
+		// unchanged — null once settled).
+		const settleDiagnostic = this.buildSettleDiagnostic(source);
 		this.attaching = false;
 		this.publishabilityState = "ready";
+		this.readyReason = source;
 		this.notReadyReason = null;
+		this.opts.onDiagnostic?.(settleDiagnostic);
 		this.firstAttachSideEffectsApplied = true;
 		if (this.attachSettleTimer !== null) {
 			this.clock.clear(this.attachSettleTimer);

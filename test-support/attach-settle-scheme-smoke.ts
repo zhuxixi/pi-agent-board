@@ -34,17 +34,21 @@ async function runSettle(tui: Record<string, unknown>, opts: { env?: Record<stri
 		attach = new PtyAttachComponent(tui as never, theme as never, {} as never, () => {}, {
 			socketPath: "/nonexistent/settle-scheme.sock",
 			title: "settle-scheme",
-			onDiagnostic: (event) => captures.diagnostics.push(event),
+			onDiagnostic: (event) => {
+				// This smoke models the settle-scheme probe only; the #284 recovery
+				// settle record (attach_settle_ready) is out of scope and filtered.
+				if ((event as { code?: string }).code === "attach_settle_scheme") captures.diagnostics.push(event);
+			},
 		});
 		// SAFETY: Replace only the real component's transport and connection state.
-		const internals = attach as unknown as { send: (m: { type: string; data?: string }) => void; finishAttachTransition: () => void; connected: boolean };
+		const internals = attach as unknown as { send: (m: { type: string; data?: string }) => void; finishAttachTransition: (source: string) => void; connected: boolean };
 		internals.send = (m) => { if (m?.type === "input" && m.data) captures.sent.push(m.data); };
 		// Production settle runs after the control socket connected; the smoke
 		// never connects (fake socket), so reflect the real delivery state here.
 		// The disconnected corner has its own scenario below.
 		internals.connected = true;
 		await feedAttachOutput(attach, "\x1b[?2004h", "snapshot");
-		internals.finishAttachTransition();
+		internals.finishAttachTransition("legacy-settle");
 		await new Promise((r) => setImmediate(r));
 		return captures;
 	} finally {
@@ -79,15 +83,19 @@ async function runLateScenario(kind: "same" | "different" | "afterTimeout" | "cl
 		attach = new PtyAttachComponent(tui as never, theme as never, {} as never, () => {}, {
 			socketPath: "/nonexistent/settle-scheme-late.sock",
 			title: "settle-scheme-late",
-			onDiagnostic: (event) => captures.diagnostics.push(event),
+			onDiagnostic: (event) => {
+				// This smoke models the settle-scheme probe only; the #284 recovery
+				// settle record (attach_settle_ready) is out of scope and filtered.
+				if ((event as { code?: string }).code === "attach_settle_scheme") captures.diagnostics.push(event);
+			},
 		});
 		// SAFETY: Replace only the real component's transport and connection state.
-		const internals = attach as unknown as { send: (m: { type: string; data?: string }) => void; finishAttachTransition: () => void; connected: boolean };
+		const internals = attach as unknown as { send: (m: { type: string; data?: string }) => void; finishAttachTransition: (source: string) => void; connected: boolean };
 		internals.send = (m) => { if (m?.type === "input" && m.data) captures.sent.push(m.data); };
 		// Same as runSettle: late scenarios deliver to a raw-mode child.
 		internals.connected = true;
 		await feedAttachOutput(attach, "\x1b[?2004h", "snapshot");
-		internals.finishAttachTransition();
+		internals.finishAttachTransition("legacy-settle");
 		await new Promise((r) => setImmediate(r));
 		// "closed" drops the late reply (already-delivered 997;2 stays).
 		// SAFETY: Invoke the component's real close path to test late-reply teardown.
@@ -150,13 +158,17 @@ out.lateClosed = dump(await runLateScenario("closed"));
 		attach = new PtyAttachComponent(tui as never, theme as never, {} as never, () => {}, {
 			socketPath: "/nonexistent/settle-scheme-disc.sock",
 			title: "settle-scheme-disc",
-			onDiagnostic: (event) => captures.diagnostics.push(event),
+			onDiagnostic: (event) => {
+				// This smoke models the settle-scheme probe only; the #284 recovery
+				// settle record (attach_settle_ready) is out of scope and filtered.
+				if ((event as { code?: string }).code === "attach_settle_scheme") captures.diagnostics.push(event);
+			},
 		});
 		// SAFETY: Replace only the real component's transport; keep it disconnected.
-		const internals = attach as unknown as { send: (m: { type: string; data?: string }) => void; finishAttachTransition: () => void };
+		const internals = attach as unknown as { send: (m: { type: string; data?: string }) => void; finishAttachTransition: (source: string) => void };
 		internals.send = (m) => { if (m?.type === "input" && m.data) captures.sent.push(m.data); };
 		// connected stays false — the corner under test.
-		internals.finishAttachTransition();
+		internals.finishAttachTransition("legacy-settle");
 		await new Promise((r) => setImmediate(r));
 		late?.({ background: LIGHT });
 		await new Promise((r) => setImmediate(r));
