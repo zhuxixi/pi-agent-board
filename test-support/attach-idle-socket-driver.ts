@@ -16,6 +16,23 @@
 //            shape) instead of only snapshot coverage;
 //   argv[6] budget gate   — written once the 250ms recovery budget elapsed;
 //            drives post-budget closed frames for the continuous-stream case.
+//
+// Review fix (issue #284, live-S ordering race): the snapshot gate alone could
+// not order the held S against the publish — the initial no-proof snapshot is
+// itself degradable, and on a loaded runner hydration can complete AFTER the
+// 250ms budget, so the late-snapshot commit hook published before the child's
+// S arrived and the live-record assertions raced (loaded-CI flake). argv[7]
+// selects a deterministic settle hold: the driver wraps the component's
+// readiness convergence point (evaluateAttachReady — the sole protocol
+// publish decision) and parks every evaluation until the live record fact is
+// observably present, so the S is guaranteed to arrive while still attaching
+// and before any publish; the budget then degrades on the live candidate-open
+// shape:
+//   "live-s"    — release once the live S record arrived (record count >= 1);
+//   "sync-open" — release once the child's post-S sync window is observably
+//                 open (hydration complete + parserSyncOpen, which also rules
+//                 out the snapshot frame's own wrapper window); the frameState
+//                 gate then holds every reveal until the first closed frame.
 import { ATTACH_RECOVERY_BUDGET_MS, PtyAttachComponent } from "../src/ui/pty-attach.ts";
 import { existsSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
@@ -23,8 +40,13 @@ import { createConnection } from "node:net";
 const socketPath = process.argv[2];
 const timeoutMs = Number(process.argv[3] ?? 8000);
 const needle = process.argv[4] ?? "IDLE-E2E VISIBLE LINE";
-const snapshotGatePath = process.argv[5] ?? null;
-const budgetGatePath = process.argv[6] ?? null;
+/** Optional argv slots arrive as missing (undefined) or explicit empty strings
+ *  when later positional args are present — both mean "no gate". */
+const optionalArg = (value: string | undefined): string | null =>
+	typeof value === "string" && value.length > 0 ? value : null;
+const snapshotGatePath = optionalArg(process.argv[5]);
+const budgetGatePath = optionalArg(process.argv[6]);
+const settleGateMode = optionalArg(process.argv[7]);
 console.error(`driver diag: exists=${existsSync(socketPath)} path=${socketPath}`);
 await new Promise<void>((r) => {
 	const s = createConnection(socketPath);
@@ -56,11 +78,30 @@ const internals = component as unknown as {
 	geometryRevision: number; resizeIntentRequired: boolean; resizeIntentId: number;
 	cols: number; rows: number; viewProofRecordCount: number; protocolBaselineState: string;
 	latestViewProof: { status?: string; reason?: string } | null;
+	parserSyncOpen: boolean; localHydrationState: string; evaluateAttachReady(): void;
 	committedView: {
 		source?: string; sourceCols?: number; sourceRows?: number; contentKind?: string;
 		identity?: { targetCols?: number; targetRows?: number; geometryRevision?: number };
 	} | null;
 };
+// Deterministic settle hold (see the header comment): parked evaluations are
+// dropped — they could only have produced a wait or the premature publish this
+// gate exists to suppress — and the convergence point runs normally once the
+// live record fact is present (the S's own evaluation is the first through).
+if (settleGateMode !== null) {
+	const originalEvaluate = internals.evaluateAttachReady.bind(component);
+	let gateOpen = false;
+	internals.evaluateAttachReady = () => {
+		if (!gateOpen) {
+			const liveSArrived = internals.viewProofRecordCount >= 1;
+			const childWindowOpen = settleGateMode !== "sync-open" ||
+				(internals.localHydrationState === "complete" && internals.parserSyncOpen === true);
+			if (!liveSArrived || !childWindowOpen) return;
+			gateOpen = true;
+		}
+		originalEvaluate();
+	};
+}
 const started = Date.now();
 let settledMs: number | null = null;
 let visible = "";

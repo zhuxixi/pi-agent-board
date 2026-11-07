@@ -311,9 +311,18 @@ for (const legacy of [false, true]) {
 		// second S would be a candidate-already-open protocol error, so the
 		// scenario is exactly one S-then-idle). The settle must happen via the
 		// 250ms recovery budget on the EXTERNAL wall clock — long before the
-		// 2500ms cap — instead of waiting forever. Flake governance is the
-		// deterministic poll loop in the driver (poll-to-settle), never loosened
-		// thresholds.
+		// 2500ms cap — instead of waiting forever.
+		//
+		// This is THE live-reporter-S attach case: a real child-emitted S marker
+		// drives a real component attach to its settle end-to-end. (The 23b2b
+		// viewProof case below exercises the wire-level record
+		// delivery/replay/coverage semantics without a component attach; the two
+		// purposes are complementary, not duplicates.) Flake governance is
+		// deterministic: the poll-to-settle loop below plus the "live-s" settle
+		// hold — the driver parks the readiness convergence point until the live
+		// S record has actually arrived, so a loaded runner can never let the
+		// late-snapshot commit hook publish before the S (loaded-CI race, review
+		// fix) — never loosened thresholds.
 		const childScript = `
 const fs = require("node:fs");
 const file = process.argv[1];
@@ -356,6 +365,8 @@ setInterval(() => {
 			"8000",
 			"IDLE-E2E VISIBLE LINE",
 			`${tokenFile}.go1`,
+			"",
+			"live-s",
 		], { encoding: "utf8", timeout: 20000 });
 		const driverLine = (driver.stdout ?? "").trim().split("\n").filter(Boolean).at(-1);
 		const driven = driverLine ? JSON.parse(driverLine) : null;
@@ -367,7 +378,10 @@ setInterval(() => {
 		assert.equal(driven?.settleDiagnostic?.proofStatus, "missing", "the candidate-open coverage is degradable missing evidence");
 		assert.equal(driven?.settleDiagnostic?.latestViewProof?.status, "unknown", "the LIVE record shape (noteViewProofRecord) drove the coverage at settle");
 		assert.equal(driven?.settleDiagnostic?.latestViewProof?.reason, "candidate-open");
-		assert.ok(typeof driven?.settledMs === "number" && driven.settledMs >= 250, `the budget path cannot settle before 250ms (got ${driven?.settledMs})`);
+		// Review fix (flaky wall clock): settledMs is measured from the driver
+		// loop start while the budget deadline starts at the component's earlier
+		// attachStartedAt — compare against the SAME epoch instead.
+		assert.ok(typeof driven?.budget.settledAfterBudgetMs === "number" && driven.budget.settledAfterBudgetMs >= 0, `the budget path cannot settle before its deadline (got ${driven?.budget.settledAfterBudgetMs}ms after)`);
 		assert.ok(driven.settledMs < 1500, `external wall-clock first paint < 1500ms scheduling headroom (got ${driven.settledMs})`);
 		assert.equal(driven?.showsContent, true, `the revealed surface shows the committed model content (${JSON.stringify(driven)})`);
 		assert.ok((driven?.proof.recordCountAtSettle ?? 0) >= 1, "a real S record arrived live through the viewProof socket path before the settle");
@@ -453,7 +467,10 @@ for (const legacy of [false, true]) {
 		// and only after the budget elapsed (gate .go2) streams complete frames
 		// that are never proven. The first post-budget closed frame is the
 		// publish boundary; the revealed content must be a streamed frame, not
-		// the base snapshot.
+		// the base snapshot. The "sync-open" settle hold parks the readiness
+		// convergence point until the child's post-S window is observably open,
+		// so a loaded runner can never publish the degradable base snapshot
+		// before the S/open-frame phase begins (review fix).
 		const childScript = `
 const fs = require("node:fs");
 const file = process.argv[1];
@@ -510,6 +527,7 @@ setInterval(() => {
 			"STREAM-E2E FRAME",
 			`${tokenFile}.go1`,
 			`${tokenFile}.go2`,
+			"sync-open",
 		], { encoding: "utf8", timeout: 20000 });
 		const driverLine = (driver.stdout ?? "").trim().split("\n").filter(Boolean).at(-1);
 		const driven = driverLine ? JSON.parse(driverLine) : null;
@@ -518,7 +536,9 @@ setInterval(() => {
 		assert.equal(driven?.readyReason, "committed-degraded");
 		assert.equal(driven?.settleDiagnostic?.budgetElapsed, true, "the publish happened after the budget elapsed");
 		assert.equal(driven?.settleDiagnostic?.deadlineState, "pending", "no 2500ms cap wait");
-		assert.ok(typeof driven?.settledMs === "number" && driven.settledMs >= 250, `the open frame held the reveal past the budget (got ${driven?.settledMs})`);
+		// Review fix (flaky wall clock): compare settle against the budget
+		// deadline's own epoch (attachStartedAt), not the driver loop start.
+		assert.ok(typeof driven?.budget.settledAfterBudgetMs === "number" && driven.budget.settledAfterBudgetMs >= 0, `the open frame held the reveal past the budget (got ${driven?.budget.settledAfterBudgetMs}ms after)`);
 		assert.ok(driven.settledMs < 1500, `external wall-clock first paint < 1500ms (got ${driven.settledMs})`);
 		assert.equal(driven?.showsContent, true, `the reveal is a post-budget closed frame, not the base snapshot (${JSON.stringify(driven)})`);
 		assert.equal(driven?.geometry.committedSource?.source, "sync-close", "the published view is the locally closed streamed frame");
@@ -653,6 +673,11 @@ test("23b1 trailing fix: a pending marker-family tail is never forwarded on repl
 for (const legacy of [false, true]) {
 	const label = legacy ? "legacy main" : "owned main";
 	test(`23b2b viewProof (${label}): opt-in live/capture/replay records, coverage and replacement reset`, async (t) => {
+		// Wire-level counterpart to the S-then-idle attach case above: this case
+		// asserts the runner's record delivery/replay/coverage/replacement
+		// semantics on the socket (S/F/A ordering, seq binding, replacement
+		// resets) without driving a component attach; the S-then-idle case is
+		// the one that settles a real attach from a real reporter-emitted S.
 		const { root, viewId, instanceId, socketPath, socket, subscriberMessages, tokenFile, messages } = await startHost(t, { legacy, script: VIEW_PROOF_SCRIPT });
 
 		const live = createConnection(socketPath);

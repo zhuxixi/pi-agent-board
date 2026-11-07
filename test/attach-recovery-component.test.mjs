@@ -51,7 +51,9 @@ test("T3 smoke: injected clock keeps legacy settle at the ATTACH_SETTLE_MS bound
 	assert.equal(at249.timers.settlePending, true);
 	assert.equal(at250.attaching, false, "settle fires at exactly the injected 250ms boundary");
 	assert.equal(at250.settledAt, 250);
-	assert.ok(run.parsed.wallMs < 200, `settle ran on virtual, not wall, clock (wall ${run.parsed.wallMs}ms)`);
+	// No wall-clock bound here (review fix): the virtual-time boundary
+	// assertions above already prove the deadline math runs on the injected
+	// clock, and a wallMs threshold only added loaded-machine flake.
 });
 
 test("T3 primitives: real snapshot/capability path commits a view and reports proof facts", () => {
@@ -609,6 +611,7 @@ test("T6 b) sticky invalid survives live S, no-proof, and capability loss; only 
 	const [afterSnapshot, at250, afterS, afterNoProof, afterLoss, atCap, afterF] = readouts(coveredRun.parsed).slice(2);
 	assert.equal(afterSnapshot.proofStatus, "invalid", "an output-gap coverage classifies invalid (fail-closed)");
 	assert.equal(afterSnapshot.stickyInvalid, true, "the invalid fact is sticky on the current baseline");
+	assert.equal(afterSnapshot.lastProofStickyInvalid, true, "the diagnostic field records the invalidation transition (false→true) post-update");
 	assert.equal(afterSnapshot.attaching, true);
 	assert.equal(at250.attaching, true, "budget expiry cannot publish over a sticky invalid fact");
 	assert.equal(at250.budget.elapsed, true);
@@ -631,6 +634,7 @@ test("T6 b) sticky invalid survives live S, no-proof, and capability loss; only 
 	assert.equal(afterF.attaching, false, "a real F record on the current baseline recovers the block");
 	assert.equal(afterF.proofStatus, "covered");
 	assert.equal(afterF.stickyInvalid, false);
+	assert.equal(afterF.lastProofStickyInvalid, false, "the diagnostic field records the covered recovery (true→false) through the publish path");
 	assert.equal(afterF.stickyBaseline, null, "covered is the only in-baseline clear of the sticky fact");
 	assert.equal(afterF.settledAt, 2500);
 
@@ -860,8 +864,12 @@ test("T7 b) readyReason committed-degraded: the budget settle records the recove
 	assert.equal(details.budgetElapsed, true);
 	assert.equal(details.proofStatus, "missing");
 	assert.equal(details.proofStickyInvalid, false);
-	assert.equal(details.committedView.connectionToken, 1);
-	assert.equal(details.committedView.baselineToken, 1);
+	// Review hardening (token/enum hygiene): the settle payload records numeric
+	// identity facts only — the parser generation and geometry revision — and
+	// never the connection/baseline tokens.
+	assert.equal(details.committedView.generation, 2, "the numeric parser generation is the recorded identity fact (the snapshot's replaceParser advanced the epoch to 2)");
+	assert.equal(Object.hasOwn(details.committedView, "connectionToken"), false, "connectionToken never reaches the diagnostic payload");
+	assert.equal(Object.hasOwn(details.committedView, "baselineToken"), false, "baselineToken never reaches the diagnostic payload");
 	assert.equal(details.committedView.geometryRevision, 0);
 	assert.equal(details.committedView.source, "sync-close");
 	assert.equal(details.committedView.sourceCols, 80);
@@ -981,6 +989,34 @@ test("T7 e) settle diagnostics contain numbers and finite enums only", () => {
 			}
 		}
 	}
+});
+
+test("T7 f) unrecognized wire proof pairs map to the finite unrecognized enum", () => {
+	// Review hardening (settle-diagnostics hygiene): the attach client's
+	// sanitizer accepts arbitrary reason strings, so the settle record must
+	// whitelist the (status, reason) pair before it reaches onDiagnostic
+	// consumers. The real path: an empty never-latched attach (client live, no
+	// witness → capability-absent legacy settle), a live view_proof_state
+	// carrying a wire-garbage pair, and the 250ms settle whose diagnostic must
+	// show only the finite "unrecognized" enum.
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "snapshot", empty: true },
+			{ op: "proofState", proof: { status: "unknown", reason: "WIRE GARBAGE † SCREEN TEXT" } },
+			{ op: "advance", ms: 250 },
+		],
+	});
+	assertScenarioOk("t7-unrecognized", run);
+	const at250 = readouts(run.parsed).at(-1);
+	assert.equal(at250.attaching, false, "the capability-absent settle reveals at the 250ms boundary");
+	assert.equal(at250.latestViewProof.reason, "WIRE GARBAGE † SCREEN TEXT", "the garbage pair survived the client sanitizer (the premise of the whitelist)");
+	const settle = run.parsed.diagnostics.filter((event) => event.code === "attach_settle_ready");
+	assert.equal(settle.length, 1);
+	assert.equal(settle[0].details.readyReason, "legacy-settle");
+	assert.equal(settle[0].details.latestViewProof.status, "unrecognized", "an unrecognized status maps to the finite enum");
+	assert.equal(settle[0].details.latestViewProof.reason, "unrecognized", "arbitrary wire reason strings never reach the diagnostic payload");
+	assert.equal(JSON.stringify(settle[0]).includes("WIRE GARBAGE"), false, "the raw wire string never leaks into the settle record");
 });
 
 // Issue #284 T8: A09 geometry coverage on the component entry (spec §3.1

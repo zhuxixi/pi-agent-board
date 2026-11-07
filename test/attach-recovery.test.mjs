@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { classifyProofStatus } from "../src/core/attach-recovery.mjs";
+import { classifyProofStatus, sanitizeViewProofEnumPair } from "../src/core/attach-recovery.mjs";
 import { decideAttachPresentation } from "../src/core/pty-attach-render.mjs";
 
 /** Coverage shape helper matching coverageFor/unknownViewProof/invalidateViewProof output. */
@@ -129,6 +129,43 @@ test("284 T1 §3.1.1 sticky priority: unrecognized values stay invalid under sti
 test("284 T1 §3.1.1 null proof: both sticky states", () => {
 	assert.equal(classifyProofStatus(null, false), "none");
 	assert.equal(classifyProofStatus(null, true), "invalid");
+});
+
+// --- sanitizeViewProofEnumPair (settle-diagnostics hygiene, review fix) ---
+
+test("284 review: recognized producer pairs pass the diagnostic whitelist verbatim", () => {
+	assert.deepEqual(sanitizeViewProofEnumPair(shape("covered", "exact-proof")), { status: "covered", reason: "exact-proof" });
+	assert.deepEqual(sanitizeViewProofEnumPair(shape("covered", "safe-trailing")), { status: "covered", reason: "safe-trailing" });
+	assert.deepEqual(sanitizeViewProofEnumPair(shape("unavailable", "candidate-open")), { status: "unavailable", reason: "candidate-open" });
+	assert.deepEqual(sanitizeViewProofEnumPair(shape("unknown", "candidate-open")), { status: "unknown", reason: "candidate-open" });
+	assert.deepEqual(sanitizeViewProofEnumPair(shape("unknown", "no-proof")), { status: "unknown", reason: "no-proof" });
+	assert.deepEqual(sanitizeViewProofEnumPair(shape("unknown", "output-gap")), { status: "unknown", reason: "output-gap" });
+	assert.deepEqual(sanitizeViewProofEnumPair(shape("unknown", "reporter-replaced")), { status: "unknown", reason: "reporter-replaced" });
+	assert.deepEqual(sanitizeViewProofEnumPair(shape("unknown", "reporter-close")), { status: "unknown", reason: "reporter-close" });
+	assert.deepEqual(sanitizeViewProofEnumPair(shape("unknown", "new-empty-baseline")), { status: "unknown", reason: "new-empty-baseline" });
+});
+
+test("284 review: the dynamic trailing family passes only in identifier form", () => {
+	assert.deepEqual(sanitizeViewProofEnumPair(shape("unknown", "view-proof-trailing-pending")), { status: "unknown", reason: "view-proof-trailing-pending" });
+	assert.deepEqual(sanitizeViewProofEnumPair(shape("unknown", "view-proof-trailing-osc-malformed")), { status: "unknown", reason: "view-proof-trailing-osc-malformed" });
+	assert.deepEqual(sanitizeViewProofEnumPair(shape("unknown", "view-proof-trailing-SCREEN † TEXT")), { status: "unrecognized", reason: "unrecognized" }, "arbitrary bytes cannot ride the prefix");
+	assert.deepEqual(sanitizeViewProofEnumPair(shape("unknown", "View-Proof-Trailing-pending")), { status: "unrecognized", reason: "unrecognized" });
+});
+
+test("284 review: unrecognized pairs, statuses, and shapes map to the finite unrecognized enum", () => {
+	assert.deepEqual(sanitizeViewProofEnumPair(shape("covered", "made-up-reason")), { status: "unrecognized", reason: "unrecognized" });
+	assert.deepEqual(sanitizeViewProofEnumPair(shape("unknown", "made-up-reason")), { status: "unrecognized", reason: "unrecognized" });
+	assert.deepEqual(sanitizeViewProofEnumPair(shape("future-status", "candidate-open")), { status: "unrecognized", reason: "unrecognized" });
+	assert.deepEqual(sanitizeViewProofEnumPair(shape("unknown", undefined)), { status: "unrecognized", reason: "unrecognized" }, "a missing reason is not a recognized enum");
+	assert.deepEqual(sanitizeViewProofEnumPair(shape("covered", 42)), { status: "unrecognized", reason: "unrecognized" });
+	assert.deepEqual(sanitizeViewProofEnumPair({}), { status: "unrecognized", reason: "unrecognized" });
+	assert.deepEqual(sanitizeViewProofEnumPair("junk"), { status: "unrecognized", reason: "unrecognized" });
+	assert.deepEqual(sanitizeViewProofEnumPair([shape("covered", "exact-proof")]), { status: "unrecognized", reason: "unrecognized" });
+});
+
+test("284 review: a missing proof object whitelists to null (capability-absent shape)", () => {
+	assert.equal(sanitizeViewProofEnumPair(null), null);
+	assert.equal(sanitizeViewProofEnumPair(undefined), null);
 });
 
 // --- decideAttachPresentation committed-degraded chain (spec §3.1) ---

@@ -433,9 +433,13 @@ function readout(h: Harness, state: ScenarioState): Record<string, unknown> {
 		// Issue #284 §3.1.1 facts: the last classification assembled for the
 		// policy and the sticky-invalid binding (bound baseline token; the
 		// effective sticky state is binding === current baselineToken).
+		// lastProofStickyInvalid exposes the diagnostic FIELD itself (post-update
+		// state) so tests can assert the invalidation/recovery transitions the
+		// settle readout records.
 		proofStatus: c.lastProofStatus ?? null,
 		stickyInvalid: (c.proofInvalidatedBaselineToken ?? null) !== null && c.proofInvalidatedBaselineToken === c.baselineToken,
 		stickyBaseline: c.proofInvalidatedBaselineToken ?? null,
+		lastProofStickyInvalid: c.lastProofStickyInvalid === true,
 		// Issue #284 §3.4: which path settled this attach (null while waiting).
 		readyReason: c.readyReason ?? null,
 		diagnosticsCount: h.diagnostics.length,

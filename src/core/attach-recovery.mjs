@@ -100,3 +100,81 @@ export function classifyProofStatus(latestViewProof, stickyInvalid) {
 	}
 	return "invalid";
 }
+
+/** Issue #284 review hardening (settle-diagnostics hygiene): recognized
+ *  (status, reason) pairs for the diagnostic layer's latestViewProof readout.
+ *  The attach client's sanitizer accepts arbitrary reason strings from the
+ *  wire, so anything exposed to onDiagnostic consumers must pass a whitelist
+ *  first: recognized producer pairs pass through verbatim, everything else
+ *  maps to "unrecognized" (finite enums only — never raw wire strings).
+ *  Mirrors the classifier's tables plus the runner's reporter lifecycle
+ *  reasons and the snapshot/baseline invalidation reasons that reach the
+ *  component's coverage object. */
+const DIAGNOSTIC_STATUS_REASONS = {
+	covered: new Set(["exact-proof", "safe-trailing"]),
+	unavailable: new Set(["candidate-open", "candidate-aborted", "trailing-pending", "trailing-unsafe"]),
+	unknown: new Set([
+		// coverageFor missing-evidence shapes.
+		"candidate-open",
+		"candidate-aborted",
+		"no-proof",
+		"no-output",
+		// coverageFor window/continuity failures.
+		"output-gap",
+		"journal-gap",
+		"journal-evicted",
+		"proof-evicted",
+		"snapshot-seq-future",
+		"snapshot-before-window",
+		"invalid-snapshot-seq",
+		// terminal-attach-client unknownViewProof reasons.
+		"invalid-view-proof",
+		"view-proof-future",
+		"records-dropped",
+		"proof-output-gap",
+		// pty-attach invalidateViewProof call sites.
+		"view-proof-replay-gap",
+		"new-empty-baseline",
+		"empty-baseline",
+		"generation-change",
+		"epoch-reset",
+		// runner resetViewProofSubscribers reasons (reporter close/replacement).
+		"reporter-replaced",
+		"reporter-close",
+	]),
+};
+
+/** The dynamic noteViewProofOutput family: view-proof-trailing-<reason>, where
+ *  <reason> is a trailing-classifier/scanner identifier. Accept it only in its
+ *  lowercase-identifier form so arbitrary bytes can never ride the prefix. */
+const TRAILING_REASON_PREFIX = "view-proof-trailing-";
+const LOWERCASE_IDENTIFIER = /^[a-z][a-z0-9-]*$/;
+
+/**
+ * Whitelist a coverage object's (status, reason) pair for diagnostic records.
+ *
+ * @param {object|null} latestViewProof coverage object as produced by
+ *   coverageFor / unknownViewProof / invalidateViewProof (null = capability
+ *   revoked or never received).
+ * @returns {{status: string, reason: string} | null} the recognized pair
+ *   verbatim, {status: "unrecognized", reason: "unrecognized"} for any
+ *   non-producer shape, or null when there is no proof object at all.
+ */
+export function sanitizeViewProofEnumPair(latestViewProof) {
+	if (latestViewProof === null || latestViewProof === undefined) return null;
+	if (typeof latestViewProof !== "object" || Array.isArray(latestViewProof)) {
+		return { status: "unrecognized", reason: "unrecognized" };
+	}
+	const status = latestViewProof.status;
+	const reason = latestViewProof.reason;
+	if (typeof status !== "string" || typeof reason !== "string") {
+		return { status: "unrecognized", reason: "unrecognized" };
+	}
+	const known = DIAGNOSTIC_STATUS_REASONS[status];
+	if (known === undefined) return { status: "unrecognized", reason: "unrecognized" };
+	if (known.has(reason)) return { status, reason };
+	if (status === "unknown" && reason.startsWith(TRAILING_REASON_PREFIX) && LOWERCASE_IDENTIFIER.test(reason)) {
+		return { status, reason };
+	}
+	return { status: "unrecognized", reason: "unrecognized" };
+}

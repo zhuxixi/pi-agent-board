@@ -6,7 +6,7 @@ import { createConnection, type Socket } from "node:net";
 import type { Component, KeybindingsManager, RgbColor, TUI, TerminalColorScheme, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { resolveAttachDeleteKey } from "../core/attach-delete.mjs";
-import { classifyProofStatus } from "../core/attach-recovery.mjs";
+import { classifyProofStatus, sanitizeViewProofEnumPair } from "../core/attach-recovery.mjs";
 import { resolveAttachDetachChord } from "../core/attach-detach.mjs";
 import { createAttachScreenOwnerState, installAttachScreenOwnerObservers } from "../core/attach-screen-owner.mjs";
 import { createPtyKittyImages } from "../core/pty-kitty-images.mjs";
@@ -53,9 +53,12 @@ export type AttachReadyReason = "complete" | "committed-degraded" | "legacy-sett
 
 /** Issue #284 §3.4/D5: recovery facts recorded at attach settle. Numbers and
  *  finite enums only — never tokens, screen text, keys, or raw terminal data.
- *  The committedView identity keeps the numeric axes the publish fence uses;
- *  the wire generation id and the parser object are deliberately excluded as
- *  non-numeric identity axes. */
+ *  The committedView identity records only numeric facts: the local parser
+ *  generation (epoch) and the geometry revision; the connection/baseline
+ *  tokens stay out of the diagnostic payload, and the wire generation id and
+ *  the parser object remain excluded as non-numeric identity axes.
+ *  latestViewProof carries the whitelisted (status, reason) pair — unrecognized
+ *  wire strings map to "unrecognized" (sanitizeViewProofEnumPair). */
 export interface AttachRecoveryFacts {
 	readyReason: AttachReadyReason;
 	notReadyReason: string | null;
@@ -67,15 +70,14 @@ export interface AttachRecoveryFacts {
 	proofStatus: string | null;
 	proofStickyInvalid: boolean;
 	committedView: {
-		connectionToken: number;
-		baselineToken: number;
+		generation: number;
 		geometryRevision: number;
 		source: string;
 		sourceCols: number;
 		sourceRows: number;
 		contentKind: string;
 	} | null;
-	latestViewProof: { status: string | null; reason: string | null } | null;
+	latestViewProof: { status: string; reason: string } | null;
 }
 
 /** Diagnostic patch emitted at attach settle with the #284 recovery facts. */
@@ -485,6 +487,11 @@ export class PtyAttachComponent implements Component {
 	private proofInvalidatedBaselineToken: number | null = null;
 	/** Last §3.1.1 classification assembled for the policy (diagnostics/readout). */
 	private lastProofStatus: "none" | "missing" | "invalid" | "covered" | null = null;
+	/** Sticky-state twin of the classification (diagnostics/readout): mirrors
+	 *  the POST-update sticky state — (proofInvalidatedBaselineToken ===
+	 *  baselineToken) AFTER the classification applied its binding change, so
+	 *  the invalidation (false→true) and publish recovery (true→false)
+	 *  transitions are both visible to settle readouts. */
 	private lastProofStickyInvalid = false;
 	/** Issue #284 §3.4: which path settled this attach; null while still
 	 *  waiting (the wait reason stays in notReadyReason, semantics unchanged). */
@@ -1569,8 +1576,11 @@ export class PtyAttachComponent implements Component {
 		const stickyInvalid = this.proofInvalidatedBaselineToken === this.baselineToken;
 		const proofStatus = classifyProofStatus(this.latestViewProof as Record<string, unknown> | null, stickyInvalid);
 		this.lastProofStatus = proofStatus;
-		this.lastProofStickyInvalid = stickyInvalid;
 		if (proofStatus === "invalid") this.proofInvalidatedBaselineToken = this.baselineToken;
+		// The diagnostic field mirrors the POST-update sticky state (review fix):
+		// recording the pre-update value hid the invalidation transition
+		// (false→true) from every settle readout built from it.
+		this.lastProofStickyInvalid = this.proofInvalidatedBaselineToken === this.baselineToken;
 		return proofStatus;
 	}
 
@@ -1656,10 +1666,13 @@ export class PtyAttachComponent implements Component {
 
 	/** Issue #284 §3.4/D5: the settle record — numbers and finite enums only
 	 *  (see AttachRecoveryFacts). Captured inside finishAttachTransition before
-	 *  the wait state resets, so it keeps the LAST wait reason. */
+	 *  the wait state resets, so it keeps the LAST wait reason. The proof pair
+	 *  is whitelisted and the committedView identity carries numeric facts
+	 *  only (parser generation/geometry revision) — tokens and raw wire strings
+	 *  never reach onDiagnostic consumers (review hardening). */
 	private buildSettleDiagnostic(source: AttachReadyReason): AttachRecoveryDiagnosticPatch {
 		const committedView = this.committedView;
-		const proof = this.latestViewProof as { status?: string | null; reason?: string | null } | null;
+		const proof = sanitizeViewProofEnumPair(this.latestViewProof as Record<string, unknown> | null);
 		return {
 			source: "attach",
 			level: "info",
@@ -1676,15 +1689,18 @@ export class PtyAttachComponent implements Component {
 				proofStatus: this.lastProofStatus,
 				proofStickyInvalid: this.lastProofStickyInvalid,
 				committedView: committedView === null ? null : {
-					connectionToken: committedView.identity.connectionToken,
-					baselineToken: committedView.identity.baselineToken,
+					// Numeric identity facts only: the local parser generation
+					// (the committed view's epoch — identity.parser is the current
+					// parser at every publish settle) and the geometry revision.
+					// The connection/baseline tokens are deliberately omitted.
+					generation: this.parserEpoch,
 					geometryRevision: committedView.identity.geometryRevision,
 					source: committedView.source,
 					sourceCols: committedView.sourceCols,
 					sourceRows: committedView.sourceRows,
 					contentKind: committedView.contentKind,
 				},
-				latestViewProof: proof === null || typeof proof !== "object" ? null : { status: proof.status ?? null, reason: proof.reason ?? null },
+				latestViewProof: proof,
 			},
 		};
 	}
