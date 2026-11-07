@@ -293,6 +293,26 @@ function applyGeometry(h: Harness, step: Record<string, any>): void {
 	h.component.render(step.cols);
 }
 
+/** Issue #284 A09 counterexample (spec §3.1 predicate 4 / parent §8.5): the
+ *  real paths keep the parser grid and the target in lockstep, so the state
+ *  the predicate defends against — a committed view whose IDENTITY is already
+ *  marked with the current target while the captured SOURCE grid stays at the
+ *  old size — cannot be produced through them. The op surgically creates exactly
+ *  that fact combination (identity axes rewritten to the new target, source
+ *  dims and every other axis untouched) so the POLICY's refusal is observable:
+ *  identity alone (I3) blesses it, only the recorded source geometry exposes
+ *  it. Budget and cap must not publish it. */
+function applyDivergeSourceFromTarget(h: Harness, step: Record<string, any>): void {
+	const c = h.component as any;
+	c.cols += typeof step.cols === "number" ? step.cols : 20;
+	c.rows += typeof step.rows === "number" ? step.rows : 6;
+	const view = c.committedView;
+	if (view !== null && view !== undefined && view.identity != null) {
+		view.identity.targetCols = c.cols;
+		view.identity.targetRows = c.rows;
+	}
+}
+
 function applyHoldWrites(h: Harness, state: ScenarioState): void {
 	const c = h.component as any;
 	if (state.heldTerm !== null) throw new Error("writes already held");
@@ -404,6 +424,8 @@ function readout(h: Harness, state: ScenarioState): Record<string, unknown> {
 						sourceCols: committed.sourceCols ?? null,
 						sourceRows: committed.sourceRows ?? null,
 						contentKind: committed.contentKind ?? null,
+						identityTargetCols: committed.identity.targetCols ?? null,
+						identityTargetRows: committed.identity.targetRows ?? null,
 					},
 		committedViewValid: c.committedViewValid(),
 		committedPreview: committedPreview(committed),
@@ -462,6 +484,9 @@ async function applyStep(h: Harness, step: Record<string, any>, state: ScenarioS
 			break;
 		case "geometry":
 			applyGeometry(h, step);
+			break;
+		case "divergeSourceFromTarget":
+			applyDivergeSourceFromTarget(h, step);
 			break;
 		case "advance":
 			h.clock.advance(step.ms);

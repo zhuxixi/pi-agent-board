@@ -921,3 +921,132 @@ test("T7 e) settle diagnostics contain numbers and finite enums only", () => {
 		}
 	}
 });
+
+// Issue #284 T8: A09 geometry coverage on the component entry (spec §3.1
+// predicate 4 + the F-chain geometry gates). The integration entry carries the
+// same-size/zero-intent contract end-to-end; the fine-grained gate semantics
+// live here where the injected clock can drive every timer deterministically.
+
+test("T8 A09 a) same-size geometry is a no-op: no revision, no intent, no gate; the budget degrade publishes through it", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "unavailable-candidate-open", text: "SAME SIZE" },
+			{ op: "geometry", cols: 80, rows: 24 },
+			{ op: "advance", ms: 250 },
+		],
+	});
+	assertScenarioOk("t8-same-size", run);
+	const [afterSnapshot, afterSameSize, at250] = readouts(run.parsed).slice(2);
+	assert.equal(afterSnapshot.identity.geometryRevision, 0);
+	assert.equal(afterSnapshot.committedView.present, true);
+	assert.equal(afterSameSize.identity.geometryRevision, 0, "a same-size render mints no geometry revision");
+	assert.equal(afterSameSize.identity.resizeIntentRequired, false, "a same-size render raises no resize intent");
+	assert.equal(afterSameSize.committedView.present, true, "a same-size render does not invalidate the committed view");
+	assert.equal(afterSameSize.committedViewValid, true);
+	assert.equal(afterSameSize.committedView.sourceCols, 80);
+	assert.equal(afterSameSize.committedView.sourceRows, 24);
+	assert.equal(at250.attaching, false, "no geometry gate blocks the budget degrade on a same-size attach");
+	assert.equal(at250.settledAt, 250);
+	assert.equal(at250.readyReason, "committed-degraded");
+	assert.equal(at250.notReadyReason, null);
+});
+
+test("T8 A09 b) the geometry gate survives wrong F/A/loss and every timer; only a real target F clears it", () => {
+	// The one real target after a differing resize: cols 100 x rows 30, the
+	// intent's own revision (1) and intent id (1).
+	const target = { protocol: 1, cols: 100, rows: 30, mode: "fullscreen", rendererEpoch: 1, sessionEpoch: 1, focusPresent: true, overlayPresent: false, intentId: 1, geometryRevision: 1 };
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "unavailable-candidate-open", text: "GATE 80" },
+			{ op: "geometry", cols: 100, rows: 30 },
+			{ op: "snapshot", resnapshot: true, proof: "unavailable-candidate-open", generation: "gen-2", text: "GATE 100" },
+			// Wrong-size F: right revision/intent, geometry the target can never accept.
+			{ op: "record", marker: "F", metadata: { ...target, cols: 140 } },
+			// Wrong-revision F: belongs to the superseded geometry.
+			{ op: "record", marker: "F", metadata: { ...target, geometryRevision: 0 } },
+			// Wrong-intent F: the applied intent is not the proof's intent.
+			{ op: "record", marker: "F", metadata: { ...target, intentId: 0 } },
+			// An abort is no geometry evidence either.
+			{ op: "record", marker: "A", frameId: 9, reason: "stop" },
+			{ op: "advance", ms: 250 },
+			// Capability loss must not clear the gate (and must not leave the committed
+			// path). The generation matches the resnapshot baseline — a wrong generation
+			// would trip the separate generation-change fence instead.
+			{ op: "status", witness: false, generation: "gen-2" },
+			{ op: "advance", ms: 2250 },
+			// The real target F is the only key.
+			{ op: "record", marker: "F", metadata: target },
+		],
+	});
+	assertScenarioOk("t8-geometry-gate", run);
+	const readoutsAll = readouts(run.parsed);
+	const [afterGeometry, afterResnapshot, afterWrongSize, afterWrongRevision, afterWrongIntent, afterA, atBudget, afterLoss, atCap, afterRealF] = readoutsAll.slice(3);
+	assert.equal(afterGeometry.identity.geometryRevision, 1, "one differing resize = exactly one revision");
+	assert.equal(afterGeometry.identity.resizeIntentRequired, true, "the differing resize raises the intent gate");
+	assert.equal(afterGeometry.committedView, null, "the differing resize invalidates the old-geometry view");
+	assert.equal(afterResnapshot.committedView.present, true, "a resnapshot at the target rebuilds a committed view");
+	assert.equal(afterResnapshot.committedView.sourceCols, 100);
+	assert.equal(afterResnapshot.committedView.sourceRows, 30);
+	assert.equal(afterResnapshot.committedViewValid, true);
+	assert.equal(afterResnapshot.attaching, true, "the fresh view waits: the intent gate is not satisfied by the snapshot");
+	assert.equal(afterResnapshot.notReadyReason, "resize-intent");
+	assert.equal(afterWrongSize.attaching, true, "a wrong-size F does not clear the gate");
+	assert.equal(afterWrongSize.notReadyReason, "resize-intent");
+	assert.equal(afterWrongSize.latestViewProof.status, "covered", "the wrong-size F still covers the proof channel — the gate is geometric");
+	assert.equal(afterWrongRevision.attaching, true, "a wrong-revision F does not clear the gate");
+	assert.equal(afterWrongRevision.notReadyReason, "resize-intent");
+	assert.equal(afterWrongIntent.attaching, true, "a wrong-intent F does not clear the gate");
+	assert.equal(afterWrongIntent.notReadyReason, "resize-intent");
+	assert.equal(afterA.attaching, true, "an abort is not geometry evidence");
+	assert.equal(afterA.notReadyReason, "resize-intent");
+	assert.equal(afterA.proofStatus, "missing");
+	assert.equal(atBudget.budget.elapsed, true, "the recovery budget elapsed under the gate");
+	assert.equal(atBudget.attaching, true, "the budget never clears a geometry gate");
+	assert.equal(atBudget.notReadyReason, "resize-intent");
+	assert.equal(afterLoss.witnessLatched, true, "capability loss keeps the committed path");
+	assert.equal(afterLoss.callbacks.restoreLegacyDeadlines, 0);
+	assert.equal(afterLoss.attaching, true, "capability loss does not clear the gate");
+	assert.equal(atCap.attaching, true, "the 2500ms cap does not clear the gate either");
+	assert.equal(atCap.settledAt, null);
+	assert.equal(atCap.deadlineState, "expired");
+	assert.equal(atCap.notReadyReason, "deadline-expired:resize-intent");
+	assert.equal(afterRealF.attaching, false, "the real target F clears the gate");
+	assert.equal(afterRealF.readyReason, "complete");
+	assert.equal(afterRealF.settledAt, 2500);
+	assert.equal(afterRealF.proofStatus, "covered");
+	assert.equal(afterRealF.identity.resizeIntentRequired, true, "the intent flag stays recorded; the matching F satisfied it");
+});
+
+test("T8 A09 c) an old-size source grid with identity marked current never publishes (I3 alone is not enough)", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "unavailable-candidate-open", text: "OLD GRID" },
+			// The §8.5 counterexample: the committed view's identity is already
+			// marked with the current target (I3 passes), but the captured grid
+			// fact stays at the old size — only predicate 4 can refuse it.
+			{ op: "divergeSourceFromTarget" },
+			{ op: "advance", ms: 250 },
+			{ op: "advance", ms: 2250 },
+		],
+	});
+	assertScenarioOk("t8-source-geometry", run);
+	const [afterDiverge, atBudget, atCap] = readouts(run.parsed).slice(3);
+	assert.equal(afterDiverge.committedView.sourceCols, 80, "the captured grid keeps its old size");
+	assert.equal(afterDiverge.committedView.sourceRows, 24);
+	assert.equal(afterDiverge.committedView.identityTargetCols, 100, "the identity is marked with the current target");
+	assert.equal(afterDiverge.committedView.identityTargetRows, 30);
+	assert.equal(afterDiverge.committedViewValid, true, "the identity fence alone (I3) blesses this view");
+	assert.equal(afterDiverge.attaching, true);
+	assert.equal(atBudget.budget.elapsed, true);
+	assert.equal(atBudget.attaching, true, "the budget must not publish an old-size source grid");
+	assert.equal(atBudget.notReadyReason, "committed-geometry-mismatch", "predicate 4 names the source-geometry mismatch");
+	assert.equal(atCap.attaching, true, "the cap does not publish it either");
+	assert.equal(atCap.settledAt, null);
+	assert.equal(atCap.notReadyReason, "deadline-expired:committed-geometry-mismatch");
+});

@@ -303,13 +303,21 @@ test("23b1 fix1 F2 (owned main): no-hello identity, token enable, marker strippi
 });
 
 for (const legacy of [false, true]) {
-	test(`reporter S-then-idle (${legacy ? "legacy main" : "owned main"}): attach reveals the committed snapshot at the legacy cap`, async (t) => {
-		// Child: one ordinary content line, then after enable a real S marker and
-		// eternal silence — the live regression shape (tracker stays candidate-open,
-		// so snapshots carry viewProof unavailable forever while the session idles).
+	test(`reporter S-then-idle (${legacy ? "legacy main" : "owned main"}): attach settles at the recovery budget, not the cap`, async (t) => {
+		// Issue #284 A11 (rewritten from the legacy-cap case): the child holds its
+		// single S marker until the DRIVER's baseline snapshot arrived (the .go1
+		// gate file), then emits it plus one live line through the REAL live
+		// viewProof record path and stays quiet forever — no F will ever come (a
+		// second S would be a candidate-already-open protocol error, so the
+		// scenario is exactly one S-then-idle). The settle must happen via the
+		// 250ms recovery budget on the EXTERNAL wall clock — long before the
+		// 2500ms cap — instead of waiting forever. Flake governance is the
+		// deterministic poll loop in the driver (poll-to-settle), never loosened
+		// thresholds.
 		const childScript = `
 const fs = require("node:fs");
 const file = process.argv[1];
+const gate = file + ".go1";
 process.stdout.write("\\u001b[?1049h\\u001b[?25l");
 process.stdout.write("IDLE-E2E VISIBLE LINE\\r\\n");
 let sent = false;
@@ -318,9 +326,13 @@ setInterval(() => {
   let token = "";
   try { token = fs.readFileSync(file, "utf8").trim(); } catch {}
   if (!token) return;
-  process.stdout.write("\\u001bP> agent-board-frame/1 ; " + token + " ; S ; 1 ; 0 ; 80\\u001b\\\\");
+  let go = "";
+  try { go = fs.readFileSync(gate, "utf8").trim(); } catch {}
+  if (go !== "GO") return;
   sent = true;
-}, 40);
+  process.stdout.write("\\u001bP> agent-board-frame/1 ; " + token + " ; S ; 1 ; 0 ; 80\\u001b\\\\");
+  process.stdout.write("IDLE-E2E LIVE LINE\\r\\n");
+}, 15);
 `;
 		const { root, viewId, socketPath, tokenFile } = await startHost(t, { legacy, script: childScript });
 		const reporter = createConnection(socketPath);
@@ -329,37 +341,191 @@ setInterval(() => {
 		send(reporter, { type: "hello", clientId: "frame-reporter", frameWitness: { protocol: 1 } });
 		const enable = await waitFor(() => reporterMessages.find((msg) => msg.type === "frame_witness_enable"), 15000);
 		writeFileSync(tokenFile, enable.token);
-		// Wait until the runner parser has SEEN the S marker (frameId advanced),
-		// then attach. Whether the runner-side candidate object later reads open
-		// or cleared is recorded below; the component contract under test is the
-		// cap-time reveal with a non-covered proof channel either way.
-		try {
-			await waitFor(() => {
-				const witness = readHost(root, viewId)?.frameWitness;
-				return witness && (witness.lastFrameId ?? 0) >= 1 ? witness : null;
-			}, 15000, "runner saw the S marker");
-		} catch (error) {
-			t.diagnostic(`S wait failed: host=${JSON.stringify(readHost(root, viewId)?.frameWitness)} reporterMessages=${JSON.stringify(reporterMessages.slice(0, 6))}`);
-			throw error;
-		}
-		const witness0 = readHost(root, viewId)?.frameWitness;
-		assert.equal((witness0?.lastFrameId ?? 0) >= 1, true, "the S marker reached the runner parser");
-		assert.equal(witness0?.proofs ?? 0, 0, "no F ever completes the idle candidate");
+		// The S is gate-held: the runner has seen no candidate yet, and no F will
+		// ever arrive to close the one the child is about to open.
+		assert.equal(readHost(root, viewId)?.frameWitness?.lastFrameId ?? 0, 0, "the child has not emitted its S yet (gate-held)");
 		// Drive a REAL component in a transform-types child (TS parameter
-		// properties cannot load under strip-only) against the live socket.
+		// properties cannot load under strip-only) against the live socket. The
+		// driver polls to the settle condition on a bounded loop (no fixed sleeps)
+		// and records the settle diagnostics (readyReason, budgetDeadline,
+		// proofStatus) for the assertions below.
 		const driver = spawnSync(process.execPath, [
 			"--experimental-transform-types",
 			resolve("test-support/attach-idle-socket-driver.ts"),
 			socketPath,
 			"8000",
 			"IDLE-E2E VISIBLE LINE",
+			`${tokenFile}.go1`,
 		], { encoding: "utf8", timeout: 20000 });
 		const driverLine = (driver.stdout ?? "").trim().split("\n").filter(Boolean).at(-1);
 		const driven = driverLine ? JSON.parse(driverLine) : null;
 		t.diagnostic(`driver: exit=${driver.status} result=${driverLine ?? null} stderr=${(driver.stderr ?? "").slice(-300)}`);
-		assert.equal(driven?.attaching, false, "the attach settles at the legacy cap instead of waiting forever");
+		assert.equal(driven?.attaching, false, "the attach settles at the recovery budget instead of waiting forever (no F ever arrives)");
+		assert.equal(driven?.readyReason, "committed-degraded", "the settle went through the committed-degraded budget path");
+		assert.equal(driven?.settleDiagnostic?.budgetElapsed, true, "the 250ms recovery budget had elapsed when the view published");
+		assert.equal(driven?.settleDiagnostic?.deadlineState, "pending", "the settle did not wait for the 2500ms hard timeout");
+		assert.equal(driven?.settleDiagnostic?.proofStatus, "missing", "the candidate-open coverage is degradable missing evidence");
+		assert.equal(driven?.settleDiagnostic?.latestViewProof?.status, "unknown", "the LIVE record shape (noteViewProofRecord) drove the coverage at settle");
+		assert.equal(driven?.settleDiagnostic?.latestViewProof?.reason, "candidate-open");
+		assert.ok(typeof driven?.settledMs === "number" && driven.settledMs >= 250, `the budget path cannot settle before 250ms (got ${driven?.settledMs})`);
+		assert.ok(driven.settledMs < 1500, `external wall-clock first paint < 1500ms scheduling headroom (got ${driven.settledMs})`);
 		assert.equal(driven?.showsContent, true, `the revealed surface shows the committed model content (${JSON.stringify(driven)})`);
+		assert.ok((driven?.proof.recordCountAtSettle ?? 0) >= 1, "a real S record arrived live through the viewProof socket path before the settle");
+		assert.equal(driven?.witnessLatched, true, "the attach observed and latched the witness capability");
+		// A09 integration: a same-size attach must trip no geometry gate at all.
+		assert.equal(driven?.geometry.revision, 0, "same-size attach records zero geometry revisions");
+		assert.equal(driven?.geometry.resizeIntentRequired, false, "same-size attach raises no resize intent");
+		assert.deepEqual(
+			{ source: driven?.geometry.committedSource?.sourceCols, rows: driven?.geometry.committedSource?.sourceRows, targetCols: driven?.geometry.committedSource?.identityTargetCols, targetRows: driven?.geometry.committedSource?.identityTargetRows },
+			{ source: 80, rows: 24, targetCols: 80, targetRows: 24 },
+			"the committed source geometry equals the target (predicate 4 holds)",
+		);
+		assert.equal(reporterMessages.filter((msg) => msg.type === "frame_witness_intent").length, 0, "the whole attach emitted zero frame_witness_intent messages");
 		t.diagnostic(`runner witness after reveal: ${JSON.stringify(readHost(root, viewId)?.frameWitness)}`);
+		const witnessAfter = readHost(root, viewId)?.frameWitness;
+		assert.equal(witnessAfter?.proofs ?? 0, 0, "still no F after the reveal");
+		assert.ok((witnessAfter?.lastFrameId ?? 0) >= 1, "the runner saw the live S marker");
+		reporter.destroy();
+	});
+}
+
+for (const legacy of [false, true]) {
+	test(`reporter healthy F (${legacy ? "legacy main" : "owned main"}): attach settles before the recovery budget with readyReason complete`, async (t) => {
+		// Issue #284 A11: one complete proven frame (S + body + F with target
+		// geometry), then idle forever. The F chain must publish before the 250ms
+		// budget fires — proved by the settle diagnostic's budgetElapsed fact,
+		// not by a loosened wall-clock window.
+		const childScript = `
+const fs = require("node:fs");
+const file = process.argv[1];
+const meta = Buffer.from(JSON.stringify({protocol:1,cols:80,rows:24,mode:"fullscreen",rendererEpoch:1,sessionEpoch:1,focusPresent:true,overlayPresent:false,intentId:0,geometryRevision:0})).toString("base64url");
+process.stdout.write("\\u001b[?1049h\\u001b[?25l");
+let sent = false;
+setInterval(() => {
+  if (sent) return; // one proven frame, then eternal idle
+  let token = "";
+  try { token = fs.readFileSync(file, "utf8").trim(); } catch {}
+  if (!token) return;
+  sent = true;
+  process.stdout.write("F-E2E VISIBLE LINE\\r\\n");
+  process.stdout.write("\\u001bP> agent-board-frame/1 ; " + token + " ; S ; 1 ; 0 ; 80\\u001b\\\\");
+  process.stdout.write("BODY-F");
+  process.stdout.write("\\u001bP> agent-board-frame/1 ; " + token + " ; F ; 1 ; " + meta + "\\u001b\\\\");
+}, 15);
+`;
+		const { root, viewId, socketPath, tokenFile } = await startHost(t, { legacy, script: childScript });
+		const reporter = createConnection(socketPath);
+		await once(reporter, "connect");
+		const reporterMessages = listen(reporter);
+		send(reporter, { type: "hello", clientId: "frame-reporter", frameWitness: { protocol: 1 } });
+		const enable = await waitFor(() => reporterMessages.find((msg) => msg.type === "frame_witness_enable"), 15000);
+		writeFileSync(tokenFile, enable.token);
+		await waitFor(() => (readHost(root, viewId)?.frameWitness?.proofs ?? 0) >= 1, 20000);
+		const driver = spawnSync(process.execPath, [
+			"--experimental-transform-types",
+			resolve("test-support/attach-idle-socket-driver.ts"),
+			socketPath,
+			"8000",
+			"F-E2E VISIBLE LINE",
+		], { encoding: "utf8", timeout: 20000 });
+		const driverLine = (driver.stdout ?? "").trim().split("\n").filter(Boolean).at(-1);
+		const driven = driverLine ? JSON.parse(driverLine) : null;
+		t.diagnostic(`driver: exit=${driver.status} result=${driverLine ?? null} stderr=${(driver.stderr ?? "").slice(-300)}`);
+		assert.equal(driven?.attaching, false, "the proven frame settles the attach");
+		assert.equal(driven?.readyReason, "complete", "the F path publishes without waiting for the budget");
+		assert.equal(driven?.settleDiagnostic?.budgetElapsed, false, "the settle preceded the 250ms recovery budget");
+		assert.equal(driven?.settleDiagnostic?.deadlineState, "pending");
+		assert.equal(driven?.settleDiagnostic?.proofStatus, "covered");
+		assert.ok(typeof driven?.settledMs === "number" && driven.settledMs < 1500, `external wall-clock settle < 1500ms (got ${driven?.settledMs})`);
+		assert.equal(driven?.showsContent, true, `the revealed surface shows the proven frame content (${JSON.stringify(driven)})`);
+		assert.equal(driven?.proof.viewProofStatus, "covered");
+		assert.equal(driven?.geometry.revision, 0, "no geometry gate trips on a same-size attach");
+		assert.equal(reporterMessages.filter((msg) => msg.type === "frame_witness_intent").length, 0);
+		reporter.destroy();
+	});
+}
+
+for (const legacy of [false, true]) {
+	test(`reporter continuous-frames-no-F (${legacy ? "legacy main" : "owned main"}): the next closed frame after budget expiry publishes`, async (t) => {
+		// Issue #284 A11/D4: after the baseline snapshot (gate .go1) the child
+		// opens a sync window that stays open ACROSS the 250ms budget — the
+		// degraded chain's frameState predicate must keep the attach waiting —
+		// and only after the budget elapsed (gate .go2) streams complete frames
+		// that are never proven. The first post-budget closed frame is the
+		// publish boundary; the revealed content must be a streamed frame, not
+		// the base snapshot.
+		const childScript = `
+const fs = require("node:fs");
+const file = process.argv[1];
+const go1 = file + ".go1";
+const go2 = file + ".go2";
+process.stdout.write("\\u001b[?1049h\\u001b[?25l");
+process.stdout.write("STREAM-E2E BASE LINE\\r\\n");
+let opened = false;
+let frames = 0;
+setInterval(() => {
+  let token = "";
+  try { token = fs.readFileSync(file, "utf8").trim(); } catch {}
+  if (!token) return;
+  let phase1 = "";
+  let phase2 = "";
+  try { phase1 = fs.readFileSync(go1, "utf8").trim(); } catch {}
+  try { phase2 = fs.readFileSync(go2, "utf8").trim(); } catch {}
+  if (!opened && phase1 === "GO") {
+    opened = true;
+    process.stdout.write("\\u001bP> agent-board-frame/1 ; " + token + " ; S ; 1 ; 0 ; 80\\u001b\\\\");
+    process.stdout.write("\\u001b[?2026h");
+    process.stdout.write("STREAM-E2E PARTIAL-OPEN");
+    return;
+  }
+  if (opened && phase2 === "GO" && frames < 40) {
+    // Every write ENDS at a close boundary and the next window opens in a later
+    // write: a reopen in the same parsed chunk would flip frameState back to
+    // open before the post-write re-evaluation could publish.
+    frames += 1;
+    if (frames === 1) {
+      process.stdout.write("STREAM-E2E FRAME " + frames + "\\r\\n");
+      process.stdout.write("\\u001b[?2026l");
+      return;
+    }
+    process.stdout.write("\\u001b[?2026h");
+    process.stdout.write("STREAM-E2E FRAME " + frames + "\\r\\n");
+    process.stdout.write("\\u001b[?2026l");
+  }
+}, 15);
+`;
+		const { root, viewId, socketPath, tokenFile } = await startHost(t, { legacy, script: childScript });
+		const reporter = createConnection(socketPath);
+		await once(reporter, "connect");
+		const reporterMessages = listen(reporter);
+		send(reporter, { type: "hello", clientId: "frame-reporter", frameWitness: { protocol: 1 } });
+		const enable = await waitFor(() => reporterMessages.find((msg) => msg.type === "frame_witness_enable"), 15000);
+		writeFileSync(tokenFile, enable.token);
+		assert.equal(readHost(root, viewId)?.frameWitness?.lastFrameId ?? 0, 0, "the stream is gate-held before the attach");
+		const driver = spawnSync(process.execPath, [
+			"--experimental-transform-types",
+			resolve("test-support/attach-idle-socket-driver.ts"),
+			socketPath,
+			"8000",
+			"STREAM-E2E FRAME",
+			`${tokenFile}.go1`,
+			`${tokenFile}.go2`,
+		], { encoding: "utf8", timeout: 20000 });
+		const driverLine = (driver.stdout ?? "").trim().split("\n").filter(Boolean).at(-1);
+		const driven = driverLine ? JSON.parse(driverLine) : null;
+		t.diagnostic(`driver: exit=${driver.status} result=${driverLine ?? null} stderr=${(driver.stderr ?? "").slice(-300)}`);
+		assert.equal(driven?.attaching, false, "the attach settles without any F ever arriving");
+		assert.equal(driven?.readyReason, "committed-degraded");
+		assert.equal(driven?.settleDiagnostic?.budgetElapsed, true, "the publish happened after the budget elapsed");
+		assert.equal(driven?.settleDiagnostic?.deadlineState, "pending", "no 2500ms cap wait");
+		assert.ok(typeof driven?.settledMs === "number" && driven.settledMs >= 250, `the open frame held the reveal past the budget (got ${driven?.settledMs})`);
+		assert.ok(driven.settledMs < 1500, `external wall-clock first paint < 1500ms (got ${driven.settledMs})`);
+		assert.equal(driven?.showsContent, true, `the reveal is a post-budget closed frame, not the base snapshot (${JSON.stringify(driven)})`);
+		assert.equal(driven?.geometry.committedSource?.source, "sync-close", "the published view is the locally closed streamed frame");
+		assert.equal(driven?.proof.viewProofReason, "candidate-open");
+		assert.ok((driven?.proof.recordCount ?? 0) >= 1, "the real S record arrived live");
+		assert.equal(readHost(root, viewId)?.frameWitness?.proofs ?? 0, 0, "no F ever proves the streamed frames");
+		assert.equal(reporterMessages.filter((msg) => msg.type === "frame_witness_intent").length, 0, "same-size attach: zero resize intents");
 		reporter.destroy();
 	});
 }
