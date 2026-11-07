@@ -738,6 +738,67 @@ test("T6 f) the cap alone no longer publishes: an open sync frame keeps waiting 
 	assert.equal(atCap.committedViewValid, true, "a committed view exists — only the policy blocks the reveal");
 });
 
+test("T6 g) sticky invalid survives a covered but non-publishable F (recovery is publish-only)", () => {
+	// Review fix (issue #284, CRITICAL): the old classifier cleared the sticky
+	// failure fact on ANY covered classification — but noteViewProofRecord(F)
+	// builds covered/safe-trailing coverage BEFORE the full-view policy
+	// validates geometry, so the wrong-geometry F below washed the sticky fact
+	// and the later live S re-classified as missing evidence, letting budget
+	// expiry publish degraded (safety bypass). Recovery is publish-only now:
+	// only the policy's "publish" action on the current baseline clears it.
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			// Real gap coverage through the real client path: invalid sticks.
+			{ op: "snapshot", proof: "output-gap", text: "STICKY BASE" },
+			// Wrong-geometry F (real record): stays covered, the F path waits —
+			// and the sticky fact must NOT be cleared by the classification.
+			{ op: "record", marker: "F", mismatchCols: true },
+			// Live S (real noteViewProofRecord): candidate-open — with the sticky
+			// fact retained this classifies invalid, not missing.
+			{ op: "record", marker: "S" },
+			// Budget AND cap elapsed: no degraded publish may happen.
+			{ op: "advance", ms: 250 },
+			{ op: "advance", ms: 2250 },
+			// The only recovery: a VALID target-geometry F publishing through the
+			// full-view policy.
+			{ op: "record", marker: "F" },
+		],
+	});
+	assertScenarioOk("t6-sticky-covered-f", run);
+	const [afterSnapshot, afterWrongF, afterS, atBudget, atCap, afterRealF] = readouts(run.parsed).slice(2);
+	assert.equal(afterSnapshot.proofStatus, "invalid", "the real gap coverage classifies invalid");
+	assert.equal(afterSnapshot.stickyInvalid, true, "the invalid fact is bound to the baseline");
+	assert.equal(afterSnapshot.attaching, true);
+	assert.equal(afterWrongF.latestViewProof.status, "covered", "the wrong-geometry F still covers the proof channel");
+	assert.equal(afterWrongF.proofStatus, "covered", "the classifier reports covered (pure contract unchanged)");
+	assert.equal(afterWrongF.stickyInvalid, true, "a covered but non-publishable F must NOT clear the sticky fact");
+	assert.equal(afterWrongF.stickyBaseline, 1, "the binding stays on the current baseline");
+	assert.equal(afterWrongF.attaching, true, "the F path waits on proof-geometry-mismatch");
+	assert.equal(afterWrongF.notReadyReason, "proof-status-covered", "a covered proof status is not degradable");
+	assert.equal(afterS.latestViewProof.status, "unknown");
+	assert.equal(afterS.latestViewProof.reason, "candidate-open", "the live S drives the real record path");
+	assert.equal(afterS.proofStatus, "invalid", "candidate-open under a retained sticky fact classifies invalid");
+	assert.equal(afterS.stickyInvalid, true);
+	assert.equal(atBudget.budget.elapsed, true);
+	assert.equal(atBudget.attaching, true, "budget expiry cannot publish over the retained sticky fact");
+	assert.equal(atCap.attaching, true, "budget AND cap elapsed: still no degraded publish");
+	assert.equal(atCap.settledAt, null);
+	assert.equal(atCap.publishabilityState, "unknown", "the attach never reached the ready state");
+	assert.equal(atCap.notReadyReason, "deadline-expired:proof-status-invalid");
+	assert.equal(afterRealF.attaching, false, "the valid target-geometry F publishes through the full-view policy");
+	assert.equal(afterRealF.readyReason, "complete");
+	assert.equal(afterRealF.settledAt, 2500);
+	assert.equal(afterRealF.proofStatus, "covered");
+	assert.equal(afterRealF.stickyInvalid, false, "the policy publish is what clears the sticky fact");
+	assert.equal(afterRealF.stickyBaseline, null);
+	const settle = run.parsed.diagnostics.filter((event) => event.code === "attach_settle_ready");
+	assert.equal(settle.length, 1);
+	assert.equal(settle[0].details.readyReason, "complete");
+	assert.equal(settle[0].details.proofStickyInvalid, false, "the settle record reports the post-publish sticky state");
+});
+
 // Issue #284 T7: readyReason recording + settle diagnostics (spec §3.4/D5).
 // Every settle records which path revealed the surface; the diagnostic record
 // carries numbers and finite enums only — never tokens, screen text, keys, or

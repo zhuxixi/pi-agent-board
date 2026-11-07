@@ -64,9 +64,11 @@ function isCoveredShape(viewProof) {
  * input except a recognized covered shape returns "invalid" — a live S/A
  * record, no-proof, a null proof after capability loss, and unrecognized
  * values included. The sticky fact is only cleared by the caller (component
- * layer) when the current baseline sees a real covered proof again or the
- * baseline identity changes; this function reports "covered" for exactly that
- * recovery shape.
+ * layer) when the full-view policy PUBLISHES on the current baseline — a
+ * covered shape alone is not recovery, because coverage is established before
+ * the policy validates sequence/metadata/geometry/intent/identity — or when
+ * the baseline identity changes; this function reports "covered" for exactly
+ * the publishable-recovery shape.
  *
  * @param {object|null} latestViewProof coverage object as produced by
  *   coverageFor / unknownViewProof / invalidateViewProof (null = capability

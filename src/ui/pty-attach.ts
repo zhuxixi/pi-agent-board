@@ -473,10 +473,15 @@ export class PtyAttachComponent implements Component {
 	private witnessLatched = false;
 	/** Issue #284 failure-fact layer (spec §3.1.1/I6): the baseline token an
 	 *  unrecovered invalid proof classification was recorded on. The effective
-	 *  sticky state is (token === baselineToken); only a covered classification
-	 *  on this baseline or a new baseline identity (replaceParser at an
-	 *  accepted snapshotReady) clears/rebinds it. Capability loss — which nulls
-	 *  latestViewProof — deliberately keeps it. */
+	 *  sticky state is (token === baselineToken). Recovery is PUBLISH-ONLY: a
+	 *  covered classification alone never clears it, because coverage is
+	 *  established before the full-view policy validates
+	 *  sequence/metadata/geometry/intent/identity — a wrong-geometry F would
+	 *  otherwise wash the sticky fact and re-open the degraded path. Only
+	 *  evaluateAttachReady's policy "publish" on the current baseline/identity
+	 *  (or a new baseline identity via replaceParser at an accepted
+	 *  snapshotReady, which rebinds it) clears/rebinds it. Capability loss —
+	 *  which nulls latestViewProof — deliberately keeps it. */
 	private proofInvalidatedBaselineToken: number | null = null;
 	/** Last §3.1.1 classification assembled for the policy (diagnostics/readout). */
 	private lastProofStatus: "none" | "missing" | "invalid" | "covered" | null = null;
@@ -1552,17 +1557,20 @@ export class PtyAttachComponent implements Component {
 
 	/** Derive proofStatus through the §3.1.1 pure classifier and manage the
 	 *  sticky failure fact (the component-side duty of spec §3.1.1): any
-	 *  invalid classification binds to the CURRENT baseline; only a covered
-	 *  classification on this baseline or a new baseline identity
-	 *  (replaceParser at an accepted snapshotReady) clears/rebinds it.
-	 *  Capability loss (latestViewProof = null) keeps the recorded fact. */
+	 *  invalid classification binds to the CURRENT baseline. The classifier
+	 *  NEVER clears the binding here — recovery is publish-only (see
+	 *  evaluateAttachReady's publish branch): noteViewProofRecord(F) builds
+	 *  covered/safe-trailing coverage BEFORE the full-view policy validates
+	 *  sequence/metadata/geometry/intent/identity, so a covered classification
+	 *  on a non-publishable F must keep the degraded path blocked. A new
+	 *  baseline identity (replaceParser at an accepted snapshotReady) rebinds
+	 *  it. Capability loss (latestViewProof = null) keeps the recorded fact. */
 	private classifyLatestProof(): "none" | "missing" | "invalid" | "covered" {
 		const stickyInvalid = this.proofInvalidatedBaselineToken === this.baselineToken;
 		const proofStatus = classifyProofStatus(this.latestViewProof as Record<string, unknown> | null, stickyInvalid);
 		this.lastProofStatus = proofStatus;
 		this.lastProofStickyInvalid = stickyInvalid;
 		if (proofStatus === "invalid") this.proofInvalidatedBaselineToken = this.baselineToken;
-		else if (proofStatus === "covered") this.proofInvalidatedBaselineToken = null;
 		return proofStatus;
 	}
 
@@ -1627,6 +1635,15 @@ export class PtyAttachComponent implements Component {
 		});
 		this.notReadyReason = decision.action === "wait" ? decision.reason : null;
 		if (decision.action === "publish") {
+			// Issue #284 §3.1.1 recovery is publish-only: the covered
+			// classification precedes the full-view gates, so ONLY a policy
+			// "publish" — a fully valid F for the current baseline/identity —
+			// may clear the sticky failure fact. A wrong-geometry/intent F that
+			// merely covers the proof channel must keep the degraded path
+			// blocked (a covered-but-unpublishable F is exactly the shape the
+			// degraded chain refuses via proof-status-covered).
+			this.proofInvalidatedBaselineToken = null;
+			this.lastProofStickyInvalid = false;
 			this.publishabilityState = "ready";
 			this.finishAttachTransition("complete");
 		} else if (decision.action === "publish-degraded") {
