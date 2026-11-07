@@ -15,6 +15,10 @@
  * - src/ui/pty-attach.ts `invalidateViewProof` call sites: `unknown` +
  *   candidate-open (:1319), candidate-aborted (:1326), view-proof-replay-gap,
  *   view-proof-trailing-pending / view-proof-trailing-<reason>.
+ *   Other UI-side invalidation reasons reaching the coverage object
+ *   (new-empty-baseline, empty-baseline, generation-change, epoch-reset,
+ *   geometry-resize) fail closed as invalid; geometry-resize is also
+ *   whitelisted for the diagnostic readout.
  *
  * Matching uses exact string tables; any unrecognized status/reason classifies
  * as "invalid" (fail closed — prefer waiting over displaying).
@@ -138,6 +142,7 @@ const DIAGNOSTIC_STATUS_REASONS = {
 		"empty-baseline",
 		"generation-change",
 		"epoch-reset",
+		"geometry-resize",
 		// runner resetViewProofSubscribers reasons (reporter close/replacement).
 		"reporter-replaced",
 		"reporter-close",
