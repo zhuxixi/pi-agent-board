@@ -116,7 +116,9 @@ async function settleTicks(): Promise<void> {
  *  views/proofs are invalidated, the attach client resumes from its cursor,
  *  and startAttachSettle runs again. The first connect keeps the client in
  *  `probing` (its start() would only send the subscribe and arm a wall-clock
- *  probe timer; snapshot_begin is accepted from probing either way). */
+ *  probe timer; snapshot_begin is accepted from probing either way). The
+ *  #284 witness latch is deliberately NOT touched here: it is attach-scoped
+ *  (I6 latch layer), not connection-scoped. */
 function simulateConnect(c: any): void {
 	c.outputRenderScheduler.cancel();
 	c.captureRecoveryView();
@@ -124,6 +126,11 @@ function simulateConnect(c: any): void {
 	c.everConnected = true;
 	c.connectionToken += 1;
 	c.committedView = null;
+	// View layer (I6): the old connection's proof facts are invalidated with
+	// its view; only the new connection's snapshot/records rebuild them.
+	c.latestViewProof = null;
+	c.viewProofIdentity = null;
+	c.viewProofTrailing.reset();
 	c.currentWireGeneration = null;
 	c.emptyResetPending = true;
 	c.disconnectedAt = null;
@@ -188,10 +195,20 @@ function snapshotViewProof(step: Record<string, any>, c: any): Record<string, un
 
 async function applySnapshot(h: Harness, step: Record<string, any>, state: ScenarioState): Promise<void> {
 	const c = h.component as any;
+	// A baseline replacement in the REAL protocol: the client is "live" after
+	// the first snapshot and rejects unsolicited begins; the runner-driven path
+	// is resnapshot_required → resubscribe → fresh snapshot (accepted from
+	// "resyncing"). Same for post-reconnect snapshots ("resyncing" after
+	// reconnect()). Without the flag the snapshot must be the probing first one.
+	if (step.resnapshot === true) {
+		c.onSocketData(`${JSON.stringify({ type: "resnapshot_required" })}\n`);
+	}
 	const cols = typeof step.cols === "number" ? step.cols : c.cols;
 	const rows = typeof step.rows === "number" ? step.rows : c.rows;
 	const beginSeq = typeof step.beginSeq === "number" ? step.beginSeq : 1;
-	const nextSeq = typeof step.nextSeq === "number" ? step.nextSeq : beginSeq + 1;
+	// Empty baselines carry no frame and no flush: the client expects the end
+	// nextSeq to be begin-independent (terminal-attach-client finishCollecting).
+	const nextSeq = typeof step.nextSeq === "number" ? step.nextSeq : step.empty === true ? 1 : beginSeq + 1;
 	c.onSocketData(`${JSON.stringify({
 		type: "snapshot_begin",
 		cols,
@@ -279,20 +296,32 @@ interface ScenarioState {
 	heldWrite: ((data: string, cb?: () => void) => void) | null;
 	settledAt: number | null;
 	wasAttaching: boolean;
-	spy: { evaluateAttachReady: number; deferAttachSettle: number; finishAttachTransition: number };
+	spy: { evaluateAttachReady: number; deferAttachSettle: number; finishAttachTransition: number; restoreLegacyDeadlines: number };
 }
 
 /** Count the shared convergence points so stale-callback tests can prove a
- *  fenced callback ran none of them. */
+ *  fenced callback ran none of them. restoreLegacyDeadlines counts the #284
+ *  T5 observable: a latched capability loss must never invoke it. */
 function installSpy(component: PtyAttachComponent, state: ScenarioState): void {
 	const c = component as any;
-	for (const name of ["evaluateAttachReady", "deferAttachSettle", "finishAttachTransition"] as const) {
+	for (const name of ["evaluateAttachReady", "deferAttachSettle", "finishAttachTransition", "restoreLegacyDeadlines"] as const) {
 		const original = c[name].bind(component);
 		c[name] = (...args: unknown[]) => {
 			state.spy[name] += 1;
 			return original(...args);
 		};
 	}
+}
+
+/** First non-empty committed row as plain text, so tests can tell the OLD
+ *  retained view from a NEW rebuild (no fake refresh, no stale identity). */
+function committedPreview(view: unknown): string | null {
+	if (view === null || view === undefined) return null;
+	for (const row of (view as { rows: Array<{ cells: { translateToString(trimRight?: boolean): string } }> }).rows) {
+		const text = row.cells.translateToString(true).trim();
+		if (text.length > 0) return text;
+	}
+	return "";
 }
 
 function readout(h: Harness, state: ScenarioState): Record<string, unknown> {
@@ -309,6 +338,10 @@ function readout(h: Harness, state: ScenarioState): Record<string, unknown> {
 		closed: c.closed === true,
 		attachMode: c.attachMode,
 		frameWitnessAvailable: c.frameWitnessAvailable === true,
+		witnessLatched: c.witnessLatched === true,
+		committedPath: c.modernCommittedMode() === true,
+		childInputReady: c.childInputReady === true,
+		firstAttachSideEffectsApplied: c.firstAttachSideEffectsApplied === true,
 		publishabilityState: c.publishabilityState,
 		notReadyReason: c.notReadyReason ?? null,
 		deadlineState: c.deadlineState,
@@ -342,6 +375,7 @@ function readout(h: Harness, state: ScenarioState): Record<string, unknown> {
 						rows: committed.rows.length,
 					},
 		committedViewValid: c.committedViewValid(),
+		committedPreview: committedPreview(committed),
 		latestViewProof: proof === null || proof === undefined ? null : { status: proof.status ?? null, reason: proof.reason ?? null },
 		viewProofRecordCount: c.viewProofRecordCount,
 		lastSeq: c.attachClient.getLastSeq(),
@@ -421,7 +455,7 @@ async function runProgram(program: Record<string, any>): Promise<Record<string, 
 		heldWrite: null,
 		settledAt: null,
 		wasAttaching: true,
-		spy: { evaluateAttachReady: 0, deferAttachSettle: 0, finishAttachTransition: 0 },
+		spy: { evaluateAttachReady: 0, deferAttachSettle: 0, finishAttachTransition: 0, restoreLegacyDeadlines: 0 },
 	};
 	installSpy(h.component, state);
 	const steps: Array<Record<string, unknown>> = [];

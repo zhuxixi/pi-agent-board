@@ -331,3 +331,215 @@ test("T4 e) continuous complete frames every 25ms never reset or extend the budg
 	assert.equal(final.attaching, true, "streaming output alone settles nothing in T4 (policy wiring is T6)");
 	assert.equal(final.committedView.present, true, "streamed complete frames keep committing views");
 });
+
+// Issue #284 T5: witness latch + three-layer invalidation (spec §3.3/I6).
+// Latch layer — the latch survives capability loss and same-component
+// reconnects, and clears only on detach/dispose; view layer — old views/proofs
+// are invalidated and rebuilt from the new identity without touching the
+// latch. Failure-fact layer (sticky invalid) is T6 and deliberately absent.
+
+test("T5 a) latched capability loss keeps the committed path: no legacy restore, no settle re-arm, latch retained", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "unavailable-candidate-open", text: "LATCHED SCREEN" },
+			{ op: "status", witness: false },
+			{ op: "output", text: "POST-LOSS", syncClose: true },
+			{ op: "advance", ms: 2500 },
+		],
+	});
+	assertScenarioOk("latched-loss", run);
+	const [afterHello, afterSnapshot, afterLoss, afterOutput, atCap] = readouts(run.parsed).slice(1);
+	assert.equal(afterHello.witnessLatched, true, "the first capability observation latches");
+	assert.equal(afterSnapshot.witnessLatched, true);
+	assert.equal(afterLoss.witnessLatched, true, "capability loss never clears the latch (I6 latch layer)");
+	assert.equal(afterLoss.frameWitnessAvailable, false);
+	assert.equal(afterLoss.callbacks.restoreLegacyDeadlines, 0, "a latched loss must not restore legacy deadlines");
+	assert.equal(afterLoss.timers.settlePending, false, "the loss re-arms no legacy settle timer");
+	assert.equal(afterLoss.committedPath, true, "the committed presentation path continues after loss");
+	assert.equal(afterLoss.committedViewValid, true, "the committed view survives the loss");
+	assert.equal(afterLoss.notReadyReason, "witness-capability-lost", "the loss is recorded as a wait reason");
+	assert.equal(afterOutput.timers.settlePending, false, "post-loss output must not re-arm the legacy settle either");
+	assert.equal(afterOutput.callbacks.restoreLegacyDeadlines, 0);
+	assert.equal(afterOutput.committedPreview, "LATCHED SCREENPOST-LOSS", "a closed frame after loss still commits (view updates continue)");
+	assert.equal(afterOutput.committedViewValid, true);
+	assert.equal(atCap.witnessLatched, true, "the latch survives to the cap");
+	assert.equal(atCap.callbacks.restoreLegacyDeadlines, 0);
+	// T5 scope: the cap may still reveal (budget wiring is T6); assert the
+	// latch facts, not the settle timing.
+	assert.equal(atCap.attaching, false);
+	assert.equal(atCap.settledAt, 2500);
+});
+
+test("T5 b) loss then resnapshot rebuilds the view from the new identity while the latch survives", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "unavailable-candidate-open", text: "OLD SCREEN" },
+			{ op: "status", witness: false },
+			{ op: "snapshot", resnapshot: true, proof: "unavailable-candidate-open", generation: "gen-2", text: "NEW SCREEN" },
+		],
+	});
+	assertScenarioOk("loss-resnapshot", run);
+	const [afterSnapshot1, afterLoss, afterSnapshot2] = readouts(run.parsed).slice(2);
+	assert.equal(afterSnapshot1.committedView.baselineToken, 1);
+	assert.equal(afterSnapshot1.committedView.generation, "gen-1");
+	assert.equal(afterLoss.committedView.baselineToken, 1, "no new frame arrived: the old committed view is retained");
+	assert.equal(afterLoss.committedPreview, "OLD SCREEN");
+	assert.equal(afterLoss.witnessLatched, true);
+	assert.equal(afterLoss.callbacks.restoreLegacyDeadlines, 0);
+	assert.equal(afterSnapshot2.witnessLatched, true, "the view-layer rebuild does not clear the latch (I6 layers are independent)");
+	assert.equal(afterSnapshot2.committedView.present, true);
+	assert.equal(afterSnapshot2.committedView.baselineToken, 2, "the rebuild carries the new baseline identity");
+	assert.equal(afterSnapshot2.committedView.generation, "gen-2");
+	assert.equal(afterSnapshot2.committedView.connectionToken, 1, "same component, same connection");
+	assert.equal(afterSnapshot2.committedPreview, "NEW SCREEN", "committed updates continue from the new identity");
+	assert.equal(afterSnapshot2.committedViewValid, true);
+	assert.equal(afterSnapshot2.attaching, true, "T5 rebuilds views; the publish wiring is T6");
+});
+
+test("T5 c) loss with no closed frame keeps the old committed view (no fake refresh)", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "unavailable-candidate-open", text: "RETAINED SCREEN" },
+			{ op: "status", witness: false },
+			{ op: "output", text: "UNCLOSED CHUNK", syncClose: false },
+			{ op: "advance", ms: 2500 },
+		],
+	});
+	assertScenarioOk("loss-no-close", run);
+	const [afterLoss, afterOutput, atCap] = readouts(run.parsed).slice(3);
+	assert.equal(afterLoss.committedPreview, "RETAINED SCREEN");
+	assert.equal(afterLoss.witnessLatched, true);
+	assert.equal(afterOutput.committedPreview, "RETAINED SCREEN", "an unclosed chunk never commits a view");
+	assert.equal(afterOutput.committedViewValid, true);
+	assert.equal(atCap.committedPreview, "RETAINED SCREEN", "the cap reveals the retained view, not a fake refresh");
+	assert.equal(atCap.attaching, false);
+	assert.equal(atCap.witnessLatched, true);
+});
+
+test("T5 d) same-component reconnect keeps the latch; old view/proof invalidated until a new snapshot rebuilds", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "unavailable-candidate-open", text: "SCREEN-1" },
+			{ op: "status", witness: false },
+			{ op: "reconnect" },
+			{ op: "advance", ms: 250 },
+			{ op: "snapshot", proof: "unavailable-candidate-open", text: "SCREEN-2" },
+			{ op: "advance", ms: 2250 },
+		],
+	});
+	assertScenarioOk("reconnect-latch", run);
+	const [afterLoss, afterReconnect, at250, afterSnapshot2, atCap] = readouts(run.parsed).slice(3);
+	assert.equal(afterLoss.witnessLatched, true);
+	assert.equal(afterReconnect.witnessLatched, true, "a same-component reconnect keeps the latch (I6 latch layer)");
+	assert.equal(afterReconnect.identity.connectionToken, 2);
+	assert.equal(afterReconnect.committedView, null, "the old connection's view is invalidated");
+	assert.equal(afterReconnect.committedViewValid, false);
+	assert.equal(afterReconnect.latestViewProof, null, "the old connection's proof facts are invalidated (I6 view layer)");
+	assert.equal(afterReconnect.timers.settlePending, false, "reconnect re-entry arms no legacy settle while latched");
+	assert.equal(afterReconnect.callbacks.restoreLegacyDeadlines, 0);
+	assert.equal(afterReconnect.budget.deadline, 250, "the reconnect keeps the original budget deadline (T4 fact, unchanged)");
+	assert.equal(at250.budget.elapsed, true);
+	assert.equal(at250.attaching, true, "the budget fact alone publishes nothing without a valid new view");
+	assert.equal(at250.committedView, null);
+	assert.equal(afterSnapshot2.committedView.present, true);
+	assert.equal(afterSnapshot2.committedView.connectionToken, 2, "the rebuild is bound to the new connection identity");
+	assert.equal(afterSnapshot2.committedView.baselineToken, 2);
+	assert.equal(afterSnapshot2.committedPreview, "SCREEN-2");
+	assert.equal(afterSnapshot2.committedViewValid, true);
+	assert.equal(afterSnapshot2.witnessLatched, true);
+	assert.equal(atCap.attaching, false, "settles via the cap in T5 (budget wiring is T6)");
+});
+
+test("T5 e) never-latched protocol attach keeps the capability-absent legacy settle unchanged", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "snapshot", empty: true },
+			{ op: "advance", ms: 249 },
+			{ op: "advance", ms: 1 },
+		],
+	});
+	assertScenarioOk("never-latched", run);
+	const [afterSnapshot, at249, at250] = readouts(run.parsed).slice(1);
+	assert.equal(afterSnapshot.attachMode, "protocol", "an empty snapshot still decides protocol mode");
+	assert.equal(afterSnapshot.witnessLatched, false, "no capability was ever observed");
+	assert.equal(afterSnapshot.committedPath, false);
+	assert.equal(at249.attaching, true);
+	assert.equal(at249.witnessLatched, false);
+	assert.equal(at250.attaching, false, "the capability-absent settle reveals at the unchanged 250ms boundary");
+	assert.equal(at250.settledAt, 250);
+	assert.equal(at250.witnessLatched, false);
+});
+
+test("T5 f) post-publish loss/resnapshot: single settle, input gates not advanced by the latch", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "covered", text: "F SCREEN" },
+			{ op: "advance", ms: 300 },
+			{ op: "status", witness: false },
+			{ op: "snapshot", resnapshot: true, proof: "unavailable-candidate-open", generation: "gen-2", text: "POST-LOSS SCREEN" },
+			{ op: "output", text: "TAIL", syncClose: true },
+			{ op: "advance", ms: 2200 },
+		],
+	});
+	assertScenarioOk("post-publish", run);
+	const [afterSnapshot, at300, afterLoss, afterResnapshot, afterOutput, finalStep] = readouts(run.parsed).slice(2);
+	assert.equal(afterSnapshot.attaching, false, "the covered F proof settled before the budget");
+	assert.equal(afterSnapshot.settledAt, 0);
+	assert.equal(afterSnapshot.callbacks.finishAttachTransition, 1, "first-attach side effects fired exactly once");
+	assert.equal(afterSnapshot.firstAttachSideEffectsApplied, true);
+	assert.equal(at300.childInputReady, false, "no real child input mode was ever signaled");
+	assert.equal(afterLoss.attaching, false, "a post-settle loss cannot re-enter the transition");
+	assert.equal(afterLoss.witnessLatched, true);
+	assert.equal(afterLoss.callbacks.finishAttachTransition, 1);
+	assert.equal(afterLoss.childInputReady, false, "the latch never advances the input gate (I4)");
+	assert.equal(afterLoss.committedPath, true, "selection/copy and display stay on the committed source");
+	assert.equal(afterResnapshot.committedPreview, "POST-LOSS SCREEN", "committed updates continue after the publish");
+	assert.equal(afterResnapshot.witnessLatched, true);
+	assert.equal(afterResnapshot.callbacks.finishAttachTransition, 1, "no second settle across loss+resnapshot");
+	assert.equal(afterOutput.committedViewValid, true);
+	assert.equal(afterOutput.callbacks.finishAttachTransition, 1);
+	assert.equal(finalStep.callbacks.finishAttachTransition, 1, "first-attach side effects fire at most once across the sequence");
+	assert.equal(finalStep.childInputReady, false);
+	assert.equal(finalStep.witnessLatched, true);
+});
+
+test("T5 g) detach and dispose clear the latch: a new attach re-observes the capability", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "unavailable-candidate-open", text: "LATCH SOURCE" },
+			{ op: "detach" },
+			{ op: "advance", ms: 1000 },
+		],
+	});
+	assertScenarioOk("detach-clears-latch", run);
+	const [afterSnapshot, afterDetach] = readouts(run.parsed).slice(2);
+	assert.equal(afterSnapshot.witnessLatched, true);
+	assert.equal(afterDetach.closed, true);
+	assert.equal(afterDetach.witnessLatched, false, "detach ends this attach: the latch is attach-scoped (I6 latch layer)");
+	assert.equal(run.parsed.final.witnessLatched, false, "no later status line can re-latch a closed component");
+
+	const disposeRun = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "unavailable-candidate-open", text: "LATCH SOURCE 2" },
+			{ op: "dispose" },
+		],
+	});
+	assertScenarioOk("dispose-clears-latch", disposeRun);
+	assert.equal(readouts(disposeRun.parsed)[3].witnessLatched, false, "dispose clears the latch too");
+	assert.equal(disposeRun.parsed.final.witnessLatched, false);
+});

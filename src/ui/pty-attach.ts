@@ -416,6 +416,12 @@ export class PtyAttachComponent implements Component {
 	/** Runner-reported reporter capability. Without it the attach keeps the
 	 *  accepted legacy deadline path (old/no-reporter hosts are not stranded). */
 	private frameWitnessAvailable = false;
+	/** Issue #284 latch layer (spec §3.3/I6): set once when frameWitnessAvailable
+	 *  first becomes true during THIS attach. Capability loss never clears it —
+	 *  the attach stays on the committed presentation path (no legacy deadline
+	 *  restore) until detach/dispose; same-component reconnects and view-layer
+	 *  invalidations (resnapshot/reset/baseline change) leave it alone. */
+	private witnessLatched = false;
 	/** Last complete modern projection installed at a real ?2026l boundary. */
 	private committedView: CommittedView | null = null;
 	/** Display-only same-generation/geometry recovery view; never readiness. */
@@ -1011,6 +1017,13 @@ export class PtyAttachComponent implements Component {
 			this.everConnected = true;
 			this.connectionToken += 1;
 			this.committedView = null;
+			// Issue #284 view layer (I6): a connection-generation change also
+			// invalidates the old proof facts — only the new connection's
+			// snapshot/records may re-establish them. The latch survives: it is
+			// attach-scoped, not connection-scoped.
+			this.latestViewProof = null;
+			this.viewProofIdentity = null;
+			this.viewProofTrailing.reset();
 			this.currentWireGeneration = null;
 			// Do not paint the previous generation between reconnect and its
 			// confirming hello/status; same-generation status clears this gate.
@@ -1172,7 +1185,10 @@ export class PtyAttachComponent implements Component {
 	}
 
 	private deferAttachSettle(): void {
-		if (!this.attaching || (this.attachMode === "protocol" && this.frameWitnessAvailable)) return;
+		// Protocol sessions never defer the legacy settle; a LATCHED session
+		// stays on that path even after capability loss (issue #284 I6) — a
+		// post-loss reconnect/output must not resurrect the legacy settle.
+		if (!this.attaching || this.modernCommittedMode()) return;
 		if (this.attachSettleTimer !== null) this.clock.clear(this.attachSettleTimer);
 		const waitToken = this.attachWaitToken;
 		this.attachSettleTimer = this.clock.schedule(() => this.handleAttachSettleTimeout(waitToken), ATTACH_SETTLE_MS);
@@ -1184,7 +1200,10 @@ export class PtyAttachComponent implements Component {
 		if (waitToken !== this.attachWaitToken) return;
 		this.attachSettleTimer = null;
 		if (!this.attaching || this.closed) return;
-		const legacyCompatible = this.attachMode === "legacy" || (this.attachMode === "protocol" && !this.frameWitnessAvailable);
+		// A latched protocol attach is never legacy-compatible: capability loss
+		// keeps the committed path (issue #284 I6), so this timer may not consume
+		// the transition for it.
+		const legacyCompatible = this.attachMode === "legacy" || (this.attachMode === "protocol" && !this.modernCommittedMode());
 		if (legacyCompatible) this.finishAttachTransition();
 	}
 
@@ -1201,7 +1220,9 @@ export class PtyAttachComponent implements Component {
 		if (waitToken !== this.attachWaitToken) return;
 		this.attachHardTimeout = null;
 		if (!this.attaching || this.closed) return;
-		const legacyCompatible = this.attachMode === "legacy" || (this.attachMode === "protocol" && !this.frameWitnessAvailable);
+		// Same latch rule as the settle timeout: a latched attach never falls
+		// back to the legacy reveal branch (issue #284 I6).
+		const legacyCompatible = this.attachMode === "legacy" || (this.attachMode === "protocol" && !this.modernCommittedMode());
 		if (legacyCompatible) {
 			this.finishAttachTransition();
 			return;
@@ -1326,8 +1347,11 @@ export class PtyAttachComponent implements Component {
 		return null;
 	}
 
+	/** Committed-path membership (projection, commits, recovery, selection
+	 *  source): protocol mode with the reporter capability OR the #284 latch —
+	 *  capability loss after a latched attach keeps this path alive (spec §3.3). */
 	private modernCommittedMode(): boolean {
-		return this.attachMode === "protocol" && this.frameWitnessAvailable;
+		return this.attachMode === "protocol" && (this.frameWitnessAvailable || this.witnessLatched);
 	}
 
 	/** Visible/interaction fork (issue #278): the committed projection is used in
@@ -2416,6 +2440,9 @@ export class PtyAttachComponent implements Component {
 					if (status.frameWitness?.enabled === true) {
 						const wasAvailable = this.frameWitnessAvailable;
 						this.frameWitnessAvailable = true;
+						// Latch on the first observation of this attach (idempotent):
+						// later losses may not strand the attach on the legacy path.
+						this.witnessLatched = true;
 						if (!wasAvailable && this.attaching && this.attachMode === "protocol") {
 							if (this.attachSettleTimer !== null) {
 								this.clock.clear(this.attachSettleTimer);
@@ -2429,9 +2456,18 @@ export class PtyAttachComponent implements Component {
 						this.latestViewProof = null;
 						this.viewProofIdentity = null;
 						if (this.attaching && this.attachMode === "protocol") {
-							this.deadlineState = "pending";
-							this.notReadyReason = "legacy-deadlines-without-reporter";
-							this.restoreLegacyDeadlines();
+							if (this.witnessLatched) {
+								// Issue #284 latch layer (I6/§3.3): a latched attach keeps the
+								// committed presentation path — no restoreLegacyDeadlines, no
+								// latch clear. Record the loss and keep waiting for safe facts;
+								// the view layer rebuilds on the next new-identity snapshot or
+								// closed frame.
+								this.notReadyReason = "witness-capability-lost";
+							} else {
+								this.deadlineState = "pending";
+								this.notReadyReason = "legacy-deadlines-without-reporter";
+								this.restoreLegacyDeadlines();
+							}
 						}
 					}
 					if (msg.type === "hello") this.editorEmpty = typeof msg.editorEmpty === "boolean" ? msg.editorEmpty : null;
@@ -2475,12 +2511,16 @@ export class PtyAttachComponent implements Component {
 				// explicit expired wait, never a forced publish.
 				this.clearJiggleStartTimer();
 				this.jiggleRetry.restoreAndStop();
-				if (this.frameWitnessAvailable && this.attachSettleTimer !== null) {
+				if (this.modernCommittedMode() && this.attachSettleTimer !== null) {
 					this.clock.clear(this.attachSettleTimer);
 					this.attachSettleTimer = null;
 				}
 				this.deadlineState = "pending";
-				this.notReadyReason = this.frameWitnessAvailable ? "awaiting-complete-frame" : "legacy-deadlines-without-reporter";
+				this.notReadyReason = this.frameWitnessAvailable
+					? "awaiting-complete-frame"
+					: this.witnessLatched
+						? "witness-capability-lost"
+						: "legacy-deadlines-without-reporter";
 				this.evaluateAttachReady();
 			} else if (prev === "protocol") {
 				// Downgrade after a protocol session (recovery budget exhausted):
@@ -2915,6 +2955,9 @@ export class PtyAttachComponent implements Component {
 		}
 		this.clearAttachRecoveryBudget();
 		this.budgetArmed = false;
+		// Issue #284 latch layer: the latch is attach-scoped — detach/dispose
+		// ends this attach; a new component re-observes the capability fresh.
+		this.witnessLatched = false;
 		this.clearGracefulSocketCloseTimer();
 		const socket = this.socket;
 		this.socket = null;
