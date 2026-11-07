@@ -53,7 +53,31 @@ export interface PtyAttachOptions {
 	title: string;
 	/** Issue #161: receives settle-scheme diagnostic patches. Default: no-op. */
 	onDiagnostic?: (event: AttachSettleDiagnosticPatch) => void;
+	/** Issue #284: injectable clock for attach-lifecycle deadlines. The default
+	 *  (host clock + global timers) keeps the existing behavior untouched; the
+	 *  component harness injects a virtual time source and timer queue so the
+	 *  250ms settle / 2500ms cap / 250ms recovery budget boundaries are asserted
+	 *  deterministically instead of on wall clock. */
+	clock?: AttachClock;
 }
+
+/** Issue #284 attach-lifecycle clock seam: `now` plus a scheduler pair. The
+ *  scheduled handle is opaque (the injected scheduler may return any id). */
+export interface AttachClock {
+	now(): number;
+	schedule(fn: () => void, ms: number): unknown;
+	clear(handle: unknown): void;
+}
+
+const hostAttachClock: AttachClock = {
+	now: () => Date.now(),
+	schedule: (fn, ms) => {
+		const timer = setTimeout(fn, ms);
+		timer.unref?.();
+		return timer;
+	},
+	clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
+};
 
 const require = createRequire(import.meta.url);
 const { Terminal } = require("@xterm/headless") as { Terminal: new (opts: Record<string, unknown>) => XtermLike };
@@ -379,7 +403,7 @@ export class PtyAttachComponent implements Component {
 	private deadlineState: "pending" | "expired" = "pending";
 	private notReadyReason: string | null = null;
 	private parserWritesInFlight = 0;
-	private readonly attachStartedAt = Date.now();
+	private readonly attachStartedAt: number;
 	private readonly viewProofTrailing = createSafeTrailingClassifier();
 	private recentProtocolOutput: Array<{ seq: number; data: string }> = [];
 	private proofResyncRequested = false;
@@ -409,6 +433,8 @@ export class PtyAttachComponent implements Component {
 	private desyncProbeTimer: ReturnType<typeof setInterval> | null = null;
 	/** Injectable clock for desync gating (tests override this). */
 	private nowFn: () => number = () => Date.now();
+	/** Issue #284: attach-lifecycle clock (deadlines + attach timers). */
+	private readonly clock: AttachClock;
 	private selection: MouseSelection | null = null;
 	/** Issue #172: bumped on every left press so a settle still queued for the previous
 	 * gesture cannot read or clear a selection the next press has already started. */
@@ -432,8 +458,8 @@ export class PtyAttachComponent implements Component {
 	// initial resize-jiggle redraws settle, so attach never visibly scrolls/flashes the
 	// buffer. `receivedOutput` tracks buffer content; `attaching` gates whether we paint it.
 	private attaching = true;
-	private attachSettleTimer: ReturnType<typeof setTimeout> | null = null;
-	private attachHardTimeout: ReturnType<typeof setTimeout> | null = null;
+	private attachSettleTimer: unknown = null;
+	private attachHardTimeout: unknown = null;
 	// Last scheme delivered to the child at settle (issue #161). Starts null:
 	// null never matches the duplicate check, so a timeout-then-late sequence
 	// still delivers. Single-shot per attach — settle runs at most once.
@@ -469,6 +495,14 @@ export class PtyAttachComponent implements Component {
 		private readonly done: (result: PtyAttachResult) => void,
 		private readonly opts: PtyAttachOptions,
 	) {
+		// Issue #284 clock seam: assigned from the constructor parameter (not a
+		// field initializer) so it is set regardless of the loader's field-init
+		// semantics, before any attach-lifecycle deadline is computed. Output
+		// timestamps (nowFn) follow the injected clock too, so legacy deadline
+		// math never mixes virtual and wall time.
+		this.clock = opts.clock ?? hostAttachClock;
+		this.attachStartedAt = this.clock.now();
+		if (opts.clock) this.nowFn = opts.clock.now;
 		const size = this.currentSize();
 		this.cols = size.cols;
 		this.rows = size.rows;
@@ -1084,18 +1118,16 @@ export class PtyAttachComponent implements Component {
 		this.attachWaitToken += 1;
 		const waitToken = this.attachWaitToken;
 		this.deferAttachSettle();
-		if (this.attachHardTimeout) clearTimeout(this.attachHardTimeout);
-		const remainingHard = Math.max(0, ATTACH_HARD_TIMEOUT_MS - (Date.now() - this.attachStartedAt));
-		this.attachHardTimeout = setTimeout(() => this.handleAttachHardTimeout(waitToken), remainingHard);
-		this.attachHardTimeout.unref?.();
+		if (this.attachHardTimeout !== null) this.clock.clear(this.attachHardTimeout);
+		const remainingHard = Math.max(0, ATTACH_HARD_TIMEOUT_MS - (this.clock.now() - this.attachStartedAt));
+		this.attachHardTimeout = this.clock.schedule(() => this.handleAttachHardTimeout(waitToken), remainingHard);
 	}
 
 	private deferAttachSettle(): void {
 		if (!this.attaching || (this.attachMode === "protocol" && this.frameWitnessAvailable)) return;
-		if (this.attachSettleTimer) clearTimeout(this.attachSettleTimer);
+		if (this.attachSettleTimer !== null) this.clock.clear(this.attachSettleTimer);
 		const waitToken = this.attachWaitToken;
-		this.attachSettleTimer = setTimeout(() => this.handleAttachSettleTimeout(waitToken), ATTACH_SETTLE_MS);
-		this.attachSettleTimer.unref?.();
+		this.attachSettleTimer = this.clock.schedule(() => this.handleAttachSettleTimeout(waitToken), ATTACH_SETTLE_MS);
 	}
 
 	/** Legacy settle callback. In protocol mode the timer is cancelled; an
@@ -1145,20 +1177,18 @@ export class PtyAttachComponent implements Component {
 	 *  not a fresh extended window. */
 	private restoreLegacyDeadlines(): void {
 		if (!this.attaching || this.closed) return;
-		const now = Date.now();
+		const now = this.clock.now();
 		if (now - this.attachStartedAt >= ATTACH_HARD_TIMEOUT_MS) {
 			this.finishAttachTransition();
 			return;
 		}
 		const settleBase = this.lastOutputAt > 0 ? this.lastOutputAt : this.attachStartedAt;
 		const remaining = Math.max(0, ATTACH_SETTLE_MS - (now - settleBase));
-		if (this.attachSettleTimer) clearTimeout(this.attachSettleTimer);
+		if (this.attachSettleTimer !== null) this.clock.clear(this.attachSettleTimer);
 		const waitToken = this.attachWaitToken;
-		this.attachSettleTimer = setTimeout(() => this.handleAttachSettleTimeout(waitToken), remaining);
-		this.attachSettleTimer.unref?.();
-		if (!this.attachHardTimeout) {
-			this.attachHardTimeout = setTimeout(() => this.handleAttachHardTimeout(waitToken), Math.max(0, ATTACH_HARD_TIMEOUT_MS - (now - this.attachStartedAt)));
-			this.attachHardTimeout.unref?.();
+		this.attachSettleTimer = this.clock.schedule(() => this.handleAttachSettleTimeout(waitToken), remaining);
+		if (this.attachHardTimeout === null) {
+			this.attachHardTimeout = this.clock.schedule(() => this.handleAttachHardTimeout(waitToken), Math.max(0, ATTACH_HARD_TIMEOUT_MS - (now - this.attachStartedAt)));
 		}
 	}
 
@@ -1429,12 +1459,12 @@ export class PtyAttachComponent implements Component {
 		this.publishabilityState = "ready";
 		this.notReadyReason = null;
 		this.firstAttachSideEffectsApplied = true;
-		if (this.attachSettleTimer) {
-			clearTimeout(this.attachSettleTimer);
+		if (this.attachSettleTimer !== null) {
+			this.clock.clear(this.attachSettleTimer);
 			this.attachSettleTimer = null;
 		}
-		if (this.attachHardTimeout) {
-			clearTimeout(this.attachHardTimeout);
+		if (this.attachHardTimeout !== null) {
+			this.clock.clear(this.attachHardTimeout);
 			this.attachHardTimeout = null;
 		}
 		this.stopLoadingTicker();
@@ -2338,8 +2368,8 @@ export class PtyAttachComponent implements Component {
 						const wasAvailable = this.frameWitnessAvailable;
 						this.frameWitnessAvailable = true;
 						if (!wasAvailable && this.attaching && this.attachMode === "protocol") {
-							if (this.attachSettleTimer) {
-								clearTimeout(this.attachSettleTimer);
+							if (this.attachSettleTimer !== null) {
+								this.clock.clear(this.attachSettleTimer);
 								this.attachSettleTimer = null;
 							}
 							this.deadlineState = "pending";
@@ -2396,8 +2426,8 @@ export class PtyAttachComponent implements Component {
 				// explicit expired wait, never a forced publish.
 				this.clearJiggleStartTimer();
 				this.jiggleRetry.restoreAndStop();
-				if (this.frameWitnessAvailable && this.attachSettleTimer) {
-					clearTimeout(this.attachSettleTimer);
+				if (this.frameWitnessAvailable && this.attachSettleTimer !== null) {
+					this.clock.clear(this.attachSettleTimer);
 					this.attachSettleTimer = null;
 				}
 				this.deadlineState = "pending";
@@ -2826,12 +2856,12 @@ export class PtyAttachComponent implements Component {
 		// without stopping the TUI. Verified host pi 1.4.0 shape.
 		if (typeof renderSeam.renderRequested === "boolean") renderSeam.renderRequested = false;
 		this.stopDesyncProbe();
-		if (this.attachSettleTimer) {
-			clearTimeout(this.attachSettleTimer);
+		if (this.attachSettleTimer !== null) {
+			this.clock.clear(this.attachSettleTimer);
 			this.attachSettleTimer = null;
 		}
-		if (this.attachHardTimeout) {
-			clearTimeout(this.attachHardTimeout);
+		if (this.attachHardTimeout !== null) {
+			this.clock.clear(this.attachHardTimeout);
 			this.attachHardTimeout = null;
 		}
 		this.clearGracefulSocketCloseTimer();
