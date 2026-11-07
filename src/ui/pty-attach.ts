@@ -93,6 +93,12 @@ const LOADING_TICK_MS = 120;
 const ATTACH_SETTLE_MS = 250;
 /** Hard cap on the attach transition so a silent session can't stall the banner. */
 const ATTACH_HARD_TIMEOUT_MS = 2500;
+/** Issue #284 recovery budget: one 250ms window per attach lifetime. Once it
+ * elapses, a protocol attach with a safely committed view but no covering F
+ * proof may publish degraded (spec §3.2; the policy wiring lands with T6 —
+ * this constant only owns the timer fact). Ordinary output and reconnect
+ * re-entry never reset or extend it (invariant I5). */
+const ATTACH_RECOVERY_BUDGET_MS = 250;
 /** Protocol-race guard for legacy jiggle arming (issue #91 phase 4): the
  * undecided window must not pulse the child before the snapshot probe
  * resolves — a resize-free attach is the protocol-mode contract. Invisible
@@ -460,6 +466,20 @@ export class PtyAttachComponent implements Component {
 	private attaching = true;
 	private attachSettleTimer: unknown = null;
 	private attachHardTimeout: unknown = null;
+	// Issue #284 recovery budget: armed ONCE per attach lifetime at the first
+	// startAttachSettle entry (deadline = attachStartedAt + 250ms). Reconnect
+	// re-entry must never re-arm or extend it (I5). The callback is fenced by
+	// the attach lifetime itself — attaching && !closed && budgetArmed — NOT by
+	// attachWaitToken: that token increments on every startAttachSettle re-entry
+	// and would permanently invalidate the armed callback after a reconnect
+	// (spec §3.2 fence lifecycle). Stale-connection views stay blocked by the
+	// identity fence (I3) instead.
+	private attachRecoveryBudgetTimer: unknown = null;
+	private budgetArmed = false;
+	/** Timer fact only: the budget deadline passed while this attach was still
+	 *  waiting. Publishing on it is the policy's decision (T6 wiring), never the
+	 *  timer's. */
+	private budgetElapsed = false;
 	// Last scheme delivered to the child at settle (issue #161). Starts null:
 	// null never matches the duplicate check, so a timeout-then-late sequence
 	// still delivers. Single-shot per attach — settle runs at most once.
@@ -1115,12 +1135,40 @@ export class PtyAttachComponent implements Component {
 	 */
 	private startAttachSettle(): void {
 		if (!this.attaching) return;
+		this.armAttachRecoveryBudget();
 		this.attachWaitToken += 1;
 		const waitToken = this.attachWaitToken;
 		this.deferAttachSettle();
 		if (this.attachHardTimeout !== null) this.clock.clear(this.attachHardTimeout);
 		const remainingHard = Math.max(0, ATTACH_HARD_TIMEOUT_MS - (this.clock.now() - this.attachStartedAt));
 		this.attachHardTimeout = this.clock.schedule(() => this.handleAttachHardTimeout(waitToken), remainingHard);
+	}
+
+	/** Arm the recovery budget once per attach lifetime; every later
+	 *  startAttachSettle re-entry (reconnect) is a no-op so the deadline never
+	 *  moves (I5). */
+	private armAttachRecoveryBudget(): void {
+		if (this.budgetArmed || this.closed || !this.attaching) return;
+		this.budgetArmed = true;
+		const remaining = Math.max(0, ATTACH_RECOVERY_BUDGET_MS - (this.clock.now() - this.attachStartedAt));
+		this.attachRecoveryBudgetTimer = this.clock.schedule(() => this.handleAttachRecoveryBudgetTimeout(), remaining);
+	}
+
+	/** Budget expiry records the timer fact and re-evaluates readiness at the
+	 *  shared convergence point. The fence is the attach lifetime only (spec
+	 *  §3.2): a settled or closed component records nothing. */
+	private handleAttachRecoveryBudgetTimeout(): void {
+		this.attachRecoveryBudgetTimer = null;
+		if (!this.budgetArmed || !this.attaching || this.closed) return;
+		this.budgetElapsed = true;
+		this.evaluateAttachReady();
+	}
+
+	private clearAttachRecoveryBudget(): void {
+		if (this.attachRecoveryBudgetTimer !== null) {
+			this.clock.clear(this.attachRecoveryBudgetTimer);
+			this.attachRecoveryBudgetTimer = null;
+		}
 	}
 
 	private deferAttachSettle(): void {
@@ -1467,6 +1515,7 @@ export class PtyAttachComponent implements Component {
 			this.clock.clear(this.attachHardTimeout);
 			this.attachHardTimeout = null;
 		}
+		this.clearAttachRecoveryBudget();
 		this.stopLoadingTicker();
 		// Force a full clear so the loading banner is replaced atomically by the settled
 		// buffer, instead of diffing banner lines into buffer lines.
@@ -2864,6 +2913,8 @@ export class PtyAttachComponent implements Component {
 			this.clock.clear(this.attachHardTimeout);
 			this.attachHardTimeout = null;
 		}
+		this.clearAttachRecoveryBudget();
+		this.budgetArmed = false;
 		this.clearGracefulSocketCloseTimer();
 		const socket = this.socket;
 		this.socket = null;

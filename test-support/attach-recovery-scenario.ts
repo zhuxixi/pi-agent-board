@@ -112,8 +112,11 @@ async function settleTicks(): Promise<void> {
 
 /** The socket 'connect' handler's attach-lifecycle effects on the same
  *  component instance (see connect() in src/ui/pty-attach.ts). Reconnect is
- *  exactly this re-entry: connectionToken increments and startAttachSettle
- *  runs again; committed views/proofs of the old connection are invalidated. */
+ *  exactly this re-entry: connectionToken increments, the old connection's
+ *  views/proofs are invalidated, the attach client resumes from its cursor,
+ *  and startAttachSettle runs again. The first connect keeps the client in
+ *  `probing` (its start() would only send the subscribe and arm a wall-clock
+ *  probe timer; snapshot_begin is accepted from probing either way). */
 function simulateConnect(c: any): void {
 	c.outputRenderScheduler.cancel();
 	c.captureRecoveryView();
@@ -125,6 +128,7 @@ function simulateConnect(c: any): void {
 	c.emptyResetPending = true;
 	c.disconnectedAt = null;
 	c.status = c.recoveryView !== null ? "reconnecting…" : "attached";
+	if (c.attachMode === "protocol") c.attachClient.reconnect(c.attachClient.getLastSeq());
 	c.startAttachSettle();
 }
 
@@ -428,6 +432,7 @@ async function runProgram(program: Record<string, any>): Promise<Record<string, 
 		state.wasAttaching = attaching;
 		steps.push({ op: step.op, readout: readout(h, state) });
 	}
+	const final = readout(h, state);
 	try {
 		h.component.dispose();
 	} catch {
@@ -438,7 +443,7 @@ async function runProgram(program: Record<string, any>): Promise<Record<string, 
 		wallMs: Date.now() - startedAt,
 		clockStart,
 		steps,
-		final: readout(h, state),
+		final,
 	};
 }
 
