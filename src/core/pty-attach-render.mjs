@@ -154,6 +154,15 @@ export function canPublishAttachView(viewIdentity, currentIdentity) {
  * reason; it can never upgrade an incomplete view to publish. Legacy decisions
  * stay independent of proof facts.
  *
+ * Issue #284 adds a second, lower-priority outcome: when the full-view (F) chain
+ * fails AND the caller supplies recovery facts (any of the `committed*` /
+ * `witnessLatched` / `proofStatus` / `budgetElapsed` inputs below), a
+ * committed-degraded chain is evaluated instead — every predicate must pass to
+ * `publish-degraded`, otherwise the first failing predicate names the wait
+ * reason. Callers that do not supply recovery facts get the exact pre-#284
+ * behavior. The F chain keeps absolute priority: a fully covered view always
+ * publishes `complete` without waiting for the budget.
+ *
  * @param {{
  *   closed?: boolean,
  *   mode?: "undecided" | "protocol" | "legacy" | "raw" | string,
@@ -176,8 +185,16 @@ export function canPublishAttachView(viewIdentity, currentIdentity) {
  *   resizeIntentSatisfied?: boolean,
  *   intentId?: number,
  *   deadlineState?: "pending" | "expired",
+ *   witnessLatched?: boolean,
+ *   committedViewValid?: boolean,
+ *   committedViewSource?: "snapshot" | "sync-close" | "none",
+ *   committedViewCols?: number,
+ *   committedViewRows?: number,
+ *   committedContentKind?: "complete" | "boot" | "raw" | "partial" | "unknown",
+ *   proofStatus?: "none" | "missing" | "invalid" | "covered",
+ *   budgetElapsed?: boolean,
  * }} state
- * @returns {{ action: "closed" | "legacy" | "wait" | "publish", reason: string }}
+ * @returns {{ action: "closed" | "legacy" | "wait" | "publish" | "publish-degraded", reason: string }}
  */
 export function decideAttachPresentation(state) {
 	if (state === null || typeof state !== "object" || Array.isArray(state)) return { action: "wait", reason: "state-missing" };
@@ -189,6 +206,13 @@ export function decideAttachPresentation(state) {
 		reason: state.deadlineState === "expired" ? `deadline-expired:${reason}` : reason,
 	});
 	if (state.mode !== "protocol") return wait(`mode-${state.mode ?? "unknown"}`);
+	const full = fullViewDecision(state, wait);
+	if (full.action === "publish") return full;
+	return degradedViewDecision(state, wait) ?? full;
+}
+
+/** The pre-#284 full-view (F) predicate chain, verbatim. */
+function fullViewDecision(state, wait) {
 	if (state.baselineState !== "valid-content" && state.baselineState !== "valid-empty") {
 		if (state.baselineState === "hydrating") return wait("baseline-hydrating");
 		if (state.baselineState === "unverified") return wait("baseline-unverified");
@@ -226,4 +250,47 @@ export function decideAttachPresentation(state) {
 	}
 	if (!canPublishAttachView(state.viewIdentity, state.currentIdentity)) return wait("identity-mismatch");
 	return { action: "publish", reason: "complete" };
+}
+
+/** Recovery facts assembled by the caller; presence of any one opts into the degraded chain. */
+const RECOVERY_FACT_KEYS = [
+	"witnessLatched",
+	"committedViewValid",
+	"committedViewSource",
+	"committedViewCols",
+	"committedViewRows",
+	"committedContentKind",
+	"proofStatus",
+	"budgetElapsed",
+];
+
+/**
+ * Issue #284 §3.1 committed-degraded chain, evaluated only after the F chain
+ * failed and only for callers that supply recovery facts. All seven predicates
+ * must pass to publish-degraded; the first failure names the wait reason
+ * (shared predicates reuse the F-chain reason strings). Every missing or
+ * unrecognized fact fails closed. Returns null when recovery facts are absent
+ * so the F-chain wait stands unchanged.
+ */
+function degradedViewDecision(state, wait) {
+	if (!RECOVERY_FACT_KEYS.some((key) => state[key] !== undefined)) return null;
+	if (state.mode !== "protocol") return wait(`mode-${state.mode ?? "unknown"}`);
+	if (state.witnessLatched !== true) return wait("witness-not-latched");
+	if (state.baselineState !== "valid-content") {
+		if (state.baselineState === "hydrating") return wait("baseline-hydrating");
+		if (state.baselineState === "unverified") return wait("baseline-unverified");
+		if (state.baselineState === "valid-empty") return wait("baseline-empty");
+		return wait("baseline-unknown");
+	}
+	if (state.localParseComplete !== true) return wait("local-parse-incomplete");
+	if (state.frameState !== "complete") return wait(state.frameState === "open" ? "sync-open" : "frame-incomplete");
+	if (state.openSyncBlock === true) return wait("sync-open");
+	if (state.committedViewValid !== true) return wait(state.committedViewValid == null ? "committed-view-missing" : "committed-view-invalid");
+	if (state.committedViewCols !== state.targetCols || state.committedViewRows !== state.targetRows) return wait("committed-geometry-mismatch");
+	if (state.resizeIntentRequired === true) return wait("resize-intent");
+	if (state.proofStatus === "covered") return wait("proof-status-covered");
+	if (state.proofStatus !== "none" && state.proofStatus !== "missing") return wait("proof-status-invalid");
+	if (state.budgetElapsed !== true) return wait("recovery-budget-pending");
+	if (state.committedContentKind !== "complete") return wait(`content-kind-${state.committedContentKind ?? "unknown"}`);
+	return { action: "publish-degraded", reason: "committed-degraded" };
 }
