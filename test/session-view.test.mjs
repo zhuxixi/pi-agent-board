@@ -51,3 +51,22 @@ test("parseSessionText keeps visible custom messages and summaries, skips hidden
 		],
 	);
 });
+
+test("parseSessionText keeps the session header extraction (refactor guard, issue #286)", () => {
+	const text = [
+		JSON.stringify({ type: "session", id: "s42", cwd: "/work" }),
+		JSON.stringify({ type: "message", id: "e1", parentId: null, message: { role: "user", content: "hi" } }),
+	].join("\n");
+	const view = parseSessionText(text);
+	assert.equal(view.header?.id, "s42");
+	assert.equal(view.header?.cwd, "/work");
+});
+
+test("parseSessionText skips id-less entries when building the branch (refactor guard, issue #286)", () => {
+	const text = [
+		JSON.stringify({ type: "message", id: "e1", parentId: null, message: { role: "user", content: "hi" } }),
+		JSON.stringify({ type: "message", parentId: "e1", message: { role: "assistant", content: "ghost" } }), // no id
+	].join("\n");
+	const view = parseSessionText(text);
+	assert.equal(view.items.length, 1, "id-less entry does not reach display items");
+});

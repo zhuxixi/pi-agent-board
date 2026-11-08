@@ -7,6 +7,7 @@
  * then render messages / visible custom messages / summaries on that branch.
  */
 import { existsSync, readFileSync } from "node:fs";
+import { activeBranchEntries, parseSessionEntries } from "./session-entries.mjs";
 
 /**
  * @typedef {Object} SessionViewItem
@@ -51,57 +52,11 @@ export function loadSessionView(sessionFile) {
  * @returns {SessionViewData}
  */
 export function parseSessionText(text) {
-	/** @type {{ id:string, cwd:string }|null} */
-	let header = null;
-	/** @type {any[]} */
-	const entries = [];
-	/** @type {Map<string, any>} */
-	const byId = new Map();
-
-	for (const rawLine of String(text || "").split(/\r?\n/)) {
-		const line = rawLine.trim();
-		if (!line) continue;
-		let entry;
-		try {
-			entry = JSON.parse(line);
-		} catch {
-			continue;
-		}
-		if (entry?.type === "session") {
-			header = { id: String(entry.id || ""), cwd: String(entry.cwd || "") };
-			continue;
-		}
-		if (!entry || typeof entry !== "object" || typeof entry.id !== "string") continue;
-		entries.push(entry);
-		byId.set(entry.id, entry);
-	}
-
+	const { header, entries, byId } = parseSessionEntries(text);
 	if (entries.length === 0) return { header, items: [], error: null };
-
-	const leaf = entries[entries.length - 1];
-	const branch = activeBranch(leaf, byId);
+	const branch = activeBranchEntries(entries, byId);
 	const items = branch.flatMap(displayItemsForEntry);
 	return { header, items, error: null };
-}
-
-/**
- * Walk from `leaf` to root following parentId pointers.
- * @param {any} leaf
- * @param {Map<string, any>} byId
- * @returns {any[]}
- */
-function activeBranch(leaf, byId) {
-	/** @type {any[]} */
-	const out = [];
-	const seen = new Set();
-	let cur = leaf;
-	while (cur && typeof cur.id === "string" && !seen.has(cur.id)) {
-		out.push(cur);
-		seen.add(cur.id);
-		cur = cur.parentId ? byId.get(cur.parentId) ?? null : null;
-	}
-	out.reverse();
-	return out;
 }
 
 /**
