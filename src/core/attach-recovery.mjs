@@ -183,3 +183,57 @@ export function sanitizeViewProofEnumPair(latestViewProof) {
 	}
 	return { status: "unrecognized", reason: "unrecognized" };
 }
+
+// --- Issue #288 D1: invalid-family classification for the cap floor ---
+
+// Runner-snapshot trailing shapes (coverageFor): a prior covered proof
+// extended by unsafe trailing bytes — the trailing family's snapshot arrival
+// shape, distinct from the UI's unknown + view-proof-trailing-* shapes.
+const UNAVAILABLE_TRAILING_REASONS = new Set(["trailing-pending", "trailing-unsafe"]);
+
+/** Trailing-family identifier form for the UI arrival shape: the suffix
+ *  after view-proof-trailing- accepts lowercase alphanumerics and hyphens
+ *  only (spec I9 — malformed/empty/uppercase/special-character suffixes
+ *  classify as hard, never trailing). */
+const TRAILING_FAMILY_IDENTIFIER = /^[a-z0-9-]+$/;
+
+function isTrailingFamilyReason(reason) {
+	return (
+		typeof reason === "string" &&
+		reason.startsWith(TRAILING_REASON_PREFIX) &&
+		TRAILING_FAMILY_IDENTIFIER.test(reason.slice(TRAILING_REASON_PREFIX.length))
+	);
+}
+
+/**
+ * Classify an invalid proof classification into its recovery family (issue
+ * #288 D1): "trailing" shapes may still be admitted by the attach cap floor
+ * once the deadline expires; "hard" shapes never can.
+ *
+ * The family is a property of the arrival shape, so the sticky fact is not
+ * consulted: null is returned exactly when classifyProofStatus (without
+ * sticky) would NOT classify the shape as "invalid" — covered shapes, the
+ * missing-evidence candidate/no-proof/no-output shapes, and a null/absent
+ * proof object. The trailing family covers the two real arrival shapes of
+ * issue #288:
+ * - runner snapshot `coverageFor`: unavailable + trailing-pending /
+ *   trailing-unsafe;
+ * - UI local paths (`noteViewProofOutput` live output and post-F replay via
+ *   `invalidateViewProof`): unknown + view-proof-trailing-pending and
+ *   unknown + view-proof-trailing-<identifier> in strict identifier form.
+ * Every other invalid classification — the window/continuity/validation
+ * reasons, non-object payloads, and any unrecognized status/reason — is
+ * "hard" (fail closed: the cap floor must not unlock it).
+ *
+ * @param {object|null} viewProof coverage object as produced by
+ *   coverageFor / unknownViewProof / invalidateViewProof (null = capability
+ *   revoked or never received).
+ * @returns {"trailing" | "hard" | null}
+ */
+export function classifyProofInvalidFamily(viewProof) {
+	if (classifyProofStatus(viewProof, false) !== "invalid") return null;
+	if (typeof viewProof !== "object" || Array.isArray(viewProof)) return "hard";
+	if (viewProof.status === "unavailable" && UNAVAILABLE_TRAILING_REASONS.has(viewProof.reason)) return "trailing";
+	if (viewProof.status === "unknown" && isTrailingFamilyReason(viewProof.reason)) return "trailing";
+	return "hard";
+}

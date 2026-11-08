@@ -1,10 +1,12 @@
 // Issue #284: attach recovery policy units. classifyProofStatus implements the
 // spec §3.1.1 induction table; the decideAttachPresentation tests below cover the
-// §3.1 committed-degraded predicate chain.
+// §3.1 committed-degraded predicate chain. Issue #288 T1 adds the
+// classifyProofInvalidFamily cap-floor eligibility table and the predicate 5
+// three-state split on deadlineState + capRecoverable.
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { classifyProofStatus, sanitizeViewProofEnumPair } from "../src/core/attach-recovery.mjs";
+import { classifyProofInvalidFamily, classifyProofStatus, sanitizeViewProofEnumPair } from "../src/core/attach-recovery.mjs";
 import { decideAttachPresentation } from "../src/core/pty-attach-render.mjs";
 
 /** Coverage shape helper matching coverageFor/unknownViewProof/invalidateViewProof output. */
@@ -129,6 +131,78 @@ test("284 T1 §3.1.1 sticky priority: unrecognized values stay invalid under sti
 test("284 T1 §3.1.1 null proof: both sticky states", () => {
 	assert.equal(classifyProofStatus(null, false), "none");
 	assert.equal(classifyProofStatus(null, true), "invalid");
+});
+
+// --- classifyProofInvalidFamily (issue #288 D1: cap-floor eligibility) ---
+
+test("288 T1 D1 trailing family: runner snapshot trailing shapes classify as trailing", () => {
+	// coverageFor arrival shape: unavailable + trailing-pending/trailing-unsafe.
+	assert.equal(classifyProofInvalidFamily(shape("unavailable", "trailing-pending")), "trailing");
+	assert.equal(classifyProofInvalidFamily(shape("unavailable", "trailing-unsafe")), "trailing");
+});
+
+test("288 T1 D1 trailing family: UI noteViewProofOutput pending and identifier forms classify as trailing", () => {
+	// UI arrival shape: unknown + view-proof-trailing-pending and the dynamic
+	// view-proof-trailing-<identifier> form (live output and post-F replay via
+	// invalidateViewProof).
+	assert.equal(classifyProofInvalidFamily(shape("unknown", "view-proof-trailing-pending")), "trailing");
+	assert.equal(classifyProofInvalidFamily(shape("unknown", "view-proof-trailing-unsafe")), "trailing");
+	assert.equal(classifyProofInvalidFamily(shape("unknown", "view-proof-trailing-csi-unknown")), "trailing");
+	assert.equal(classifyProofInvalidFamily(shape("unknown", "view-proof-trailing-osc-42")), "trailing");
+});
+
+test("288 T1 D1 I9: malformed trailing-prefix values are hard, never trailing", () => {
+	for (const reason of [
+		"view-proof-trailing-Pending", // uppercase suffix
+		"view-proof-trailing-", // empty suffix
+		"view-proof-trailing-<script>alert(1)</script>", // special characters
+		"view-proof-trailing", // pure prefix without the trailing dash
+		"", // empty reason on the prefix-y arrival shape
+	]) {
+		assert.equal(classifyProofStatus(shape("unknown", reason), false), "invalid", reason);
+		assert.equal(classifyProofInvalidFamily(shape("unknown", reason)), "hard", reason);
+	}
+});
+
+test("288 T1 D1 hard family: every other invalid-classification reason is hard", () => {
+	for (const reason of [
+		"output-gap",
+		"journal-gap",
+		"journal-evicted",
+		"proof-evicted",
+		"snapshot-seq-future",
+		"snapshot-before-window",
+		"invalid-snapshot-seq",
+		"invalid-view-proof",
+		"view-proof-future",
+		"records-dropped",
+		"proof-output-gap",
+		"view-proof-replay-gap",
+	]) {
+		assert.equal(classifyProofInvalidFamily(shape("unknown", reason)), "hard", reason);
+	}
+});
+
+test("288 T1 D1 fail-closed: unrecognized statuses, reasons, and non-object payloads are hard", () => {
+	assert.equal(classifyProofInvalidFamily(shape("covered", "made-up-reason")), "hard");
+	assert.equal(classifyProofInvalidFamily(shape("unavailable", "made-up-reason")), "hard");
+	assert.equal(classifyProofInvalidFamily(shape("future-status", "candidate-open")), "hard");
+	assert.equal(classifyProofInvalidFamily("junk"), "hard");
+	assert.equal(classifyProofInvalidFamily(42), "hard");
+	assert.equal(classifyProofInvalidFamily([shape("covered", "exact-proof")]), "hard");
+});
+
+test("288 T1 D1: non-invalid shapes return null (not a family)", () => {
+	assert.equal(classifyProofInvalidFamily(null), null);
+	assert.equal(classifyProofInvalidFamily(undefined), null);
+	assert.equal(classifyProofInvalidFamily(shape("covered", "exact-proof")), null);
+	assert.equal(classifyProofInvalidFamily(shape("covered", "safe-trailing")), null);
+	assert.equal(classifyProofInvalidFamily(shape("unavailable", "candidate-open")), null);
+	assert.equal(classifyProofInvalidFamily(shape("unavailable", "candidate-aborted")), null);
+	assert.equal(classifyProofInvalidFamily(shape("unknown", "candidate-open")), null);
+	assert.equal(classifyProofInvalidFamily(shape("unknown", "candidate-aborted")), null);
+	assert.equal(classifyProofInvalidFamily(shape("unknown", "no-proof")), null);
+	assert.equal(classifyProofInvalidFamily(shape("unknown", "no-output")), null);
 });
 
 // --- sanitizeViewProofEnumPair (settle-diagnostics hygiene, review fix) ---
@@ -373,4 +447,89 @@ test("284 T2 §3.1: states without recovery inputs keep the exact F-path behavio
 	}
 	assert.deepEqual(decideAttachPresentation(legacy), { action: "wait", reason: "view-proof-unknown" });
 	assert.deepEqual(decideAttachPresentation({ ...legacy, frameState: "open" }), { action: "wait", reason: "sync-open" });
+});
+
+// --- issue #288 T1: predicate 5 cap floor (spec D1) ---
+
+test("288 T1 predicate 5: pending deadlines keep invalid proof status waiting, capRecoverable cannot relax it", () => {
+	// The policy sees only proofStatus + capRecoverable; the trailing/hard
+	// family of the underlying shape is irrelevant to this predicate.
+	assert.deepEqual(decideRecovery({ viewProof: shape("unavailable", "trailing-unsafe"), proofStatus: "invalid" }), {
+		action: "wait",
+		reason: "proof-status-invalid",
+	});
+	assert.deepEqual(decideRecovery({ viewProof: shape("unknown", "output-gap"), proofStatus: "invalid" }), {
+		action: "wait",
+		reason: "proof-status-invalid",
+	});
+	assert.deepEqual(decideRecovery({ deadlineState: "pending", proofStatus: "invalid" }), { action: "wait", reason: "proof-status-invalid" });
+	assert.deepEqual(decideRecovery({ deadlineState: undefined, proofStatus: "invalid", capRecoverable: true }), {
+		action: "wait",
+		reason: "proof-status-invalid",
+	});
+});
+
+test("288 T1 predicate 5: expired deadline admits invalid proof status only when capRecoverable is exactly true", () => {
+	assert.deepEqual(decideRecovery({ deadlineState: "expired", proofStatus: "invalid", capRecoverable: true }), {
+		action: "publish-degraded",
+		reason: "committed-degraded",
+	});
+});
+
+test("288 T1 predicate 5: expired deadline with invalid proof and capRecoverable not true fails closed", () => {
+	assert.deepEqual(decideRecovery({ deadlineState: "expired", proofStatus: "invalid", capRecoverable: false }), {
+		action: "wait",
+		reason: "deadline-expired:proof-status-invalid",
+	});
+	// Undefined capRecoverable (pre-#288 callers) fails closed the same way.
+	assert.deepEqual(decideRecovery({ deadlineState: "expired", proofStatus: "invalid" }), {
+		action: "wait",
+		reason: "deadline-expired:proof-status-invalid",
+	});
+	// The cap floor admits exactly "invalid": garbage proof statuses stay out.
+	assert.deepEqual(decideRecovery({ deadlineState: "expired", proofStatus: "garbage", capRecoverable: true }), {
+		action: "wait",
+		reason: "deadline-expired:proof-status-invalid",
+	});
+});
+
+test("288 T1 predicate 5: covered proof status is never admitted by the cap floor", () => {
+	assert.deepEqual(decideRecovery({ deadlineState: "expired", proofStatus: "covered", capRecoverable: true }), {
+		action: "wait",
+		reason: "deadline-expired:proof-status-covered",
+	});
+});
+
+test("288 T1: the other six degraded predicates do not relax under expired deadlines with capRecoverable", () => {
+	const cap = { deadlineState: "expired", proofStatus: "invalid", capRecoverable: true };
+	for (const [over, reason] of [
+		[{ witnessLatched: false }, "deadline-expired:witness-not-latched"],
+		[{ baselineState: "unverified" }, "deadline-expired:baseline-unverified"],
+		[{ committedViewValid: false }, "deadline-expired:committed-view-invalid"],
+		[{ committedViewCols: 100 }, "deadline-expired:committed-geometry-mismatch"],
+		[{ budgetElapsed: false }, "deadline-expired:recovery-budget-pending"],
+		[{ committedContentKind: "partial" }, "deadline-expired:content-kind-partial"],
+	]) {
+		assert.deepEqual(decideRecovery({ ...cap, ...over }), { action: "wait", reason }, JSON.stringify(over));
+	}
+});
+
+test("288 T1: supplying capRecoverable alone opts into the degraded chain", () => {
+	const state = recoveryView();
+	for (const key of [
+		"witnessLatched",
+		"committedViewValid",
+		"committedViewSource",
+		"committedViewCols",
+		"committedViewRows",
+		"committedContentKind",
+		"proofStatus",
+		"budgetElapsed",
+	]) {
+		delete state[key];
+	}
+	// Without capRecoverable the F-path wait stands unchanged (#284 behavior).
+	assert.deepEqual(decideAttachPresentation(state), { action: "wait", reason: "view-proof-unknown" });
+	// With capRecoverable supplied, the degraded chain engages and names its own wait.
+	assert.deepEqual(decideAttachPresentation({ ...state, capRecoverable: true }), { action: "wait", reason: "witness-not-latched" });
 });

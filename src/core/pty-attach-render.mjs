@@ -156,12 +156,19 @@ export function canPublishAttachView(viewIdentity, currentIdentity) {
  *
  * Issue #284 adds a second, lower-priority outcome: when the full-view (F) chain
  * fails AND the caller supplies recovery facts (any of the `committed*` /
- * `witnessLatched` / `proofStatus` / `budgetElapsed` inputs below), a
- * committed-degraded chain is evaluated instead — every predicate must pass to
- * `publish-degraded`, otherwise the first failing predicate names the wait
- * reason. Callers that do not supply recovery facts get the exact pre-#284
- * behavior. The F chain keeps absolute priority: a fully covered view always
- * publishes `complete` without waiting for the budget.
+ * `witnessLatched` / `proofStatus` / `budgetElapsed` / `capRecoverable` inputs
+ * below), a committed-degraded chain is evaluated instead — every predicate
+ * must pass to `publish-degraded`, otherwise the first failing predicate names
+ * the wait reason. Callers that do not supply recovery facts get the exact
+ * pre-#284 behavior. The F chain keeps absolute priority: a fully covered view
+ * always publishes `complete` without waiting for the budget.
+ *
+ * Issue #288 adds the cap floor to the degraded chain's proof predicate (5):
+ * once `deadlineState` is "expired", an invalid `proofStatus` may still pass
+ * when `capRecoverable` is exactly `true` (the caller derives it from the
+ * absence of a hard proof invalidation on the current baseline); any other
+ * value — including undefined — fails closed, and pending deadlines keep the
+ * exact #284 pass set.
  *
  * @param {{
  *   closed?: boolean,
@@ -192,6 +199,7 @@ export function canPublishAttachView(viewIdentity, currentIdentity) {
  *   committedViewRows?: number,
  *   committedContentKind?: "complete" | "boot" | "raw" | "partial" | "unknown",
  *   proofStatus?: "none" | "missing" | "invalid" | "covered",
+ *   capRecoverable?: boolean,
  *   budgetElapsed?: boolean,
  * }} state
  * @returns {{ action: "closed" | "legacy" | "wait" | "publish" | "publish-degraded", reason: string }}
@@ -261,6 +269,7 @@ const RECOVERY_FACT_KEYS = [
 	"committedViewRows",
 	"committedContentKind",
 	"proofStatus",
+	"capRecoverable",
 	"budgetElapsed",
 ];
 
@@ -289,7 +298,17 @@ function degradedViewDecision(state, wait) {
 	if (state.committedViewCols !== state.targetCols || state.committedViewRows !== state.targetRows) return wait("committed-geometry-mismatch");
 	if (state.resizeIntentRequired === true) return wait("resize-intent");
 	if (state.proofStatus === "covered") return wait("proof-status-covered");
-	if (state.proofStatus !== "none" && state.proofStatus !== "missing") return wait("proof-status-invalid");
+	if (state.proofStatus !== "none" && state.proofStatus !== "missing") {
+		// Issue #288 cap floor: once the attach hard timeout has expired, an
+		// invalid classification may still pass — but only when the caller
+		// asserts capRecoverable === true (trailing-only invalidation; the
+		// component derives it from !proofHardInvalidatedThisBaseline). Any
+		// other value fails closed, and pending deadlines keep the #284 pass
+		// set exactly. The wait helper prefixes "deadline-expired:".
+		const capFloorAdmitted =
+			state.deadlineState === "expired" && state.proofStatus === "invalid" && state.capRecoverable === true;
+		if (!capFloorAdmitted) return wait("proof-status-invalid");
+	}
 	if (state.budgetElapsed !== true) return wait("recovery-budget-pending");
 	if (state.committedContentKind !== "complete") return wait(`content-kind-${state.committedContentKind ?? "unknown"}`);
 	return { action: "publish-degraded", reason: "committed-degraded" };
