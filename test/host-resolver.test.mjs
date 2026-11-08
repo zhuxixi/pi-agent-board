@@ -845,3 +845,124 @@ test("adopt path marks an abandoned claim failed without spawning when the model
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("ensureHost leaves model/thinking to session restore when the session can provide them (issue #286)", () => {
+	const root = freshRoot();
+	try {
+		const meta = createView(root, { id: "v1", name: "restorable", cwd: "/r", defaultModel: "prov/default-a", defaultThinking: "high" });
+		writeFileSync(meta.sessionFile, [
+			JSON.stringify({ type: "session", id: "s1", cwd: "/r" }),
+			JSON.stringify({ type: "thinking_level_change", id: "e1", parentId: null, thinkingLevel: "medium" }),
+			JSON.stringify({ type: "model_change", id: "e2", parentId: "e1", provider: "prov", modelId: "picked-b" }),
+			JSON.stringify({ type: "message", id: "e3", parentId: "e2", message: { role: "user", content: "hi" } }),
+			JSON.stringify({ type: "message", id: "e4", parentId: "e3", message: { role: "assistant", content: "yo" } }),
+		].join("\n") + "\n");
+		const spawns = [];
+		const svc = resolverService(root, {
+			launchHost: (_root, config) => {
+				spawns.push({ config });
+				return { pid: process.pid, configPath: config.configPath };
+			},
+		});
+		const res = svc.ensureHost("v1");
+		assert.equal(res.ok, true);
+		assert.equal(spawns.length, 1);
+		assert.equal(spawns[0].config.model, null, "model flag must be omitted so pi restores it");
+		assert.equal(spawns[0].config.thinkingLevel, null, "thinking flag must be omitted so pi restores it");
+		const diags = readDiagnostics(root, "v1");
+		assert.ok(diags.some((d) => d.code === "launch_prefs_from_session"), "drop is recorded in diagnostics");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("ensureHost launches a restorable session even when defaultModel is provably unavailable (issue #286 + #90)", () => {
+	const root = freshRoot();
+	try {
+		const meta = createView(root, { id: "v1", name: "stale-but-restorable", cwd: "/r", defaultModel: "glm/glm-5.3", defaultThinking: "high" });
+		writeFileSync(meta.sessionFile, [
+			JSON.stringify({ type: "session", id: "s1", cwd: "/r" }),
+			JSON.stringify({ type: "model_change", id: "e1", parentId: null, provider: "zai-coding-cn", modelId: "glm-5.3" }),
+			JSON.stringify({ type: "message", id: "e2", parentId: "e1", message: { role: "user", content: "hi" } }),
+			JSON.stringify({ type: "message", id: "e3", parentId: "e2", message: { role: "assistant", content: "yo" } }),
+		].join("\n") + "\n");
+		const spawns = [];
+		const svc = resolverService(root, {
+			availableModels: () => [{ provider: "zai-coding-cn", id: "glm-5.3" }],
+			launchHost: (_root, config) => {
+				spawns.push({ config });
+				return { pid: process.pid, configPath: config.configPath };
+			},
+		});
+		const res = svc.ensureHost("v1");
+		assert.equal(res.ok, true, "a dead defaultModel must not block a session that restores its own model");
+		assert.equal(spawns.length, 1);
+		assert.equal(spawns[0].config.model, null);
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("guard still blocks a dead defaultModel on an unrestorable session (issue #90 unchanged, issue #286)", () => {
+	const root = freshRoot();
+	try {
+		const meta = createView(root, { id: "v1", name: "stale-empty", cwd: "/r", defaultModel: "glm/glm-5.3" });
+		writeFileSync(meta.sessionFile, [
+			JSON.stringify({ type: "session", id: "s1", cwd: "/r" }),
+			JSON.stringify({ type: "message", id: "e1", parentId: null, message: { role: "user", content: "hi" } }),
+		].join("\n") + "\n");
+		const spawns = [];
+		const svc = resolverService(root, {
+			availableModels: () => [{ provider: "zai-coding-cn", id: "glm-5.3" }],
+			launchHost: (_root, config) => {
+				spawns.push({ config });
+				return { pid: process.pid, configPath: config.configPath };
+			},
+		});
+		const res = svc.ensureHost("v1");
+		assert.equal(res.ok, false);
+		assert.match(res.error, /no longer available/);
+		assert.equal(spawns.length, 0, "user-only session cannot restore a model — the explicit dead one must not spawn");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("adoption of a stale claim also resolves launch prefs from the session (issue #286)", async () => {
+	const root = freshRoot();
+	try {
+		const meta = createView(root, { id: "v1", name: "adopt", cwd: "/r", defaultModel: "prov/default-a", defaultThinking: "high" });
+		writeFileSync(meta.sessionFile, [
+			JSON.stringify({ type: "session", id: "s1", cwd: "/r" }),
+			JSON.stringify({ type: "model_change", id: "e1", parentId: null, provider: "prov", modelId: "picked-b" }),
+			JSON.stringify({ type: "message", id: "e2", parentId: "e1", message: { role: "user", content: "hi" } }),
+		].join("\n") + "\n");
+		hostRecord(root, "v1", {
+			instanceId: "i1",
+			state: "starting",
+			claimAt: Date.now() - HOST_START_GRACE_MS - 5_000,
+			claimPid: process.pid,
+			runnerSpawnedAt: null,
+		});
+		// No lock contention → adoption lands on the first loop iteration, so the
+		// second probe already reports ready (unlike the busy-lock convergence test,
+		// whose extra "missing" absorbs the deferred adoption attempt).
+		const probe = scriptProbe(["missing", "ready"]);
+		const spawns = [];
+		const svc = resolverService(root, {
+			probeHostFn: probe.fn,
+			sleepFn: instantSleep,
+			launchHost: (_root, config) => {
+				spawns.push({ config });
+				return { pid: process.pid, configPath: config.configPath };
+			},
+		});
+		const result = await svc.resolveAttachTarget("v1", { timeoutMs: 2_000 });
+		assert.equal(result.kind, "pty");
+		assert.equal(spawns.length, 1, "the stale claim is adopted and spawned");
+		assert.equal(spawns[0].config.model, null, "adopted spawn omits the model flag");
+		assert.equal(spawns[0].config.thinkingLevel, "high", "no thinking entry in session → keep view default");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});

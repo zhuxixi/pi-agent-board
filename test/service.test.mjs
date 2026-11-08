@@ -1665,6 +1665,73 @@ test("busy replies queue and drain when idle", async () => {
 	}
 });
 
+/**
+ * Issue #286 fixture: queue a reply while busy, then drain it once idle, and
+ * return the json-runner config the drain spawned with. `sessionText` is
+ * written verbatim into the view's session file ("" = empty/unrestorable).
+ */
+async function replyDrainCapture(root, sessionText) {
+	const meta = createView(root, { id: "v1", name: "r", cwd: "/r", defaultModel: "prov/default-a", defaultThinking: "high" });
+	if (sessionText !== null) writeFileSync(meta.sessionFile, sessionText);
+	const st = readState(root, "v1");
+	st.semanticState = "working";
+	st.processState = "alive";
+	writeState(root, st);
+	const launched = [];
+	const svc = service(root, {
+		ptySupport: () => ({ ok: false, reason: "test" }),
+		launch: (_root, config) => {
+			launched.push(config);
+			return { pid: null, configPath: "/no/config.json" };
+		},
+	});
+	const queued = await svc.reply("v1", "next step");
+	assert.equal(queued.ok, true);
+	const idle = readState(root, "v1");
+	idle.semanticState = "idle";
+	idle.processState = "exited";
+	writeState(root, idle);
+	const drained = await svc.drainNextFollowUp("v1");
+	assert.equal(drained.ok, true);
+	assert.equal(launched.length, 1);
+	return { launched: launched[0], svc };
+}
+
+test("json-runner follow-up on a restorable session omits model/thinking flags (issue #286)", async () => {
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");
+	const root = freshRoot();
+	try {
+		const sessionText = [
+			JSON.stringify({ type: "session", id: "s1", cwd: "/r" }),
+			JSON.stringify({ type: "thinking_level_change", id: "e1", parentId: null, thinkingLevel: "medium" }),
+			JSON.stringify({ type: "model_change", id: "e2", parentId: "e1", provider: "prov", modelId: "picked-b" }),
+			JSON.stringify({ type: "message", id: "e3", parentId: "e2", message: { role: "user", content: "hi" } }),
+			JSON.stringify({ type: "message", id: "e4", parentId: "e3", message: { role: "assistant", content: "yo" } }),
+		].join("\n") + "\n";
+		const { launched } = await replyDrainCapture(root, sessionText);
+		assert.equal(launched.model, null);
+		assert.equal(launched.thinkingLevel, null);
+		assert.ok(readDiagnostics(root, "v1").some((d) => d.code === "launch_prefs_from_session"));
+	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("json-runner follow-up on an empty session keeps launch defaults (issue #286)", async () => {
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");
+	const root = freshRoot();
+	try {
+		const { launched } = await replyDrainCapture(root, "");
+		assert.equal(launched.model, "prov/default-a");
+		assert.equal(launched.thinkingLevel, "high");
+		assert.ok(!readDiagnostics(root, "v1").some((d) => d.code === "launch_prefs_from_session"), "no drop → no diagnostic");
+	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("adoptSession creates and reuses rows for an existing session file", async () => {
 	const root = freshRoot();
 	const { coord, restore } = await startTrackedCoordinator(root);

@@ -4,7 +4,7 @@
  * safety rule. Pure node + core modules; the Pi-coupled bits (attach, dialogs) live in
  * the command handler. The pi invocation + runner path are injected (resolved in index.ts).
  */
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import { createConnection } from "node:net";
@@ -31,6 +31,7 @@ import { acquireOwnedViewLock, tryAcquireOwnedViewLock } from "../core/locks.mjs
 import { canFinalizeLegacyHost, canReplaceHost, classifyUnverifiableProcess, processIdentityState } from "../core/host-coordination.mjs";
 import { readProcessIdentityProbe, readProcessStartToken } from "../core/process-identity-probe.mjs";
 import { modelRefAvailable } from "../core/launch-options.mjs";
+import { resolveLaunchModelPrefs } from "../core/session-launch-prefs.mjs";
 import { ensureCoordinator, sendStateCommand, coordinatorDisabled } from "../core/coordinator-client.mjs";
 import { createDesyncEpisodeThrottle, rereadPair, statusRevisionDesynced } from "../core/status-consistency.mjs";
 import { commandRejectDiagnostic } from "../core/state-commands.mjs";
@@ -239,6 +240,7 @@ export function createService(opts) {
 	 */
 	async function launchForView(meta, prompt, kind) {
 		const runId = newRunId();
+		const launchPrefs = resolveViewLaunchPrefs(meta);
 		/** @type {import("../core/types.mjs").RunConfig} */
 		const config = {
 			root,
@@ -250,8 +252,8 @@ export function createService(opts) {
 			prompt,
 			piCommand: opts.piCommand,
 			piArgsPrefix: opts.piArgsPrefix,
-			model: meta.defaultModel ?? null,
-			thinkingLevel: meta.defaultThinking ?? null,
+			model: launchPrefs.model,
+			thinkingLevel: launchPrefs.thinkingLevel,
 			tools: null,
 		};
 		// Final-review F2 residual (fix round 2): mark_queued must LAND before the
@@ -306,16 +308,50 @@ export function createService(opts) {
 	}
 
 	/**
-	 * Actionable error when the view's defaultModel is provably unavailable
-	 * (issue #90): launching a child with a dead model id makes it exit 1 on
-	 * every start, so attach would loop cold starts forever. Only fires when a
-	 * model is configured AND a live model list is injectable; anything
-	 * uncertain (no list, list call failure) conservatively allows the launch.
+	 * Effective launch prefs for a view (issue #286): read the session file and
+	 * let the pure policy decide, per dimension, whether the explicit
+	 * --model/--thinking flag must be withheld so pi restores the session's own
+	 * last selection. Missing/unreadable session → both flags pass through
+	 * (today's behavior). Real drops are recorded in diagnostics.
 	 * @param {import("../core/types.mjs").ViewMeta} meta
+	 * @returns {{ model: string|null, thinkingLevel: string|null, droppedModel: boolean, droppedThinking: boolean }}
+	 */
+	function resolveViewLaunchPrefs(meta) {
+		let text = null;
+		try {
+			text = existsSync(meta.sessionFile) ? readFileSync(meta.sessionFile, "utf8") : null;
+		} catch {
+			text = null;
+		}
+		const prefs = resolveLaunchModelPrefs(
+			{ model: meta.defaultModel ?? null, thinkingLevel: meta.defaultThinking ?? null },
+			text,
+		);
+		if (prefs.droppedModel || prefs.droppedThinking) {
+			appendDiagnostic(root, meta.id, {
+				source: "service",
+				code: "launch_prefs_from_session",
+				message: "Launch model/thinking left to session restore",
+				details: { droppedModel: prefs.droppedModel, droppedThinking: prefs.droppedThinking },
+			});
+		}
+		return prefs;
+	}
+
+	/**
+	 * Actionable error when the model we are about to spawn with is provably
+	 * unavailable (issue #90): launching a child with a dead model id makes it
+	 * exit 1 on every start, so attach would loop cold starts forever. With
+	 * issue #286 the input is the EFFECTIVE model — null when the session
+	 * restores its own selection, in which case there is nothing to validate.
+	 * Only fires when a model is configured AND a live model list is injectable;
+	 * anything uncertain (no list, list call failure) conservatively allows the
+	 * launch.
+	 * @param {string|null} effectiveModel
 	 * @returns {string|null}
 	 */
-	function validateViewModelMeta(meta) {
-		const model = meta.defaultModel ?? null;
+	function validateViewModelMeta(effectiveModel) {
+		const model = effectiveModel ?? null;
 		if (!model || !availableModelsImpl) return null;
 		let available;
 		try {
@@ -349,8 +385,11 @@ export function createService(opts) {
 		}
 
 		// Fail fast BEFORE claiming (issue #90): no claim record, no config file,
-		// no spawn — the resolver surfaces the error via its pending reason.
-		const modelError = validateViewModelMeta(meta);
+		// no spawn — the resolver surfaces the error via its pending reason. On the
+		// EFFECTIVE model (issue #286): a session that restores its own model must
+		// not be blocked by a dead defaultModel we are not going to pass anyway.
+		const launchPrefs = resolveViewLaunchPrefs(meta);
+		const modelError = validateViewModelMeta(launchPrefs.model);
 		if (modelError) return { ok: false, error: modelError };
 
 		const instanceId = randomIdImpl();
@@ -365,8 +404,8 @@ export function createService(opts) {
 			initialPrompt,
 			piCommand: opts.piCommand,
 			piArgsPrefix: opts.piArgsPrefix,
-			model: meta.defaultModel ?? null,
-			thinkingLevel: meta.defaultThinking ?? null,
+			model: launchPrefs.model,
+			thinkingLevel: launchPrefs.thinkingLevel,
 			tools: null,
 			env: {},
 			cols: Number(process.env.COLUMNS || 120),
@@ -1426,7 +1465,10 @@ export function createService(opts) {
 			// Stale-model guard (issue #90): the claim is an abandoned record, so mark
 			// it failed fenced (same shape as the spawn-failure path below — the next
 			// ensure can claim anew) instead of spawning a child doomed to exit 1.
-			const modelError = validateViewModelMeta(meta);
+			// On the EFFECTIVE model (issue #286): a session that restores its own
+			// model must not be blocked by a dead defaultModel we are not passing.
+			const launchPrefs = resolveViewLaunchPrefs(meta);
+			const modelError = validateViewModelMeta(launchPrefs.model);
 			if (modelError) {
 				updateOwnedHost(root, viewId, instanceId, (h) => ({ ...h, state: "failed", endedAt: nowImpl(), exitCode: 1, error: modelError, claimPid: null, claimIdentity: null }));
 				return { ok: true, pending: true, socketPath: null, instanceId };
@@ -1442,8 +1484,8 @@ export function createService(opts) {
 				initialPrompt: null,
 				piCommand: opts.piCommand,
 				piArgsPrefix: opts.piArgsPrefix,
-				model: meta.defaultModel ?? null,
-				thinkingLevel: meta.defaultThinking ?? null,
+				model: launchPrefs.model,
+				thinkingLevel: launchPrefs.thinkingLevel,
 				tools: null,
 				env: {},
 				cols: current.cols || 120,
