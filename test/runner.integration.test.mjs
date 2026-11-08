@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { test } from "node:test";
 import { readCodeRefs } from "../src/core/code-refs-store.mjs";
+import { readDiagnostics } from "../src/core/diagnostics.mjs";
 import { launchRun } from "../src/core/launch.mjs";
 import { isAlive } from "../src/core/pid.mjs";
 import * as P from "../src/core/paths.mjs";
@@ -86,6 +87,53 @@ function makeConfig(root, viewId, runId, sessionFile, cwd, prompt) {
 		tools: null,
 	};
 }
+
+test("worker argv carries --model/--thinking only when configured (issue #286)", { timeout: 20000 }, async () => {
+	const root = mkdtempSync(join(tmpdir(), "agentview-argv-"));
+	process.env.AGENT_BOARD_SUMMARY_MODEL = "off";
+	const runnerPids = [];
+	// Tracked coordinator: run_started/run_finalized route through it; the fixture
+	// prevents an untracked detached coordinator past the rmSync below.
+	const coord = await startCoordinator(root);
+	try {
+		const meta = createView(root, { id: "v1", name: "argv", cwd: root });
+		const base = {
+			root,
+			viewId: "v1",
+			kind: "reply",
+			sessionFile: meta.sessionFile,
+			cwd: root,
+			prompt: "do it",
+			piCommand: process.execPath, // node ...
+			piArgsPrefix: [FAKE_PI], // ... fake-pi.mjs
+		};
+
+		// Null prefs (a restorable session) → the worker argv carries no flags.
+		runnerPids.push(launchRun(root, { ...base, runId: "run-argv-null", model: null, thinkingLevel: null }, { runnerScript: RUNNER }).pid);
+		const nullSpawn = await waitFor(() => readDiagnostics(root, "v1").find((d) => d.code === "worker_spawn" && d.runId === "run-argv-null") ?? null);
+		assert.ok(nullSpawn, "worker_spawn diagnostic recorded for null prefs");
+		assert.ok(!nullSpawn.details.args.includes("--model"), "null model → no --model flag");
+		assert.ok(!nullSpawn.details.args.includes("--thinking"), "null thinking → no --thinking flag");
+
+		// Deterministic barrier: let the null-pref run fully exit before launching
+		// the next run, so its run_started cannot bounce as stale_run (two live runs
+		// on one view is the exact hazard the liveness guard rejects).
+		await waitFor(() => (isAlive(runnerPids[0]) ? null : true));
+
+		// Configured values → flags present (proves the mapping direction).
+		runnerPids.push(launchRun(root, { ...base, runId: "run-argv-set", model: "prov/picked-b", thinkingLevel: "high" }, { runnerScript: RUNNER }).pid);
+		const setSpawn = await waitFor(() => readDiagnostics(root, "v1").find((d) => d.code === "worker_spawn" && d.runId === "run-argv-set") ?? null);
+		assert.ok(setSpawn, "worker_spawn diagnostic recorded for configured prefs");
+		const args = setSpawn.details.args;
+		assert.ok(args.includes("--model") && args[args.indexOf("--model") + 1] === "prov/picked-b", "model flag passed through");
+		assert.ok(args.includes("--thinking") && args[args.indexOf("--thinking") + 1] === "high", "thinking flag passed through");
+	} finally {
+		for (const pid of runnerPids) await killDetached(pid);
+		await coord.kill();
+		delete process.env.AGENT_BOARD_SUMMARY_MODEL;
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});
 
 test("runner auto-classifies a completed fake worker and writes durable artifacts", { timeout: 20000 }, async () => {
 	const root = mkdtempSync(join(tmpdir(), "agentview-run-"));
