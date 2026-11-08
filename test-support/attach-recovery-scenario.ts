@@ -157,6 +157,11 @@ const VIEW_PROOF_PRESETS: Record<string, () => Record<string, unknown>> = {
 	"no-proof": () => ({ status: "unknown", reason: "no-proof", proof: null, throughSeq: null, cursorVisible: null }),
 	"no-output": () => ({ status: "unknown", reason: "no-output", proof: null, throughSeq: null, cursorVisible: null }),
 	"output-gap": () => ({ status: "unknown", reason: "output-gap", proof: null, throughSeq: null, cursorVisible: null }),
+	// Issue #288 trailing-family arrival shapes (spec §1): the runner snapshot
+	// form (coverageFor `unavailable + trailing-unsafe`) and the UI live form
+	// (noteViewProofOutput → `unknown + view-proof-trailing-<identifier>`).
+	"unavailable-trailing-unsafe": () => ({ status: "unavailable", reason: "trailing-unsafe", proof: null, throughSeq: null, cursorVisible: null }),
+	"unknown-trailing-csi-unknown": () => ({ status: "unknown", reason: "view-proof-trailing-csi-unknown", proof: null, throughSeq: null, cursorVisible: null }),
 };
 
 /** Frame-witness F metadata matching the component's current geometry. A
@@ -440,6 +445,14 @@ function readout(h: Harness, state: ScenarioState): Record<string, unknown> {
 		stickyInvalid: (c.proofInvalidatedBaselineToken ?? null) !== null && c.proofInvalidatedBaselineToken === c.baselineToken,
 		stickyBaseline: c.proofInvalidatedBaselineToken ?? null,
 		lastProofStickyInvalid: c.lastProofStickyInvalid === true,
+		// Issue #288 D1/I8 hard-dominance latch: the baseline token a HARD
+		// invalid family classification latched on (effective state:
+		// binding === current baselineToken, same as the sticky fact).
+		// capRecoverable mirrors the policy fact the component assembles from
+		// the latch (spec §2 D1).
+		hardInvalidated: (c.proofHardInvalidatedThisBaseline ?? null) !== null && c.proofHardInvalidatedThisBaseline === c.baselineToken,
+		hardInvalidatedBaseline: c.proofHardInvalidatedThisBaseline ?? null,
+		capRecoverable: (c.proofHardInvalidatedThisBaseline ?? null) !== c.baselineToken,
 		// Issue #284 §3.4: which path settled this attach (null while waiting).
 		readyReason: c.readyReason ?? null,
 		diagnosticsCount: h.diagnostics.length,

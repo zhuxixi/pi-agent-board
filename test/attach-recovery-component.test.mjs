@@ -1024,6 +1024,251 @@ test("T7 f) unrecognized wire proof pairs map to the finite unrecognized enum", 
 // same-size/zero-intent contract end-to-end; the fine-grained gate semantics
 // live here where the injected clock can drive every timer deterministically.
 
+// Issue #288 T2: cap-floor hard-dominance latch + wait diagnostics (spec §2
+// D1/D2, invariants I7-I9, acceptance A2/A4 component layer). Trailing-only
+// invalidations unlock at the 2500ms cap floor; hard invalidations latch on
+// the baseline and keep the cap closed until a full-view F publish (or a
+// baseline identity change) clears them. The budget/cap wait phases leave
+// on-disk evidence in arrival order (budget → cap → settle).
+
+test("T2 A2 a) trailing-only snapshot shape: budget holds, cap floor publishes degraded", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "unavailable-trailing-unsafe", text: "TRAIL SNAP" },
+			{ op: "advance", ms: 250 },
+			{ op: "advance", ms: 2250 },
+		],
+	});
+	assertScenarioOk("t2-trailing-snapshot", run);
+	const [afterSnapshot, atBudget, atCap] = readouts(run.parsed).slice(2);
+	assert.equal(afterSnapshot.latestViewProof.status, "unavailable");
+	assert.equal(afterSnapshot.latestViewProof.reason, "trailing-unsafe", "the runner-snapshot trailing arrival shape");
+	assert.equal(afterSnapshot.attaching, true);
+	assert.equal(afterSnapshot.proofStatus, "invalid", "trailing-unsafe classifies invalid — #284 sticky semantics unchanged");
+	assert.equal(afterSnapshot.stickyInvalid, true, "the sticky failure fact binds to the baseline");
+	assert.equal(afterSnapshot.hardInvalidated, false, "the trailing family does NOT latch hard (I9)");
+	assert.equal(afterSnapshot.capRecoverable, true);
+	assert.equal(atBudget.budget.elapsed, true);
+	assert.equal(atBudget.attaching, true, "the 250ms budget must NOT publish over the sticky invalid fact");
+	assert.equal(atBudget.notReadyReason, "proof-status-invalid");
+	assert.equal(atBudget.hardInvalidated, false);
+	assert.equal(atCap.attaching, false, "the 2500ms cap floor publishes the trailing-only degraded view");
+	assert.equal(atCap.settledAt, 2500);
+	assert.equal(atCap.readyReason, "committed-degraded");
+	assert.equal(atCap.deadlineState, "expired");
+	assert.equal(atCap.stickyInvalid, true, "I7: the cap-floor publish does not clear the sticky fact");
+	assert.equal(atCap.hardInvalidated, false, "I7: the hard latch was never set on this baseline");
+	const settle = run.parsed.diagnostics.filter((event) => event.code === "attach_settle_ready");
+	assert.equal(settle.length, 1);
+	assert.equal(settle[0].details.readyReason, "committed-degraded");
+	assert.equal(settle[0].details.deadlineState, "expired", "the settle record distinguishes the cap floor from a budget degrade");
+	assert.equal(settle[0].details.budgetElapsed, true);
+	assert.equal(settle[0].details.proofStatus, "invalid");
+});
+
+test("T2 A2 b) trailing-only UI live shape: real noteViewProofOutput unlocks at the cap", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			// No proof facts from the snapshot; the wrong-geometry F below covers
+		// the proof channel WITHOUT publishing, so the attach stays waiting when
+		// the live trailing output arrives (the real #288 arrival shape).
+			{ op: "snapshot", proof: "none", text: "LIVE BASE" },
+			{ op: "record", marker: "F", mismatchCols: true },
+			{ op: "output", text: "LIVE UNSAFE", syncClose: true },
+			{ op: "advance", ms: 250 },
+			{ op: "advance", ms: 2250 },
+		],
+	});
+	assertScenarioOk("t2-trailing-live", run);
+	const [afterSnapshot, afterF, afterOutput, atBudget, atCap] = readouts(run.parsed).slice(2);
+	assert.equal(afterSnapshot.committedView.present, true);
+	assert.equal(afterF.latestViewProof.status, "covered", "the wrong-geometry F covers the proof channel");
+	assert.equal(afterF.attaching, true, "the F path waits on proof-geometry-mismatch — no settle before the trailing arrival");
+	assert.equal(afterF.hardInvalidated, false);
+	assert.equal(afterOutput.latestViewProof.status, "unknown");
+	assert.equal(afterOutput.latestViewProof.reason, "view-proof-trailing-csi-unknown", "the real noteViewProofOutput path produced the UI trailing arrival shape");
+	assert.equal(afterOutput.proofStatus, "invalid");
+	assert.equal(afterOutput.stickyInvalid, true);
+	assert.equal(afterOutput.hardInvalidated, false, "the UI trailing shape is the trailing family — no hard latch");
+	assert.equal(afterOutput.capRecoverable, true);
+	assert.equal(atBudget.budget.elapsed, true);
+	assert.equal(atBudget.attaching, true, "the budget does not publish over the sticky invalid fact");
+	assert.equal(atBudget.notReadyReason, "proof-status-invalid");
+	assert.equal(atCap.attaching, false, "the cap floor publishes the UI-live trailing shape too");
+	assert.equal(atCap.settledAt, 2500);
+	assert.equal(atCap.readyReason, "committed-degraded");
+	assert.equal(atCap.stickyInvalid, true, "I7: sticky stays set through the cap-floor publish");
+	assert.equal(atCap.hardInvalidated, false);
+});
+
+test("T2 A2 c) hard dominance: trailing/loss/S/no-proof arrivals never unlatch; only an F publish clears both", () => {
+	const dominanceTail = [
+		{ label: "hard→trailing", steps: [{ op: "proofState", proof: "unknown-trailing-csi-unknown" }] },
+		{ label: "trailing→hard", steps: [{ op: "proofState", proof: "output-gap" }] },
+		{ label: "hard→loss", steps: [{ op: "status", witness: false }] },
+		{ label: "hard→S", steps: [{ op: "record", marker: "S" }] },
+		{ label: "hard→no-proof", steps: [{ op: "proofState", proof: "no-proof" }] },
+	];
+	for (const tail of dominanceTail) {
+		const steps = [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+		];
+		// The first shape: hard (output-gap) except for the trailing→hard run,
+		// which starts trailing-only to prove the hard arrival latches late.
+		steps.push(tail.label === "trailing→hard"
+			? { op: "snapshot", proof: "unavailable-trailing-unsafe", text: "TRAIL FIRST" }
+			: { op: "snapshot", proof: "output-gap", text: "HARD BASE" });
+		steps.push(...tail.steps);
+		steps.push({ op: "advance", ms: 250 });
+		steps.push({ op: "advance", ms: 2250 });
+		steps.push({ op: "record", marker: "F" });
+		const run = runScenario({ steps });
+		assertScenarioOk(`t2-dominance-${tail.label}`, run);
+		const [afterSnapshot, afterArrival, atBudget, atCap, afterF] = readouts(run.parsed).slice(2);
+		if (tail.label === "trailing→hard") {
+			assert.equal(afterSnapshot.hardInvalidated, false, `${tail.label}: trailing-only start latches nothing hard`);
+			assert.equal(afterSnapshot.stickyInvalid, true);
+			assert.equal(afterArrival.latestViewProof.reason, "output-gap");
+			assert.equal(afterArrival.hardInvalidated, true, `${tail.label}: the hard arrival latches even under a trailing-set sticky`);
+		} else {
+			assert.equal(afterSnapshot.hardInvalidated, true, `${tail.label}: the hard shape latches on the baseline`);
+			assert.equal(afterArrival.hardInvalidated, true, `${tail.label}: I8 — the later arrival does not clear the hard latch`);
+		}
+		assert.equal(afterArrival.stickyInvalid, true);
+		assert.equal(atBudget.budget.elapsed, true);
+		assert.equal(atBudget.attaching, true, `${tail.label}: the budget cannot publish`);
+		assert.equal(atCap.attaching, true, `${tail.label}: the cap floor stays closed behind a hard invalidation`);
+		assert.equal(atCap.settledAt, null);
+		assert.equal(atCap.deadlineState, "expired");
+		assert.equal(atCap.notReadyReason, "deadline-expired:proof-status-invalid");
+		assert.equal(atCap.capRecoverable, false, `${tail.label}: the latch is the policy's cap fact`);
+		// The only recovery: a full-view F publish clears BOTH failure facts and
+		// restores normal (budget/cap) degradation facts for the baseline.
+		assert.equal(afterF.attaching, false, `${tail.label}: the covered F publish recovers the attach`);
+		assert.equal(afterF.readyReason, "complete");
+		assert.equal(afterF.settledAt, 2500);
+		assert.equal(afterF.stickyInvalid, false, `${tail.label}: the publish clears the sticky fact`);
+		assert.equal(afterF.stickyBaseline, null);
+		assert.equal(afterF.hardInvalidated, false, `${tail.label}: the publish clears the hard latch`);
+		assert.equal(afterF.hardInvalidatedBaseline, null);
+		assert.equal(afterF.capRecoverable, true, `${tail.label}: normal degradation facts are restored`);
+	}
+});
+
+test("T2 A4 d) wait diagnostics: budget → cap → settle order, phase field, no readyReason, enums only", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "unavailable-trailing-unsafe", text: "DIAG ORDER" },
+			{ op: "advance", ms: 250 },
+			{ op: "advance", ms: 2250 },
+		],
+	});
+	assertScenarioOk("t2-wait-order", run);
+	const lifecycle = run.parsed.diagnostics.filter((event) => event.code === "attach_wait_expired" || event.code === "attach_settle_ready");
+	assert.deepEqual(
+		lifecycle.map((event) => event.code),
+		["attach_wait_expired", "attach_wait_expired", "attach_settle_ready"],
+		"each wait phase records once, before the settle record, in expiry order",
+	);
+	const [budgetEvent, capEvent, settleEvent] = lifecycle;
+	for (const event of [budgetEvent, capEvent]) {
+		assert.equal(event.source, "attach");
+		assert.equal(event.level, "info");
+		assert.equal(event.code, "attach_wait_expired");
+		assert.equal(Object.hasOwn(event.details, "readyReason"), false, "a waiting attach has no readyReason");
+		assert.equal(event.details.witnessLatched, true);
+		assert.equal(event.details.budgetElapsed, true);
+		assert.equal(event.details.proofStatus, "invalid");
+		assert.equal(event.details.proofStickyInvalid, true);
+		assert.equal(event.details.committedView.source, "snapshot");
+		assert.equal(event.details.latestViewProof.status, "unavailable");
+		assert.equal(event.details.latestViewProof.reason, "trailing-unsafe");
+		assert.equal(Object.hasOwn(event.details.committedView, "connectionToken"), false, "tokens never reach the wait payload");
+		assert.equal(Object.hasOwn(event.details.committedView, "baselineToken"), false, "tokens never reach the wait payload");
+	}
+	assert.equal(budgetEvent.details.phase, "budget");
+	assert.equal(budgetEvent.details.deadlineState, "pending", "the budget record predates the cap");
+	assert.equal(budgetEvent.details.publishabilityState, "wait");
+	assert.equal(budgetEvent.details.notReadyReason, "proof-status-invalid");
+	assert.equal(capEvent.details.phase, "cap");
+	assert.equal(capEvent.details.deadlineState, "expired");
+	assert.equal(capEvent.details.publishabilityState, "unknown");
+	assert.equal(capEvent.details.notReadyReason, "deadline-expired:waiting-for-complete-frame");
+	assert.equal(settleEvent.code, "attach_settle_ready", "the settle record keeps its unchanged shape");
+	assert.equal(settleEvent.details.readyReason, "committed-degraded");
+	assert.equal(settleEvent.details.deadlineState, "expired");
+	// Same hygiene rule as the settle records (T7 e): numbers and finite enums
+	// only — screen text, terminal data, and tokens never reach onDiagnostic.
+	for (const event of lifecycle) {
+		const strings = [];
+		const walk = (value) => {
+			if (value === null || typeof value === "boolean") return;
+			if (typeof value === "number") {
+				assert.ok(Number.isFinite(value), "diagnostic numbers are finite");
+			return;
+			}
+			if (typeof value === "string") {
+				strings.push(value);
+				return;
+			}
+			if (value && typeof value === "object") {
+				for (const item of Object.values(value)) walk(item);
+				return;
+			}
+			assert.fail(`unsupported diagnostic leaf: ${String(value)}`);
+		};
+		walk(event.details);
+		for (const text of strings) {
+			assert.match(text, /^[a-z][a-z0-9:.-]*$/, `non-enum string leaked into diagnostics: ${text}`);
+		}
+	}
+});
+
+test("T2 A4 e) settled and legacy attaches record no wait events beyond the fences", () => {
+	// A settled-before-budget attach (covered F) never records a wait phase.
+	const settledRun = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "covered", text: "PROVEN" },
+			{ op: "advance", ms: 250 },
+			{ op: "advance", ms: 2250 },
+		],
+	});
+	assertScenarioOk("t2-wait-settled", settledRun);
+	assert.deepEqual(
+		settledRun.parsed.diagnostics.filter((event) => event.code === "attach_wait_expired"),
+		[],
+		"no wait events after the transition finished",
+	);
+	// The cap phase belongs to the PROTOCOL branch only: a legacy-cap settle
+	// records the settle, never a cap wait event. The budget phase is armed for
+	// every attach, so the legacy settle still sees its budget record first.
+	const legacyRun = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "mode", value: "legacy" },
+			{ op: "advance", ms: 2500 },
+		],
+	});
+	assertScenarioOk("t2-wait-legacy", legacyRun);
+	const legacyWait = legacyRun.parsed.diagnostics.filter((event) => event.code === "attach_wait_expired");
+	assert.equal(legacyWait.length, 1, "only the budget phase fired for a legacy attach");
+	assert.equal(legacyWait[0].details.phase, "budget");
+	assert.deepEqual(
+		legacyRun.parsed.diagnostics.filter((event) => event.code === "attach_wait_expired" && event.details.phase === "cap"),
+		[],
+		"the legacy cap reveal is not a protocol cap expiry",
+	);
+});
+
 test("T8 A09 a) same-size geometry is a no-op: no revision, no intent, no gate; the budget degrade publishes through it", () => {
 	const run = runScenario({
 		steps: [

@@ -6,7 +6,7 @@ import { createConnection, type Socket } from "node:net";
 import type { Component, KeybindingsManager, RgbColor, TUI, TerminalColorScheme, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { CURSOR_MARKER, Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { resolveAttachDeleteKey } from "../core/attach-delete.mjs";
-import { classifyProofStatus, sanitizeViewProofEnumPair } from "../core/attach-recovery.mjs";
+import { classifyProofInvalidFamily, classifyProofStatus, sanitizeViewProofEnumPair } from "../core/attach-recovery.mjs";
 import { resolveAttachDetachChord } from "../core/attach-detach.mjs";
 import { createAttachScreenOwnerState, installAttachScreenOwnerObservers } from "../core/attach-screen-owner.mjs";
 import { createPtyKittyImages } from "../core/pty-kitty-images.mjs";
@@ -51,8 +51,9 @@ export interface AttachSettleDiagnosticPatch {
 /** Issue #284 §3.4: which path settled this attach (recorded as readyReason). */
 export type AttachReadyReason = "complete" | "committed-degraded" | "legacy-settle" | "legacy-cap";
 
-/** Issue #284 §3.4/D5: recovery facts recorded at attach settle. Numbers and
- *  finite enums only — never tokens, screen text, keys, or raw terminal data.
+/** Issue #284 §3.4/D5: recovery facts recorded at attach settle (and, from
+ *  issue #288 D2, at each attach WAIT phase expiry). Numbers and finite
+ *  enums only — never tokens, screen text, keys, or raw terminal data.
  *  The committedView identity records only numeric facts: the local parser
  *  generation (epoch) and the geometry revision; the connection/baseline
  *  tokens stay out of the diagnostic payload, and the wire generation id and
@@ -60,7 +61,6 @@ export type AttachReadyReason = "complete" | "committed-degraded" | "legacy-sett
  *  latestViewProof carries the whitelisted (status, reason) pair — unrecognized
  *  wire strings map to "unrecognized" (sanitizeViewProofEnumPair). */
 export interface AttachRecoveryFacts {
-	readyReason: AttachReadyReason;
 	notReadyReason: string | null;
 	publishabilityState: string;
 	deadlineState: string;
@@ -86,7 +86,22 @@ export interface AttachRecoveryDiagnosticPatch {
 	level: "info";
 	code: "attach_settle_ready";
 	message: string;
-	details: AttachRecoveryFacts;
+	details: AttachRecoveryFacts & { readyReason: AttachReadyReason };
+}
+
+/** Issue #288 D2: which attach deadline expired while the attach was still
+ *  waiting — the 250ms recovery budget or the 2500ms hard cap. */
+export type AttachWaitExpiredPhase = "budget" | "cap";
+
+/** Diagnostic patch emitted when an attach wait phase expires and the attach
+ *  keeps waiting (issue #288 D2). Same recovery facts as the settle record;
+ *  no readyReason — a waiting attach has none. */
+export interface AttachWaitExpiredDiagnosticPatch {
+	source: string;
+	level: "info";
+	code: "attach_wait_expired";
+	message: string;
+	details: AttachRecoveryFacts & { phase: AttachWaitExpiredPhase };
 }
 
 export interface PtyAttachOptions {
@@ -94,7 +109,7 @@ export interface PtyAttachOptions {
 	screenLogPath?: string;
 	title: string;
 	/** Issue #161: receives settle-scheme diagnostic patches. Default: no-op. */
-	onDiagnostic?: (event: AttachSettleDiagnosticPatch | AttachRecoveryDiagnosticPatch) => void;
+	onDiagnostic?: (event: AttachSettleDiagnosticPatch | AttachRecoveryDiagnosticPatch | AttachWaitExpiredDiagnosticPatch) => void;
 	/** Issue #284: injectable clock for attach-lifecycle deadlines. The default
 	 *  (host clock + global timers) keeps the existing behavior untouched; the
 	 *  component harness injects a virtual time source and timer queue so the
@@ -485,6 +500,17 @@ export class PtyAttachComponent implements Component {
 	 *  snapshotReady, which rebinds it) clears/rebinds it. Capability loss —
 	 *  which nulls latestViewProof — deliberately keeps it. */
 	private proofInvalidatedBaselineToken: number | null = null;
+	/** Issue #288 D1/I8 hard-dominance latch: the baseline token a HARD invalid
+	 *  family classification (classifyProofInvalidFamily === "hard") latched
+	 *  on; the effective state is (token === baselineToken), exactly like the
+	 *  sticky failure fact. Hard dominance: once latched, later trailing
+	 *  shapes, other non-covered shapes, capability loss, S records, and
+	 *  missing proofs NEVER clear it — the cap floor stays closed for this
+	 *  baseline. Cleared only where the sticky fact clears: the policy PUBLISH
+	 *  branch (a fully valid F) or a baseline identity change (replaceParser
+	 *  increments baselineToken, so the stale binding goes inactive). The
+	 *  cap-floor publish-degraded deliberately does NOT clear it (I7). */
+	private proofHardInvalidatedThisBaseline: number | null = null;
 	/** Last §3.1.1 classification assembled for the policy (diagnostics/readout). */
 	private lastProofStatus: "none" | "missing" | "invalid" | "covered" | null = null;
 	/** Sticky-state twin of the classification (diagnostics/readout): mirrors
@@ -556,6 +582,9 @@ export class PtyAttachComponent implements Component {
 	// identity fence (I3) instead.
 	private attachRecoveryBudgetTimer: unknown = null;
 	private budgetArmed = false;
+	/** Issue #288 D2: which wait phases already recorded their wait diagnostic
+	 *  — single-shot per phase per attach (the budgetArmed fence pattern). */
+	private attachWaitDiagnosticEmitted: { budget: boolean; cap: boolean } = { budget: false, cap: false };
 	/** Timer fact only: the budget deadline passed while this attach was still
 	 *  waiting. Publishing on it is the policy's decision (T6 wiring), never the
 	 *  timer's. */
@@ -1248,6 +1277,10 @@ export class PtyAttachComponent implements Component {
 		this.attachRecoveryBudgetTimer = null;
 		if (!this.budgetArmed || !this.attaching || this.closed) return;
 		this.budgetElapsed = true;
+		// Issue #288 D2: the budget expiry leaves on-disk wait evidence — emitted
+		// BEFORE the policy re-evaluation so a settle it triggers always follows
+		// the budget record (A4 ordering).
+		this.emitAttachWaitExpiredDiagnostic("budget");
 		this.evaluateAttachReady();
 	}
 
@@ -1302,6 +1335,11 @@ export class PtyAttachComponent implements Component {
 		this.deadlineState = "expired";
 		this.notReadyReason = this.attachMode === "protocol" ? "deadline-expired:waiting-for-complete-frame" : "deadline-expired:mode-undecided";
 		this.publishabilityState = "unknown";
+		// Issue #288 D2: the cap expiry is the second wait phase — recorded after
+		// the deadline state flip (and after the budget record, which fired at
+		// 250ms) and before the policy re-evaluation, so a cap-floor settle it
+		// triggers still lands after both wait records (A4 ordering).
+		this.emitAttachWaitExpiredDiagnostic("cap");
 		this.evaluateAttachReady();
 		this.scheduleRender();
 	}
@@ -1577,6 +1615,15 @@ export class PtyAttachComponent implements Component {
 		const proofStatus = classifyProofStatus(this.latestViewProof as Record<string, unknown> | null, stickyInvalid);
 		this.lastProofStatus = proofStatus;
 		if (proofStatus === "invalid") this.proofInvalidatedBaselineToken = this.baselineToken;
+		// Issue #288 D1: latch the HARD invalid family on the current baseline.
+		// The family is a property of the ARRIVAL shape (never of the sticky
+		// fact), so a trailing arrival under an existing sticky binding latches
+		// nothing, while a hard arrival latches even when the sticky fact was
+		// first set by a trailing shape — hard dominates (I8). Never cleared
+		// here: same publish-only/baseline-rebind lifecycle as the sticky fact.
+		if (proofStatus === "invalid" && classifyProofInvalidFamily(this.latestViewProof as Record<string, unknown> | null) === "hard") {
+			this.proofHardInvalidatedThisBaseline = this.baselineToken;
+		}
 		// The diagnostic field mirrors the POST-update sticky state (review fix):
 		// recording the pre-update value hid the invalidation transition
 		// (false→true) from every settle readout built from it.
@@ -1641,6 +1688,10 @@ export class PtyAttachComponent implements Component {
 			committedViewRows: committedView.sourceRows,
 			committedContentKind: committedView.contentKind,
 			proofStatus,
+			// Issue #288 D1 cap floor: the hard-latch absence is the policy's
+			// recoverability fact — a trailing-only invalidation may pass
+			// predicate 5 once the cap expires; a hard one never may.
+			capRecoverable: this.proofHardInvalidatedThisBaseline !== this.baselineToken,
 			budgetElapsed: this.budgetElapsed,
 		});
 		this.notReadyReason = decision.action === "wait" ? decision.reason : null;
@@ -1653,6 +1704,7 @@ export class PtyAttachComponent implements Component {
 			// blocked (a covered-but-unpublishable F is exactly the shape the
 			// degraded chain refuses via proof-status-covered).
 			this.proofInvalidatedBaselineToken = null;
+			this.proofHardInvalidatedThisBaseline = null;
 			this.lastProofStickyInvalid = false;
 			this.publishabilityState = "ready";
 			this.finishAttachTransition("complete");
@@ -1664,45 +1716,77 @@ export class PtyAttachComponent implements Component {
 		}
 	}
 
-	/** Issue #284 §3.4/D5: the settle record — numbers and finite enums only
-	 *  (see AttachRecoveryFacts). Captured inside finishAttachTransition before
-	 *  the wait state resets, so it keeps the LAST wait reason. The proof pair
-	 *  is whitelisted and the committedView identity carries numeric facts
-	 *  only (parser generation/geometry revision) — tokens and raw wire strings
-	 *  never reach onDiagnostic consumers (review hardening). */
-	private buildSettleDiagnostic(source: AttachReadyReason): AttachRecoveryDiagnosticPatch {
+	/** Issue #288 D2: the SHARED recovery-facts snapshot behind the settle and
+	 *  wait diagnostic records — the #284 settle-diagnostic assembly (enum
+	 *  whitelisting via sanitizeViewProofEnumPair, numeric-only committedView
+	 *  identity, token exclusion) moved here verbatim; the two event wrappers
+	 * below add only their outcome field, so the whitelist logic is never
+	 * duplicated. Numbers and finite enums only — never tokens, screen text,
+	 * keys, or raw terminal data. */
+	private buildAttachRecoveryFacts(): AttachRecoveryFacts {
 		const committedView = this.committedView;
 		const proof = sanitizeViewProofEnumPair(this.latestViewProof as Record<string, unknown> | null);
+		return {
+			notReadyReason: this.notReadyReason,
+			publishabilityState: this.publishabilityState,
+			deadlineState: this.deadlineState,
+			witnessLatched: this.witnessLatched,
+			budgetDeadline: this.attachStartedAt + ATTACH_RECOVERY_BUDGET_MS,
+			budgetElapsed: this.budgetElapsed,
+			proofStatus: this.lastProofStatus,
+			proofStickyInvalid: this.lastProofStickyInvalid,
+			committedView: committedView === null ? null : {
+				// Numeric identity facts only: the local parser generation
+				// (the committed view's epoch — identity.parser is the current
+				// parser at every publish settle) and the geometry revision.
+				// The connection/baseline tokens are deliberately omitted.
+				generation: this.parserEpoch,
+				geometryRevision: committedView.identity.geometryRevision,
+				source: committedView.source,
+				sourceCols: committedView.sourceCols,
+				sourceRows: committedView.sourceRows,
+				contentKind: committedView.contentKind,
+			},
+			latestViewProof: proof,
+		};
+	}
+
+	/** Issue #284 §3.4/D5: the settle record. Captured inside
+	 *  finishAttachTransition before the wait state resets, so it keeps the
+	 *  LAST wait reason. Byte-identical to the pre-#288 settle payload (the
+	 *  readyReason field still leads the details object). */
+	private buildSettleDiagnostic(source: AttachReadyReason): AttachRecoveryDiagnosticPatch {
 		return {
 			source: "attach",
 			level: "info",
 			code: "attach_settle_ready",
 			message: `attach settle ready via ${source}`,
-			details: {
-				readyReason: source,
-				notReadyReason: this.notReadyReason,
-				publishabilityState: this.publishabilityState,
-				deadlineState: this.deadlineState,
-				witnessLatched: this.witnessLatched,
-				budgetDeadline: this.attachStartedAt + ATTACH_RECOVERY_BUDGET_MS,
-				budgetElapsed: this.budgetElapsed,
-				proofStatus: this.lastProofStatus,
-				proofStickyInvalid: this.lastProofStickyInvalid,
-				committedView: committedView === null ? null : {
-					// Numeric identity facts only: the local parser generation
-					// (the committed view's epoch — identity.parser is the current
-					// parser at every publish settle) and the geometry revision.
-					// The connection/baseline tokens are deliberately omitted.
-					generation: this.parserEpoch,
-					geometryRevision: committedView.identity.geometryRevision,
-					source: committedView.source,
-					sourceCols: committedView.sourceCols,
-					sourceRows: committedView.sourceRows,
-					contentKind: committedView.contentKind,
-				},
-				latestViewProof: proof,
-			},
+			details: { readyReason: source, ...this.buildAttachRecoveryFacts() },
 		};
+	}
+
+	/** Issue #288 D2: the wait record — the same recovery facts plus the
+	 *  expired phase, and NO readyReason (a waiting attach has none). */
+	private buildWaitExpiredDiagnostic(phase: AttachWaitExpiredPhase): AttachWaitExpiredDiagnosticPatch {
+		return {
+			source: "attach",
+			level: "info",
+			code: "attach_wait_expired",
+			message: `attach wait expired at ${phase} deadline`,
+			details: { phase, ...this.buildAttachRecoveryFacts() },
+		};
+	}
+
+	/** Issue #288 D2: record a wait-phase expiry on the onDiagnostic channel.
+	 *  Emitted only while the attach is still waiting and at most once per
+	 *  phase per attach — a settled or closed component records nothing, and a
+	 *  re-scheduled deadline (reconnect re-entry of startAttachSettle) cannot
+	 *  duplicate the event. */
+	private emitAttachWaitExpiredDiagnostic(phase: AttachWaitExpiredPhase): void {
+		if (this.closed || !this.attaching) return;
+		if (this.attachWaitDiagnosticEmitted[phase]) return;
+		this.attachWaitDiagnosticEmitted[phase] = true;
+		this.opts.onDiagnostic?.(this.buildWaitExpiredDiagnostic(phase));
 	}
 
 	private finishAttachTransition(source: AttachReadyReason): void {
@@ -3153,8 +3237,10 @@ export class PtyAttachComponent implements Component {
 		// Issue #284 latch layer: the latch is attach-scoped — detach/dispose
 		// ends this attach; a new component re-observes the capability fresh.
 		this.witnessLatched = false;
-		// Same attach scope for the sticky failure fact (spec §3.1.1/I6).
+		// Same attach scope for the sticky failure fact (spec §3.1.1/I6) and the
+		// #288 hard-dominance latch (spec §3 I8).
 		this.proofInvalidatedBaselineToken = null;
+		this.proofHardInvalidatedThisBaseline = null;
 		this.clearGracefulSocketCloseTimer();
 		const socket = this.socket;
 		this.socket = null;
