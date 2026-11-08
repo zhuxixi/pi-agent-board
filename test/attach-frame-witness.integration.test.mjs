@@ -551,6 +551,292 @@ setInterval(() => {
 }
 
 for (const legacy of [false, true]) {
+	test(`reporter trailing-unsafe snapshot (${legacy ? "legacy main" : "owned main"}): the cap floor settles the #288 lockout shape`, async (t) => {
+		// Issue #288 A3 (runner-snapshot arrival shape): the child proves one
+		// frame, then emits bare trailing bytes and goes idle forever — the
+		// runner's safe-trailing classifier marks the post-proof segment unsafe,
+		// so the driver's baseline snapshot answers with the #288 lockout
+		// coverage `unavailable + trailing-unsafe`. #284 classified that shape
+		// sticky-invalid with no time exit; the cap floor must publish the
+		// committed view at the 2500ms deadline — settle ≤ 4000ms external
+		// wall-clock (2500ms cap + 1500ms scheduling headroom), with no F ever
+		// arriving. No settle hold is needed: the invalid coverage arrives WITH
+		// the baseline snapshot, so no pre-snapshot evaluation can publish.
+		const childScript = `
+const fs = require("node:fs");
+const file = process.argv[1];
+const meta = Buffer.from(JSON.stringify({protocol:1,cols:80,rows:24,mode:"fullscreen",rendererEpoch:1,sessionEpoch:1,focusPresent:true,overlayPresent:false,intentId:0,geometryRevision:0})).toString("base64url");
+process.stdout.write("\\u001b[?1049h\\u001b[?25l");
+process.stdout.write("TRAIL-SNAP VISIBLE LINE\\r\\n");
+let sent = false;
+setInterval(() => {
+  if (sent) return; // one proven frame + unsafe trailing tail, then eternal idle — no F ever follows
+  let token = "";
+  try { token = fs.readFileSync(file, "utf8").trim(); } catch {}
+  if (!token) return;
+  sent = true;
+  const marker = (kind, id, extra) => "\\u001bP> agent-board-frame/1 ; " + token + " ; " + kind + " ; " + id + " ; " + extra + "\\u001b\\\\";
+  process.stdout.write(marker("S", 1, "0 ; 80"));
+  process.stdout.write("TRAIL-SNAP FRAME BODY\\r\\n");
+  process.stdout.write(marker("F", 1, meta));
+  // Bare bytes after the proven frame: the safe-trailing classifier marks the
+  // segment unsafe, so every later snapshot answers unavailable+trailing-unsafe.
+  process.stdout.write("TRAIL-SNAP UNSAFE TAIL");
+}, 15);
+`;
+		const { root, viewId, socketPath, tokenFile } = await startHost(t, { legacy, script: childScript });
+		const reporter = createConnection(socketPath);
+		await once(reporter, "connect");
+		const reporterMessages = listen(reporter);
+		send(reporter, { type: "hello", clientId: "frame-reporter", frameWitness: { protocol: 1 } });
+		const enable = await waitFor(() => reporterMessages.find((msg) => msg.type === "frame_witness_enable"), 15000);
+		writeFileSync(tokenFile, enable.token);
+		// Deterministic rendezvous: the proof AND the unsafe tail must be in the
+		// runner's tracker/journal before the attach, so the FIRST snapshot the
+		// driver sees already carries the trailing-unsafe coverage.
+		await waitFor(() => (readHost(root, viewId)?.frameWitness?.proofs ?? 0) >= 1, 20000);
+		await waitFor(() => readFileSync(P.screenLogPath(root, viewId), "utf8").includes("TRAIL-SNAP UNSAFE TAIL"), 20000);
+		const driver = spawnSync(process.execPath, [
+			"--experimental-transform-types",
+			resolve("test-support/attach-idle-socket-driver.ts"),
+			socketPath,
+			"8000",
+			"TRAIL-SNAP VISIBLE LINE",
+		], { encoding: "utf8", timeout: 20000 });
+		const driverLine = (driver.stdout ?? "").trim().split("\n").filter(Boolean).at(-1);
+		const driven = driverLine ? JSON.parse(driverLine) : null;
+		t.diagnostic(`driver: exit=${driver.status} result=${driverLine ?? null} stderr=${(driver.stderr ?? "").slice(-300)}`);
+		assert.equal(driven?.attaching, false, "the cap floor settles the trailing-only lockout (no F ever arrives)");
+		assert.equal(driven?.readyReason, "committed-degraded");
+		assert.equal(driven?.settleDiagnostic?.deadlineState, "expired", "the settle went through the expired cap floor, not the 250ms budget");
+		assert.equal(driven?.settleDiagnostic?.budgetElapsed, true, "the budget had long elapsed when the cap published");
+		assert.equal(driven?.settleDiagnostic?.proofStatus, "invalid", "trailing-unsafe keeps its #284 sticky-invalid classification");
+		assert.deepEqual(driven?.settleDiagnostic?.latestViewProof, { status: "unavailable", reason: "trailing-unsafe" }, "the runner-snapshot arrival shape reached the settle record");
+		assert.equal(driven?.proof.viewProofStatus, "unavailable");
+		assert.equal(driven?.proof.stickyInvalid, true);
+		assert.equal(driven?.hardInvalidated, false, "the trailing family never latches hard (I9)");
+		assert.equal(driven?.capRecoverable, true);
+		assert.ok(typeof driven?.budget.settledAfterCapMs === "number" && driven.budget.settledAfterCapMs >= 0, `a cap-floor settle cannot precede its own deadline (got ${driven?.budget.settledAfterCapMs}ms after)`);
+		assert.ok(driven.settledMs <= 4000, `external wall-clock settle <= 4000ms = 2500ms cap + 1500ms scheduling headroom (got ${driven.settledMs})`);
+		assert.equal(driven?.showsContent, true, `the revealed surface shows the committed model content (${JSON.stringify(driven)})`);
+		assert.equal(driven?.geometry.revision, 0, "same-size attach records zero geometry revisions");
+		// Issue #288 A4 integration: both wait phases recorded in expiry order,
+		// then the settle; a waiting attach carries no readyReason field.
+		assert.deepEqual(driven?.attachLifecycle, ["wait:budget", "wait:cap", "settle"]);
+		assert.equal(driven?.waitEvents?.length, 2);
+		assert.equal(driven?.waitEvents?.[0]?.phase, "budget");
+		assert.equal(driven?.waitEvents?.[1]?.phase, "cap");
+		for (const wait of driven?.waitEvents ?? []) assert.equal(Object.hasOwn(wait, "readyReason"), false, "a wait record carries no readyReason");
+		const witnessAfter = readHost(root, viewId)?.frameWitness;
+		assert.equal(witnessAfter?.proofs ?? 0, 1, "exactly the one pre-attach F — none arrived during the attach");
+		assert.equal(reporterMessages.filter((msg) => msg.type === "frame_witness_intent").length, 0, "same-size attach: zero resize intents");
+		reporter.destroy();
+	});
+}
+
+for (const legacy of [false, true]) {
+	test(`reporter live trailing output (${legacy ? "legacy main" : "owned main"}): the cap floor settles the UI arrival shape`, async (t) => {
+		// Issue #288 A3 (UI live arrival shape): the burst is gate-held on the
+		// DRIVER's baseline snapshot (.go1) — it opens a candidate, completes it
+		// with an F whose metadata cols can never match the 80-col target (a
+		// covered but unpublishable F: the full-view chain waits on
+		// proof-geometry-mismatch), then streams a sync-wrapped tail. The
+		// component feeds that tail through its REAL noteViewProofOutput path:
+		// ESC[?2026h is an unknown CSI to the safe-trailing classifier, producing
+		// exactly the #288 UI arrival `unknown + view-proof-trailing-csi-unknown`.
+		// The budget must hold over the sticky invalid fact and the cap floor
+		// publishes ≤ 4000ms. The "live-trailing" settle hold parks every publish
+		// evaluation until the trailing invalidation is observably present, so a
+		// loaded runner can never let the budget settle over the still-missing
+		// S-only candidate state (same flake governance as the S-then-idle case).
+		const childScript = `
+const fs = require("node:fs");
+const file = process.argv[1];
+const gate = file + ".go1";
+const meta = Buffer.from(JSON.stringify({protocol:1,cols:99,rows:24,mode:"fullscreen",rendererEpoch:1,sessionEpoch:1,focusPresent:true,overlayPresent:false,intentId:0,geometryRevision:0})).toString("base64url");
+process.stdout.write("\\u001b[?1049h\\u001b[?25l");
+process.stdout.write("UI-TRAIL VISIBLE LINE\\r\\n");
+let sent = false;
+setInterval(() => {
+  if (sent) return; // covered-but-unpublishable F + unsafe tail, then eternal idle — no F ever follows
+  let token = "";
+  try { token = fs.readFileSync(file, "utf8").trim(); } catch {}
+  let go = "";
+  try { go = fs.readFileSync(gate, "utf8").trim(); } catch {}
+  if (!token || go !== "GO") return;
+  sent = true;
+  const marker = (kind, id, extra) => "\\u001bP> agent-board-frame/1 ; " + token + " ; " + kind + " ; " + id + " ; " + extra + "\\u001b\\\\";
+  process.stdout.write(marker("S", 1, "0 ; 80"));
+  process.stdout.write("UI-TRAIL FRAME BODY\\r\\n");
+  process.stdout.write(marker("F", 1, meta));
+  process.stdout.write("\\u001b[?2026h");
+  process.stdout.write("UI-TRAIL UNSAFE TAIL\\r\\n");
+  process.stdout.write("\\u001b[?2026l");
+}, 15);
+`;
+		const { root, viewId, socketPath, tokenFile } = await startHost(t, { legacy, script: childScript });
+		const reporter = createConnection(socketPath);
+		await once(reporter, "connect");
+		const reporterMessages = listen(reporter);
+		send(reporter, { type: "hello", clientId: "frame-reporter", frameWitness: { protocol: 1 } });
+		const enable = await waitFor(() => reporterMessages.find((msg) => msg.type === "frame_witness_enable"), 15000);
+		writeFileSync(tokenFile, enable.token);
+		assert.equal(readHost(root, viewId)?.frameWitness?.lastFrameId ?? 0, 0, "the stream is gate-held before the attach");
+		const driver = spawnSync(process.execPath, [
+			"--experimental-transform-types",
+			resolve("test-support/attach-idle-socket-driver.ts"),
+			socketPath,
+			"8000",
+			"UI-TRAIL VISIBLE LINE",
+			`${tokenFile}.go1`,
+			"",
+			"live-trailing",
+		], { encoding: "utf8", timeout: 20000 });
+		const driverLine = (driver.stdout ?? "").trim().split("\n").filter(Boolean).at(-1);
+		const driven = driverLine ? JSON.parse(driverLine) : null;
+		t.diagnostic(`driver: exit=${driver.status} result=${driverLine ?? null} stderr=${(driver.stderr ?? "").slice(-300)}`);
+		assert.equal(driven?.attaching, false, "the cap floor settles the UI trailing lockout (no F ever arrives)");
+		assert.equal(driven?.readyReason, "committed-degraded");
+		assert.equal(driven?.settleDiagnostic?.deadlineState, "expired", "the settle went through the expired cap floor, not the 250ms budget");
+		assert.equal(driven?.settleDiagnostic?.budgetElapsed, true);
+		assert.equal(driven?.settleDiagnostic?.proofStatus, "invalid");
+		assert.deepEqual(driven?.settleDiagnostic?.latestViewProof, { status: "unknown", reason: "view-proof-trailing-csi-unknown" }, "the UI live arrival shape reached the settle record");
+		assert.equal(driven?.proof.viewProofStatus, "unknown");
+		assert.equal(driven?.proof.viewProofReason, "view-proof-trailing-csi-unknown", "the REAL noteViewProofOutput path produced the trailing invalidation");
+		assert.equal(driven?.proof.stickyInvalid, true);
+		assert.equal(driven?.hardInvalidated, false, "the trailing family never latches hard (I9)");
+		assert.equal(driven?.capRecoverable, true);
+		assert.ok(typeof driven?.budget.settledAfterCapMs === "number" && driven.budget.settledAfterCapMs >= 0, `a cap-floor settle cannot precede its own deadline (got ${driven?.budget.settledAfterCapMs}ms after)`);
+		assert.ok(driven.settledMs <= 4000, `external wall-clock settle <= 4000ms = 2500ms cap + 1500ms scheduling headroom (got ${driven.settledMs})`);
+		assert.equal(driven?.showsContent, true, `the revealed surface shows the committed model content (${JSON.stringify(driven)})`);
+		assert.ok((driven?.proof.recordCountAtSettle ?? 0) >= 2, "the live S and F records arrived through the viewProof socket path before the settle");
+		// Issue #288 A4 integration: budget → cap → settle, no readyReason on waits.
+		assert.deepEqual(driven?.attachLifecycle, ["wait:budget", "wait:cap", "settle"]);
+		assert.equal(driven?.waitEvents?.length, 2);
+		assert.equal(driven?.waitEvents?.[0]?.phase, "budget");
+		assert.equal(driven?.waitEvents?.[1]?.phase, "cap");
+		for (const wait of driven?.waitEvents ?? []) assert.equal(Object.hasOwn(wait, "readyReason"), false, "a wait record carries no readyReason");
+		assert.equal(readHost(root, viewId)?.frameWitness?.proofs ?? 0, 1, "exactly the one burst F — none arrived after the tail");
+		assert.equal(reporterMessages.filter((msg) => msg.type === "frame_witness_intent").length, 0, "same-size attach: zero resize intents");
+		reporter.destroy();
+	});
+}
+
+for (const legacy of [false, true]) {
+	test(`reporter hard-then-trailing (${legacy ? "legacy main" : "owned main"}): a hard invalidation keeps the cap floor closed (I8)`, async (t) => {
+		// Issue #288 A3/I8 counterexample end-to-end: a REAL hard arrival — the
+		// reporter is REPLACED mid-attach, so the runner broadcasts
+		// view_proof_state unknown+reporter-replaced (a hard-family
+		// classification) — latches on the driver's current baseline; the
+		// trailing family then arrives through the real live path (a
+		// covered-but-unpublishable F followed by an unsafe sync-wrapped tail)
+		// and must NOT unlatch it. Past the 2500ms cap the attach is STILL
+		// waiting: hard dominance keeps the cap floor closed until an F publish
+		// or a baseline identity change. The orchestration runs while the driver
+		// attaches (spawn, not spawnSync): the replacement must land on the
+		// attach's current baseline, which a pre-attach arrival never could. The
+		// "hard-invalid" settle hold parks publish evaluations until the hard
+		// arrival is present (before it, the no-proof baseline is degradable
+		// missing evidence and the budget could publish).
+		const childScript = `
+const fs = require("node:fs");
+const file = process.argv[1];
+const gate = file + ".go2";
+const meta = Buffer.from(JSON.stringify({protocol:1,cols:99,rows:24,mode:"fullscreen",rendererEpoch:1,sessionEpoch:1,focusPresent:true,overlayPresent:false,intentId:0,geometryRevision:0})).toString("base64url");
+process.stdout.write("\\u001b[?1049h\\u001b[?25l");
+process.stdout.write("HARD-E2E VISIBLE LINE\\r\\n");
+let sent = false;
+setInterval(() => {
+  if (sent) return; // idle forever after the burst — the unsafe tail is the last word
+  let token = "";
+  try { token = fs.readFileSync(file, "utf8").trim(); } catch {}
+  let go = "";
+  try { go = fs.readFileSync(gate, "utf8").trim(); } catch {}
+  if (!token || go !== "GO") return;
+  sent = true;
+  const marker = (kind, id, extra) => "\\u001bP> agent-board-frame/1 ; " + token + " ; " + kind + " ; " + id + " ; " + extra + "\\u001b\\\\";
+  process.stdout.write(marker("S", 1, "0 ; 80"));
+  process.stdout.write("HARD-E2E FRAME BODY\\r\\n");
+  process.stdout.write(marker("F", 1, meta));
+  process.stdout.write("\\u001b[?2026h");
+  process.stdout.write("HARD-E2E UNSAFE TAIL\\r\\n");
+  process.stdout.write("\\u001b[?2026l");
+}, 15);
+`;
+		const { root, viewId, socketPath, tokenFile } = await startHost(t, { legacy, script: childScript });
+		const first = createConnection(socketPath);
+		await once(first, "connect");
+		const firstMessages = listen(first);
+		send(first, { type: "hello", clientId: "frame-reporter", frameWitness: { protocol: 1 } });
+		const firstEnable = await waitFor(() => firstMessages.find((msg) => msg.type === "frame_witness_enable"), 15000);
+		writeFileSync(tokenFile, firstEnable.token);
+		const driver = spawn(process.execPath, [
+			"--experimental-transform-types",
+			resolve("test-support/attach-idle-socket-driver.ts"),
+			socketPath,
+			"4000",
+			"HARD-E2E VISIBLE LINE",
+			`${tokenFile}.go1`,
+			"",
+			"hard-invalid",
+		], { stdio: ["ignore", "pipe", "pipe"] });
+		t.after(() => {
+			try {
+				driver.kill("SIGKILL");
+			} catch {
+				/* already gone */
+			}
+		});
+		let driverOut = "";
+		let driverErr = "";
+		driver.stdout.on("data", (chunk) => {
+			driverOut += chunk;
+		});
+		driver.stderr.on("data", (chunk) => {
+			driverErr += chunk;
+		});
+		const driverExit = new Promise((resolveExit) => driver.once("exit", () => resolveExit(true)));
+		// The driver's baseline snapshot landed (.go1): replace the reporter NOW,
+		// so the hard arrival lands on the attach's current baseline.
+		await waitFor(() => existsSync(`${tokenFile}.go1`), 15000);
+		const fingerprintBefore = readHost(root, viewId)?.frameWitness?.tokenFingerprint;
+		const replacement = createConnection(socketPath);
+		await once(replacement, "connect");
+		const replacementMessages = listen(replacement);
+		send(replacement, { type: "hello", clientId: "frame-reporter", frameWitness: { protocol: 1 } });
+		const replacementEnable = await waitFor(() => replacementMessages.find((msg) => msg.type === "frame_witness_enable"), 15000);
+		await waitFor(() => readHost(root, viewId)?.frameWitness?.tokenFingerprint !== fingerprintBefore, 15000);
+		// The replacement is observable runner-side, so the view_proof_state
+		// reset already went out: let the trailing family arrive under the new
+		// token once .go2 opens — after the hard latch, exactly the dominance
+		// counterexample order.
+		writeFileSync(tokenFile, replacementEnable.token);
+		writeFileSync(`${tokenFile}.go2`, "GO\n");
+		const exited = await Promise.race([driverExit, new Promise((resolveTimeout) => setTimeout(() => resolveTimeout(false), 15000))]);
+		assert.equal(exited, true, "the driver loop ran past the cap and exited on its own");
+		const driverLine = driverOut.trim().split("\n").filter(Boolean).at(-1);
+		const driven = driverLine ? JSON.parse(driverLine) : null;
+		t.diagnostic(`driver: exit=${driver.exitCode} result=${driverLine ?? null} stderr=${driverErr.slice(-300)}`);
+		assert.equal(driven?.attaching, true, "the hard latch keeps the cap floor closed — still attaching past the cap");
+		assert.equal(driven?.settledMs, null, "no settle ever happened");
+		assert.equal(driven?.deadlineState, "expired", "the 2500ms cap deadline fired");
+		assert.equal(driven?.notReadyReason, "deadline-expired:proof-status-invalid", "the expired wait names the hard-blocked proof predicate");
+		assert.equal(driven?.proof.stickyInvalid, true);
+		assert.equal(driven?.hardInvalidated, true, "the reporter-replaced arrival latched hard on the baseline");
+		assert.equal(driven?.capRecoverable, false, "I8: the trailing arrival after the hard latch did not restore cap recoverability");
+		assert.equal(driven?.proof.viewProofReason, "view-proof-trailing-csi-unknown", "the trailing family DID arrive after the hard latch");
+		// Issue #288 A4 integration: both wait phases recorded in expiry order and
+		// NO settle record — a still-waiting attach's evidence chain ends at the cap.
+		assert.deepEqual(driven?.attachLifecycle, ["wait:budget", "wait:cap"]);
+		assert.equal(driven?.waitEvents?.length, 2);
+		for (const wait of driven?.waitEvents ?? []) assert.equal(Object.hasOwn(wait, "readyReason"), false, "a wait record carries no readyReason");
+		assert.equal(readHost(root, viewId)?.frameWitness?.proofs ?? 0, 1, "the child's single F completed — nothing published off it");
+		replacement.destroy();
+		first.destroy();
+	});
+}
+
+for (const legacy of [false, true]) {
 	test(`plain resize (${legacy ? "legacy main" : "owned main"}): an actual geometry change emits exactly one target intent`, async (t) => {
 		const { socket, messages } = await startHost(t, { legacy });
 		send(socket, { type: "hello", clientId: "frame-reporter", frameWitness: { protocol: 1 } });

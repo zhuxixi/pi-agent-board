@@ -33,7 +33,19 @@
 //                 open (hydration complete + parserSyncOpen, which also rules
 //                 out the snapshot frame's own wrapper window); the frameState
 //                 gate then holds every reveal until the first closed frame.
-import { ATTACH_RECOVERY_BUDGET_MS, PtyAttachComponent } from "../src/ui/pty-attach.ts";
+// Issue #288 T3 additions — the same rendezvous for the cap-floor scenarios,
+// where the premature publish this gate must suppress is the 250ms BUDGET
+// settle on still-missing evidence:
+//   "live-trailing" — release once the REAL live output path produced the UI
+//                 trailing arrival (unknown + view-proof-trailing-*): until it
+//                 lands, an S-only candidate state is degradable missing
+//                 evidence and the budget could publish over it;
+//   "hard-invalid"  — release once the hard arrival is present (the reporter
+//                 replacement reset, unknown + reporter-replaced): before it,
+//                 a no-proof baseline is degradable and the budget could
+//                 publish; after it, sticky/hard invalidation makes every
+//                 later evaluation a wait by construction.
+import { ATTACH_HARD_TIMEOUT_MS, ATTACH_RECOVERY_BUDGET_MS, PtyAttachComponent } from "../src/ui/pty-attach.ts";
 import { existsSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
 
@@ -75,6 +87,7 @@ const internals = component as unknown as {
 	readyReason: string | null; witnessLatched: boolean; frameWitnessAvailable: boolean;
 	budgetArmed: boolean; budgetElapsed: boolean; attachStartedAt: number;
 	lastProofStatus: string | null; lastProofStickyInvalid: boolean;
+	proofHardInvalidatedThisBaseline: number | null; baselineToken: number;
 	geometryRevision: number; resizeIntentRequired: boolean; resizeIntentId: number;
 	cols: number; rows: number; viewProofRecordCount: number; protocolBaselineState: string;
 	latestViewProof: { status?: string; reason?: string } | null;
@@ -93,10 +106,25 @@ if (settleGateMode !== null) {
 	let gateOpen = false;
 	internals.evaluateAttachReady = () => {
 		if (!gateOpen) {
-			const liveSArrived = internals.viewProofRecordCount >= 1;
-			const childWindowOpen = settleGateMode !== "sync-open" ||
-				(internals.localHydrationState === "complete" && internals.parserSyncOpen === true);
-			if (!liveSArrived || !childWindowOpen) return;
+			const stillHolding = () => {
+				if (settleGateMode === "live-trailing") {
+					// The issue #288 UI arrival shape: the live output path must have
+					// produced the trailing-family invalidation before any evaluation
+					// may publish (an S-only candidate is degradable missing evidence).
+					const proof = internals.latestViewProof;
+					return !(proof?.status === "unknown" && typeof proof.reason === "string" && proof.reason.startsWith("view-proof-trailing-"));
+				}
+				if (settleGateMode === "hard-invalid") {
+					// The issue #288 hard arrival: hold until the reporter replacement
+					// reset reached the component (a no-proof baseline is degradable).
+					return internals.latestViewProof?.reason !== "reporter-replaced";
+				}
+				const liveSArrived = internals.viewProofRecordCount >= 1;
+				const childWindowOpen = settleGateMode !== "sync-open" ||
+					(internals.localHydrationState === "complete" && internals.parserSyncOpen === true);
+				return !liveSArrived || !childWindowOpen;
+			};
+			if (stillHolding()) return;
 			gateOpen = true;
 		}
 		originalEvaluate();
@@ -128,6 +156,12 @@ while (Date.now() - started < timeoutMs) {
 	await new Promise<void>((r) => setTimeout(r, 25));
 }
 const settleDiagnostic = diagnostics.filter((event) => event.code === "attach_settle_ready").at(-1) ?? null;
+// Issue #288 A4: the wait-phase records (details only — the payloads are
+// numbers/finite enums by construction) plus the settle/wait ordering readout.
+const waitEvents = diagnostics.filter((event) => event.code === "attach_wait_expired").map((event) => event.details ?? null);
+const attachLifecycle = diagnostics
+	.filter((event) => event.code === "attach_wait_expired" || event.code === "attach_settle_ready")
+	.map((event) => event.code === "attach_wait_expired" ? `wait:${String(event.details?.phase ?? "?")}` : "settle");
 const committed = internals.committedView;
 const result = {
 	settledMs,
@@ -146,6 +180,9 @@ const result = {
 		// Wall-clock skew between the driver loop start and the component's
 		// attachStartedAt makes this an observational fact, not an assertion basis.
 		settledAfterBudgetMs: settledMs === null ? null : started + settledMs - (internals.attachStartedAt + ATTACH_RECOVERY_BUDGET_MS),
+		// Same epoch discipline against the 2500ms cap: a cap-floor settle cannot
+		// precede its own deadline, so this stays >= 0 (issue #288 A3).
+		settledAfterCapMs: settledMs === null ? null : started + settledMs - (internals.attachStartedAt + ATTACH_HARD_TIMEOUT_MS),
 	},
 	geometry: {
 		revision: internals.geometryRevision,
@@ -171,6 +208,12 @@ const result = {
 		recordCountAtSettle,
 	},
 	settleDiagnostic: settleDiagnostic === null ? null : settleDiagnostic.details ?? null,
+	// Issue #288 A3/A4 facts: the hard-dominance latch (binding === current
+	// baseline), the policy fact derived from it, and the wait-phase records.
+	hardInvalidated: internals.proofHardInvalidatedThisBaseline !== null && internals.proofHardInvalidatedThisBaseline === internals.baselineToken,
+	capRecoverable: internals.proofHardInvalidatedThisBaseline !== internals.baselineToken,
+	waitEvents,
+	attachLifecycle,
 	diagnosticsCount: diagnostics.length,
 	gates: { snapshot: snapshotGateWritten, budget: budgetGateWritten },
 };

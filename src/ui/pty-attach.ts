@@ -148,8 +148,10 @@ const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", 
 const LOADING_TICK_MS = 120;
 /** How long to keep the loading banner after the last resize-jiggle during attach. */
 const ATTACH_SETTLE_MS = 250;
-/** Hard cap on the attach transition so a silent session can't stall the banner. */
-const ATTACH_HARD_TIMEOUT_MS = 2500;
+/** Hard cap on the attach transition so a silent session can't stall the banner.
+ *  Issue #288: the cap doubles as the trailing-only downgrade floor (spec §2
+ *  D1); exported for the integration driver's wall-clock readouts. */
+export const ATTACH_HARD_TIMEOUT_MS = 2500;
 /** Issue #284 recovery budget: one 250ms window per attach lifetime. Once it
  * elapses, a protocol attach with a safely committed view but no covering F
  * proof may publish degraded (spec §3.2; the policy wiring lands with T6 —
