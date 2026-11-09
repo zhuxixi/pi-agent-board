@@ -5,6 +5,7 @@
 // Expected: the component finishes its attach transition within the legacy
 // deadlines (premerge behavior) instead of waiting forever.
 import { PtyAttachComponent } from "../src/ui/pty-attach.ts";
+import { exitAfterStdout } from "./stdout-flush.mjs";
 
 const timeoutMs = Number(process.env.HARNESS_TIMEOUT_MS ?? 8000);
 const theme = { fg: (_c, text) => text, bold: (text) => text };
@@ -72,5 +73,4 @@ const result = {
 	eventTrace,
 };
 try { c.dispose(); } catch {}
-console.log(JSON.stringify(result));
-process.exit(result.settledMs !== null && result.showsContent ? 0 : 1);
+exitAfterStdout(JSON.stringify(result) + "\n", result.settledMs !== null && result.showsContent ? 0 : 1);

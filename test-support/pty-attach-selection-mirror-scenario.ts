@@ -8,6 +8,7 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PtyAttachComponent } from "../src/ui/pty-attach.ts";
+import { exitAfterStdout } from "./stdout-flush.mjs";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 const READ_FIXTURE = "read-fixture-text";
@@ -257,5 +258,4 @@ try {
 try {
 	rmSync(root, { recursive: true, force: true, maxRetries: 3, retryDelay: 30 });
 } catch {}
-console.log(JSON.stringify(result));
-process.exit(0);
+exitAfterStdout(JSON.stringify(result) + "\n", 0);

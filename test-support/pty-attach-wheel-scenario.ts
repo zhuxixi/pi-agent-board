@@ -30,6 +30,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PtyAttachComponent } from "../src/ui/pty-attach.ts";
+import { exitAfterStdout } from "./stdout-flush.mjs";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
@@ -184,5 +185,4 @@ try {
 	} catch {}
 }
 
-console.log(JSON.stringify(result));
-process.exit(0);
+exitAfterStdout(JSON.stringify(result) + "\n", 0);
