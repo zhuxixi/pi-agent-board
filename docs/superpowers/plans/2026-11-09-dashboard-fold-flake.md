@@ -69,7 +69,7 @@ Expected: FAIL — child probe aborts with `AssertionError: selected session/hea
 
 - [ ] **Step 4: Do NOT commit yet**
 
-Task 1 and Task 2 form one atomic change; the commit happens in Task 2 Step 4.
+Task 1 and Task 2 form one atomic change; the commit happens in Task 2 Step 3.
 
 ### Task 2: Prefix-compare fix in the probe
 
