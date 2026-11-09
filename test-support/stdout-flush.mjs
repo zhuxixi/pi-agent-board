@@ -9,7 +9,8 @@
  *
  * `stream` and `exit` are injected so the three paths — flushed, broken pipe,
  * synchronous write error — are unit-testable without spawning a child. Only
- * statement-adjacent `process.stdout.write(...)` followed by `process.exit(...)`
+ * statement-adjacent `process.stdout.write(...)` or `console.log(...)` /
+ * `console.info(...)` (the same stdout channel) followed by `process.exit(...)`
  * is guarded; a write inside `try` with the exit in `finally` is out of scope, as
  * are a write separated from the exit by other statements (`write(x);
  * cleanup(); exit(0)`) and deferred or aliased exits (`write(x);
