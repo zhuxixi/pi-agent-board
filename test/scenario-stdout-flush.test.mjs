@@ -226,3 +226,25 @@ test("stdout-flush: a harness whose dry-run used exit for control flow stays ter
 		rmSync(artifactsRoot, { recursive: true, force: true });
 	}
 });
+
+const CANDIDATE_OPEN_HARNESS = fileURLToPath(new URL("../test-support/attach-idle-candidate-open-harness.mjs", import.meta.url));
+
+const runCandidateOpenHarness = (env) => spawnSync(
+	process.execPath,
+	["--experimental-transform-types", CANDIDATE_OPEN_HARNESS],
+	{ encoding: "utf8", timeout: 5000, env: { ...process.env, ...env } },
+);
+
+test("stdout-flush: the orphan candidate-open harness prints one JSON line and keeps its own exit code", () => {
+	const settled = runCandidateOpenHarness({});
+	assert.equal(settled.status, 0, `default run must exit 0; stderr:\n${settled.stderr}`);
+	assert.ok(settled.stdout.endsWith("\n"), "the result channel keeps console.log's trailing newline");
+	const settledResult = JSON.parse(settled.stdout.trim());
+	assert.notEqual(settledResult.settledMs, null, "the default run settles");
+
+	const timedOut = runCandidateOpenHarness({ HARNESS_TIMEOUT_MS: "0" });
+	assert.equal(timedOut.status, 1, `a zero timeout must exit 1; stderr:\n${timedOut.stderr}`);
+	assert.ok(timedOut.stdout.endsWith("\n"), "the failure path also keeps the trailing newline");
+	const timedOutResult = JSON.parse(timedOut.stdout.trim());
+	assert.equal(timedOutResult.settledMs, null, "a zero timeout never settles");
+});

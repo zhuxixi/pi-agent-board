@@ -442,6 +442,8 @@ setInterval(() => {
 			"8000",
 			"F-E2E VISIBLE LINE",
 		], { encoding: "utf8", timeout: 20000 });
+		assert.equal(driver.status, 0, `the settled driver must exit 0; stderr:\n${(driver.stderr ?? "").slice(-300)}`);
+		assert.ok(driver.stdout.endsWith("\n"), "the result channel keeps console.log's trailing newline");
 		const driverLine = (driver.stdout ?? "").trim().split("\n").filter(Boolean).at(-1);
 		const driven = driverLine ? JSON.parse(driverLine) : null;
 		t.diagnostic(`driver: exit=${driver.status} result=${driverLine ?? null} stderr=${(driver.stderr ?? "").slice(-300)}`);
@@ -814,6 +816,8 @@ setInterval(() => {
 		writeFileSync(`${tokenFile}.go2`, "GO\n");
 		const exited = await Promise.race([driverExit, new Promise((resolveTimeout) => setTimeout(() => resolveTimeout(false), 15000))]);
 		assert.equal(exited, true, "the driver loop ran past the cap and exited on its own");
+		assert.equal(driver.exitCode, 1, "an unsettled driver must exit 1, not a constant 0");
+		assert.ok(driverOut.endsWith("\n"), "the failure path also keeps console.log's trailing newline");
 		const driverLine = driverOut.trim().split("\n").filter(Boolean).at(-1);
 		const driven = driverLine ? JSON.parse(driverLine) : null;
 		t.diagnostic(`driver: exit=${driver.exitCode} result=${driverLine ?? null} stderr=${driverErr.slice(-300)}`);

@@ -19,6 +19,7 @@ test("a snapshot frame taller than the attach viewport forwards the first wheel 
 		encoding: "utf8",
 		timeout: 90_000,
 	});
+	assert.ok(out.endsWith("\n"), "the result channel keeps console.log's trailing newline");
 	const parsed = JSON.parse(out.trim().split("\n").filter(Boolean).pop());
 	assert.equal(parsed.error, null, `scenario error: ${parsed.error}`);
 	assert.equal(parsed.runnerScrollback, 0, "topology pin: the runner snapshot carries no scrollback");

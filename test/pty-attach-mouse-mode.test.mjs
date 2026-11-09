@@ -18,6 +18,7 @@ test("attach mouse-mode ownership: fullscreen writes nothing; regular pairing ke
 		encoding: "utf8",
 		timeout: 60_000,
 	});
+	assert.ok(out.endsWith("\n"), "the result channel keeps console.log's trailing newline");
 	const parsed = JSON.parse(out.trim().split("\n").filter(Boolean).pop());
 	assert.equal(parsed.error, null, `scenario error: ${parsed.error}`);
 	// Issue #207: pi-tui writes ENABLE_MOUSE exactly once at startup and never again, so a
