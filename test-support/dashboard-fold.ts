@@ -47,13 +47,20 @@ try {
 		return dash;
 	};
 	let dash = open();
+	// Issue #279: a row's trailing age column flips whole seconds, so two render
+	// passes can differ even with no state change. Compare the 20-column visible
+	// prefix instead (same convention as dashboard-scroll.ts / dashboard-tui-modes.ts):
+	// it still proves the selected target is visible in the windowed frame — a
+	// scroll marker never shares a row's prefix.
+	const visiblePrefix = (line: string) => line.trimEnd().slice(0, 20);
 	const frame = (width = 120) => {
 		const lines: string[] = dash.render(width);
 		assert.equal(lines.length, tui.terminal.rows);
 		assert.ok(lines.every((line: string) => visibleWidth(line) <= width));
 		if (dash.listTargets.length > 0) {
 			const body: string[] = dash.renderRows(width).map(stripVTControlCharacters);
-			assert.ok(lines.map(stripVTControlCharacters).includes(body[dash.selectedBodyLine]), "selected session/header must never be hidden by an indicator");
+			const prefix = visiblePrefix(body[dash.selectedBodyLine]);
+			assert.ok(lines.map(stripVTControlCharacters).some((line: string) => visiblePrefix(line) === prefix), "selected session/header must never be hidden by an indicator");
 		}
 		return lines.map(stripVTControlCharacters);
 	};

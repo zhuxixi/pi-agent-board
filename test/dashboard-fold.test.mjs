@@ -13,6 +13,15 @@ test("section folding preserves navigation, safe actions, search, polling, and s
 	assert.equal(JSON.parse(out).ok, true);
 });
 
+test("folding stays deterministic when the clock advances between render passes", () => {
+	const loader = fileURLToPath(new URL("../test-support/tick-clock.mjs", import.meta.url));
+	const out = execFileSync(process.execPath, ["--experimental-transform-types", "--import", loader, PROBE], {
+		encoding: "utf8",
+		timeout: 30_000,
+	});
+	assert.equal(JSON.parse(out).ok, true);
+});
+
 test("folding renders and receives keys through real regular/fullscreen TUI overlays", () => {
 	const probe = fileURLToPath(new URL("../test-support/dashboard-tui-modes.ts", import.meta.url));
 	const out = execFileSync(process.execPath, ["--experimental-transform-types", probe], {
