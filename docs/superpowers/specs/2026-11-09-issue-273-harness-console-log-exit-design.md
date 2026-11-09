@@ -3,6 +3,7 @@
 Drafted: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-11-09T08:51:35+08:00
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-11-09T08:58:04+08:00 — cross-review R1（真缺口 1 / 细化 2）：R1-G1 接受（A3 拆成「driver 成功/失败退出码」与「孤儿 harness smoke 两条退出码」，不再把无消费方夹具计入「消费方已验证」）；R1-D1 接受（whitespace-only 也视为 unset，A5 样本补齐）；R1-D2 接受（D5 改为只同步 helper 的注释，不改运行时代码）
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-11-09T09:04:38+08:00 — cross-review R2（真缺口 0 / 细化 3，收敛）：R2-D1 接受（A4 命令写死 `test/scenario-stdout-flush.test.mjs`，注明 `--experimental-transform-types` 启动与 5 秒 spawn 超时）；R2-D2 接受（A3/A4/A5 补「原始 stdout 以换行结尾」断言，六类调用点各覆盖一次）；R2-D3 接受（「纯函数」表述收窄为「不直接读 `process.env`/`process.cwd`，非空相对值沿用 `path.resolve` 的 cwd 语义」，A7 增加相对值样本）
+Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-11-09T10:27:00+08:00 — Zima CR round-1 advisory accepted（advisory，低）：settled 运行钉住 4 秒 harness 预算 `HARNESS_TIMEOUT_MS: "4000"`，使 harness 自身超时总是先于 5 秒 spawn kill 触发（kill 层级：4 秒 < 5 秒 < harness 默认 8 秒），避免高负载 CI 下正常收尾的默认运行被 spawn 超时拆掉进程、`status` 变 `null` 令断言读起来误导；§3.5 与 A4 同步
 
 基线：`origin/main @ 608a22a`。调研：`research/01-reproduction-and-inventory.md`、
 `research/02-predicate-boundary-and-scope.md`。本 issue 走 bug 路由，第 1 节即根因报告。
@@ -130,9 +131,12 @@ const baselineRepo = resolveBaselineRepo(process.env.FORMAL_BASELINE_REPO, repo)
 在 `test/scenario-stdout-flush.test.mjs` 末尾新增一条用例，以
 `spawnSync(process.execPath, ["--experimental-transform-types", HARNESS], { env, encoding: "utf8", timeout: 5000 })`
 启动夹具（`HARNESS` 用 `fileURLToPath(new URL("../test-support/attach-idle-candidate-open-harness.mjs", import.meta.url))`）；
-两路显式 env：① `{ ...process.env }`（默认超时）→ 断言 `status === 0`、stdout 末行可 `JSON.parse`、
+两路显式 env：① `{ ...process.env, HARNESS_TIMEOUT_MS: "4000" }`（settled 运行钉住 4 秒预算，不用
+harness 默认 8 秒）→ 断言 `status === 0`、stdout 末行可 `JSON.parse`、
 `settledMs !== null`、原始 stdout 以 `"\n"` 结尾；② `{ ...process.env, HARNESS_TIMEOUT_MS: "0" }` →
 断言 `status === 1`、stdout 末行可 `JSON.parse`、`settledMs === null`、原始 stdout 以 `"\n"` 结尾。
+kill 层级：harness 预算 4 秒 < spawn 杀 5 秒 < harness 默认 8 秒，harness 总是在 spawn 超时
+拆掉进程（`status` 变 `null`、断言读起来误导）之前自己排空退出。
 
 ## 4. 验收矩阵
 
@@ -141,7 +145,7 @@ const baselineRepo = resolveBaselineRepo(process.env.FORMAL_BASELINE_REPO, repo)
 | A1 | 守卫谓词能识别 `console.log`/`console.info` 紧邻 `exit`，且不误报 `console.error` | 自动化验证（unit） | `node --test test/scenario-stdout-flush.test.mjs` | 四条新样本（log / info / 条件式 log / error）判定与预期逐条一致 |
 | A2 | `test-support/**` 不再有六种形态的违例 | 自动化验证（static） | 同上：全目录扫描用例 | `offenders` 为空；扫描前先临时还原一处可复现红 |
 | A3 | `attach-idle-socket-driver.ts` 的成功/失败退出码与 JSON 输出 | 自动化验证（integration） | `node --test test/attach-frame-witness.integration.test.mjs` | 既有成功用例新增 `driver.status === 0` 断言；hard-invalid 用例新增 `driver.exitCode === 1` 断言；两条路径的 stdout 末行都能 `JSON.parse`，且原始 stdout 以 `"\n"` 结尾 |
-| A4 | 孤儿 `attach-idle-candidate-open-harness.mjs` 的退出码与 JSON 输出 | 自动化验证（integration） | `node --test test/scenario-stdout-flush.test.mjs`（含两路 smoke，以 `--experimental-transform-types` 启动，5 秒 spawn 超时） | 默认运行在 5 秒内退出 0，stdout 为合法 JSON、`settledMs !== null`、原始 stdout 以 `"\n"` 结尾；`HARNESS_TIMEOUT_MS=0` 时退出 1，stdout 为合法 JSON、`settledMs === null`、原始 stdout 以 `"\n"` 结尾 |
+| A4 | 孤儿 `attach-idle-candidate-open-harness.mjs` 的退出码与 JSON 输出 | 自动化验证（integration） | `node --test test/scenario-stdout-flush.test.mjs`（含两路 smoke，以 `--experimental-transform-types` 启动，5 秒 spawn 超时） | settled 运行（显式 `HARNESS_TIMEOUT_MS: "4000"`）在 5 秒内退出 0，stdout 为合法 JSON、`settledMs !== null`、原始 stdout 以 `"\n"` 结尾；`HARNESS_TIMEOUT_MS=0` 时退出 1，stdout 为合法 JSON、`settledMs === null`、原始 stdout 以 `"\n"` 结尾；kill 层级：harness 预算 4 秒 < spawn 杀 5 秒 < harness 默认 8 秒 |
 | A5 | 另外四个场景夹具的输出仍可被消费方解析 | 自动化验证（integration） | `node --test test/pty-attach-frame-overflow.test.mjs test/pty-attach-mouse-mode.test.mjs test/pty-attach-wheel.test.mjs test/pty-attach-selection-mirror.test.mjs` | 全部通过，无 `Unterminated string`；每个消费方新增一条断言：原始 stdout 以 `"\n"` 结尾（与 A3/A4 一起覆盖六个调用点） |
 | A6 | 排空助手在大 payload + 慢读端下不截断（回归保护） | 自动化验证（integration） | `node --test test/scenario-stdout-flush.test.mjs` 的 256 KiB probe 用例 | 通过，payload 长度 262144 |
 | A7 | `FORMAL_BASELINE_REPO` 为空串/纯空白时回落默认路径，相对值沿用 cwd 语义 | 自动化验证（unit） | `node --test test/formal-runner-plan.test.mjs` | `undefined`、`""`、`"   "` 都返回 `<repo>/../issue-222-attach-baseline`；绝对非空值返回其 `resolve` 结果（两侧空白保留）；相对值 `"sibling"` 返回 `resolve("sibling")`（与现状一致） |
