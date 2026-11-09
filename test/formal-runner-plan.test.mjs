@@ -80,4 +80,6 @@ test("FORMAL_BASELINE_REPO: unset, empty and blank resolve to the default baseli
 	assert.equal(resolveBaselineRepo("   ", repo), "/repo/issue-222-attach-baseline");
 	assert.equal(resolveBaselineRepo("/baseline/abs", repo), "/baseline/abs");
 	assert.equal(resolveBaselineRepo("sibling", repo), resolve("sibling"), "relative values keep the path.resolve cwd semantics");
+	const padded = " /baseline/abs ";
+	assert.equal(resolveBaselineRepo(padded, repo), resolve(padded), "non-empty values keep surrounding whitespace");
 });

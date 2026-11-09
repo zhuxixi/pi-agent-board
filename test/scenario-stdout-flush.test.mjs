@@ -229,10 +229,14 @@ test("stdout-flush: a harness whose dry-run used exit for control flow stays ter
 
 const CANDIDATE_OPEN_HARNESS = fileURLToPath(new URL("../test-support/attach-idle-candidate-open-harness.mjs", import.meta.url));
 
+// Hermetic base env: HARNESS_TIMEOUT_MS must never leak from the invoking
+// environment, or the "default" run would take the timeout path.
+const baseEnv = { ...process.env };
+delete baseEnv.HARNESS_TIMEOUT_MS;
 const runCandidateOpenHarness = (env) => spawnSync(
 	process.execPath,
 	["--experimental-transform-types", CANDIDATE_OPEN_HARNESS],
-	{ encoding: "utf8", timeout: 5000, env: { ...process.env, ...env } },
+	{ encoding: "utf8", timeout: 5000, env: { ...baseEnv, ...env } },
 );
 
 test("stdout-flush: the orphan candidate-open harness prints one JSON line and keeps its own exit code", () => {
