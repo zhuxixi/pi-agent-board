@@ -111,6 +111,23 @@ for (const mode of ["regular", "fullscreen"] as const) {
 		screen = await frame();
 		assert.ok(!screen.some((line) => /↑ \d+ more/.test(line)), `${mode}: no-running layout must reach the true top`);
 		await key("\t");
+		// Issue #258: real dispatch chain — SGR mouse into the REAL TuiAltScreen,
+		// overlay hit-test to DashboardComponent.handleMouse (observe only), pi
+		// finalizes + copies, the board's deferred settle clears the selection.
+		let mouseSettleOk: boolean | null = null;
+		if (mode === "fullscreen") {
+			const sel = () => (tui as any).getActiveSelectionText?.();
+			assert.ok(!sel(), `${mode}: no selection before the gesture`);
+			input("\x1b[<0;5;2M");  // left press  (col 5, row 2)
+			input("\x1b[<32;15;2M"); // left drag   (SGR button 32 = motion with button 1)
+			const during = sel();
+			assert.ok(typeof during === "string" && during.length > 0, `${mode}: drag must establish a non-empty selection (got ${JSON.stringify(during)})`);
+			input("\x1b[<0;15;2m"); // left release
+			await frame();           // repaint after clear
+			await new Promise<void>((resolve) => setImmediate(resolve)); // flush the nextTick settle
+			assert.ok(!sel(), `${mode}: release must clear the selection via the board's settler`);
+			mouseSettleOk = true;
+		}
 		// Recreate the overlay as the command does after an attach/detach roundtrip.
 		overlay.hide();
 		dash.dispose();
@@ -126,7 +143,7 @@ for (const mode of ["regular", "fullscreen"] as const) {
 		dash.refresh();
 		await frame();
 		assert.notEqual(dash.selectedSection, "holding");
-		results.push({ mode, frames, ok: true });
+		results.push({ mode, frames, mouseSettleOk, ok: true });
 	} finally {
 		dash?.dispose();
 		tui.stop();
