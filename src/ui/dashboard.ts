@@ -8,11 +8,12 @@
  */
 import { readFileSync } from "node:fs";
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
-import type { Component, EditorTheme, KeybindingsManager, TUI } from "@earendil-works/pi-tui";
+import type { Component, EditorTheme, KeybindingsManager, TUI, TuiMouseEvent, TuiMouseEventResult } from "@earendil-works/pi-tui";
 import { Key, matchesKey, parseKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { requestDashboardRender } from "../core/dashboard-render.mjs";
 import { readFoldedSections, saveFoldedSections } from "../core/dashboard-prefs.mjs";
 import { normalizeGenericStatusText } from "../core/derive.mjs";
+import { createFullscreenSelectionSettler } from "../core/fullscreen-selection.mjs";
 import { firstSentence, truncate } from "../core/heuristics.mjs";
 import {
 	browseTabCompletion,
@@ -33,6 +34,7 @@ import { filterRows, groupRowsByFolder, rowState, stateGlyph } from "../core/row
 import { loadSessionView } from "../core/session-view.mjs";
 import { GROUP_LABELS } from "../core/types.mjs";
 import { buildEvidencePanel } from "./dashboard-evidence.mjs";
+import type { FullscreenSelectionHost } from "./pty-attach.ts";
 import { type Row } from "../core/store.mjs";
 import type { createService } from "../runtime/service.mjs";
 
@@ -157,6 +159,11 @@ export class DashboardComponent implements Component {
 	 *  "assumes clean screen" (fullRender(false)) and overlays never get
 	 *  clearOnShrink — crash output / dirty bottoms would persist (issue #88). */
 	private needsFullClear = true;
+	/** Issue #258: set at dispose() so a settle queued before unmount cannot
+	 * touch pi-level selection state afterwards (the gesture serial only grows
+	 * on presses this component still observes). */
+	private disposed = false;
+	private readonly selectionSettler: ReturnType<typeof createFullscreenSelectionSettler>;
 	/** Content line count of the previous frame BEFORE spacer/padding fill
 	 *  (padding always fills the terminal height, so padded counts never
 	 *  shrink — shrink detection must run on pre-fill counts). */
@@ -181,6 +188,11 @@ export class DashboardComponent implements Component {
 		};
 		this.editor.onSubmit = (text) => this.submitEditor(text);
 		this.selectedId = deps.initialSelectedId ?? null;
+		this.selectionSettler = createFullscreenSelectionSettler({
+			host: tui as unknown as FullscreenSelectionHost,
+			repaint: () => this.tui.requestRender(),
+			shouldSettle: () => !this.disposed,
+		});
 		// Issue #147: the post-delete reopen carries the Deleted notice here —
 		// the component is new each open, so an inline notice cannot travel.
 		if (deps.initialNotice) this.notice(deps.initialNotice, "info");
@@ -409,6 +421,14 @@ export class DashboardComponent implements Component {
 				break;
 		}
 		requestDashboardRender(this.tui);
+	}
+
+	/** Issue #258: observe-only mouse hook. pi keeps every gesture (selection,
+	 * copy, links); the settler only drops the stale highlight after
+	 * copy-on-select. Always returns undefined — never consumes. */
+	handleMouse(_event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		this.selectionSettler.observeMouse(_event);
+		return undefined;
 	}
 
 	private handleListKey(data: string): void {
@@ -1265,6 +1285,7 @@ export class DashboardComponent implements Component {
 
 	dispose(): void {
 		/* poll interval is owned by the factory */
+		this.disposed = true;
 		this.prewarmScheduler.cancel();
 	}
 
