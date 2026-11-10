@@ -49,7 +49,11 @@ const manualQueue = () => {
 };
 
 /** Counting host fixture; clear invalidates text so a read-after-clear order yields no mirror text. */
-const makeHost = ({ text = "fixture-text", copyOnSelect = true, withClear = true } = {}) => {
+const makeHost = (opts = {}) => {
+	const { copyOnSelect = true, withClear = true } = opts;
+	// Presence check, not default destructuring: { text: undefined } must stay
+	// genuinely absent instead of falling back to the default string.
+	const text = "text" in opts ? opts.text : "fixture-text";
 	const state = { text, copyOnSelect, reads: 0, clears: 0, repaints: 0, mirrored: [] };
 	return {
 		state,
@@ -123,8 +127,8 @@ test("settler: a release followed by a new left press in the same tick is droppe
 	const s = createFullscreenSelectionSettler({ host, schedule });
 	s.observeMouse(leftEvent("release", 3, 3));
 	s.observeMouse(leftEvent("press", 9, 9));
+	assert.equal(q.length, 1, "only the release queued a settle"); // before flush(): flush drains the queue
 	flush();
-	assert.equal(q.length, 1, "only the release queued a settle");
 	assert.equal(state.reads, 0, "the queued settle must not consume the new gesture");
 	assert.equal(state.clears, 0);
 });
