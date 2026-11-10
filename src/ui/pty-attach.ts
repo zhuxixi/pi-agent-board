@@ -108,6 +108,8 @@ export interface PtyAttachOptions {
 	socketPath: string;
 	screenLogPath?: string;
 	title: string;
+	/** Persisted winning PR/MR reference shown beside the session name. */
+	prLabel?: string;
 	/** Issue #161: receives settle-scheme diagnostic patches. Default: no-op. */
 	onDiagnostic?: (event: AttachSettleDiagnosticPatch | AttachRecoveryDiagnosticPatch | AttachWaitExpiredDiagnosticPatch) => void;
 	/** Issue #284: injectable clock for attach-lifecycle deadlines. The default
@@ -889,10 +891,11 @@ export class PtyAttachComponent implements Component {
 		} else {
 			body = this.renderLoading(bodyHeight, width);
 		}
+		const headerTitle = this.opts.prLabel ? `${this.opts.title} · ${this.opts.prLabel}` : this.opts.title;
 		const header = this.confirmArmed
 			? this.theme.fg("accent", this.theme.bold(` Delete "${truncateToWidth(this.opts.title, 24, "")}"? `)) +
 			  this.theme.fg("muted", "y confirms · any other key cancels")
-			: this.theme.fg("accent", this.theme.bold(` ${this.opts.title} `)) +
+			: this.theme.fg("accent", this.theme.bold(` ${headerTitle} `)) +
 			  this.theme.fg("muted", `${this.status} · links · select+copy · Ctrl+←/Ctrl+\\/Alt+H detach`);
 		return [clip(header, width), ...body.map((l) => clipTerminalLine(l, width)), this.theme.fg("dim", "─".repeat(width))];
 	}

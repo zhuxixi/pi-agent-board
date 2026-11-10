@@ -15,6 +15,7 @@ import { screenLogPath } from "../core/paths.mjs";
 import { appendDiagnostic } from "../core/diagnostics.mjs";
 import { DashboardComponent, type DashboardResult } from "../ui/dashboard.ts";
 import { PtyAttachComponent, type PtyAttachResult } from "../ui/pty-attach.ts";
+import { attachPrLabel } from "../core/attach-pr-label.mjs";
 
 const POLL_MS = 700;
 
@@ -199,7 +200,8 @@ async function attach(
 	const plan = planAttachResolved(await service.resolveAttachTarget(viewId));
 	if (plan.plan === "open-pty") {
 		void service.markVisited?.(viewId)?.catch(() => {});
-		const result = await openPtyAttach(ctx, root, row.meta.id, row.meta.name, plan.socketPath);
+		const latest = service.row(viewId) ?? row;
+		const result = await openPtyAttach(ctx, root, row.meta.id, row.meta.name, plan.socketPath, attachPrLabel(latest.codeRefs));
 		void service.markVisited?.(viewId)?.catch(() => {});
 		if (result.action === "delete") {
 			// Issue #147: the component already tore down and exited — archive
@@ -254,6 +256,7 @@ async function openPtyAttach(
 	viewId: string,
 	name: string,
 	socketPath: string,
+	prLabel: string,
 ): Promise<PtyAttachResult> {
 	ctx.ui.setWorkingVisible(false);
 	ctx.ui.setHeader(() => ({ render: () => [], invalidate() {} }));
@@ -266,6 +269,7 @@ async function openPtyAttach(
 					socketPath,
 					screenLogPath: root ? screenLogPath(root, viewId) : undefined,
 					title: name,
+					prLabel,
 					onDiagnostic: root
 						? (event) => {
 								// Best effort, like every other diagnostics writer.
