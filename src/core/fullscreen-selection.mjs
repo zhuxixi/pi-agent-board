@@ -1,6 +1,15 @@
 import { isFullscreenSelectionEnd } from "./pty-scroll.mjs";
 
 /**
+ * @typedef {Object} FullscreenSelectionSettlerOptions
+ * @property {{ getActiveSelectionText?: () => string | undefined, getCopyOnSelect?: () => boolean, clearTextSelection?: () => void }} host - The TuiAltScreen-shaped seam (see the header note); every access is feature-detected.
+ * @property {(text: string) => void} [mirror] - X11 PRIMARY write (attach supplies it; the board omits it).
+ * @property {() => void} [repaint] - One repaint after a successful clear.
+ * @property {(cb: () => void) => void} [schedule] - Deferral transport; defaults to process.nextTick (issue #174).
+ * @property {() => boolean} [shouldSettle] - Runtime lifecycle gate, checked inside the deferred callback.
+ */
+
+/**
  * Issue #258 (+ #172/#174 refactor): one place that settles pi's fullscreen
  * selection after copy-on-select, so the attach overlay and the board cannot
  * drift. All I/O is injected (repo convention: pure/testable core, thin shell).
@@ -19,6 +28,9 @@ import { isFullscreenSelectionEnd } from "./pty-scroll.mjs";
  *   before any host read. attach passes () => !this.closed; the board passes
  *   () => !this.disposed. The gesture serial cannot cover unmount/close: it
  *   only grows on presses this component still observes.
+ *
+ * @param {FullscreenSelectionSettlerOptions} [options]
+ * @returns {{ observeMouse(event: unknown): void }} Observe-only mouse listener; selection endings queue one deferred settle.
  */
 export function createFullscreenSelectionSettler({ host, mirror, repaint, schedule = (cb) => process.nextTick(cb), shouldSettle } = {}) {
 	let serial = 0;
