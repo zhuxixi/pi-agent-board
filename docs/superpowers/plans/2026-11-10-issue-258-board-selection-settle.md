@@ -749,3 +749,12 @@ On the same updated instance, double-click a word within 500 ms, then triple-cli
 - **Spec coverage:** D1→Task 1+2, D2→Task 1 (serial in core, unit-tested), D3→Task 1 (clear-only semantics preserved; no resetTextSelection anywhere), D4→Task 2 (attach-only mirror) + Task 3 (board passes no mirror), D5→Task 3 (+dispose gate from R2-D1), D6→Task 3 cases 4-5, A1→Task 1, A2→Task 2, A3→Task 3, A4→Task 4, A5→Task 5, U1/U2→Task 6. No spec acceptance item lacks a task; no task lacks an acceptance ID.
 - **Placeholder scan:** no TBD/TODO; every code step carries real code; the only deliberate "adjust if needed" is A4's SGR coordinates (bounded by the no-weakening rule).
 - **Type consistency:** `createFullscreenSelectionSettler` signature identical across Tasks 1-3; `FullscreenSelectionHost` exported (Task 2) before imported (Task 3); `mouseSettleOk` produced (Task 4 scenario) and consumed (Task 4 wrapper) with matching shape.
+
+---
+
+## Amendments (during implementation, all supervisor-approved)
+
+1. **Core module JSDoc types (Task 2, commit d3eca39).** `src/core/fullscreen-selection.mjs` now ships a doc-only `@typedef FullscreenSelectionSettlerOptions` (host / mirror / repaint / schedule / shouldSettle) plus `@param`/`@returns` on `createFullscreenSelectionSettler`, following the `JiggleRetryControllerDeps` convention. Reason: with `allowJs: true` + `checkJs: false`, tsc infers an untyped `.mjs` options parameter only from defaulted destructured properties — `host`/`mirror`/`repaint`/`shouldSettle` were absent from the inferred type and every `.ts` call site failed TS2353/TS7006. Runtime identical; Task 1 tests 8/8 after the patch. Task 3's call site typechecks naturally because of this.
+2. **Task 2 TDD evidence is mutation-RED.** Neutralizing the pre-existing closed-gate made the two new assertions fail (`1 !== 0`), then the mutation was reverted. A behavior-preserving refactor whose guard already exists cannot produce a natural RED; the brief's Step-3 FAIL prediction was self-contradictory and is superseded by this.
+3. **Task 2 scenario case numbered `// 10.`** (the scenario already had cases 1–9; brief said `// 8.`).
+4. **Task 1 test-fixture presence-check and serial-assert placement corrections** — documented in task-1-report.md; the Task 1 code blocks above already reflect them.
