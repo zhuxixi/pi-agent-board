@@ -139,6 +139,8 @@ const result = {
 	middleHandled: false,
 	clipboardReads: -1,
 	clipboardReadSource: null as string | null,
+	closedWrites: -1,
+	closedClears: -1,
 };
 
 try {
@@ -250,6 +252,18 @@ try {
 		const rs = reads();
 		result.clipboardReads = rs.length - before;
 		result.clipboardReadSource = rs.length > before ? rs[rs.length - 1] : null;
+	});
+
+	// 10. Issue #258 shared-core guard, attach wiring: a settle queued before
+	// close() must not fire after the component is closed.
+	await withComponent(undefined, async (c) => {
+		resetFixture();
+		const before = writes().length;
+		(c as any).handleMouse(leftEvent("release"));
+		(c as any).close();
+		await sleep(80);
+		result.closedWrites = writes().length - before;
+		result.closedClears = clearCalls;
 	});
 } catch (err) {
 	result.error = err instanceof Error ? err.message : String(err);

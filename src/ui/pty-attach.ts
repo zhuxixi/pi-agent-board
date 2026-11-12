@@ -20,6 +20,7 @@ import { MAX_VIEW_PROOF_RECORDS } from "../core/terminal-attach-protocol.mjs";
 import { createSafeTrailingClassifier } from "../core/attach-view-proof.mjs";
 import { backgroundRgbFromTerminalColors, buildSettleSchemePatch, colorSchemeForBackgroundRgb, extractOscQuerySequences, resolveProbeApi, toColorSchemeReport } from "../core/terminal-query-sequences.mjs";
 import { REPLY_GUARD_WINDOW_MS, createReplyGuard, isReplyGuardEnabled } from "../core/terminal-reply-guard.mjs";
+import { createFullscreenSelectionSettler } from "../core/fullscreen-selection.mjs";
 import { clampInt, encodeWheelReport, fullscreenMouseEnableSequence, historyFloorAfterHydrate, isFullscreenSelectionEnd, resolveAttachMouseAction, resolveAttachWheelRoute, resolvePasteSelectionSource, resolveWheelLines, sameMousePoint, scrollableHistoryLines, scrollViewportTop, selectionDragScrollLines, selectionReleaseIsDrag, shouldOwnOuterMouseMode, splitAttachInput, wheelScrollLinesUp } from "../core/pty-scroll.mjs";
 
 export type PtyAttachResult = { action: "detached" } | { action: "closed"; exitCode?: number | null } | { action: "delete" };
@@ -33,7 +34,7 @@ type ThemeLike = {
  * getActiveSelectionText / clearTextSelection are private in TuiAltScreen's d.ts
  * (runtime-reachable plain methods), getCopyOnSelect is public. Every access is
  * feature-detected so an older or newer pi-tui degrades instead of throwing. */
-interface FullscreenSelectionHost {
+export interface FullscreenSelectionHost {
 	getActiveSelectionText?: () => string | undefined;
 	getCopyOnSelect?: () => boolean;
 	clearTextSelection?: () => void;
@@ -552,9 +553,9 @@ export class PtyAttachComponent implements Component {
 	/** Issue #284: attach-lifecycle clock (deadlines + attach timers). */
 	private readonly clock: AttachClock;
 	private selection: MouseSelection | null = null;
-	/** Issue #172: bumped on every left press so a settle still queued for the previous
-	 * gesture cannot read or clear a selection the next press has already started. */
-	private selectionGestureSerial = 0;
+	/** Issue #172/#174/#258: the shared settle core owns the gesture serial, the
+	 * deferral and the closed gate; attach supplies only the X11 PRIMARY mirror. */
+	private readonly selectionSettler: ReturnType<typeof createFullscreenSelectionSettler>;
 	private selectionDragging = false;
 	private selectionAutoScrollTimer: ReturnType<typeof setInterval> | null = null;
 	private selectionAutoScrollLines = 0;
@@ -636,6 +637,12 @@ export class PtyAttachComponent implements Component {
 		this.clock = opts.clock ?? hostAttachClock;
 		this.attachStartedAt = this.clock.now();
 		if (opts.clock) this.nowFn = opts.clock.now;
+		this.selectionSettler = createFullscreenSelectionSettler({
+			host: this.tui as FullscreenSelectionHost,
+			mirror: (text) => this.writePrimarySelection(text),
+			repaint: () => this.scheduleRender(),
+			shouldSettle: () => !this.closed,
+		});
 		const size = this.currentSize();
 		this.cols = size.cols;
 		this.rows = size.rows;
@@ -853,21 +860,10 @@ export class PtyAttachComponent implements Component {
 			return { handled: true, render: false };
 		}
 		const nativePasteEnabled = process.env.AGENT_BOARD_ATTACH_NATIVE_PASTE !== "0";
-		// Issue #172: a press starts a new gesture. Two reports can share one stdin chunk
-		// (pi-tui emits them synchronously in a loop), so the settle queued by the previous
-		// release must not consume the selection this press just started.
-		if (event.type === "press" && event.button === "left") this.selectionGestureSerial += 1;
-		if (isFullscreenSelectionEnd(event)) {
-			// Observe only — pi's fullscreen selection keeps the event. Overlays are
-			// dispatched before TuiAltScreen finalizes (and copies) the selection for this
-			// event, so settling must run deferred (issue #174).
-			const serial = this.selectionGestureSerial;
-			process.nextTick(() => {
-				if (serial !== this.selectionGestureSerial) return;
-				this.settleFullscreenSelection(nativePasteEnabled);
-			});
-			return undefined;
-		}
+		// Issue #172 + #258: observe the gesture; the shared settler owns the
+		// serial guard, the deferral and the lifecycle gate.
+		this.selectionSettler.observeMouse(event);
+		if (isFullscreenSelectionEnd(event)) return undefined;
 		const action = resolveAttachMouseAction(event, { nativePasteEnabled });
 		if (action !== "paste-primary") return undefined;
 		this.clearPendingClick();
@@ -2422,26 +2418,6 @@ export class PtyAttachComponent implements Component {
 		} catch {
 			/* silent no-op when xclip is absent — documented contract of this helper */
 		}
-	}
-
-	/** Issue #174 (B2) + #172: a selection gesture ended inside this overlay and pi has
-	 * finalized (and copied) its selection. Mirror the text into X11 PRIMARY so
-	 * middle-click paste closes the loop, then drop pi's selection so the inverse-video
-	 * highlight does not outlive the copy. Clearing is skipped when copy-on-select is
-	 * off (the user copies later with pi's Ctrl+X) and when the pi-tui method is absent
-	 * (older/newer runtime) — both degrade to the previous behaviour instead of throwing.
-	 * clearTextSelection preserves pi's multi-click history; resetTextSelection would
-	 * clear lastClick and break double-click word / triple-click line selection. */
-	private settleFullscreenSelection(nativePasteEnabled: boolean): void {
-		if (this.closed) return;
-		const alt = this.tui as FullscreenSelectionHost;
-		const text = alt.getActiveSelectionText?.();
-		if (typeof text !== "string" || text.length === 0) return;
-		if (nativePasteEnabled) this.writePrimarySelection(text);
-		if (alt.getCopyOnSelect?.() === false) return;
-		if (typeof alt.clearTextSelection !== "function") return;
-		alt.clearTextSelection();
-		this.scheduleRender();
 	}
 
 	/** Write `text` to the X11 PRIMARY selection so other apps can middle-click-paste it. */
