@@ -17,6 +17,7 @@ test("attach selection mirror: left release/click mirrors pi's selection into PR
 		encoding: "utf8",
 		timeout: 60_000,
 	});
+	assert.ok(out.endsWith("\n"), "the result channel keeps console.log's trailing newline");
 	const parsed = JSON.parse(out.trim().split("\n").filter(Boolean).pop());
 	assert.equal(parsed.error, null, `scenario error: ${parsed.error}`);
 	assert.equal(parsed.releaseResultUndefined, true, "release(left) must return undefined (observe only)");

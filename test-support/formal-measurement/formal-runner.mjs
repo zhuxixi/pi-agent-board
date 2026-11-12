@@ -4,7 +4,7 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { buildFormalPlan, buildReplacementPlan, classifyTrial } from "./formal-plan.mjs";
+import { buildFormalPlan, buildReplacementPlan, classifyTrial, resolveBaselineRepo } from "./formal-plan.mjs";
 import { extractTrialMetrics } from "./trial-metrics.mjs";
 import { parseRunnerArgs } from "./runner-args.mjs";
 import { exitAfterStdout } from "../stdout-flush.mjs";
@@ -17,9 +17,7 @@ const repo = resolve(dirname(new URL(import.meta.url).pathname), "../..");
 // `baselineRepo` — the source-identity hashing AND, once `--execute-formal` is
 // allowed, the baseline trials' cwd and script argv. It is meant for dry-run and CI
 // checks only: executing a formal battery under it would measure the wrong tree.
-const baselineRepo = process.env.FORMAL_BASELINE_REPO === undefined
-	? resolve(repo, "../issue-222-attach-baseline")
-	: resolve(process.env.FORMAL_BASELINE_REPO);
+const baselineRepo = resolveBaselineRepo(process.env.FORMAL_BASELINE_REPO, repo);
 const options = parseRunnerArgs(process.argv.slice(2));
 const artifactsRoot = resolve(options.artifacts ?? join(repo, ".superpowers/sdd/2026-10-23-issue-222-attach-ready/task-31-artifacts/formal-run"));
 const execute = options.execute;

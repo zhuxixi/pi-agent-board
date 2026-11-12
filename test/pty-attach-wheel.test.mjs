@@ -19,6 +19,7 @@ test("attach fullscreen wheel: scrolls the local viewport, falls through when it
 		encoding: "utf8",
 		timeout: 60_000,
 	});
+	assert.ok(out.endsWith("\n"), "the result channel keeps console.log's trailing newline");
 	const parsed = JSON.parse(out.trim().split("\n").filter(Boolean).pop());
 	assert.equal(parsed.error, null, `scenario error: ${parsed.error}`);
 	assert.ok(parsed.room > 0, "scrollback must exceed one screen for the wheel to have room to move");

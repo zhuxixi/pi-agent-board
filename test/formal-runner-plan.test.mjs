@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { buildFormalPlan, classifyTrial, FORMAL_TOTAL, WARMUP_TOTAL, expectedPath } from "../test-support/formal-measurement/formal-plan.mjs";
+import { resolve } from "node:path";
+import { buildFormalPlan, classifyTrial, FORMAL_TOTAL, WARMUP_TOTAL, expectedPath, resolveBaselineRepo } from "../test-support/formal-measurement/formal-plan.mjs";
 import { CELLS, scheduleFor } from "../test-support/formal-measurement/matrix.mjs";
 
 const repo = process.cwd();
@@ -70,4 +71,15 @@ test("classifyTrial separates infrastructure from product evidence", () => {
 	assert.equal(baselineRed.class, "product");
 	const timeout = classifyTrial({ version: "candidate", expectedPath: "modern-reporter-viewproof", status: null, timedOut: true, parsed: null });
 	assert.equal(timeout.class, "infrastructure");
+});
+
+test("FORMAL_BASELINE_REPO: unset, empty and blank resolve to the default baseline", () => {
+	const repo = "/repo/candidate";
+	assert.equal(resolveBaselineRepo(undefined, repo), "/repo/issue-222-attach-baseline");
+	assert.equal(resolveBaselineRepo("", repo), "/repo/issue-222-attach-baseline");
+	assert.equal(resolveBaselineRepo("   ", repo), "/repo/issue-222-attach-baseline");
+	assert.equal(resolveBaselineRepo("/baseline/abs", repo), "/baseline/abs");
+	assert.equal(resolveBaselineRepo("sibling", repo), resolve("sibling"), "relative values keep the path.resolve cwd semantics");
+	const padded = " /baseline/abs ";
+	assert.equal(resolveBaselineRepo(padded, repo), resolve(padded), "non-empty values keep surrounding whitespace");
 });

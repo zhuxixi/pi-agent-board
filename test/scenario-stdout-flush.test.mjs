@@ -90,11 +90,20 @@ const isPropertyAccessOn = (node, name, receiver) =>
 	ts.isPropertyAccessExpression(node) && node.name.text === name && receiver(node.expression);
 const isProcessIdentifier = (node) => ts.isIdentifier(node) && node.text === "process";
 const isStdoutReceiver = (node) => isPropertyAccessOn(node, "stdout", isProcessIdentifier);
+const CONSOLE_STDOUT_METHODS = new Set(["log", "info"]);
+const isConsoleIdentifier = (node) => ts.isIdentifier(node) && node.text === "console";
+const writesConsole = (statement) =>
+	ts.isExpressionStatement(statement) &&
+	ts.isCallExpression(statement.expression) &&
+	ts.isPropertyAccessExpression(statement.expression.expression) &&
+	CONSOLE_STDOUT_METHODS.has(statement.expression.expression.name.text) &&
+	isConsoleIdentifier(statement.expression.expression.expression);
 const isCallStatement = (statement, property, receiver) =>
 	ts.isExpressionStatement(statement) &&
 	ts.isCallExpression(statement.expression) &&
 	isPropertyAccessOn(statement.expression.expression, property, receiver);
-const writesStdout = (statement) => isCallStatement(statement, "write", isStdoutReceiver);
+const writesStdout = (statement) =>
+	isCallStatement(statement, "write", isStdoutReceiver) || writesConsole(statement);
 const exitsProcess = (statement) => isCallStatement(statement, "exit", isProcessIdentifier);
 
 /** Unwrap `if`/block so `if (ready) process.stdout.write(x)` counts as a write. */
@@ -109,9 +118,11 @@ function containsStatement(statement, predicate) {
 }
 
 /**
- * List every statement pair where one writes `process.stdout` and the next one
- * calls `process.exit`. `console.*` is deliberately not matched: the spec keeps
- * those sites out of scope for issue #270.
+ * List every statement pair where one writes `process.stdout` — directly via
+ * `process.stdout.write` or through `console.log`/`console.info`, which share
+ * the same stdout channel — and the next one calls `process.exit`.
+ * Still not matched: `console.error` (stderr), `console.debug`, and aliased
+ * forms such as `const out = process.stdout; out.write(x)`.
  * Three boundaries: a write inside `try` with the exit in `finally` is not
  * covered; only statement-adjacent pairs are flagged, so `write(x);
  * cleanup(); exit(0)` is not seen; and deferred or aliased forms such as
@@ -159,6 +170,9 @@ test("stdout-flush: the detector flags the shape and accepts the guards", () => 
 		["conditional write then exit", `if (ready) process.stdout.write(carry);\nprocess.exit(1);`],
 		["block-wrapped write then exit", `if (ready) { process.stdout.write(token); }\nprocess.exit(0);`],
 		["pair nested in the first of two sibling ifs", `if (dryRun) { process.stdout.write("x"); process.exit(0); }\nif (approved !== "1") { process.exit(2); }`],
+		["console.log then exit", `console.log("x");\nprocess.exit(0);`],
+		["console.info then exit", `console.info("x");\nprocess.exit(0);`],
+		["conditional console.log then exit", `if (ready) console.log(x);\nprocess.exit(1);`],
 	];
 	for (const [label, source] of violations) {
 		assert.equal(findUnguardedStdoutExits(source, "sample.mjs").length, 1, `must flag: ${label}`);
@@ -166,7 +180,7 @@ test("stdout-flush: the detector flags the shape and accepts the guards", () => 
 	const accepted = [
 		["write with an exit callback", `process.stdout.write("x", () => process.exit(0));`],
 		["shared helper", `exitAfterStdout("x", 0);`],
-		["console.log then exit", `console.log("x");\nprocess.exit(0);`],
+		["console.error then exit", `console.error("x");\nprocess.exit(0);`],
 		["then writes, catch exits", `run().then((r) => { process.stdout.write(JSON.stringify(r)); }).catch(() => { process.exit(1); });`],
 		["sibling conditionals never pair", `if (dryRun) { process.stdout.write("x"); }\nif (approved !== "1") { process.exit(2); }`],
 		["flush, then conditional helper exit", `process.stdout.write("echo:hi\\n");\nif (exiting) exitAfterStdout("", 0);`],
@@ -211,4 +225,34 @@ test("stdout-flush: a harness whose dry-run used exit for control flow stays ter
 	} finally {
 		rmSync(artifactsRoot, { recursive: true, force: true });
 	}
+});
+
+const CANDIDATE_OPEN_HARNESS = fileURLToPath(new URL("../test-support/attach-idle-candidate-open-harness.mjs", import.meta.url));
+
+// Hermetic base env: HARNESS_TIMEOUT_MS must never leak from the invoking
+// environment. Kill hierarchy: each run pins its harness budget (4 s settled,
+// 0 s timeout run) below this spawnSync kill (5 s), which in turn sits below
+// the harness's own default (8 s), so the harness always terminates itself —
+// emitting its JSON line and exit code — before the spawn timeout could kill
+// it and null out `status`.
+const baseEnv = { ...process.env };
+delete baseEnv.HARNESS_TIMEOUT_MS;
+const runCandidateOpenHarness = (env) => spawnSync(
+	process.execPath,
+	["--experimental-transform-types", CANDIDATE_OPEN_HARNESS],
+	{ encoding: "utf8", timeout: 5000, env: { ...baseEnv, ...env } },
+);
+
+test("stdout-flush: the orphan candidate-open harness prints one JSON line and keeps its own exit code", () => {
+	const settled = runCandidateOpenHarness({ HARNESS_TIMEOUT_MS: "4000" });
+	assert.equal(settled.status, 0, `default run must exit 0; stderr:\n${settled.stderr}`);
+	assert.ok(settled.stdout.endsWith("\n"), "the result channel keeps console.log's trailing newline");
+	const settledResult = JSON.parse(settled.stdout.trim());
+	assert.notEqual(settledResult.settledMs, null, "the default run settles");
+
+	const timedOut = runCandidateOpenHarness({ HARNESS_TIMEOUT_MS: "0" });
+	assert.equal(timedOut.status, 1, `a zero timeout must exit 1; stderr:\n${timedOut.stderr}`);
+	assert.ok(timedOut.stdout.endsWith("\n"), "the failure path also keeps the trailing newline");
+	const timedOutResult = JSON.parse(timedOut.stdout.trim());
+	assert.equal(timedOutResult.settledMs, null, "a zero timeout never settles");
 });

@@ -43,6 +43,7 @@ import { createTerminalModel, feedOutput, whenIdle } from "../src/core/terminal-
 import { captureTerminalSnapshot, synthesizeFullRedrawFrame } from "../src/core/terminal-snapshot.mjs";
 import { scrollableHistoryLines } from "../src/core/pty-scroll.mjs";
 import { PtyAttachComponent } from "../src/ui/pty-attach.ts";
+import { exitAfterStdout } from "./stdout-flush.mjs";
 
 const RUNNER_ROWS = 65;
 const ATTACH_TERMINAL_ROWS = 40;
@@ -375,5 +376,4 @@ try {
 	socketProto.write = origSocketWrite;
 }
 
-console.log(JSON.stringify(result));
-process.exit(0);
+exitAfterStdout(JSON.stringify(result) + "\n", 0);

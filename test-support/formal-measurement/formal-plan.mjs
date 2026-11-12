@@ -2,11 +2,20 @@
 // the CLI runner owns process spawning and file append.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { CELLS, HARD_OPPORTUNITY_MS, OBSERVATION_MS, B_UPDATE_MS, TRIAL_CAP_MS, WARMUPS_PER_VERSION, scheduleFor } from "./matrix.mjs";
 
 export const FORMAL_TOTAL = CELLS.reduce((sum, cell) => sum + cell.n, 0) * 2;
 export const WARMUP_TOTAL = CELLS.length * WARMUPS_PER_VERSION * 2;
+
+// An empty or whitespace-only FORMAL_BASELINE_REPO is an unset variable, not
+// the process cwd: resolve("") would silently re-root baseline hashing at the
+// candidate repo.
+export function resolveBaselineRepo(envValue, repo) {
+	return typeof envValue === "string" && envValue.trim() !== ""
+		? resolve(envValue)
+		: resolve(repo, "../issue-222-attach-baseline");
+}
 
 const MODERN_CELLS = new Set(["B", "Q", "S", "T-on-time", "T-late", "L-normal", "L-alt", "G1", "G2", "G3", "C", "R-reconnect", "R-restart"]);
 export function expectedPath(version, cellId) {

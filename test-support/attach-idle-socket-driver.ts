@@ -48,6 +48,7 @@
 import { ATTACH_HARD_TIMEOUT_MS, ATTACH_RECOVERY_BUDGET_MS, PtyAttachComponent } from "../src/ui/pty-attach.ts";
 import { existsSync, writeFileSync } from "node:fs";
 import { createConnection } from "node:net";
+import { exitAfterStdout } from "./stdout-flush.mjs";
 
 const socketPath = process.argv[2];
 const timeoutMs = Number(process.argv[3] ?? 8000);
@@ -218,5 +219,4 @@ const result = {
 	gates: { snapshot: snapshotGateWritten, budget: budgetGateWritten },
 };
 try { component.dispose(); } catch { /* best effort */ }
-console.log(JSON.stringify(result));
-process.exit(result.settledMs !== null && result.showsContent ? 0 : 1);
+exitAfterStdout(JSON.stringify(result) + "\n", result.settledMs !== null && result.showsContent ? 0 : 1);
