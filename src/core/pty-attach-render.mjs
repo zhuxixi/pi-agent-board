@@ -250,7 +250,7 @@ export function decideAttachPresentation(state) {
 	return degradedViewDecision(state, wait) ?? full;
 }
 
-/** The pre-#284 full-view (F) predicate chain, verbatim. */
+/** The full-view (F) predicate chain. */
 function fullViewDecision(state, wait) {
 	if (state.baselineState !== "valid-content" && state.baselineState !== "valid-empty") {
 		if (state.baselineState === "hydrating") return wait("baseline-hydrating");

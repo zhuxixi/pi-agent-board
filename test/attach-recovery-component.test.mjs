@@ -1434,9 +1434,12 @@ test("A2b (#294): target F + ordinary F0 in the capture window, coverage head F0
 		],
 	});
 	assertScenarioOk("i294-a2b", run);
-	const [afterResnapshot] = readouts(run.parsed).slice(4);
-	assert.equal(afterResnapshot.attaching, false);
+	const [afterResnapshot, afterAdvance] = readouts(run.parsed).slice(4);
+	assert.equal(afterResnapshot.attaching, false, "settles at the hydration commit");
 	assert.equal(afterResnapshot.readyReason, "complete");
+	assert.equal(afterResnapshot.settledAt, 0);
+	assert.equal(afterAdvance.attaching, false, "stays settled");
+	assert.equal(afterAdvance.settledAt, 0, "the settle stays anchored at the hydration commit, not the cap");
 });
 
 test("A2c (#294): real output -> S0 -> F0 after the snapshot settles via the evidence bypass", () => {
@@ -1457,9 +1460,12 @@ test("A2c (#294): real output -> S0 -> F0 after the snapshot settles via the evi
 	assertScenarioOk("i294-a2c", run);
 	const [afterOutput, afterS0, afterF0] = readouts(run.parsed).slice(5);
 	assert.equal(afterOutput.protocolErrorCount, 0);
+	assert.equal(afterOutput.viewProofRecordCount, 1, "the snapshot-carried record is counted at hydration");
 	assert.equal(afterS0.protocolErrorCount, 0);
+	assert.equal(afterS0.viewProofRecordCount, 2, "S0 strictly increments the record count");
 	assert.equal(afterS0.latestViewProof.reason, "candidate-open", "S0 opens a candidate");
 	assert.equal(afterF0.protocolErrorCount, 0);
+	assert.equal(afterF0.viewProofRecordCount, 3, "F0 strictly increments the record count");
 	assert.deepEqual(afterF0.coverageHead, { seq: 3, frameId: 3, intentId: 0, geometryRevision: 0, cols: 100, rows: 30 });
 	assert.equal(afterF0.attaching, false, "the ordinary head publishes via fresh evidence");
 	assert.equal(afterF0.readyReason, "complete");
@@ -1492,8 +1498,10 @@ test("A3-1 (#294): snapshot-carried wrong-dims/revision/intent F records keep th
 		assertScenarioOk("i294-a3n", run);
 		const [atBudget, atCap, afterRescue] = readouts(run.parsed).slice(5);
 		assert.equal(atBudget.attaching, true, `bad=${JSON.stringify(bad)} waits at budget`);
+		assert.equal(atBudget.notReadyReason, "resize-intent", `bad=${JSON.stringify(bad)} names the intent gate at 250ms`);
 		assert.equal(atCap.attaching, true);
 		assert.equal(atCap.deadlineState, "expired");
+		assert.equal(atCap.notReadyReason, "deadline-expired:resize-intent", `bad=${JSON.stringify(bad)} keeps the intent gate past expiry`);
 		assert.equal(afterRescue.attaching, false, "a real live target F still rescues");
 		assert.equal(afterRescue.readyReason, "complete");
 	}
@@ -1516,9 +1524,14 @@ test("A3-2 (#294): no evidence — live S0/F0 keeps waiting as today", () => {
 		],
 	});
 	assertScenarioOk("i294-a3-2", run);
-	const final = run.parsed.final;
-	assert.equal(final.attaching, true, "no evidence -> ordinary F0 head keeps waiting");
-	assert.equal(final.deadlineState, "expired");
+	const [afterOutput, afterS0, afterF0, atBudget, atCap] = readouts(run.parsed).slice(5);
+	assert.equal(afterF0.attaching, true, "waiting immediately after the ordinary F0 head — not only at 250/2500");
+	assert.equal(afterF0.notReadyReason, "resize-intent", "no evidence: the decision names the intent gate (verified literal)");
+	assert.equal(atBudget.attaching, true);
+	assert.equal(atCap.attaching, true);
+	assert.equal(atCap.notReadyReason, "deadline-expired:resize-intent");
+	assert.equal(run.parsed.final.attaching, true, "no evidence -> ordinary F0 head keeps waiting");
+	assert.equal(run.parsed.final.deadlineState, "expired");
 });
 
 test("A3-3 (#294): a second differing resize clears the old evidence", () => {
@@ -1563,10 +1576,32 @@ test("A3-4 (#294): live wrong-dims F1 -> S0 -> target F0 does not publish", () =
 			{ op: "record", marker: "F", seq: 3, metadata: i294Ord },
 			{ op: "advance", ms: 250 },
 			{ op: "advance", ms: 2250 },
+			// The spec's positive control: a deliverable live matching target F
+			// (seq at the client's lastSeq, metadata = target intent 1 / rev 1 /
+			// 100x30) rescues the same attach — proving the long wait above is the
+			// wrong-dims evidence gap, not a dropped or malformed record.
+			{ op: "record", marker: "F", seq: 3, metadata: i294Target },
 		],
 	});
 	assertScenarioOk("i294-a3-4", run);
+	const [afterF1, afterOutput, afterS0, afterF0, atBudget, atCap] = readouts(run.parsed).slice(5);
+	assert.equal(afterF1.protocolErrorCount, 0, "the live wrong-dims F1 was delivered, not dropped");
+	assert.equal(afterF1.viewProofRecordCount, 1, "wrong-dims F1 counted: 0 -> 1");
+	assert.equal(afterOutput.protocolErrorCount, 0);
+	assert.equal(afterS0.protocolErrorCount, 0);
+	assert.equal(afterS0.viewProofRecordCount, 2, "S0 counted: -> 2");
+	assert.equal(afterS0.latestViewProof.reason, "candidate-open", "S0 opens a candidate");
+	assert.equal(afterF0.protocolErrorCount, 0);
+	assert.equal(afterF0.viewProofRecordCount, 3, "F0 counted: -> 3");
+	assert.deepEqual(afterF0.coverageHead, { seq: 3, frameId: 3, intentId: 0, geometryRevision: 0, cols: 100, rows: 30 }, "the ordinary head truly formed");
+	assert.equal(afterF0.attaching, true, "waiting immediately after the F0 step — not only at 250/2500");
+	assert.equal(afterF0.notReadyReason, "resize-intent", "wrong-dims F1 is not evidence: the decision names the intent gate (verified literal)");
+	assert.equal(atBudget.attaching, true, "wrong-dims live F1 is not evidence");
+	assert.equal(atBudget.notReadyReason, "resize-intent");
+	assert.equal(atCap.attaching, true);
+	assert.equal(atCap.deadlineState, "expired");
+	assert.equal(atCap.notReadyReason, "deadline-expired:resize-intent");
 	const final = run.parsed.final;
-	assert.equal(final.attaching, true, "wrong-dims live F1 is not evidence");
-	assert.equal(final.deadlineState, "expired");
+	assert.equal(final.attaching, false, "the deliverable live matching target F rescues (positive control)");
+	assert.equal(final.readyReason, "complete");
 });

@@ -251,7 +251,7 @@ test("A1b: no evidence / not satisfied keeps the original waits", () => {
 });
 
 test("A1b: stale evidence (proofSeq > throughSeq) keeps waiting on the head checks", () => {
-	assert.deepEqual(decide(armed({ viewProof: ordCovered() , resizeIntentProofSeq: 11 })), { action: "wait", reason: "geometry-revision" });
+	assert.deepEqual(decide(armed({ viewProof: ordCovered(), resizeIntentProofSeq: 11 })), { action: "wait", reason: "geometry-revision" });
 });
 
 test("A1b: a wrong-non-zero head is NOT ordinary — gates stay even with valid evidence", () => {

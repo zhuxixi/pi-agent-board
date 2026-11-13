@@ -192,6 +192,7 @@ test("A1a: anything short of a full match fails closed", () => {
 		[{ ...MATCH(2), metadata: { ...MATCH(2).metadata, rows: 40 } }],
 		[{ ...MATCH(2), metadata: { ...MATCH(2).metadata, protocol: 2 } }],
 		[{ ...MATCH(2), metadata: { ...MATCH(2).metadata, extra: 1 } }],
+		[{ ...MATCH(2), metadata: { ...MATCH(2).metadata, cols: 1.5 } }],
 		[{ ...MATCH(2), seq: 0 }],
 		[{ ...MATCH(2), seq: 1.5 }],
 		[],
