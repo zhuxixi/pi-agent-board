@@ -220,6 +220,7 @@ export function resizeIntentEvidenceFromRecords(intent, records) {
  *   requiredGeometryRevision?: number,
  *   resizeIntentRequired?: boolean,
  *   resizeIntentSatisfied?: boolean,
+ *   resizeIntentProofSeq?: number,
  *   intentId?: number,
  *   deadlineState?: "pending" | "expired",
  *   witnessLatched?: boolean,
@@ -281,10 +282,25 @@ function fullViewDecision(state, wait) {
 	const metadata = validateFrameMetadata(coverage.proof.metadata);
 	if (!metadata.ok) return wait("view-proof-invalid");
 	if (metadata.value.cols !== state.targetCols || metadata.value.rows !== state.targetRows) return wait("proof-geometry-mismatch");
-	if (state.requiredGeometryRevision !== undefined && metadata.value.geometryRevision !== state.requiredGeometryRevision) return wait("geometry-revision");
+	// Issue #294: a validated intent proof (snapshot-carried or live) that is
+	// fresh against the covered window, plus an ordinary post-intent (0/0)
+	// coverage head at the target size, is an acceptable alternative to the
+	// head itself carrying the intent metadata. Everything else fails closed
+	// to the original waits.
+	const intentEvidenceHeadOk =
+		state.resizeIntentRequired === true &&
+		state.resizeIntentSatisfied === true &&
+		Number.isInteger(state.resizeIntentProofSeq) &&
+		state.resizeIntentProofSeq <= coverage.throughSeq &&
+		metadata.value.intentId === 0 &&
+		metadata.value.geometryRevision === 0 &&
+		metadata.value.cols === state.targetCols &&
+		metadata.value.rows === state.targetRows;
+	if (state.requiredGeometryRevision !== undefined && metadata.value.geometryRevision !== state.requiredGeometryRevision && !intentEvidenceHeadOk) return wait("geometry-revision");
 	if (state.resizeIntentRequired === true) {
 		if (state.resizeIntentSatisfied !== true) return wait("resize-intent");
-		if (metadata.value.intentId !== state.intentId || metadata.value.intentId === 0) return wait("resize-intent");
+		const headCarriesIntent = metadata.value.intentId === state.intentId && metadata.value.intentId !== 0;
+		if (!headCarriesIntent && !intentEvidenceHeadOk) return wait("resize-intent");
 	}
 	if (!canPublishAttachView(state.viewIdentity, state.currentIdentity)) return wait("identity-mismatch");
 	return { action: "publish", reason: "complete" };
