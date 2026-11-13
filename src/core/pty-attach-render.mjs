@@ -220,7 +220,7 @@ export function resizeIntentEvidenceFromRecords(intent, records) {
  *   requiredGeometryRevision?: number,
  *   resizeIntentRequired?: boolean,
  *   resizeIntentSatisfied?: boolean,
- *   resizeIntentProofSeq?: number,
+ *   resizeIntentProofSeq?: number | null,
  *   intentId?: number,
  *   deadlineState?: "pending" | "expired",
  *   witnessLatched?: boolean,

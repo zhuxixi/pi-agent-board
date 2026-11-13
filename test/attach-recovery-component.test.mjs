@@ -1392,3 +1392,181 @@ test("T8 A09 c) an old-size source grid with identity marked current never publi
 	assert.equal(atCap.settledAt, null);
 	assert.equal(atCap.notReadyReason, "deadline-expired:committed-geometry-mismatch");
 });
+
+// Issue #294: the target after a differing resize to 100x30 — revision 1, intent 1.
+const i294Target = { protocol: 1, cols: 100, rows: 30, mode: "fullscreen", rendererEpoch: 1, sessionEpoch: 1, focusPresent: true, overlayPresent: false, intentId: 1, geometryRevision: 1 };
+const i294Ord = { ...i294Target, intentId: 0, geometryRevision: 0 };
+const i294F = (metadata, seq) => ({ marker: "F", seq, frameId: seq, metadata });
+const i294Covered = (proof, throughSeq) => ({ status: "covered", reason: "exact-proof", proof, throughSeq, cursorVisible: true });
+
+test("A2a (#294): a snapshot-carried target F settles like the live control", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "unavailable-candidate-open", text: "I294 80" },
+			{ op: "geometry", cols: 100, rows: 30 },
+			{ op: "snapshot", resnapshot: true, generation: "gen-2", text: "I294 100", beginSeq: 2,
+				records: [i294F(i294Target, 2)],
+				proof: i294Covered(i294F(i294Target, 2), 2) },
+			{ op: "advance", ms: 2500 },
+		],
+	});
+	assertScenarioOk("i294-a2a", run);
+	const [afterResnapshot, afterAdvance] = readouts(run.parsed).slice(4);
+	assert.equal(afterResnapshot.attaching, false, "settles at the hydration commit");
+	assert.equal(afterResnapshot.readyReason, "complete");
+	assert.equal(afterResnapshot.settledAt, 0);
+	assert.equal(afterAdvance.attaching, false, "stays settled");
+});
+
+test("A2b (#294): target F + ordinary F0 in the capture window, coverage head F0, settles", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "unavailable-candidate-open", text: "I294 80" },
+			{ op: "geometry", cols: 100, rows: 30 },
+			{ op: "snapshot", resnapshot: true, generation: "gen-2", text: "I294 100", beginSeq: 2,
+				records: [i294F(i294Target, 2), i294F(i294Ord, 2)],
+				proof: i294Covered(i294F(i294Ord, 2), 2) },
+			{ op: "advance", ms: 2500 },
+		],
+	});
+	assertScenarioOk("i294-a2b", run);
+	const [afterResnapshot] = readouts(run.parsed).slice(4);
+	assert.equal(afterResnapshot.attaching, false);
+	assert.equal(afterResnapshot.readyReason, "complete");
+});
+
+test("A2c (#294): real output -> S0 -> F0 after the snapshot settles via the evidence bypass", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "unavailable-candidate-open", text: "I294 80" },
+			{ op: "geometry", cols: 100, rows: 30 },
+			{ op: "snapshot", resnapshot: true, generation: "gen-2", text: "I294 100", beginSeq: 2,
+				records: [i294F(i294Target, 2)],
+				proof: { status: "unknown", reason: "candidate-open", proof: null, throughSeq: null, cursorVisible: null } },
+			{ op: "output", seq: 3, text: "POST-SNAPSHOT OUTPUT" },
+			{ op: "record", marker: "S", seq: 3, frameId: 3 },
+			{ op: "record", marker: "F", seq: 3, metadata: i294Ord },
+		],
+	});
+	assertScenarioOk("i294-a2c", run);
+	const [afterOutput, afterS0, afterF0] = readouts(run.parsed).slice(5);
+	assert.equal(afterOutput.protocolErrorCount, 0);
+	assert.equal(afterS0.protocolErrorCount, 0);
+	assert.equal(afterS0.latestViewProof.reason, "candidate-open", "S0 opens a candidate");
+	assert.equal(afterF0.protocolErrorCount, 0);
+	assert.deepEqual(afterF0.coverageHead, { seq: 3, frameId: 3, intentId: 0, geometryRevision: 0, cols: 100, rows: 30 });
+	assert.equal(afterF0.attaching, false, "the ordinary head publishes via fresh evidence");
+	assert.equal(afterF0.readyReason, "complete");
+});
+
+test("A3-1 (#294): snapshot-carried wrong-dims/revision/intent F records keep the gate", () => {
+	for (const bad of [
+		{ ...i294Target, cols: 140 },
+		{ ...i294Target, geometryRevision: 0 },
+		{ ...i294Target, intentId: 0 },
+	]) {
+		const run = runScenario({
+			steps: [
+				{ op: "connect" },
+				{ op: "hello", witness: true, generation: "gen-1" },
+				{ op: "snapshot", proof: "unavailable-candidate-open", text: "I294 80" },
+				{ op: "geometry", cols: 100, rows: 30 },
+				{ op: "snapshot", resnapshot: true, generation: "gen-2", text: "I294 100", beginSeq: 2,
+					records: [i294F(bad, 2)],
+					proof: { status: "unknown", reason: "candidate-open", proof: null, throughSeq: null, cursorVisible: null } },
+				{ op: "advance", ms: 250 },
+				{ op: "advance", ms: 2250 },
+				// The rescue F must be deliverable live: seq has to stay <= the
+				// client's lastSeq (2 after the beginSeq-2 resnapshot) or the record
+				// is dropped as view_proof_future — same record-at-lastSeq pattern
+				// as A3-4/T8.
+				{ op: "record", marker: "F", seq: 2, metadata: i294Target },
+			],
+		});
+		assertScenarioOk("i294-a3n", run);
+		const [atBudget, atCap, afterRescue] = readouts(run.parsed).slice(5);
+		assert.equal(atBudget.attaching, true, `bad=${JSON.stringify(bad)} waits at budget`);
+		assert.equal(atCap.attaching, true);
+		assert.equal(atCap.deadlineState, "expired");
+		assert.equal(afterRescue.attaching, false, "a real live target F still rescues");
+		assert.equal(afterRescue.readyReason, "complete");
+	}
+});
+
+test("A3-2 (#294): no evidence — live S0/F0 keeps waiting as today", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "unavailable-candidate-open", text: "I294 80" },
+			{ op: "geometry", cols: 100, rows: 30 },
+			{ op: "snapshot", resnapshot: true, generation: "gen-2", text: "I294 100", beginSeq: 2,
+				proof: { status: "unknown", reason: "candidate-open", proof: null, throughSeq: null, cursorVisible: null } },
+			{ op: "output", seq: 3, text: "POST-SNAPSHOT OUTPUT" },
+			{ op: "record", marker: "S", seq: 3, frameId: 3 },
+			{ op: "record", marker: "F", seq: 3, metadata: i294Ord },
+			{ op: "advance", ms: 250 },
+			{ op: "advance", ms: 2250 },
+		],
+	});
+	assertScenarioOk("i294-a3-2", run);
+	const final = run.parsed.final;
+	assert.equal(final.attaching, true, "no evidence -> ordinary F0 head keeps waiting");
+	assert.equal(final.deadlineState, "expired");
+});
+
+test("A3-3 (#294): a second differing resize clears the old evidence", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "unavailable-candidate-open", text: "I294 80" },
+			{ op: "geometry", cols: 100, rows: 30 },
+			{ op: "snapshot", resnapshot: true, generation: "gen-2", text: "I294 100", beginSeq: 2,
+				// Post-#294 a covered target-F head settles the attach (A2a), which
+				// would make this superseded-evidence scenario vacuous — the first
+				// resnapshot carries the evidence as records under an open candidate
+				// so the gate stays observable for the second resize.
+				records: [i294F(i294Target, 2)],
+				proof: { status: "unknown", reason: "candidate-open", proof: null, throughSeq: null, cursorVisible: null } },
+			{ op: "geometry", cols: 120, rows: 40 },
+			{ op: "snapshot", resnapshot: true, generation: "gen-3", cols: 120, rows: 40, text: "I294 120", beginSeq: 3,
+				proof: { status: "unknown", reason: "candidate-open", proof: null, throughSeq: null, cursorVisible: null } },
+			{ op: "output", seq: 4, text: "MORE OUTPUT" },
+			{ op: "record", marker: "F", seq: 4, metadata: { ...i294Ord, cols: 120, rows: 40 } },
+			{ op: "advance", ms: 2500 },
+		],
+	});
+	assertScenarioOk("i294-a3-3", run);
+	const final = run.parsed.final;
+	assert.equal(final.attaching, true, "superseded evidence must not publish the new intent");
+});
+
+test("A3-4 (#294): live wrong-dims F1 -> S0 -> target F0 does not publish", () => {
+	const run = runScenario({
+		steps: [
+			{ op: "connect" },
+			{ op: "hello", witness: true, generation: "gen-1" },
+			{ op: "snapshot", proof: "unavailable-candidate-open", text: "I294 80" },
+			{ op: "geometry", cols: 100, rows: 30 },
+			{ op: "snapshot", resnapshot: true, generation: "gen-2", text: "I294 100", beginSeq: 2,
+				proof: { status: "unknown", reason: "candidate-open", proof: null, throughSeq: null, cursorVisible: null } },
+			{ op: "record", marker: "F", seq: 2, metadata: { ...i294Target, cols: 140 } },
+			{ op: "output", seq: 3, text: "POST OUTPUT" },
+			{ op: "record", marker: "S", seq: 3, frameId: 3 },
+			{ op: "record", marker: "F", seq: 3, metadata: i294Ord },
+			{ op: "advance", ms: 250 },
+			{ op: "advance", ms: 2250 },
+		],
+	});
+	assertScenarioOk("i294-a3-4", run);
+	const final = run.parsed.final;
+	assert.equal(final.attaching, true, "wrong-dims live F1 is not evidence");
+	assert.equal(final.deadlineState, "expired");
+});
