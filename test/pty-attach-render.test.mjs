@@ -9,6 +9,7 @@ import {
 	isPtyCursorHidden,
 	nextAttachRender,
 	projectPtyCursor,
+	resizeIntentEvidenceFromRecords,
 	shouldScheduleAttachRenderForMessage,
 } from "../src/core/pty-attach-render.mjs";
 
@@ -161,4 +162,44 @@ test("isPtyCursorHidden falls back to visible for unknown terminal shapes", () =
 		false,
 		"a throwing accessor must degrade to visible, not break the projection",
 	);
+});
+
+// --- issue #294 A1a: the single-source intent-evidence predicate ---
+
+const INTENT = { required: true, geometryRevision: 1, intentId: 1, cols: 100, rows: 30 };
+const MATCH = (seq) => ({
+	marker: "F", seq, frameId: seq,
+	metadata: { protocol: 1, cols: 100, rows: 30, mode: "fullscreen", rendererEpoch: 1, sessionEpoch: 1, focusPresent: true, overlayPresent: false, intentId: 1, geometryRevision: 1 },
+});
+
+test("A1a: a fully matching F yields evidence with its seq (highest wins)", () => {
+	assert.deepEqual(resizeIntentEvidenceFromRecords(INTENT, [MATCH(2)]), { satisfied: true, proofSeq: 2 });
+	assert.deepEqual(resizeIntentEvidenceFromRecords(INTENT, [{ marker: "S", seq: 1, frameId: 1 }, MATCH(2), MATCH(5)]), { satisfied: true, proofSeq: 5 });
+});
+
+test("A1a: a non-required intent is vacuously satisfied without evidence", () => {
+	assert.deepEqual(resizeIntentEvidenceFromRecords({ ...INTENT, required: false }, []), { satisfied: true, proofSeq: null });
+});
+
+test("A1a: anything short of a full match fails closed", () => {
+	const notEvidence = [
+		[{ marker: "S", seq: 2, frameId: 2 }],
+		[{ marker: "A", seq: 2, frameId: 2, reason: "stop" }],
+		[{ ...MATCH(2), metadata: { ...MATCH(2).metadata, geometryRevision: 0 } }],
+		[{ ...MATCH(2), metadata: { ...MATCH(2).metadata, intentId: 0 } }],
+		[{ ...MATCH(2), metadata: { ...MATCH(2).metadata, intentId: 2 } }],
+		[{ ...MATCH(2), metadata: { ...MATCH(2).metadata, cols: 140 } }],
+		[{ ...MATCH(2), metadata: { ...MATCH(2).metadata, rows: 40 } }],
+		[{ ...MATCH(2), metadata: { ...MATCH(2).metadata, protocol: 2 } }],
+		[{ ...MATCH(2), metadata: { ...MATCH(2).metadata, extra: 1 } }],
+		[{ ...MATCH(2), seq: 0 }],
+		[{ ...MATCH(2), seq: 1.5 }],
+		[],
+		"not-an-array",
+		[null],
+	];
+	for (const records of notEvidence) {
+		assert.deepEqual(resizeIntentEvidenceFromRecords(INTENT, records), { satisfied: false, proofSeq: null }, `records=${JSON.stringify(records)}`);
+	}
+	assert.deepEqual(resizeIntentEvidenceFromRecords(null, [MATCH(2)]), { satisfied: false, proofSeq: null });
 });

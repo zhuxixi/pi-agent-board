@@ -149,6 +149,36 @@ export function canPublishAttachView(viewIdentity, currentIdentity) {
 }
 
 /**
+ * Issue #294: derive the resize-intent evidence from view-proof records.
+ * One matcher for every evidence source — snapshotReady's records array and
+ * the live single-record path both call this; no revision/intent-only
+ * shortcut may exist anywhere. Fail-closed: anything short of a fully
+ * matching target F yields no evidence.
+ * @param {{ required: boolean, geometryRevision: number, intentId: number, cols: number, rows: number } | null} intent
+ * @param {unknown} records
+ * @returns {{ satisfied: boolean, proofSeq: number | null }}
+ */
+export function resizeIntentEvidenceFromRecords(intent, records) {
+	if (intent === null || typeof intent !== "object") return { satisfied: false, proofSeq: null };
+	if (intent.required !== true) return { satisfied: true, proofSeq: null };
+	if (!Array.isArray(records)) return { satisfied: false, proofSeq: null };
+	let best = null;
+	for (const record of records) {
+		if (record === null || typeof record !== "object") continue;
+		if (record.marker !== "F") continue;
+		if (!Number.isInteger(record.seq) || record.seq < 1) continue;
+		const validation = validateFrameMetadata(record.metadata);
+		if (!validation.ok) continue;
+		const metadata = validation.value;
+		if (metadata.geometryRevision !== intent.geometryRevision) continue;
+		if (metadata.intentId !== intent.intentId) continue;
+		if (metadata.cols !== intent.cols || metadata.rows !== intent.rows) continue;
+		if (best === null || record.seq > best) best = record.seq;
+	}
+	return best === null ? { satisfied: false, proofSeq: null } : { satisfied: true, proofSeq: best };
+}
+
+/**
  * Pure §4 presentation decision. It consumes only immutable facts — no clock,
  * timer, terminal or I/O. `deadlineState:"expired"` can only change a WAIT
  * reason; it can never upgrade an incomplete view to publish. Legacy decisions
