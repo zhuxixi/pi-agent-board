@@ -1,14 +1,16 @@
 #!/usr/bin/env node
 /**
- * Detached title-runner shim.
- *
- * Best-effort only: generates a short GPT-4o title from the initial task prompt and updates
- * the row's meta name if the user has not already renamed it.
+ * Detached title-runner shim (issue #295): non-greeting prompts generate a
+ * title immediately (previous behavior); greeting prompts poll the session
+ * file for the first substantive user message. Best-effort only — the manual
+ * rename always wins. All orchestration lives in src/core/title-flow.mjs.
  */
 import { spawn } from "node:child_process";
+import { existsSync, readFileSync } from "node:fs";
 import { readJson } from "../src/core/atomic.mjs";
 import { readMeta, writeMeta } from "../src/core/store.mjs";
-import { DEFAULT_TITLE_MODEL, DEFAULT_TITLE_THINKING_LEVEL, normalizeGeneratedTitle, titlePrompt } from "../src/core/title.mjs";
+import { runTitleFlow } from "../src/core/title-flow.mjs";
+import { resolveTitleSettings, titlePrompt } from "../src/core/title.mjs";
 
 function main() {
 	const configPath = process.argv[2];
@@ -17,29 +19,36 @@ function main() {
 	const config = readJson(configPath, null);
 	if (!config?.viewId || !config.prompt) process.exit(2);
 
-	maybeGenerateTitle(config)
+	const settings = resolveTitleSettings(process.env, config.model);
+	if (!settings.enabled) return;
+
+	runTitleFlow(config, realDeps(config, settings))
 		.catch(() => {})
 		.finally(() => process.exit(0));
 }
 
-async function maybeGenerateTitle(config) {
-	const configured = process.env.AGENT_BOARD_TITLE_MODEL ?? process.env.AGENT_VIEW_TITLE_MODEL;
-	if (configured === "off") return;
-	const model = config.model ?? configured ?? DEFAULT_TITLE_MODEL;
-	const thinking = process.env.AGENT_BOARD_TITLE_THINKING_LEVEL ?? process.env.AGENT_VIEW_TITLE_THINKING_LEVEL ?? DEFAULT_TITLE_THINKING_LEVEL;
-	const prompt = titlePrompt(config.prompt);
-	const args = [...config.piArgsPrefix, "--mode", "json", "-p", "--no-session", "--model", model];
-	if (thinking && thinking !== "off") args.push("--thinking", thinking);
-	args.push(prompt);
-	const out = await runOneShot(config.piCommand, args, 15000);
-	const title = normalizeGeneratedTitle(out.trim().split("\n").slice(-1)[0]?.trim(), config.fallbackName);
-	if (!title || title === config.fallbackName) return;
-
-	const meta = readMeta(config.root, config.viewId);
-	if (!meta) return;
-	if (meta.name !== config.fallbackName) return;
-	meta.name = title;
-	writeMeta(config.root, meta);
+/**
+ * @param {import("../src/core/types.mjs").TitleConfig} config
+ * @param {{ enabled: boolean, model: string, thinking: string }} settings
+ */
+function realDeps(config, settings) {
+	return {
+		now: () => Date.now(),
+		sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+		readMeta: (root, viewId) => readMeta(root, viewId),
+		commitMeta: (meta) => writeMeta(config.root, meta),
+		readSessionText: () => {
+			const meta = readMeta(config.root, config.viewId);
+			if (!meta?.sessionFile) return null;
+			return existsSync(meta.sessionFile) ? readFileSync(meta.sessionFile, "utf8") : null;
+		},
+		runOneShot: (prompt) => {
+			const args = [...(config.piArgsPrefix ?? []), "--mode", "json", "-p", "--no-session", "--model", settings.model];
+			if (settings.thinking && settings.thinking !== "off") args.push("--thinking", settings.thinking);
+			args.push(titlePrompt(prompt));
+			return runOneShot(config.piCommand, args, 15000);
+		},
+	};
 }
 
 function runOneShot(command, args, timeoutMs = 20000) {
