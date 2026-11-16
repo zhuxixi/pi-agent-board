@@ -1,5 +1,7 @@
 /** Title-generation helpers for session names. */
 
+import { activeBranchEntries, contentText, parseSessionEntries } from "./session-entries.mjs";
+
 /** Default cheap model for session titles. Override via $AGENT_BOARD_TITLE_MODEL. */
 export const DEFAULT_TITLE_MODEL = "openai-codex/gpt-5.5";
 
@@ -121,4 +123,22 @@ export function resolveTitleSettings(env, configModel) {
 	const thinking = env.AGENT_BOARD_TITLE_THINKING_LEVEL ?? env.AGENT_VIEW_TITLE_THINKING_LEVEL ?? DEFAULT_TITLE_THINKING_LEVEL;
 	if (configured === "off") return { enabled: false, model: "", thinking };
 	return { enabled: true, model: configModel ?? configured ?? DEFAULT_TITLE_MODEL, thinking };
+}
+
+/**
+ * First substantive (non-greeting, non-empty) user message on the active
+ * branch of a session JSONL, or null (issue #295). Tool-result user entries
+ * project to empty text and are skipped by contentText.
+ * @param {string} sessionJsonlText
+ * @returns {string|null}
+ */
+export function firstSubstantiveUserPrompt(sessionJsonlText) {
+	const { entries, byId } = parseSessionEntries(sessionJsonlText);
+	for (const entry of activeBranchEntries(entries, byId)) {
+		if (entry?.type !== "message" || entry.message?.role !== "user") continue;
+		const text = contentText(entry.message?.content);
+		if (!text || isGreetingPrompt(text)) continue;
+		return text;
+	}
+	return null;
 }
