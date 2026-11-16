@@ -41,5 +41,6 @@ test("resolveTitleSettings keeps env precedence and off semantics", () => {
 	assert.deepEqual(resolveTitleSettings({}, null).thinking, DEFAULT_TITLE_THINKING_LEVEL);
 	assert.deepEqual(resolveTitleSettings({ AGENT_BOARD_TITLE_THINKING_LEVEL: "high" }, null).thinking, "high");
 	assert.deepEqual(resolveTitleSettings({ AGENT_VIEW_TITLE_THINKING_LEVEL: "low" }, null).thinking, "low");
+	assert.deepEqual(resolveTitleSettings({ AGENT_BOARD_TITLE_THINKING_LEVEL: "high", AGENT_VIEW_TITLE_THINKING_LEVEL: "low" }, null).thinking, "high");
 	assert.deepEqual(resolveTitleSettings({ AGENT_BOARD_TITLE_THINKING_LEVEL: "off" }, null).thinking, "off");
 });
