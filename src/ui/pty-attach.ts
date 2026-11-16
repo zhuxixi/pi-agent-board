@@ -11,7 +11,7 @@ import { resolveAttachDetachChord } from "../core/attach-detach.mjs";
 import { createAttachScreenOwnerState, installAttachScreenOwnerObservers } from "../core/attach-screen-owner.mjs";
 import { createPtyKittyImages } from "../core/pty-kitty-images.mjs";
 import { findHttpUrlAtCells, findWordRangeAtCells } from "../core/pty-links.mjs";
-import { canPublishAttachView, createAttachOutputRenderScheduler, decideAttachPresentation, detectCursorDesync, isPtyCursorHidden, nextAttachRender, projectPtyCursor, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
+import { canPublishAttachView, createAttachOutputRenderScheduler, decideAttachPresentation, detectCursorDesync, isPtyCursorHidden, nextAttachRender, projectPtyCursor, resizeIntentEvidenceFromRecords, shouldScheduleAttachRenderForMessage } from "../core/pty-attach-render.mjs";
 import { evaluateAttachReconnect, shouldEscapeAttach } from "../core/pty-attach-reconnect.mjs";
 import { installImeCursorCoalesce } from "../core/ime-cursor-coalesce.mjs";
 import { createJiggleRetryController } from "../core/pty-attach-jiggle-controller.mjs";
@@ -474,6 +474,9 @@ export class PtyAttachComponent implements Component {
 	private geometryRevision = 0;
 	private resizeIntentRequired = false;
 	private resizeIntentSatisfied = false;
+	/** Issue #294: seq of the F record that proved the current intent (gate
+	 *  freshness fact: the evidence must not postdate the covered window). */
+	private resizeIntentProofSeq: number | null = null;
 	private resizeIntentId = 0;
 	private pendingEarlySyncTarget: string | null = null;
 	/** Protocol transition facts; timers may mark expiry but never publish. */
@@ -1521,7 +1524,7 @@ export class PtyAttachComponent implements Component {
 		this.latestViewProof = { status: "unknown", reason, proof: null, throughSeq: null, cursorVisible: null };
 		this.viewProofIdentity = null;
 		this.viewProofTrailing.reset();
-		this.resizeIntentSatisfied = false;
+		// Issue #294: intent evidence is sticky — see noteGeometryIntent/snapshotReady/viewProofRecord.
 	}
 
 	/** Feed ordinary output after the last F proof through the safe-trailing
@@ -1677,6 +1680,7 @@ export class PtyAttachComponent implements Component {
 			requiredGeometryRevision: this.resizeIntentRequired ? this.geometryRevision : undefined,
 			resizeIntentRequired: this.resizeIntentRequired,
 			resizeIntentSatisfied: this.resizeIntentSatisfied,
+			resizeIntentProofSeq: this.resizeIntentProofSeq,
 			intentId: this.resizeIntentId,
 			deadlineState: this.deadlineState,
 			// Issue #284 recovery facts (spec §3.1): plain facts recorded on the
@@ -2516,6 +2520,7 @@ export class PtyAttachComponent implements Component {
 		this.resizeIntentId = this.geometryRevision;
 		this.resizeIntentRequired = true;
 		this.resizeIntentSatisfied = false;
+		this.resizeIntentProofSeq = null;
 		this.committedView = null;
 		this.recoveryView = null;
 		this.recoveryGeneration = null;
@@ -2891,7 +2896,12 @@ export class PtyAttachComponent implements Component {
 			}
 			this.viewProofTrailing.reset();
 			this.recentProtocolOutput = [];
-			this.resizeIntentSatisfied = false;
+			const evidence = resizeIntentEvidenceFromRecords(
+				{ required: this.resizeIntentRequired, geometryRevision: this.geometryRevision, intentId: this.resizeIntentId, cols: this.cols, rows: this.rows },
+				records,
+			);
+			this.resizeIntentSatisfied = evidence.satisfied;
+			this.resizeIntentProofSeq = evidence.proofSeq;
 			if (snap.viewProof !== undefined) {
 				this.latestViewProof = snap.viewProof;
 				this.viewProofIdentity = (snap.viewProof as { status?: string } | null)?.status === "covered" ? this.currentViewIdentity() : null;
@@ -2961,8 +2971,17 @@ export class PtyAttachComponent implements Component {
 				const record = payload as Record<string, unknown>;
 				this.noteViewProofRecord(record);
 				if (record.marker === "F") {
-					const metadata = record.metadata as { geometryRevision?: unknown; intentId?: unknown } | undefined;
-					this.resizeIntentSatisfied = !this.resizeIntentRequired || (metadata?.geometryRevision === this.geometryRevision && metadata?.intentId === this.resizeIntentId);
+					// Issue #294: one matcher for every evidence source — a live F
+					// re-evaluates through the same pure predicate (full validation
+					// incl. target dims); a non-match leaves the evidence untouched.
+					const evidence = resizeIntentEvidenceFromRecords(
+						{ required: this.resizeIntentRequired, geometryRevision: this.geometryRevision, intentId: this.resizeIntentId, cols: this.cols, rows: this.rows },
+						[record],
+					);
+					if (evidence.satisfied) {
+						this.resizeIntentSatisfied = true;
+						this.resizeIntentProofSeq = evidence.proofSeq;
+					}
 				}
 				this.evaluateAttachReady();
 			}

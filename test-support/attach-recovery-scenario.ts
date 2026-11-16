@@ -97,7 +97,17 @@ function createHarness(clockStart: number) {
 			diagnostics.push(event);
 		},
 	});
-	return { clock, component, tuiTerminal, terminalWrites, renderCount: () => renders, diagnostics };
+	// Issue #294 A2c observability: count protocolError events through the REAL
+	// client→component channel. The attach client emits every event (including
+	// protocolError) via `this.handleAttachEvent`, so the instance property below
+	// intercepts them (same wrapping precedent as installSpy).
+	const protocolErrors: unknown[] = [];
+	const originalHandleAttachEvent = (component as any).handleAttachEvent.bind(component);
+	(component as any).handleAttachEvent = (event: string, payload?: unknown) => {
+		if (event === "protocolError") protocolErrors.push(payload ?? null);
+		return originalHandleAttachEvent(event, payload);
+	};
+	return { clock, component, tuiTerminal, terminalWrites, renderCount: () => renders, diagnostics, protocolErrors };
 }
 
 type Harness = ReturnType<typeof createHarness>;
@@ -381,6 +391,10 @@ function readout(h: Harness, state: ScenarioState): Record<string, unknown> {
 	};
 	const committed = c.committedView;
 	const proof = c.latestViewProof;
+	// Issue #294 A2c readouts: the proof record head of the latest coverage
+	// (bounded to the axes Task 4 asserts on; null when no record is held).
+	const proofHead = (proof as { proof?: Record<string, unknown> | null } | null)?.proof;
+	const headMeta = (proofHead?.metadata ?? {}) as Record<string, unknown>;
 	return {
 		now: h.clock.now(),
 		attaching: c.attaching === true,
@@ -435,6 +449,18 @@ function readout(h: Harness, state: ScenarioState): Record<string, unknown> {
 		committedViewValid: c.committedViewValid(),
 		committedPreview: committedPreview(committed),
 		latestViewProof: proof === null || proof === undefined ? null : { status: proof.status ?? null, reason: proof.reason ?? null },
+		protocolErrorCount: h.protocolErrors.length,
+		coverageHead:
+			proofHead === null || proofHead === undefined || typeof proofHead !== "object"
+				? null
+				: {
+						seq: (proofHead as { seq?: unknown }).seq ?? null,
+						frameId: (proofHead as { frameId?: unknown }).frameId ?? null,
+						intentId: headMeta.intentId ?? null,
+						geometryRevision: headMeta.geometryRevision ?? null,
+						cols: headMeta.cols ?? null,
+						rows: headMeta.rows ?? null,
+					},
 		// Issue #284 §3.1.1 facts: the last classification assembled for the
 		// policy and the sticky-invalid binding (bound baseline token; the
 		// effective sticky state is binding === current baselineToken).

@@ -217,3 +217,54 @@ test("23b2c1 decision: expired deadline only renames waits and never upgrades in
 		reason: "deadline-expired:view-proof-missing",
 	});
 });
+
+// Issue #294 A1b: the intent-evidence / ordinary-head alternative.
+const ORD_HEAD = { ...META, intentId: 0, geometryRevision: 0 };
+const ordCovered = () => ({
+	...COVERED,
+	proof: { ...COVERED.proof, metadata: ORD_HEAD },
+	throughSeq: 10,
+});
+const armed = (over = {}) => view({
+	resizeIntentRequired: true,
+	resizeIntentSatisfied: true,
+	resizeIntentProofSeq: 9,
+	intentId: 7,
+	viewProof: ordCovered(),
+	...over,
+});
+
+test("A1b: fresh evidence + ordinary 0/0 head at target dims publishes", () => {
+	assert.deepEqual(decide(armed()), { action: "publish", reason: "complete" });
+});
+
+test("A1b: no evidence / not satisfied keeps the original waits", () => {
+	// Fixtures use a rev-matching head (META carries geometryRevision 2 =
+	// required): per the spec §3 gate order the earlier geometry gate only
+	// releases a rev-0 ordinary head when fresh evidence exists, so with no
+	// evidence the intent gate is what names the original wait here.
+	assert.deepEqual(decide(armed({ viewProof: COVERED, resizeIntentProofSeq: undefined })), { action: "wait", reason: "resize-intent" });
+	assert.deepEqual(decide(armed({ viewProof: COVERED, resizeIntentSatisfied: false })), { action: "wait", reason: "resize-intent" });
+	assert.deepEqual(decide(view({ resizeIntentRequired: true, resizeIntentSatisfied: false, intentId: 7 })), { action: "wait", reason: "resize-intent" });
+	// Ordinary (0/0) head + no evidence fails closed to the earlier gate.
+	assert.deepEqual(decide(armed({ resizeIntentProofSeq: undefined })), { action: "wait", reason: "geometry-revision" });
+});
+
+test("A1b: stale evidence (proofSeq > throughSeq) keeps waiting on the head checks", () => {
+	assert.deepEqual(decide(armed({ viewProof: ordCovered(), resizeIntentProofSeq: 11 })), { action: "wait", reason: "geometry-revision" });
+});
+
+test("A1b: a wrong-non-zero head is NOT ordinary — gates stay even with valid evidence", () => {
+	assert.deepEqual(decide(armed({ viewProof: { ...ordCovered(), proof: { ...ordCovered().proof, metadata: { ...ORD_HEAD, geometryRevision: 5 } } } })), { action: "wait", reason: "geometry-revision" });
+	// Rev-matching wrong-intent head: the geometry gate passes, so the intent gate names the wait.
+	assert.deepEqual(decide(armed({ viewProof: { ...COVERED, proof: { ...COVERED.proof, metadata: { ...META, intentId: 3 } } } })), { action: "wait", reason: "resize-intent" });
+});
+
+test("A1b: a wrong-size ordinary head still waits on proof-geometry-mismatch", () => {
+	assert.deepEqual(decide(armed({ viewProof: { ...ordCovered(), proof: { ...ordCovered().proof, metadata: { ...ORD_HEAD, cols: 140 } } } })), { action: "wait", reason: "proof-geometry-mismatch" });
+});
+
+test("A1b: a head carrying the intent itself keeps the original publish path", () => {
+	const intentMeta = { ...META, intentId: 7, geometryRevision: 2 };
+	assert.deepEqual(decide(armed({ viewProof: { ...COVERED, proof: { ...COVERED.proof, metadata: intentMeta } } })), { action: "publish", reason: "complete" });
+});
