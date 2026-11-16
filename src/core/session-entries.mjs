@@ -65,3 +65,18 @@ export function activeBranchEntries(entries, byId) {
 	out.reverse();
 	return out;
 }
+
+/**
+ * Convert Pi message/content blocks to plain text.
+ * @param {any} content
+ * @returns {string}
+ */
+export function contentText(content) {
+	if (typeof content === "string") return content.trim();
+	if (!Array.isArray(content)) return "";
+	return content
+		.filter((b) => b && b.type === "text" && typeof b.text === "string")
+		.map((b) => b.text)
+		.join("\n")
+		.trim();
+}

@@ -7,7 +7,7 @@
  * then render messages / visible custom messages / summaries on that branch.
  */
 import { existsSync, readFileSync } from "node:fs";
-import { activeBranchEntries, parseSessionEntries } from "./session-entries.mjs";
+import { activeBranchEntries, contentText, parseSessionEntries } from "./session-entries.mjs";
 
 /**
  * @typedef {Object} SessionViewItem
@@ -111,19 +111,4 @@ function displayItemsForEntry(entry) {
 		default:
 			return [];
 	}
-}
-
-/**
- * Convert Pi message/content blocks to plain text.
- * @param {any} content
- * @returns {string}
- */
-function contentText(content) {
-	if (typeof content === "string") return content.trim();
-	if (!Array.isArray(content)) return "";
-	return content
-		.filter((b) => b && b.type === "text" && typeof b.text === "string")
-		.map((b) => b.text)
-		.join("\n")
-		.trim();
 }
