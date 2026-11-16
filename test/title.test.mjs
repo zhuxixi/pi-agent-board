@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isGreetingPrompt, normalizeGeneratedTitle, titlePrompt } from "../src/core/title.mjs";
+import { DEFAULT_TITLE_MODEL, DEFAULT_TITLE_THINKING_LEVEL, isGreetingPrompt, normalizeGeneratedTitle, resolveTitleSettings, titlePrompt } from "../src/core/title.mjs";
 
 test("titlePrompt asks for a 3-4 word plain-text title", () => {
 	const prompt = titlePrompt("fix websocket reconnect bug");
@@ -29,4 +29,17 @@ test("isGreetingPrompt rejects non-greetings", () => {
 	const cases = ["hello, please fix X", "helloX", "你好请修复", "there", "呀", "there hello",
 		"good", "fix the bug", "", " ", "hi, what is the cache hit rate for redis"];
 	for (const s of cases) assert.equal(isGreetingPrompt(s), false, JSON.stringify(s));
+});
+
+test("resolveTitleSettings keeps env precedence and off semantics", () => {
+	assert.deepEqual(resolveTitleSettings({}, null), { enabled: true, model: DEFAULT_TITLE_MODEL, thinking: DEFAULT_TITLE_THINKING_LEVEL });
+	assert.equal(resolveTitleSettings({ AGENT_BOARD_TITLE_MODEL: "off" }, "x/y").enabled, false);
+	assert.equal(resolveTitleSettings({ AGENT_VIEW_TITLE_MODEL: "off" }, null).enabled, false);
+	assert.deepEqual(resolveTitleSettings({ AGENT_BOARD_TITLE_MODEL: "a/b", AGENT_VIEW_TITLE_MODEL: "c/d" }, null).model, "a/b");
+	assert.deepEqual(resolveTitleSettings({ AGENT_VIEW_TITLE_MODEL: "c/d" }, null).model, "c/d");
+	assert.deepEqual(resolveTitleSettings({ AGENT_VIEW_TITLE_MODEL: "c/d" }, "cfg/m").model, "cfg/m");
+	assert.deepEqual(resolveTitleSettings({}, null).thinking, DEFAULT_TITLE_THINKING_LEVEL);
+	assert.deepEqual(resolveTitleSettings({ AGENT_BOARD_TITLE_THINKING_LEVEL: "high" }, null).thinking, "high");
+	assert.deepEqual(resolveTitleSettings({ AGENT_VIEW_TITLE_THINKING_LEVEL: "low" }, null).thinking, "low");
+	assert.deepEqual(resolveTitleSettings({ AGENT_BOARD_TITLE_THINKING_LEVEL: "off" }, null).thinking, "off");
 });

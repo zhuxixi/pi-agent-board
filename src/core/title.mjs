@@ -107,3 +107,18 @@ function longestUnitAt(s, i, first) {
 function escapeForCharClass(chars) {
 	return chars.replace(/[\\\]^-]/g, "\\$&");
 }
+
+/**
+ * Resolve title-generation settings from env, preserving the runner's
+ * historical precedence exactly (issue #295): board var wins over the legacy
+ * view var; `off` disables even when a config model is set.
+ * @param {Record<string, string|undefined>} env
+ * @param {string|null|undefined} configModel
+ * @returns {{ enabled: boolean, model: string, thinking: string }}
+ */
+export function resolveTitleSettings(env, configModel) {
+	const configured = env.AGENT_BOARD_TITLE_MODEL ?? env.AGENT_VIEW_TITLE_MODEL;
+	const thinking = env.AGENT_BOARD_TITLE_THINKING_LEVEL ?? env.AGENT_VIEW_TITLE_THINKING_LEVEL ?? DEFAULT_TITLE_THINKING_LEVEL;
+	if (configured === "off") return { enabled: false, model: "", thinking };
+	return { enabled: true, model: configModel ?? configured ?? DEFAULT_TITLE_MODEL, thinking };
+}
