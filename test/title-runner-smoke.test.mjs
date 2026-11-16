@@ -28,9 +28,21 @@ function seedView(root, { prompt, name, sessionLines, extra = {} }) {
 	return viewId;
 }
 
+/** Title env vars inherited from the host; scrubbed so tests stay hermetic. */
+const TITLE_ENV_KEYS = [
+	"AGENT_BOARD_TITLE_MODEL",
+	"AGENT_VIEW_TITLE_MODEL",
+	"AGENT_BOARD_TITLE_THINKING_LEVEL",
+	"AGENT_VIEW_TITLE_THINKING_LEVEL",
+];
+
 function runRunner(root, viewId, env = {}) {
+	// Scrub host title settings from the base env so a contaminated parent
+	// cannot disable or reroute generation; explicit overrides still win.
+	const base = { ...process.env };
+	for (const key of TITLE_ENV_KEYS) delete base[key];
 	return spawnSync(process.execPath, [RUNNER, titleConfigPath(root, viewId)], {
-		env: { ...process.env, FAKE_TITLE_PI_MARKER: join(root, "marker"), ...env },
+		env: { ...base, FAKE_TITLE_PI_MARKER: join(root, "marker"), ...env },
 		timeout: 20000,
 	});
 }
@@ -75,5 +87,29 @@ test("A6③ off (board and legacy) exits without model call or rename", () => {
 			assert.equal(meta.name, "keep-me");
 			assert.equal(existsSync(join(root, "marker")), false, JSON.stringify(env));
 		} finally { rmSync(root, { recursive: true, force: true }); }
+	}
+});
+
+test("A6④ hermeticity regression: contaminated host title env still generates for a non-greeting prompt", () => {
+	const root = freshRoot();
+	const saved = {};
+	// Simulate a host that exports title settings ("off" disables generation).
+	for (const key of TITLE_ENV_KEYS) {
+		saved[key] = process.env[key];
+		process.env[key] = key.endsWith("THINKING_LEVEL") ? "high" : "off";
+	}
+	try {
+		const viewId = seedView(root, { prompt: "fix bug now", name: "fix-bug-now" });
+		const res = runRunner(root, viewId);
+		assert.equal(res.status, 0);
+		const meta = JSON.parse(readFileSync(metaPath(root, viewId), "utf8"));
+		assert.equal(meta.name, "T: fix bug now");
+		assert.ok(existsSync(join(root, "marker")), "scrubbed env must still reach the model call");
+	} finally {
+		for (const [key, value] of Object.entries(saved)) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+		rmSync(root, { recursive: true, force: true });
 	}
 });

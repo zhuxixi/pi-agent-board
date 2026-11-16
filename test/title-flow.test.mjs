@@ -7,7 +7,6 @@ const baseConfig = () => ({ root: "/r", viewId: "v1", cwd: "/r", prompt: "hello"
 /** Deterministic deps: clock advances only via sleep; meta lives in a store. */
 function makeDeps(overrides = {}) {
 	const state = { now: 0, meta: { id: "v1", name: "slug-name" }, sessionText: null, oneShotImpl: null, sleeps: 0 };
-	const pending = [];
 	const deps = {
 		now: () => state.now,
 		sleep: async (ms) => { state.now += ms; state.sleeps++; },
