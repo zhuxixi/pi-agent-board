@@ -31,7 +31,11 @@ function isQuestionToolCall(name, args) {
 	return QUESTION_TOOL_NAMES.has(name) || isQuestionArgShape(args);
 }
 
-/** Compaction event types whose summary is owned by begin/endCompaction (I8). */
+/**
+ * Compaction events tolerate a leftover failure marker in reduceEvent (I6):
+ * the notice is cleared on the next real event, not on its own compaction pair.
+ * Summary ownership lives in the `summaryPinned` flag instead.
+ */
 const COMPACTION_EVENT_TYPES = new Set(["compaction_start", "compaction_end"]);
 
 /**
@@ -43,7 +47,14 @@ const COMPACTION_EVENT_TYPES = new Set(["compaction_start", "compaction_end"]);
  */
 export function beginCompaction(status, facts = {}, now) {
 	const existing = status.compaction;
-	if (!existing || existing.phase === "failed") {
+	if (existing?.phase === "failed") {
+		// A retry supersedes the previous failure notice (I6). Clear the stale
+		// display before snapshotting so a successful retry cannot restore it.
+		status.compaction = null;
+		status.error = null;
+		status.summary = deriveSummary(status);
+	}
+	if (!status.compaction) {
 		status.compaction = {
 			phase: "running",
 			reason: facts.reason ?? "manual",
@@ -74,6 +85,10 @@ export function beginCompaction(status, facts = {}, now) {
  */
 export function endCompaction(status, facts = {}, now) {
 	const marker = status.compaction ?? null;
+	if (marker?.phase === "failed") {
+		// A late/duplicate end after a failure must not revive a resting row.
+		return;
+	}
 	const previous = marker?.previous ?? null;
 	status.compaction = null;
 	status.lastActivityAt = now;

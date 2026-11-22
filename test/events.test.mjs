@@ -521,6 +521,37 @@ test("endCompaction restores on abort without an error", () => {
 	assert.equal(s.compaction, null);
 });
 
+test("endCompaction leaves a failed marker alone on a duplicate end", () => {
+	const s = createRunStatus(cfg(), 1, 1000);
+	s.semanticState = "idle";
+	s.processState = "exited";
+	s.summary = "Needs instructions";
+	beginCompaction(s, { reason: "manual" }, 2000);
+	endCompaction(s, { aborted: false, errorMessage: "Compaction failed: boom" }, 3000);
+	const before = structuredClone(s);
+	endCompaction(s, { willRetry: false, aborted: false }, 4000);
+	assert.deepEqual(s, before, "a late end must not flip the resting row to working");
+	assert.equal(s.compaction.phase, "failed");
+});
+
+test("a successful retry of a failed compaction does not restore the failure notice", () => {
+	const s = createRunStatus(cfg(), 1, 1000);
+	s.semanticState = "idle";
+	s.processState = "exited";
+	s.summary = "Needs instructions";
+	beginCompaction(s, { reason: "manual" }, 2000);
+	endCompaction(s, { aborted: false, errorMessage: "Compaction failed: boom" }, 3000);
+	assert.equal(s.compaction.phase, "failed");
+	beginCompaction(s, { reason: "manual" }, 4000);
+	assert.equal(s.compaction.phase, "running");
+	assert.equal(s.compaction.previous.error, null, "the stale error is not snapshotted");
+	endCompaction(s, { willRetry: false, aborted: false, errorMessage: null }, 5000);
+	assert.notEqual(s.summary, "Compaction failed: boom");
+	assert.equal(s.error, null);
+	assert.equal(s.semanticState, "idle");
+	assert.equal(s.compaction, null);
+});
+
 test("endCompaction surfaces a real failure without faking a failed run", () => {
 	const s = createRunStatus(cfg(), 1, 1000);
 	s.semanticState = "idle";
@@ -537,8 +568,8 @@ test("endCompaction surfaces a real failure without faking a failed run", () => 
 
 test("endCompaction without a snapshot stays working instead of throwing", () => {
 	const s = createRunStatus(cfg(), 1, 1000);
-	s.semanticState = "working";
-	s.compaction = null;
+	s.semanticState = "idle";
+	s.processState = "exited";
 	endCompaction(s, { willRetry: false }, 3000);
 	assert.equal(s.semanticState, "working");
 	assert.equal(s.compaction, null);
@@ -553,6 +584,19 @@ test("reduceEvent mirrors compaction_start/compaction_end and owns the summary",
 	assert.equal(reduceEvent(s, { type: "compaction_end", reason: "threshold", result: { summary: "x" }, aborted: false, willRetry: false }, 3000), true);
 	assert.equal(s.compaction, null);
 	assert.equal(s.semanticState, "working", "was mid-run");
+});
+
+test("reduceEvent keeps the restored summary instead of re-deriving it", () => {
+	const s = createRunStatus(cfg(), 1, 1000);
+	s.semanticState = "idle";
+	s.processState = "exited";
+	s.summary = "Needs instructions";
+	s.error = "stale";
+	s.latestAssistantPreview = "";
+	reduceEvent(s, { type: "compaction_start", reason: "manual" }, 2000);
+	reduceEvent(s, { type: "compaction_end", aborted: false, willRetry: false, result: {} }, 3000);
+	assert.equal(s.summary, "Needs instructions", "a re-derive would return the bare error");
+	assert.equal(s.compaction, null);
 });
 
 test("a failed compaction notice survives until the next real event", () => {
