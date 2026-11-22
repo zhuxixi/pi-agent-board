@@ -104,7 +104,8 @@ export const GROUP_LABELS = {
  * @property {"manual"|"threshold"|"overflow"} reason
  * @property {number} startedAt
  * @property {{semanticState:SemanticState, processState:ProcessState, summary:string, question:string|null, error:string|null}|null} previous
- *   Pre-compaction snapshot; non-null only while running.
+ *   Pre-compaction snapshot; kept on `failed` markers so a retry can restore the
+ *   error the row carried before the window.
  * @property {string|null} error pi's errorMessage, only on phase "failed".
  */
 

@@ -250,7 +250,9 @@ export function applyAutoStateToViewState(state, classification, now = Date.now(
 	} else {
 		state.question = null;
 	}
-	state.error = nextState === "failed" ? state.error : null;
+	// A failed compaction notice owns the error field until the next real event;
+	// nulling it here would leave `compaction.phase === "failed"` with no error.
+	state.error = nextState === "failed" || state.compaction?.phase === "failed" ? state.error : null;
 	state.updatedAt = now;
 	state.summary = deriveSummary({
 		processState: state.processState,

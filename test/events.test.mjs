@@ -562,8 +562,27 @@ test("endCompaction surfaces a real failure without faking a failed run", () => 
 	assert.equal(s.semanticState, "idle", "the session itself is still usable");
 	assert.equal(s.error, "Compaction failed: Nothing to compact (session too small)");
 	assert.equal(s.compaction.phase, "failed");
-	assert.equal(s.compaction.previous, null);
+	assert.equal(s.compaction.previous.semanticState, "idle", "the pre-window snapshot is kept for a retry");
 	assert.equal(s.summary, "Compaction failed: Nothing to compact (session too small)");
+});
+
+test("a failed compaction preserves the row's underlying error across a retry", () => {
+	const s = createRunStatus(cfg(), 1, 1000);
+	s.semanticState = "failed";
+	s.processState = "exited";
+	s.summary = "Provider exploded";
+	s.error = "Provider exploded";
+	beginCompaction(s, { reason: "manual" }, 2000);
+	endCompaction(s, { aborted: false, errorMessage: "Compaction failed: boom" }, 3000);
+	assert.equal(s.semanticState, "failed");
+	assert.equal(s.error, "Compaction failed: boom");
+	assert.equal(s.compaction.previous.error, "Provider exploded", "the failed marker keeps the pre-window error");
+	beginCompaction(s, { reason: "manual" }, 4000);
+	assert.equal(s.error, "Provider exploded", "a retry restores the underlying error, not the compaction text");
+	endCompaction(s, { willRetry: false, aborted: false, errorMessage: null }, 5000);
+	assert.equal(s.semanticState, "failed");
+	assert.equal(s.error, "Provider exploded");
+	assert.equal(s.compaction, null);
 });
 
 test("endCompaction without a snapshot stays working instead of throwing", () => {

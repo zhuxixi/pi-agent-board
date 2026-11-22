@@ -48,10 +48,11 @@ const COMPACTION_EVENT_TYPES = new Set(["compaction_start", "compaction_end"]);
 export function beginCompaction(status, facts = {}, now) {
 	const existing = status.compaction;
 	if (existing?.phase === "failed") {
-		// A retry supersedes the previous failure notice (I6). Clear the stale
-		// display before snapshotting so a successful retry cannot restore it.
+		// A retry supersedes the previous failure notice (I6). Restore the error the
+		// row carried before the failed window (the marker kept it), then clear the
+		// display so a successful retry cannot restore "Compaction failed: …".
 		status.compaction = null;
-		status.error = null;
+		status.error = existing.previous?.error ?? null;
 		status.summary = deriveSummary(status);
 	}
 	if (!status.compaction) {
@@ -120,7 +121,9 @@ export function endCompaction(status, facts = {}, now) {
 			phase: "failed",
 			reason: marker?.reason ?? "manual",
 			startedAt: marker?.startedAt ?? now,
-			previous: null,
+			// Keep the snapshot: a retry has to restore the error the row carried
+			// before this window, not the compaction message (CR round-1 advisory).
+			previous,
 			error: facts.errorMessage,
 		};
 		status.summary = deriveSummary(status);

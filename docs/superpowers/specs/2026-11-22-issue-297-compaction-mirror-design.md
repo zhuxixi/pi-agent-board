@@ -39,7 +39,8 @@ pi 侧事件时序（1.5.2 `dist/core/agent-session.js`）：
  * @property {number} startedAt
  * @property {{semanticState:SemanticState, processState:ProcessState, summary:string,
  *             question:string|null, error:string|null}|null} previous
- *        压缩前快照（含 processState，R1-G3）；仅 phase "running" 时非空。
+ *        压缩前快照（含 processState，R1-G3）。failed 标记也保留它：重试成功后恢复压缩前的 error，
+ *        而不是把 `Compaction failed: …` 留在行上（CR round-1 advisory）。
  * @property {string|null} error 仅 phase "failed"：pi 的 errorMessage 原文。
  */
 ```
