@@ -98,6 +98,17 @@ export const GROUP_LABELS = {
  */
 
 /**
+ * Compaction window mirrored from pi (issue #297).
+ * @typedef {Object} CompactionWindow
+ * @property {"running"|"failed"} phase
+ * @property {"manual"|"threshold"|"overflow"} reason
+ * @property {number} startedAt
+ * @property {{semanticState:SemanticState, processState:ProcessState, summary:string, question:string|null, error:string|null}|null} previous
+ *   Pre-compaction snapshot; non-null only while running.
+ * @property {string|null} error pi's errorMessage, only on phase "failed".
+ */
+
+/**
  * Derived dashboard state for a row (`state.json`).
  * @typedef {Object} ViewState
  * @property {number} version
@@ -112,6 +123,7 @@ export const GROUP_LABELS = {
  * @property {boolean} hasError
  * @property {string} latestAssistantPreview
  * @property {{name:string, path:string|null}|null} latestTool
+ * @property {CompactionWindow|null} [compaction] Compaction window mirrored from pi (issue #297).
  * @property {string|null} question
  * @property {Array<{toolCallId:string, question:string}>} pendingQuestions
  * @property {string|null} error
@@ -178,6 +190,7 @@ export const GROUP_LABELS = {
  * @property {string} summary
  * @property {number} lastActivityAt
  * @property {{name:string, path:string|null}|null} currentTool
+ * @property {CompactionWindow|null} [compaction] Compaction window mirrored from pi (issue #297).
  * @property {string} latestAssistantPreview
  * @property {string|null} question
  * @property {Array<{toolCallId:string, question:string}>} pendingQuestions

@@ -92,6 +92,11 @@ export function normalizeGenericStatusText(state, text) {
  */
 export function deriveSummary(status, max = 80) {
 	const s = status;
+	// 0. A compaction window owns the summary (issue #297, invariant I8).
+	if (s.compaction) {
+		if (s.compaction.phase === "failed" && s.compaction.error) return truncate(s.compaction.error, max);
+		return "Compacting context…";
+	}
 	// 2. active tool (only while still working)
 	if (s.processState === "alive" && s.currentTool?.name) {
 		// currentTool.summary is precomputed by the reducer; fall back to name.

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { createRunStatus, finalizeRun, projectViewState, reduceEvent } from "../src/core/events.mjs";
+import { beginCompaction, createRunStatus, endCompaction, finalizeRun, projectViewState, reduceEvent } from "../src/core/events.mjs";
 
 /** @returns {import("../src/core/types.mjs").RunConfig} */
 function cfg(overrides = {}) {
@@ -430,4 +430,154 @@ test("projectViewState preserves last unread message until a new assistant reply
 	}, 3000);
 	const next = projectViewState(s, 3500, vs);
 	assert.equal(next.lastAgentActivityAt, 3000);
+});
+
+test("beginCompaction snapshots the pre-compaction state once and opens the window", () => {
+	const s = createRunStatus(cfg(), 1, 1000);
+	s.semanticState = "idle";
+	s.processState = "exited";
+	s.summary = "Needs instructions";
+	s.question = null;
+	beginCompaction(s, { reason: "manual" }, 2000);
+	assert.equal(s.semanticState, "working");
+	assert.equal(s.processState, "alive");
+	assert.equal(s.summary, "Compacting context…");
+	assert.equal(s.compaction.phase, "running");
+	assert.equal(s.compaction.reason, "manual");
+	assert.equal(s.compaction.startedAt, 2000);
+	assert.deepEqual(s.compaction.previous, {
+		semanticState: "idle",
+		processState: "exited",
+		summary: "Needs instructions",
+		question: null,
+		error: null,
+	});
+	// Idempotent while running: the original snapshot survives.
+	beginCompaction(s, { reason: "threshold" }, 2500);
+	assert.equal(s.compaction.reason, "manual");
+	assert.equal(s.compaction.startedAt, 2000);
+	assert.equal(s.compaction.previous.semanticState, "idle");
+});
+
+test("beginCompaction treats a leftover failed marker as a fresh window", () => {
+	const s = createRunStatus(cfg(), 1, 1000);
+	s.semanticState = "idle";
+	s.processState = "exited";
+	s.compaction = { phase: "failed", reason: "manual", startedAt: 1500, previous: null, error: "Compaction failed: x" };
+	beginCompaction(s, { reason: "manual" }, 2000);
+	assert.equal(s.compaction.phase, "running");
+	assert.equal(s.compaction.previous.semanticState, "idle");
+	assert.equal(s.compaction.previous.processState, "exited");
+});
+
+test("endCompaction restores a resting pre-state verbatim", () => {
+	const s = createRunStatus(cfg(), 1, 1000);
+	s.semanticState = "idle";
+	s.processState = "exited";
+	s.summary = "Needs instructions";
+	s.question = null;
+	beginCompaction(s, {}, 2000);
+	endCompaction(s, { willRetry: false, aborted: false, errorMessage: null }, 3000);
+	assert.equal(s.semanticState, "idle");
+	assert.equal(s.processState, "exited", "processState must come back to the snapshot value");
+	assert.equal(s.summary, "Needs instructions");
+	assert.equal(s.compaction, null);
+});
+
+test("endCompaction keeps a mid-run row working", () => {
+	const s = createRunStatus(cfg(), 1, 1000);
+	s.semanticState = "working";
+	s.processState = "alive";
+	beginCompaction(s, { reason: "threshold" }, 2000);
+	endCompaction(s, { willRetry: false }, 3000);
+	assert.equal(s.semanticState, "working");
+	assert.equal(s.processState, "alive");
+	assert.equal(s.compaction, null);
+});
+
+test("endCompaction keeps willRetry rows working and drops the error", () => {
+	const s = createRunStatus(cfg(), 1, 1000);
+	s.semanticState = "idle";
+	s.processState = "exited";
+	s.summary = "Needs instructions";
+	beginCompaction(s, { reason: "overflow" }, 2000);
+	endCompaction(s, { willRetry: true, aborted: false, errorMessage: "Compaction failed: boom" }, 3000);
+	assert.equal(s.semanticState, "working");
+	assert.equal(s.error, null, "a retry supersedes its error");
+	assert.equal(s.compaction, null);
+});
+
+test("endCompaction restores on abort without an error", () => {
+	const s = createRunStatus(cfg(), 1, 1000);
+	s.semanticState = "needs_input";
+	s.processState = "exited";
+	s.summary = "Approve this plan?";
+	s.question = "Approve this plan?";
+	beginCompaction(s, { reason: "manual" }, 2000);
+	endCompaction(s, { aborted: true, errorMessage: "Compaction failed: ignored" }, 3000);
+	assert.equal(s.semanticState, "needs_input");
+	assert.equal(s.question, "Approve this plan?");
+	assert.equal(s.error, null);
+	assert.equal(s.compaction, null);
+});
+
+test("endCompaction surfaces a real failure without faking a failed run", () => {
+	const s = createRunStatus(cfg(), 1, 1000);
+	s.semanticState = "idle";
+	s.processState = "exited";
+	s.summary = "Needs instructions";
+	beginCompaction(s, { reason: "manual" }, 2000);
+	endCompaction(s, { aborted: false, errorMessage: "Compaction failed: Nothing to compact (session too small)" }, 3000);
+	assert.equal(s.semanticState, "idle", "the session itself is still usable");
+	assert.equal(s.error, "Compaction failed: Nothing to compact (session too small)");
+	assert.equal(s.compaction.phase, "failed");
+	assert.equal(s.compaction.previous, null);
+	assert.equal(s.summary, "Compaction failed: Nothing to compact (session too small)");
+});
+
+test("endCompaction without a snapshot stays working instead of throwing", () => {
+	const s = createRunStatus(cfg(), 1, 1000);
+	s.semanticState = "working";
+	s.compaction = null;
+	endCompaction(s, { willRetry: false }, 3000);
+	assert.equal(s.semanticState, "working");
+	assert.equal(s.compaction, null);
+});
+
+test("reduceEvent mirrors compaction_start/compaction_end and owns the summary", () => {
+	const s = createRunStatus(cfg(), 1, 1000);
+	assert.equal(reduceEvent(s, { type: "compaction_start", reason: "threshold" }, 2000), true);
+	assert.equal(s.semanticState, "working");
+	assert.equal(s.processState, "alive");
+	assert.equal(s.summary, "Compacting context…");
+	assert.equal(reduceEvent(s, { type: "compaction_end", reason: "threshold", result: { summary: "x" }, aborted: false, willRetry: false }, 3000), true);
+	assert.equal(s.compaction, null);
+	assert.equal(s.semanticState, "working", "was mid-run");
+});
+
+test("a failed compaction notice survives until the next real event", () => {
+	const s = createRunStatus(cfg(), 1, 1000);
+	s.semanticState = "idle";
+	s.processState = "exited";
+	s.summary = "Needs instructions";
+	reduceEvent(s, { type: "compaction_start", reason: "manual" }, 2000);
+	reduceEvent(s, { type: "compaction_end", reason: "manual", result: undefined, aborted: false, willRetry: false, errorMessage: "Compaction failed: boom" }, 3000);
+	assert.equal(s.compaction.phase, "failed");
+	assert.equal(s.summary, "Compaction failed: boom");
+	reduceEvent(s, { type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: { command: "ls" } }, 4000);
+	assert.equal(s.compaction, null, "the next real event drops the failure notice");
+});
+
+test("finalizeRun and projectViewState handle the window field", () => {
+	const s = createRunStatus(cfg(), 1, 1000);
+	beginCompaction(s, { reason: "manual" }, 2000);
+	const projected = projectViewState(s, 2000);
+	assert.equal(projected.compaction.phase, "running");
+	assert.equal(projected.compaction.previous.semanticState, "queued");
+	finalizeRun(s, { exitCode: 0 }, 3000);
+	assert.equal(s.compaction, null);
+	assert.equal(projectViewState(s, 3000).compaction, null);
+	const legacy = { ...s };
+	delete legacy.compaction;
+	assert.equal(projectViewState(legacy, 4000).compaction, null);
 });

@@ -108,3 +108,18 @@ test("normalizeGenericStatusText maps legacy labels to current ones", () => {
 	assert.equal(normalizeGenericStatusText("needs_input", "Needs input"), "Needs answer");
 	assert.equal(normalizeGenericStatusText("idle", "Custom summary"), "Custom summary");
 });
+
+test("deriveSummary renders the compaction window (issue #297)", () => {
+	const base = {
+		semanticState: "working",
+		processState: "alive",
+		currentTool: { name: "bash", summary: "bash: npm test" },
+		latestAssistantPreview: "Old preview text that must not win.",
+	};
+	assert.equal(deriveSummary({ ...base, compaction: { phase: "running" } }), "Compacting context…");
+	assert.equal(
+		deriveSummary({ ...base, compaction: { phase: "failed", error: "Compaction failed: Nothing to compact (session too small)" } }),
+		"Compaction failed: Nothing to compact (session too small)",
+	);
+	assert.equal(deriveSummary({ ...base, compaction: null }), "bash: npm test");
+});

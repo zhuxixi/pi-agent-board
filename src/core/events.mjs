@@ -31,6 +31,86 @@ function isQuestionToolCall(name, args) {
 	return QUESTION_TOOL_NAMES.has(name) || isQuestionArgShape(args);
 }
 
+/** Compaction event types whose summary is owned by begin/endCompaction (I8). */
+const COMPACTION_EVENT_TYPES = new Set(["compaction_start", "compaction_end"]);
+
+/**
+ * Open (or refresh) a compaction window on a status (issue #297).
+ * The pre-compaction snapshot is taken once per window: a repeated
+ * before_compact/compaction_start keeps the original, while a leftover
+ * `failed` marker counts as a new window (the user retried).
+ * @param {any} status @param {{reason?: "manual"|"threshold"|"overflow"}} facts @param {number} now
+ */
+export function beginCompaction(status, facts = {}, now) {
+	const existing = status.compaction;
+	if (!existing || existing.phase === "failed") {
+		status.compaction = {
+			phase: "running",
+			reason: facts.reason ?? "manual",
+			startedAt: now,
+			previous: {
+				semanticState: status.semanticState,
+				processState: status.processState,
+				summary: status.summary,
+				question: status.question ?? null,
+				error: status.error ?? null,
+			},
+			error: null,
+		};
+	}
+	status.semanticState = "working";
+	status.processState = "alive";
+	status.lastActivityAt = now;
+	status.summary = deriveSummary(status);
+}
+
+/**
+ * Close a compaction window and restore what it replaced (issue #297).
+ * Resting pre-states restore verbatim (including processState, R1-G3); a
+ * mid-run pre-state or willRetry stays working so the continuing run owns the
+ * row until agent_end. A genuine failure restores the row and leaves a
+ * `failed` marker so the summary keeps showing pi's message (R1-G1).
+ * @param {any} status @param {{willRetry?: boolean, aborted?: boolean, errorMessage?: string|null}} facts @param {number} now
+ */
+export function endCompaction(status, facts = {}, now) {
+	const marker = status.compaction ?? null;
+	const previous = marker?.previous ?? null;
+	status.compaction = null;
+	status.lastActivityAt = now;
+	if (!previous) {
+		// No snapshot survived (late/duplicate end): stay working; agent_end or
+		// reconcile converges the row.
+		status.semanticState = "working";
+		status.summary = deriveSummary(status);
+		return;
+	}
+	if (facts.willRetry || previous.semanticState === "queued" || previous.semanticState === "working") {
+		// The run continues (threshold/overflow) or is retried; a retry
+		// supersedes its own error, so dropping errorMessage here is deliberate.
+		status.semanticState = "working";
+		status.processState = "alive";
+		status.summary = deriveSummary(status);
+		return;
+	}
+	status.semanticState = previous.semanticState;
+	status.processState = previous.processState;
+	status.question = previous.question;
+	status.error = previous.error;
+	if (!facts.aborted && facts.errorMessage) {
+		status.error = facts.errorMessage;
+		status.compaction = {
+			phase: "failed",
+			reason: marker?.reason ?? "manual",
+			startedAt: marker?.startedAt ?? now,
+			previous: null,
+			error: facts.errorMessage,
+		};
+		status.summary = deriveSummary(status);
+		return;
+	}
+	status.summary = previous.summary || deriveSummary(status);
+}
+
 /**
  * Build the initial status for a freshly-launched run.
  * @param {RunConfig} config
@@ -56,6 +136,7 @@ export function createRunStatus(config, pid, now) {
 		summary: "Queued",
 		lastActivityAt: now,
 		currentTool: null,
+		compaction: null,
 		latestAssistantPreview: "",
 		question: null,
 		pendingQuestions: [],
@@ -86,6 +167,7 @@ export function createRunStatus(config, pid, now) {
 export function reduceEvent(status, event, now, opts = {}) {
 	if (!event || typeof event !== "object" || typeof event.type !== "string") return false;
 	let meaningful = false;
+	let summaryPinned = false;
 	status.eventCount = (status.eventCount ?? 0) + 1;
 	status.lastEventAt = now;
 
@@ -159,11 +241,32 @@ export function reduceEvent(status, event, now, opts = {}) {
 		case "turn_end":
 			status.lastActivityAt = now;
 			break;
+		case "compaction_start": {
+			beginCompaction(status, { reason: event.reason }, now);
+			summaryPinned = true;
+			meaningful = true;
+			break;
+		}
+		case "compaction_end": {
+			endCompaction(status, {
+				willRetry: Boolean(event.willRetry),
+				aborted: Boolean(event.aborted),
+				errorMessage: event.errorMessage ?? null,
+			}, now);
+			summaryPinned = true;
+			meaningful = true;
+			break;
+		}
 		default:
 			break;
 	}
 
-	if (meaningful) status.summary = deriveSummary(status);
+	if (meaningful) {
+		// A leftover failure notice belongs to the compaction that produced it;
+		// the next real activity supersedes it (invariant I6).
+		if (status.compaction?.phase === "failed" && !COMPACTION_EVENT_TYPES.has(event.type)) status.compaction = null;
+		if (!summaryPinned) status.summary = deriveSummary(status);
+	}
 	return meaningful;
 }
 
@@ -181,6 +284,7 @@ export function finalizeRun(status, opts, now) {
 	status.pid = null;
 	status.stoppedByUser = Boolean(opts.stoppedByUser);
 	status.currentTool = null;
+	status.compaction = null;
 
 	const hadPendingQuestions = pendingQuestions(status).length > 0;
 	status.pendingQuestions = [];
@@ -223,6 +327,7 @@ export function projectViewState(status, now, previousState = null) {
 		hasError: status.semanticState === "failed",
 		latestAssistantPreview: status.latestAssistantPreview,
 		latestTool: status.currentTool ? { name: status.currentTool.name, path: status.currentTool.path } : null,
+		compaction: status.compaction ?? null,
 		question: status.question,
 		pendingQuestions: pendingQuestions(status),
 		error: status.error,
