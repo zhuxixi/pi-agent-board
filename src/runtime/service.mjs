@@ -1849,7 +1849,7 @@ export function createService(opts) {
 		// Issue #225: correct a stale disk rebuild before the new event is reduced.
 		foregroundProjectionCache.adopt(row.meta.id, status);
 		// Issue #297: only the three compaction hooks keep the window marker; any
-		// other event supersedes a leftover failure notice.
+		// other event supersedes an open window or a leftover failure notice.
 		if (status.compaction && !COMPACTION_EVENTS.has(event.type)) status.compaction = null;
 		let evidence = readEvidence(root, row.meta.id);
 		if (!evidence.viewId) evidence = emptyEvidenceSnapshot({ viewId: row.meta.id, source: "hosted" });
