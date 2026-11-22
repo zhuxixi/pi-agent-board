@@ -248,6 +248,9 @@ export const GROUP_LABELS = {
  * @property {string} piCommand
  * @property {string[]} piArgsPrefix
  * @property {string|null} model
+ * Optional poll tuning for tests; production never sets these (issue #295).
+ * @property {number} [pollIntervalMs]
+ * @property {number} [pollBudgetMs]
  */
 
 /**
