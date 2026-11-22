@@ -3,7 +3,7 @@
  * Fake `pi` worker for hermetic tests. Emulates `pi --mode json -p --session <file> <prompt>`:
  * emits a realistic JSON event stream to stdout and (optionally) persists a session file,
  * without any model/network/TTY. Behavior is controlled by $FAKE_PI_MODE:
- *   completed (default) | needs_input | fail | slow | hang | github-refs | abort
+ *   completed (default) | needs_input | fail | slow | hang | github-refs | abort | compact
  *
  * `github-refs` emits a bash tool execution for `gh issue edit 40 --add-assignee @me`
  * followed by an assistant message containing a github.com pull URL, so the runner's
@@ -108,6 +108,20 @@ async function main() {
 			],
 		},
 	});
+
+	if (mode === "compact") {
+		// Mid-run threshold compaction: the run continues afterwards, so the row
+		// must stay working across the window (issue #297, A4).
+		emit({ type: "compaction_start", reason: "threshold" });
+		await sleep(Number(process.env.FAKE_PI_COMPACT_MS || 1200));
+		emit({
+			type: "compaction_end",
+			reason: "threshold",
+			result: { summary: "older context compacted", tokensBefore: 4096, firstKeptEntryId: "u0000001" },
+			aborted: false,
+			willRetry: false,
+		});
+	}
 
 	if (mode === "abort") {
 		// Exit-0 abort: the worker reports a stopReason-bearing final assistant
