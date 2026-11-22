@@ -102,9 +102,12 @@ export function endCompaction(status, facts = {}, now) {
 	if (facts.willRetry || previous.semanticState === "queued" || previous.semanticState === "working") {
 		// The run continues (threshold/overflow) or is retried; a retry
 		// supersedes its own error, so dropping errorMessage here is deliberate.
+		// Snapshot first, like the resting branch: a row rebuilt from disk carries
+		// the window's own "Compacting context…" text as currentTool.summary, so
+		// re-deriving here would make that text a fixpoint until the next tool event.
 		status.semanticState = "working";
 		status.processState = "alive";
-		status.summary = deriveSummary(status);
+		status.summary = previous.summary || deriveSummary(status);
 		return;
 	}
 	status.semanticState = previous.semanticState;

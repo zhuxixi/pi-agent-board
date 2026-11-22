@@ -2694,6 +2694,36 @@ test("syncHostedEvent mirrors a compaction window end to end (issue #297)", asyn
 	}
 });
 
+test("a mid-run compaction end restores the pre-compaction summary (issue #297)", async () => {
+	const root = freshRoot();
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const svc = service(root);
+		const s = readState(root, "v1");
+		s.semanticState = "working";
+		s.processState = "alive";
+		s.summary = "Needs instructions";
+		s.latestTool = { name: "bash", path: null };
+		writeState(root, s);
+
+		assert.equal(await svc.syncHostedEvent("v1", { type: "session_before_compact", reason: "manual", willRetry: false }), true);
+		assert.equal(readState(root, "v1").summary, "Compacting context…");
+
+		assert.equal(await svc.syncHostedEvent("v1", { type: "session_compact", reason: "manual", willRetry: false, fromExtension: false }), true);
+		const resumed = readState(root, "v1");
+		// A disk rebuild hands the window's own text back as currentTool.summary;
+		// re-deriving instead of restoring the snapshot made it a fixpoint until the
+		// next tool event.
+		assert.equal(resumed.summary, "Needs instructions");
+		assert.equal(resumed.semanticState, "working");
+		assert.equal(resumed.compaction, null);
+	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("a failed compaction surfaces pi's message and never fakes a failed run (issue #297)", async () => {
 	const root = freshRoot();
 	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");

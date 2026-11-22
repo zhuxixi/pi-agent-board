@@ -258,6 +258,9 @@ export function applyAutoStateToViewState(state, classification, now = Date.now(
 		currentTool: state.latestTool,
 		question: state.question,
 		error: state.error,
+		// A failed compaction marker owns the summary (issue #297): without it a
+		// classification would rewrite the notice while the marker survives.
+		compaction: state.compaction ?? null,
 		latestAssistantPreview: state.latestAssistantPreview,
 	});
 	const after = `${state.semanticState}|${state.question ?? ""}|${state.summary ?? ""}|${state.autoState?.source ?? ""}|${state.autoState?.textHash ?? ""}`;
