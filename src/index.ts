@@ -241,4 +241,10 @@ export default function piAgentBoard(pi: ExtensionAPI): void {
 	pi.on("message_start", async (event, ctx) => syncForeground(event, ctx));
 	pi.on("message_end", async (event, ctx) => syncForeground(event, ctx));
 	pi.on("agent_end", async (event, ctx) => syncForeground(event, ctx));
+	// Issue #297: compaction is work in progress. Registered separately from the
+	// AgentSessionEvent stream because these three hooks are what a live pi
+	// session actually emits to extensions.
+	pi.on("session_before_compact", async (event, ctx) => syncForeground(event, ctx));
+	pi.on("session_compact", async (event, ctx) => syncForeground(event, ctx));
+	pi.on("session_compact_failed", async (event, ctx) => syncForeground(event, ctx));
 }

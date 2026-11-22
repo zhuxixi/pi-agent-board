@@ -27,6 +27,7 @@ const CACHED_FIELDS = [
 	"question",
 	"pendingQuestions",
 	"error",
+	"compaction",
 	"lastActivityAt",
 	"latestAssistantPreview",
 	"lastAgentActivityAt",
