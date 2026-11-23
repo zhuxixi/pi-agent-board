@@ -277,6 +277,29 @@ export function nextVisibleIdAfterRemoval(rows, id, now) {
 }
 
 /**
+ * Issue #254: the row the board should select after `removedIds` leave their
+ * current positions. Mirrors the issue #147 delete semantics — the next visible
+ * row after the anchor's slot, else the previous one, else null — but works on
+ * the dashboard's already-filtered, already-folded order.
+ * @param {readonly string[]} orderedIds visible row ids in board order
+ * @param {Iterable<string>} removedIds ids that will leave their positions
+ * @param {string} anchorId the id whose slot must be kept
+ * @returns {{ neighborId: string | null, anchorIndex: number } | null} null when anchorId is not visible
+ */
+export function neighborAfterRemoval(orderedIds, removedIds, anchorId) {
+	const anchorIndex = orderedIds.indexOf(anchorId);
+	if (anchorIndex === -1) return null;
+	const removed = removedIds instanceof Set ? removedIds : new Set(removedIds);
+	for (let i = anchorIndex + 1; i < orderedIds.length; i += 1) {
+		if (!removed.has(orderedIds[i])) return { neighborId: orderedIds[i], anchorIndex };
+	}
+	for (let i = anchorIndex - 1; i >= 0; i -= 1) {
+		if (!removed.has(orderedIds[i])) return { neighborId: orderedIds[i], anchorIndex };
+	}
+	return { neighborId: null, anchorIndex };
+}
+
+/**
  * Stable row order: pinned first, then creation order (oldest first), then id.
  * Activity time deliberately does not participate, so rows never reshuffle while
  * sessions are running.
