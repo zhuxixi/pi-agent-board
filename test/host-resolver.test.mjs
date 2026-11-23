@@ -381,7 +381,8 @@ test("legacy finalize clears the host.json pid and the host-pid mirror (issue #3
 	}
 });
 
-test("resolver leaves a legacy host untouched while the host-start lease is held elsewhere (issue #87 CR r1)", async () => {	const root = freshRoot();
+test("resolver leaves a legacy host untouched while the host-start lease is held elsewhere (issue #87 CR r1)", async () => {
+	const root = freshRoot();
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
 		legacyHostRecord(root, "v1", 999999, { state: "alive" });
