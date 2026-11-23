@@ -711,3 +711,50 @@ test("runner drain fence: holding and completed verdicts are never auto-resumed 
 		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
 	}
 });
+
+test("runner mirrors a mid-run compaction window into the row (issue #297)", { timeout: 30000 }, async () => {
+	const root = mkdtempSync(join(tmpdir(), "agentview-run-compact-"));
+	process.env.FAKE_PI_MODE = "compact";
+	process.env.FAKE_PI_COMPACT_MS = "1500";
+	process.env.AGENT_BOARD_SUMMARY_MODEL = "off";
+	let runnerPid = null;
+	const coord = await startCoordinator(root);
+	try {
+		const meta = createView(root, { id: "view_1", name: "compact", cwd: root });
+		const config = makeConfig(root, "view_1", "run_1", meta.sessionFile, root, "compact the context");
+		const st = readState(root, "view_1");
+		st.currentRunId = "run_1";
+		const { writeState } = await import("../src/core/store.mjs");
+		writeState(root, st);
+
+		runnerPid = launchRun(root, config, { runnerScript: RUNNER }).pid;
+		assert.ok(runnerPid && runnerPid > 0, "runner spawned");
+
+		const during = await waitFor(() => {
+			const state = readState(root, "view_1");
+			const status = readStatus(root, "view_1", "run_1");
+			return state?.compaction?.phase === "running" && status?.compaction?.phase === "running" ? { state, status } : null;
+		});
+		assert.equal(during.state.semanticState, "working");
+		assert.equal(during.state.processState, "alive");
+		assert.equal(during.state.summary, "Compacting context…");
+		assert.equal(during.status.semanticState, "working");
+
+		const done = await waitFor(() => {
+			const status = readStatus(root, "view_1", "run_1");
+			return status && status.endedAt ? status : null;
+		});
+		assert.equal(done.compaction, null, "the window is cleared once the run finishes");
+		await waitFor(() => (isAlive(runnerPid) ? null : true), 15000);
+		const finalState = readState(root, "view_1");
+		assert.equal(finalState.compaction, null);
+		assert.notEqual(finalState.semanticState, "working");
+	} finally {
+		await killDetached(runnerPid);
+		await coord.kill();
+		delete process.env.FAKE_PI_MODE;
+		delete process.env.FAKE_PI_COMPACT_MS;
+		delete process.env.AGENT_BOARD_SUMMARY_MODEL;
+		rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+});

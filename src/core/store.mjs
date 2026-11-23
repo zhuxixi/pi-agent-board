@@ -510,6 +510,7 @@ export function createView(root, opts) {
 		hasError: false,
 		latestAssistantPreview: "",
 		latestTool: null,
+		compaction: null,
 		question: null,
 		pendingQuestions: [],
 		error: null,

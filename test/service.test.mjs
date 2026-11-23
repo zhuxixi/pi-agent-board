@@ -2656,3 +2656,183 @@ test("degradation: unreadable token and unavailable probe stay unknown and pend 
 		rmSync(root, { recursive: true, force: true });
 	}
 });
+
+test("syncHostedEvent mirrors a compaction window end to end (issue #297)", async () => {
+	const root = freshRoot();
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const svc = service(root);
+		const s = readState(root, "v1");
+		s.semanticState = "idle";
+		s.processState = "exited";
+		s.summary = "Needs instructions";
+		writeState(root, s);
+
+		assert.equal(await svc.syncHostedEvent("v1", { type: "session_before_compact", reason: "manual", willRetry: false }), true);
+		const compacting = readState(root, "v1");
+		assert.equal(compacting.semanticState, "working");
+		assert.equal(compacting.processState, "alive");
+		assert.equal(compacting.summary, "Compacting context…");
+		assert.equal(compacting.compaction.phase, "running");
+		assert.equal(compacting.compaction.previous.semanticState, "idle");
+		assert.equal(service(root).row("v1").alive, true);
+		// The busy guards now see the row (they key on semanticState only).
+		assert.equal((await service(root).markCompleted("v1")).ok, false);
+		assert.equal((await service(root).holdView("v1")).ok, false);
+
+		assert.equal(await svc.syncHostedEvent("v1", { type: "session_compact", reason: "manual", willRetry: false, fromExtension: false }), true);
+		const restored = readState(root, "v1");
+		assert.equal(restored.semanticState, "idle");
+		assert.equal(restored.processState, "exited");
+		assert.equal(restored.summary, "Needs instructions");
+		assert.equal(restored.compaction, null);
+		assert.equal(service(root).row("v1").alive, false);
+	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a mid-run compaction end restores the pre-compaction summary (issue #297)", async () => {
+	const root = freshRoot();
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const svc = service(root);
+		const s = readState(root, "v1");
+		s.semanticState = "working";
+		s.processState = "alive";
+		s.summary = "Needs instructions";
+		s.latestTool = { name: "bash", path: null };
+		writeState(root, s);
+
+		assert.equal(await svc.syncHostedEvent("v1", { type: "session_before_compact", reason: "manual", willRetry: false }), true);
+		assert.equal(readState(root, "v1").summary, "Compacting context…");
+
+		assert.equal(await svc.syncHostedEvent("v1", { type: "session_compact", reason: "manual", willRetry: false, fromExtension: false }), true);
+		const resumed = readState(root, "v1");
+		// A disk rebuild hands the window's own text back as currentTool.summary;
+		// re-deriving instead of restoring the snapshot made it a fixpoint until the
+		// next tool event.
+		assert.equal(resumed.summary, "Needs instructions");
+		assert.equal(resumed.semanticState, "working");
+		assert.equal(resumed.compaction, null);
+	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a failed compaction surfaces pi's message and never fakes a failed run (issue #297)", async () => {
+	const root = freshRoot();
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const svc = service(root);
+		const s = readState(root, "v1");
+		s.semanticState = "idle";
+		s.processState = "exited";
+		s.summary = "Needs instructions";
+		writeState(root, s);
+
+		await svc.syncHostedEvent("v1", { type: "session_before_compact", reason: "manual", willRetry: false });
+		await svc.syncHostedEvent("v1", {
+			type: "session_compact_failed",
+			reason: "manual",
+			aborted: false,
+			willRetry: false,
+			errorMessage: "Compaction failed: Nothing to compact (session too small)",
+			fromExtension: false,
+		});
+		const failed = readState(root, "v1");
+		assert.equal(failed.semanticState, "idle");
+		assert.equal(failed.processState, "exited");
+		assert.equal(failed.error, "Compaction failed: Nothing to compact (session too small)");
+		assert.equal(failed.compaction.phase, "failed");
+		assert.match(failed.summary, /^Compaction failed: /);
+
+		// The next real activity drops the notice (invariant I6).
+		await svc.syncHostedEvent("v1", { type: "input", text: "try again" });
+		const resumed = readState(root, "v1");
+		assert.equal(resumed.compaction, null);
+		assert.equal(resumed.semanticState, "working");
+		assert.equal(resumed.summary, "Running…");
+	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("an aborted compaction restores the pre-compaction row silently (issue #297)", async () => {
+	const root = freshRoot();
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", "off");
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const svc = service(root);
+		const s = readState(root, "v1");
+		s.semanticState = "needs_input";
+		s.processState = "exited";
+		s.summary = "Approve this plan?";
+		s.question = "Approve this plan?";
+		s.pendingQuestions = [{ toolCallId: "q1", question: "Approve this plan?" }];
+		writeState(root, s);
+
+		await svc.syncHostedEvent("v1", { type: "session_before_compact", reason: "manual", willRetry: false });
+		await svc.syncHostedEvent("v1", { type: "session_compact_failed", reason: "manual", aborted: true, willRetry: false, errorMessage: undefined });
+		const restored = readState(root, "v1");
+		assert.equal(restored.semanticState, "needs_input");
+		assert.equal(restored.question, "Approve this plan?");
+		assert.equal(restored.error, null);
+		assert.equal(restored.compaction, null);
+	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("a fast-failing compaction cannot strand an idle row in working (issue #297, R1-G2)", async () => {
+	const root = freshRoot();
+	// The coordinator must stay enabled: with it disabled, writeForegroundState
+	// short-circuits to a synchronous writeState and the in-flight window this
+	// test exists to cover never happens.
+	const prevCoordinator = setEnv("AGENT_BOARD_COORDINATOR", undefined);
+	const fake = delayedMaterializingSendStateCommand(root, { delayMs: 20 });
+	try {
+		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
+		const st = readState(root, "v1");
+		st.semanticState = "idle";
+		st.processState = "exited";
+		st.summary = "Needs instructions";
+		// Strictly stale: foregroundProjectionCache.adopt only corrects a rebuild
+		// whose updatedAt is older than the cached stamp, so a fresh timestamp
+		// would let a same-millisecond tie hide the in-flight projection.
+		st.updatedAt = 1;
+		writeState(root, st);
+
+		// Back-to-back hooks while the begin projection is still in flight.
+		await service(root, { sendStateCommand: fake.send }).syncForegroundEvent(meta.sessionFile, { type: "session_before_compact", reason: "manual" });
+		await service(root, { sendStateCommand: fake.send }).syncForegroundEvent(meta.sessionFile, {
+			type: "session_compact_failed",
+			reason: "manual",
+			aborted: false,
+			willRetry: false,
+			errorMessage: "Compaction failed: Nothing to compact (session too small)",
+		});
+
+		// The stand-in materializes on its own timers; both projections must have
+		// gone through it, or the assertions below prove nothing about the race.
+		const applied = await waitFor(() => fake.applied.length >= 2, 3000);
+		assert.ok(applied, "both projections went through the delayed coordinator stand-in");
+		const settled = await waitFor(() => {
+			const s = readState(root, "v1");
+			return s.compaction?.phase === "failed" ? s : null;
+		});
+		assert.ok(settled, "the failure notice materialized");
+		assert.equal(settled.semanticState, "idle", "never stranded on working");
+		assert.equal(settled.processState, "exited");
+	} finally {
+		setEnv("AGENT_BOARD_COORDINATOR", prevCoordinator);
+		rmSync(root, { recursive: true, force: true });
+	}
+});

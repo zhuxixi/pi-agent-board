@@ -6,7 +6,9 @@
  *   clean exit:    needs_input (asked a question) | idle (user can mark completed)
  *   bad exit:      failed
  *   user stop:     stopped
- * Summary priority (plan §9.3): model → active tool → blocker → first sentence → error → fallback.
+ * Summary priority (plan §9.3): compaction window → model → active tool → blocker →
+ * first sentence → error → fallback. An open (or failed) compaction window owns the
+ * summary so raw `compaction_end.result` text never reaches the row (issue #297).
  */
 import { firstSentence, truncate } from "./heuristics.mjs";
 
@@ -92,6 +94,11 @@ export function normalizeGenericStatusText(state, text) {
  */
 export function deriveSummary(status, max = 80) {
 	const s = status;
+	// 0. A compaction window owns the summary (issue #297, invariant I8).
+	if (s.compaction) {
+		if (s.compaction.phase === "failed" && s.compaction.error) return truncate(s.compaction.error, max);
+		return "Compacting context…";
+	}
 	// 2. active tool (only while still working)
 	if (s.processState === "alive" && s.currentTool?.name) {
 		// currentTool.summary is precomputed by the reducer; fall back to name.

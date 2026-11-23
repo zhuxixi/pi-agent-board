@@ -12,7 +12,7 @@ import { resolve } from "node:path";
 import { applyAutoStateToStatus, autoStateEnabled, heuristicAutoState, isManualVerdict } from "../core/auto-state.mjs";
 import { CLOCK_EPSILON_MS, classifyRunsForRow, probeBackgroundRun, resolveWorkflowHome, scanBackgroundRuns } from "../core/background-runs.mjs";
 import { appendLine, atomicWriteJson, removeFile } from "../core/atomic.mjs";
-import { finalizeRun, projectViewState, reduceEvent } from "../core/events.mjs";
+import { beginCompaction, endCompaction, finalizeRun, projectViewState, reduceEvent } from "../core/events.mjs";
 import { clearDiagnostics, appendDiagnostic, appendDiagnosticOnce, tailDiagnostics } from "../core/diagnostics.mjs";
 import { emptyEvidenceSnapshot, finalizeEvidence, readEvidence, reduceEvidence, summarizeEvidence, writeEvidence } from "../core/evidence.mjs";
 import { updateCodeRefsFromEvidence } from "../core/code-refs-store.mjs";
@@ -84,6 +84,9 @@ const ATTACH_RESOLVE_TIMEOUT_MS = 120_000;
  * interruption notice would be swallowed for that host incarnation.
  */
 export const NOTICE_FLIP_GRACE_MS = 60_000;
+
+/** Events that may touch an open compaction window; anything else supersedes it (issue #297). */
+const COMPACTION_EVENTS = new Set(["session_before_compact", "session_compact", "session_compact_failed"]);
 
 /**
  * Dynamic readers for the ladder constants above (issue #95 F4). Module-load-time
@@ -885,6 +888,7 @@ export function createService(opts) {
 			hasError: false,
 			latestAssistantPreview: "",
 			latestTool: null,
+			compaction: null,
 			question: null,
 			pendingQuestions: [],
 			error: null,
@@ -924,6 +928,9 @@ export function createService(opts) {
 			// Issue #225: freshness signal for the projection cache. Absent on legacy rows.
 			updatedAt: typeof s.updatedAt === "number" ? s.updatedAt : 0,
 			currentTool: s.latestTool ? { name: s.latestTool.name, path: s.latestTool.path, summary: s.summary } : null,
+			// Read-through, never initialize: the window marker is persisted by the
+			// previous event's projection and must survive this rebuild (issue #297, R1-D1).
+			compaction: s.compaction ?? null,
 			latestAssistantPreview: s.latestAssistantPreview,
 			question: s.question,
 			pendingQuestions: Array.isArray(s.pendingQuestions) ? s.pendingQuestions : [],
@@ -1841,6 +1848,9 @@ export function createService(opts) {
 		foregroundPreviewCache.backfill(row.meta.id, status);
 		// Issue #225: correct a stale disk rebuild before the new event is reduced.
 		foregroundProjectionCache.adopt(row.meta.id, status);
+		// Issue #297: only the three compaction hooks keep the window marker; any
+		// other event supersedes an open window or a leftover failure notice.
+		if (status.compaction && !COMPACTION_EVENTS.has(event.type)) status.compaction = null;
 		let evidence = readEvidence(root, row.meta.id);
 		if (!evidence.viewId) evidence = emptyEvidenceSnapshot({ viewId: row.meta.id, source: "hosted" });
 		try {
@@ -1872,6 +1882,23 @@ export function createService(opts) {
 			const userSpoke = event.type === "input" && event.source === "interactive";
 			// Throughput path: periodic self-healing mirror, fire-and-forget.
 			void writeForegroundState(row, status, userSpoke ? { source: "dashboard-user" } : {});
+			return true;
+		}
+
+		if (event.type === "session_before_compact") {
+			beginCompaction(status, { reason: event.reason }, now);
+			// Throughput path: periodic self-healing mirror, fire-and-forget.
+			void writeForegroundState(row, status);
+			return true;
+		}
+
+		if (event.type === "session_compact" || event.type === "session_compact_failed") {
+			endCompaction(status, {
+				willRetry: Boolean(event.willRetry),
+				aborted: Boolean(event.aborted),
+				errorMessage: event.errorMessage ?? null,
+			}, now);
+			void writeForegroundState(row, status);
 			return true;
 		}
 

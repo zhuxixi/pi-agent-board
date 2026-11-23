@@ -164,6 +164,27 @@ test("the auto-state rules never overwrite a holding verdict (spec A6)", () => {
 	assert.equal(status.semanticState, "holding");
 });
 
+test("applyAutoStateToViewState never erases a failed-compaction notice (issue #297)", () => {
+	const state = {
+		viewId: "v",
+		processState: "exited",
+		semanticState: "idle",
+		autoState: null,
+		question: null,
+		pendingQuestions: [],
+		latestTool: null,
+		latestAssistantPreview: "Done. Fixed the bug and tests pass.",
+		compaction: { phase: "failed", reason: "manual", startedAt: 1, previous: null, error: "Compaction failed: boom" },
+		error: "Compaction failed: boom",
+		summary: "Compaction failed: boom",
+	};
+	const classification = { kind: "in_progress", confidence: "low", source: "heuristic", reason: "turn finished" };
+	assert.equal(applyAutoStateToViewState(state, classification, 10), true);
+	assert.equal(state.semanticState, "idle");
+	assert.equal(state.summary, "Compaction failed: boom", "the failure notice survives the classification");
+	assert.equal(state.error, "Compaction failed: boom", "the structured error is not nulled while the notice is live");
+});
+
 test("semanticStateForAutoKind never yields holding (spec A7)", () => {
 	for (const kind of ["needs_input", "in_progress", "done"]) {
 		assert.notEqual(semanticStateForAutoKind(kind), "holding");
