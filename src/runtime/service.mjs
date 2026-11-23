@@ -28,7 +28,7 @@ import { launchAutoState as launchAutoStateProcess, launchHost as launchHostProc
 import { gitRepoRoot } from "../core/repo.mjs";
 import { captureStartToken, isAlive, killProcess } from "../core/pid.mjs";
 import { acquireOwnedViewLock, tryAcquireOwnedViewLock } from "../core/locks.mjs";
-import { canFinalizeLegacyHost, canReplaceHost, classifyUnverifiableProcess, processIdentityState } from "../core/host-coordination.mjs";
+import { canFinalizeLegacyHost, canReplaceHost, classifyUnverifiableProcess, describeHostReplaceBlock, processIdentityState } from "../core/host-coordination.mjs";
 import { readProcessIdentityProbe, readProcessStartToken } from "../core/process-identity-probe.mjs";
 import { modelRefAvailable } from "../core/launch-options.mjs";
 import { resolveLaunchModelPrefs } from "../core/session-launch-prefs.mjs";
@@ -281,7 +281,7 @@ export function createService(opts) {
 	 * can never stack a second host on top of a live claim.
 	 * @param {import("../core/types.mjs").ViewMeta} meta
 	 * @param {string|null} initialPrompt
-	 * @returns {Promise<{ ok: true, status: "started"|"pending"|"reused", pid: number|null, socketPath: string|null, instanceId: string|null } | { ok: false, error: string, fallbackReason?: string }>}
+	 * @returns {Promise<{ ok: true, status: "started"|"pending"|"reused"|"blocked", pid: number|null, socketPath: string|null, instanceId: string|null } | { ok: false, error: string, fallbackReason?: string }>}
 	 */
 	async function launchHost(meta, initialPrompt, launchOpts = {}) {
 		let lease;
@@ -309,6 +309,37 @@ export function createService(opts) {
 	/** @param {import("../core/types.mjs").HostStatus|null} host */
 	function pendingLaunchResult(host) {
 		return { ok: true, status: "pending", pid: null, socketPath: host?.socketPath ?? null, instanceId: host?.instanceId ?? null };
+	}
+
+	/**
+	 * Refusal result for a terminal record whose roles cannot be proven gone
+	 * (issue #301). Contrast with `pendingLaunchResult`: the record here belongs to
+	 * a DEAD instance, so echoing its socketPath/instanceId would hand the caller a
+	 * stale endpoint and hide the refusal. One deduped `host_replace_blocked`
+	 * diagnostic carries the blocking evidence (repeated attach clicks on the same
+	 * record must not flood the tail).
+	 * @param {any} host the terminal record that blocked replacement
+	 * @param {{runnerObservation: string, childObservation: string}} observation
+	 * @returns {{ ok: true, status: "blocked", pid: null, socketPath: null, instanceId: null, blocked: {instanceId: string|null, runnerPid: number|null, childPid: number|null, runnerObservation: string, childObservation: string, reason: string} }}
+	 */
+	function blockedLaunchResult(host, observation) {
+		const details = {
+			instanceId: host?.instanceId ?? null,
+			runnerPid: host?.runnerPid ?? null,
+			childPid: host?.childPid ?? null,
+			runnerObservation: observation.runnerObservation,
+			childObservation: observation.childObservation,
+		};
+		try {
+			appendDiagnosticOnce(root, host.viewId, {
+				source: "service",
+				level: "warn",
+				code: "host_replace_blocked",
+				message: "Host replacement refused: the terminal record names a process that cannot be proven gone",
+				details,
+			}, { match: ["instanceId", "runnerPid", "childPid"] });
+		} catch { /* best effort: a diagnostic failure must not change the decision */ }
+		return { ok: true, status: "blocked", pid: null, socketPath: null, instanceId: null, blocked: { ...details, reason: describeHostReplaceBlock(details) } };
 	}
 
 	/**
@@ -372,9 +403,9 @@ export function createService(opts) {
 	 * lease; this function never acquires or releases it.
 	 * @param {import("../core/types.mjs").ViewMeta} meta
 	 * @param {string|null} initialPrompt
-	 * @returns {{ ok: true, status: "reused"|"pending"|"started", pid: number|null, socketPath: string|null, instanceId: string|null } | { ok: false, error: string, fallbackReason?: string }}
+	 * @returns {Promise<{ ok: true, status: "reused"|"pending"|"blocked"|"started", pid: number|null, socketPath: string|null, instanceId: string|null, blocked?: {reason: string} } | { ok: false, error: string, fallbackReason?: string }>}
 	 */
-	function startHostUnderLease(meta, initialPrompt, launchOpts = {}) {
+	async function startHostUnderLease(meta, initialPrompt, launchOpts = {}) {
 		const existing = readHost(root, meta.id);
 		if (existing && (existing.state === "starting" || existing.state === "alive" || existing.state === "stopping")) {
 			// An active claim already exists — reuse it, never a second spawn.
@@ -382,10 +413,26 @@ export function createService(opts) {
 				? { ok: true, status: "reused", pid: null, socketPath: existing.socketPath ?? null, instanceId: existing.instanceId ?? null }
 				: pendingLaunchResult(existing);
 		}
-		// No record is trivially replaceable; a terminal record only when nothing
-		// it names can still be alive (conservative: a live pid is "unknown" and blocks).
-		if (existing && !canReplaceHost(observeHostForReplace(existing))) {
-			return pendingLaunchResult(existing);
+		// A terminal record is replaceable only when nothing it names can still be
+		// alive. Issue #301: the observation is identity-aware (token compare, then
+		// command-line / creation-time probe), so a recycled pid reads `foreign` and
+		// is releasable instead of the old blanket `unknown`.
+		if (existing) {
+			const observation = await observeHostForReplace(existing, meta.sessionFile);
+			if (!canReplaceHost(observation)) return blockedLaunchResult(existing, observation);
+			appendDiagnosticOnce(root, meta.id, {
+				source: "service",
+				level: "info",
+				code: "host_replace_released",
+				message: "Stale terminal host record released for replacement",
+				details: {
+					oldInstanceId: existing.instanceId ?? null,
+					runnerPid: existing.runnerPid ?? null,
+					childPid: existing.childPid ?? null,
+					runnerObservation: observation.runnerObservation,
+					childObservation: observation.childObservation,
+				},
+			}, { match: ["oldInstanceId"] });
 		}
 
 		// Fail fast BEFORE claiming (issue #90): no claim record, no config file,
@@ -1172,6 +1219,31 @@ export function createService(opts) {
 		});
 	}
 
+	/**
+	 * Identity-aware observation of a terminal host record for the replacement gate
+	 * (issue #301). Same seam as the recovery paths (`observeHostRole`): a recorded
+	 * start token is compared against the live process, and an `unknown` token path
+	 * is refined by the command-line / creation-time probe (#217). A recycled pid
+	 * therefore reads `foreign` (releasable) instead of the pre-identity blanket
+	 * `unknown` that wedged replacement forever. `unknown` still refuses — an
+	 * unverifiable live process is never guessed as foreign.
+	 *
+	 * Fresh memos per call: a verdict cached across calls would be stale, and each
+	 * ensure is bounded to one token read + one probe per pid.
+	 * @param {any} host the terminal record being judged
+	 * @param {string|null} sessionFile child command-line fragment
+	 * @returns {Promise<{host: any, runnerObservation: string, childObservation: string, launchLeaseActive: false}>}
+	 */
+	async function observeHostForReplace(host, sessionFile) {
+		const memo = new Map();
+		const tokenMemo = new Map();
+		const runnerObservation = await observeHostRole(host, "runner", { sessionFile, memo, tokenMemo });
+		const childObservation = await observeHostRole(host, "child", { sessionFile, memo, tokenMemo });
+		// launchLeaseActive is always false here: this gate only ever sees terminal
+		// records (a live claim short-circuits in startHostUnderLease before it).
+		return { host, runnerObservation, childObservation, launchLeaseActive: false };
+	}
+
 	/** Re-validate an "owned" identity immediately before signalling: a pid reused
 	 *  mid-recovery must never receive an escalation signal (#240 CR). A recorded
 	 *  start token is re-read live, bypassing the observation memo — on win32 the
@@ -1394,10 +1466,12 @@ export function createService(opts) {
 
 	/**
 	 * ensureHost implementation (issue #70 Task 10 + Task 12 adopt branch).
+	 * Async since issue #301: the replacement gate observes each recorded role's
+	 * identity (token read / probe), which is I/O on win32 and macOS.
 	 * @param {string} viewId
-	 * @returns {{ ok: boolean, pending?: boolean, started?: boolean, socketPath?: string|null, instanceId?: string|null, error?: string, fallbackReason?: string }}
+	 * @returns {Promise<{ ok: boolean, pending?: boolean, started?: boolean, status?: string, socketPath?: string|null, instanceId?: string|null, blocked?: {reason: string}, error?: string, fallbackReason?: string }>}
 	 */
-	function ensureHostImpl(viewId) {
+	async function ensureHostImpl(viewId) {
 		const row = loadRow(root, viewId);
 		if (!row) return { ok: false, error: "Unknown session" };
 		const host = row.host ?? null;
@@ -1437,11 +1511,20 @@ export function createService(opts) {
 			if (inner && (inner.state === "starting" || inner.state === "alive" || inner.state === "stopping")) {
 				return { ok: true, pending: true, socketPath: inner.socketPath ?? null, instanceId: inner.instanceId ?? null };
 			}
-			const res = startHostUnderLease(row.meta, null, { markQueued: false });
+			const res = await startHostUnderLease(row.meta, null, { markQueued: false });
 			if (res.ok && res.status === "started") pruneWarmHosts({ keepViewId: viewId });
-			return res.ok
-				? { ok: true, started: res.status === "started", pending: res.status !== "started", socketPath: res.socketPath, instanceId: res.instanceId }
-				: res;
+			if (!res.ok) return res;
+			// Keep the structured refusal (issue #301): the resolver needs the blocking
+			// pid to explain the failure, and the caller must see `blocked` as a
+			// distinct outcome from a launch that is merely still pending.
+			return {
+				ok: true,
+				started: res.status === "started",
+				pending: res.status !== "started",
+				socketPath: res.socketPath,
+				instanceId: res.instanceId,
+				...(res.status === "blocked" ? { status: "blocked", blocked: res.blocked } : {}),
+			};
 		} finally {
 			try { lock.lease.release(); } catch { /* best effort */ }
 		}
@@ -1577,7 +1660,7 @@ export function createService(opts) {
 				}
 				if (!ensured) {
 					ensured = true;
-					const res = ensureHostImpl(viewId);
+					const res = await ensureHostImpl(viewId);
 					if (!res.ok) {
 						if (res.fallbackReason != null) {
 							// PTY unavailable and nothing active — safe to fall back to session attach.
@@ -1643,7 +1726,7 @@ export function createService(opts) {
 				// the resolver to its deadline (issue #70 CI wave 2).
 			if (!legacy && host.runnerSpawnedAt == null && probe.classification === "missing" && !withinGrace) {
 					lastAdoptAt = nowImpl();
-					ensureHostImpl(viewId);
+					await ensureHostImpl(viewId);
 					await sleepFnImpl(HOST_PROBE_RETRY_MS);
 					continue;
 				}
@@ -2282,14 +2365,14 @@ export function createService(opts) {
 	 * (Task 12) instead of pending forever. Real socket health is the attach
 	 * resolver's job; this path never probes, kills, or spawns past an active claim.
 	 * @param {string} viewId
-	 * @returns {{ ok: boolean, pending?: boolean, started?: boolean, socketPath?: string|null, instanceId?: string|null, error?: string, fallbackReason?: string }}
+	 * @returns {Promise<{ ok: boolean, pending?: boolean, started?: boolean, status?: string, socketPath?: string|null, instanceId?: string|null, blocked?: {reason: string}, error?: string, fallbackReason?: string }>}
 	 */
-	ensureHost(viewId) {
+	async ensureHost(viewId) {
 		return ensureHostImpl(viewId);
 	},
 
 		/** @param {string} viewId */
-		prewarmHost(viewId) {
+		async prewarmHost(viewId) {
 			const row = loadRow(root, viewId);
 			if (!row || isAgentBusy(row)) return { ok: false, error: row ? "Session is busy" : "Unknown session" };
 			return this.ensureHost(viewId);
@@ -2867,7 +2950,7 @@ function finalizeDeadLegacyHost(root, viewId, host, probeClassification, now, ac
 		// writeHost() only writes host.json, so the host-pid.json mirror needs its own
 		// explicit clear (updateOwnedHost, which normally mirrors, cannot reach a
 		// legacy record: it has no instanceId to fence against).
-		writeHost(root, { ...cur, runnerPid: null, state: "exited", endedAt: finalizedAt, lastSeenAt: finalizedAt, error: "legacy host finalized: runner pid dead" });
+		writeHost(root, { ...cur, runnerPid: null, lastRunnerPid: hostPid, state: "exited", endedAt: finalizedAt, lastSeenAt: finalizedAt, error: "legacy host finalized: runner pid dead" });
 		try { writeHostPid(root, viewId, null); } catch { /* best effort */ }
 	} finally {
 		try { gate.lease.release(); } catch { /* best effort */ }
@@ -2884,14 +2967,6 @@ function finalizeDeadLegacyHost(root, viewId, host, probeClassification, now, ac
 	return true;
 }
 
-/** Conservative pre-identity observation (issue #70 Task 10): a recorded pid that
- *  is still alive is always `unknown` — never safe to release; not recorded or
- *  provably gone is `dead`. Task 11 replaces this with identity-aware observation. */
-function conservativeObservation(pid) {
-	if (pid == null) return "dead";
-	return isAlive(pid) ? "unknown" : "dead";
-}
-
 /** Signal an identity previously observed as "owned". ESRCH is tolerated (the
  *  process may exit between observation and signal); anything else rethrows. */
 function defaultSignalOwnedProcess(identity, signal) {
@@ -2900,16 +2975,6 @@ function defaultSignalOwnedProcess(identity, signal) {
 	} catch (err) {
 		if (/** @type {NodeJS.ErrnoException} */ (err).code !== "ESRCH") throw err;
 	}
-}
-
-/** @param {import("../core/types.mjs").HostStatus|null} host */
-function observeHostForReplace(host) {
-	return {
-		host,
-		runnerObservation: conservativeObservation(host?.runnerPid ?? null),
-		childObservation: conservativeObservation(host?.childPid ?? null),
-		launchLeaseActive: false,
-	};
 }
 
 /**

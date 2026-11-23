@@ -439,7 +439,7 @@ test("dispatch allows a second active session in the same non-git folder", async
 	}
 });
 
-test("ensureHost starts an idle PTY host without changing row task state", () => {
+test("ensureHost starts an idle PTY host without changing row task state", async () => {
 	const root = freshRoot();
 	const oldForce = process.env.AGENT_BOARD_FORCE_PTY;
 	try {
@@ -457,7 +457,7 @@ test("ensureHost starts an idle PTY host without changing row task state", () =>
 			launched = config;
 			return { pid: process.pid, configPath: "/no/host-config.json" };
 		} });
-		const res = svc.ensureHost("v1");
+		const res = await svc.ensureHost("v1");
 		assert.equal(res.ok, true);
 		assert.equal(res.started, true);
 		assert.ok(res.instanceId, "fresh start reports its instanceId");
@@ -510,7 +510,7 @@ function startingClaimHost(root, viewId, instanceId = "i1") {
 	});
 }
 
-test("ensureHost returns pending for a fresh starting claim with null runnerPid", () => {
+test("ensureHost returns pending for a fresh starting claim with null runnerPid", async () => {
 	const root = freshRoot();
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
@@ -522,7 +522,7 @@ test("ensureHost returns pending for a fresh starting claim with null runnerPid"
 				return { pid: process.pid, configPath: "/no/host-config.json" };
 			},
 		});
-		const res = svc.ensureHost("v1");
+		const res = await svc.ensureHost("v1");
 		assert.deepEqual(res, { ok: true, pending: true, socketPath: P.hostEndpointPathFor(process.platform, root, "v1", "i1"), instanceId: "i1" });
 		assert.equal(launches, 0, "an existing starting claim must never trigger a second spawn");
 	} finally {
@@ -530,7 +530,7 @@ test("ensureHost returns pending for a fresh starting claim with null runnerPid"
 	}
 });
 
-test("second ensureHost sees the on-disk claim and never spawns twice", () => {
+test("second ensureHost sees the on-disk claim and never spawns twice", async () => {
 	const root = freshRoot();
 	const oldForce = process.env.AGENT_BOARD_FORCE_PTY;
 	try {
@@ -544,11 +544,11 @@ test("second ensureHost sees the on-disk claim and never spawns twice", () => {
 				return { pid: process.pid, configPath: "/no/host-config.json" };
 			},
 		});
-		const first = svc.ensureHost("v1");
+		const first = await svc.ensureHost("v1");
 		assert.equal(first.ok, true);
 		assert.equal(first.started, true);
 		assert.equal(launches, 1);
-		const second = svc.ensureHost("v1");
+		const second = await svc.ensureHost("v1");
 		assert.equal(second.ok, true);
 		assert.equal(second.pending, true);
 		assert.equal(second.instanceId, first.instanceId);
@@ -560,7 +560,7 @@ test("second ensureHost sees the on-disk claim and never spawns twice", () => {
 	}
 });
 
-test("lock contention yields pending without spawn", () => {
+test("lock contention yields pending without spawn", async () => {
 	const root = freshRoot();
 	try {
 		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
@@ -574,7 +574,7 @@ test("lock contention yields pending without spawn", () => {
 				return { pid: process.pid, configPath: "/no/host-config.json" };
 			},
 		});
-		const res = svc.ensureHost("v1");
+		const res = await svc.ensureHost("v1");
 		assert.deepEqual(res, { ok: true, pending: true, socketPath: null, instanceId: null });
 		assert.equal(launches, 0);
 	} finally {
@@ -2122,7 +2122,7 @@ test("ensureHost passes screenLogMaxBytes from prefs into HostConfig", async () 
 				return { pid: process.pid, configPath: "/no/host-config.json" };
 			},
 		});
-		const result = svc.ensureHost("gc1");
+		const result = await svc.ensureHost("gc1");
 		assert.equal(result.ok, true);
 		assert.equal(captured.screenLogMaxBytes, 2048);
 	} finally {
@@ -2234,7 +2234,7 @@ test("errors-only GC passes produce no gc-history record", async () => {
 	}
 });
 
-test("ensureHost probes PTY support with TTL cache, not forced refresh", () => {
+test("ensureHost probes PTY support with TTL cache, not forced refresh", async () => {
 	const root = freshRoot();
 	const oldForce = process.env.AGENT_BOARD_FORCE_PTY;
 	try {
@@ -2246,7 +2246,7 @@ test("ensureHost probes PTY support with TTL cache, not forced refresh", () => {
 			ptySupport: (opts = {}) => { probeCalls.push(opts); return { ok: true }; },
 			launchHost: () => ({ pid: process.pid, configPath: "/no/host-config.json" }),
 		});
-		const res = svc.ensureHost("v1");
+		const res = await svc.ensureHost("v1");
 		assert.equal(res.ok, true);
 		assert.ok(probeCalls.length >= 1);
 		for (const opts of probeCalls) {

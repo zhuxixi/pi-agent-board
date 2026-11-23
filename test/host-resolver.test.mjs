@@ -255,6 +255,7 @@ test("legacy finalize clears the host.json pid and the host-pid mirror (issue #3
 		const finalized = readHost(root, "v1");
 		assert.equal(finalized.state, "exited");
 		assert.equal(finalized.runnerPid, null, "finalized record must drop the proven-dead pid");
+		assert.equal(finalized.lastRunnerPid, 999999, "finalized record keeps the dead pid for forensics only");
 		assert.equal(readHostPid(root, "v1"), null, "host-pid mirror must be cleared explicitly (writeHost does not mirror)");
 	} finally {
 		rmSync(root, { recursive: true, force: true });
@@ -518,7 +519,7 @@ test("abandoned claim past grace gets adopt-and-spawned on the SAME instance", a
 	}
 });
 
-test("ensureHost directly adopts an abandoned claim past grace", () => {
+test("ensureHost directly adopts an abandoned claim past grace", async () => {
 	const root = freshRoot();
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
@@ -536,7 +537,7 @@ test("ensureHost directly adopts an abandoned claim past grace", () => {
 				return { pid: process.pid, configPath: config.configPath };
 			},
 		});
-		const res = svc.ensureHost("v1");
+		const res = await svc.ensureHost("v1");
 		assert.equal(res.ok, true);
 		assert.equal(res.started, true);
 		assert.equal(res.instanceId, "i1");
@@ -743,7 +744,7 @@ test("adoption retries through a transient host-start lock busy and still conver
 
 // ---- stale defaultModel launch guard (issue #90) ----
 
-test("ensureHost refuses to launch when the view's defaultModel is provably unavailable", () => {
+test("ensureHost refuses to launch when the view's defaultModel is provably unavailable", async () => {
 	const root = freshRoot();
 	try {
 		const meta = createView(root, { id: "v1", name: "stale-model", cwd: "/r", defaultModel: "glm/glm-5.3" });
@@ -756,7 +757,7 @@ test("ensureHost refuses to launch when the view's defaultModel is provably unav
 				return { pid: process.pid, configPath: config.configPath };
 			},
 		});
-		const res = svc.ensureHost("v1");
+		const res = await svc.ensureHost("v1");
 		assert.equal(res.ok, false);
 		assert.match(res.error, /glm\/glm-5\.3/);
 		assert.match(res.error, /no longer available/);
@@ -767,7 +768,7 @@ test("ensureHost refuses to launch when the view's defaultModel is provably unav
 	}
 });
 
-test("ensureHost launches normally when the defaultModel matches the available list", () => {
+test("ensureHost launches normally when the defaultModel matches the available list", async () => {
 	const root = freshRoot();
 	try {
 		const meta = createView(root, { id: "v1", name: "valid-model", cwd: "/r", defaultModel: "zai-coding-cn/glm-5.3" });
@@ -780,7 +781,7 @@ test("ensureHost launches normally when the defaultModel matches the available l
 				return { pid: process.pid, configPath: config.configPath };
 			},
 		});
-		const res = svc.ensureHost("v1");
+		const res = await svc.ensureHost("v1");
 		assert.equal(res.ok, true);
 		assert.equal(res.started, true);
 		assert.equal(spawns.length, 1);
@@ -790,7 +791,7 @@ test("ensureHost launches normally when the defaultModel matches the available l
 	}
 });
 
-test("ensureHost skips the stale-model guard when defaultModel is null even with an injected list", () => {
+test("ensureHost skips the stale-model guard when defaultModel is null even with an injected list", async () => {
 	const root = freshRoot();
 	try {
 		const meta = createView(root, { id: "v1", name: "null-model", cwd: "/r", defaultModel: null });
@@ -803,7 +804,7 @@ test("ensureHost skips the stale-model guard when defaultModel is null even with
 				return { pid: process.pid, configPath: config.configPath };
 			},
 		});
-		const res = svc.ensureHost("v1");
+		const res = await svc.ensureHost("v1");
 		assert.equal(res.ok, true);
 		assert.equal(res.started, true);
 		assert.equal(spawns.length, 1, "null defaultModel imposes no constraint");
@@ -813,7 +814,7 @@ test("ensureHost skips the stale-model guard when defaultModel is null even with
 	}
 });
 
-test("missing availableModels injection skips the stale-model guard (backward compatible)", () => {
+test("missing availableModels injection skips the stale-model guard (backward compatible)", async () => {
 	const root = freshRoot();
 	try {
 		const meta = createView(root, { id: "v1", name: "no-injection", cwd: "/r", defaultModel: "glm/glm-5.3" });
@@ -825,7 +826,7 @@ test("missing availableModels injection skips the stale-model guard (backward co
 				return { pid: process.pid, configPath: config.configPath };
 			},
 		});
-		const res = svc.ensureHost("v1");
+		const res = await svc.ensureHost("v1");
 		assert.equal(res.ok, true);
 		assert.equal(res.started, true);
 		assert.equal(spawns.length, 1, "without a list the guard conservatively allows");
@@ -870,7 +871,7 @@ test("adopt path marks an abandoned claim failed without spawning when the model
 	}
 });
 
-test("ensureHost leaves model/thinking to session restore when the session can provide them (issue #286)", () => {
+test("ensureHost leaves model/thinking to session restore when the session can provide them (issue #286)", async () => {
 	const root = freshRoot();
 	try {
 		const meta = createView(root, { id: "v1", name: "restorable", cwd: "/r", defaultModel: "prov/default-a", defaultThinking: "high" });
@@ -888,7 +889,7 @@ test("ensureHost leaves model/thinking to session restore when the session can p
 				return { pid: process.pid, configPath: config.configPath };
 			},
 		});
-		const res = svc.ensureHost("v1");
+		const res = await svc.ensureHost("v1");
 		assert.equal(res.ok, true);
 		assert.equal(spawns.length, 1);
 		assert.equal(spawns[0].config.model, null, "model flag must be omitted so pi restores it");
@@ -900,7 +901,7 @@ test("ensureHost leaves model/thinking to session restore when the session can p
 	}
 });
 
-test("ensureHost launches a restorable session even when defaultModel is provably unavailable (issue #286 + #90)", () => {
+test("ensureHost launches a restorable session even when defaultModel is provably unavailable (issue #286 + #90)", async () => {
 	const root = freshRoot();
 	try {
 		const meta = createView(root, { id: "v1", name: "stale-but-restorable", cwd: "/r", defaultModel: "glm/glm-5.3", defaultThinking: "high" });
@@ -918,7 +919,7 @@ test("ensureHost launches a restorable session even when defaultModel is provabl
 				return { pid: process.pid, configPath: config.configPath };
 			},
 		});
-		const res = svc.ensureHost("v1");
+		const res = await svc.ensureHost("v1");
 		assert.equal(res.ok, true, "a dead defaultModel must not block a session that restores its own model");
 		assert.equal(spawns.length, 1);
 		assert.equal(spawns[0].config.model, null);
@@ -927,7 +928,7 @@ test("ensureHost launches a restorable session even when defaultModel is provabl
 	}
 });
 
-test("guard still blocks a dead defaultModel on an unrestorable session (issue #90 unchanged, issue #286)", () => {
+test("guard still blocks a dead defaultModel on an unrestorable session (issue #90 unchanged, issue #286)", async () => {
 	const root = freshRoot();
 	try {
 		const meta = createView(root, { id: "v1", name: "stale-empty", cwd: "/r", defaultModel: "glm/glm-5.3" });
@@ -943,7 +944,7 @@ test("guard still blocks a dead defaultModel on an unrestorable session (issue #
 				return { pid: process.pid, configPath: config.configPath };
 			},
 		});
-		const res = svc.ensureHost("v1");
+		const res = await svc.ensureHost("v1");
 		assert.equal(res.ok, false);
 		assert.match(res.error, /no longer available/);
 		assert.equal(spawns.length, 0, "user-only session cannot restore a model — the explicit dead one must not spawn");
