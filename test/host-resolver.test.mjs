@@ -268,6 +268,50 @@ test("resolver retries a transient replacement block and attaches when it clears
 	}
 });
 
+test("resolver drops a stale refusal reason once another launcher's claim appears (issue #301 CR r1)", async () => {
+	const root = freshRoot();
+	const oldRetry = process.env.AGENT_BOARD_TEST_HOST_REPLACE_RETRY_MS;
+	try {
+		process.env.AGENT_BOARD_TEST_HOST_REPLACE_RETRY_MS = "1";
+		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeFileSync(meta.sessionFile, "");
+		hostRecord(root, "v1", {
+			instanceId: "i1",
+			state: "exited",
+			runnerPid: 4242,
+			runnerIdentity: { pid: 4242, startToken: "old" },
+			runnerSpawnedAt: Date.now() - 60_000,
+			childPid: null,
+			endedAt: Date.now(),
+			exitCode: 0,
+		});
+		let claimedByOther = false;
+		const probe = scriptProbe(["starting"]);
+		const spawns = [];
+		const svc = resolverService(root, {
+			...healServiceOverrides(probe, spawns),
+			// The first sleep runs right after the refusal: simulate a second
+			// dashboard claiming the view, which makes the refusal stale.
+			sleepFn: async () => {
+				if (!claimedByOther) {
+					claimedByOther = true;
+					hostRecord(root, "v1", { instanceId: "other", state: "starting", claimPid: process.pid, claimAt: Date.now() });
+				}
+			},
+			observeProcess: async () => "unknown",
+			probeProcessIdentity: async () => null,
+		});
+		const result = await svc.resolveAttachTarget("v1", { timeoutMs: 200 });
+		assert.equal(result.kind, "pending");
+		assert.equal(result.reason, "host start timed out", "a stale refusal must not label an unrelated timeout");
+		assert.equal(spawns.length, 0);
+	} finally {
+		if (oldRetry === undefined) delete process.env.AGENT_BOARD_TEST_HOST_REPLACE_RETRY_MS;
+		else process.env.AGENT_BOARD_TEST_HOST_REPLACE_RETRY_MS = oldRetry;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("resolver keeps pending for a legacy alive host whose runner pid is still alive (issue #87 conservative path)", async () => {
 	const root = freshRoot();
 	try {

@@ -429,19 +429,24 @@ export function createService(opts) {
 		if (existing) {
 			const observation = await observeHostForReplace(existing, meta.sessionFile);
 			if (!canReplaceHost(observation)) return blockedLaunchResult(existing, observation);
-			appendDiagnosticOnce(root, meta.id, {
-				source: "service",
-				level: "info",
-				code: "host_replace_released",
-				message: "Stale terminal host record released for replacement",
-				details: {
-					oldInstanceId: existing.instanceId ?? null,
-					runnerPid: existing.runnerPid ?? null,
-					childPid: existing.childPid ?? null,
-					runnerObservation: observation.runnerObservation,
-					childObservation: observation.childObservation,
-				},
-			}, { match: ["oldInstanceId"] });
+			// Best effort, exactly like the refusal path: a diagnostics write failure
+			// (unwritable tail, full disk) must never turn a replacement into a
+			// rejected attach promise.
+			try {
+				appendDiagnosticOnce(root, meta.id, {
+					source: "service",
+					level: "info",
+					code: "host_replace_released",
+					message: "Stale terminal host record released for replacement",
+					details: {
+						oldInstanceId: existing.instanceId ?? null,
+						runnerPid: existing.runnerPid ?? null,
+						childPid: existing.childPid ?? null,
+						runnerObservation: observation.runnerObservation,
+						childObservation: observation.childObservation,
+					},
+				}, { match: ["oldInstanceId"] });
+			} catch { /* best effort: the decision stands without the trail */ }
 		}
 
 		// Fail fast BEFORE claiming (issue #90): no claim record, no config file,
@@ -1655,8 +1660,12 @@ export function createService(opts) {
 			const row = loadRow(root, viewId);
 			if (!row) return { kind: "missing" };
 			const sessionFile = row.meta.sessionFile;
-			if (nowImpl() >= deadline) return pending(sessionFile, lastBlock?.reason ?? "host start timed out");
 			const host = row.host ?? null;
+			// A refusal describes a TERMINAL record. Once another launcher's claim is
+			// visible, the reason is stale and must not label a later, unrelated
+			// timeout (CR r1).
+			if (row.hostActive) lastBlock = null;
+			if (nowImpl() >= deadline) return pending(sessionFile, lastBlock?.reason ?? "host start timed out");
 
 			// No active claim: live JSON runners pend (no parallel PTY child); otherwise
 			// ensure exactly one host start per invocation, then fall through to probing.
