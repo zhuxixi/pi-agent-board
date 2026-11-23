@@ -267,7 +267,9 @@ export class DashboardComponent implements Component {
 		if (!target) return;
 		this.selectedId = target;
 		this.selectedSection = null;
-		this.prewarmSelected();
+		// Defer like every other prewarm entry point: a burst of `h` presses must
+		// spawn at most one host, for the resting selection (prewarm-schedule.mjs).
+		this.prewarmScheduler.schedule();
 	}
 
 	private selectedRow(): Row | null {
@@ -1118,6 +1120,9 @@ export class DashboardComponent implements Component {
 				return;
 			}
 			this.notice(holding ? "Resumed — needs instructions" : "On hold", "info");
+			// The command is async IPC; a j/k (or a new peek target) during the
+			// round-trip moved the cursor already — never override that newer choice.
+			if (this.selectedId !== row.meta.id) return;
 			this.refresh();
 			this.applyPositionAnchor(anchor);
 		});
