@@ -30,7 +30,7 @@ import {
 import { createPrewarmScheduler } from "../core/prewarm-schedule.mjs";
 import { planDashboardAttach, planPrewarm, replyNotice } from "./dashboard-decisions.mjs";
 import { ensureCwdStatsSeeded, rankedCwdCandidates, recordCwdLaunch } from "../core/cwd-stats.mjs";
-import { filterRows, groupRowsByFolder, rowState, stateGlyph } from "../core/rows.mjs";
+import { filterRows, groupRowsByFolder, neighborAfterRemoval, rowState, stateGlyph } from "../core/rows.mjs";
 import { loadSessionView } from "../core/session-view.mjs";
 import { GROUP_LABELS } from "../core/types.mjs";
 import { buildEvidencePanel } from "./dashboard-evidence.mjs";
@@ -41,6 +41,7 @@ import type { createService } from "../runtime/service.mjs";
 type Service = ReturnType<typeof createService>;
 type SectionState = keyof typeof GROUP_LABELS;
 type ListTarget = { kind: "section"; state: SectionState } | { kind: "row"; state: SectionState; id: string };
+type PositionAnchor = { neighborId: string | null; anchorIndex: number };
 type PtyIssue = {
 	id: string;
 	title: string;
@@ -238,6 +239,35 @@ export class DashboardComponent implements Component {
 		if (this.orderedIds.length === 0 && this.mode === "select") this.mode = "list";
 		if (!this.selectedId) this.prewarmScheduler.cancel();
 		else if (this.selectedId !== previousSelected) this.prewarmScheduler.schedule();
+	}
+
+	/**
+	 * Issue #254: the slot a demote command is about to vacate. Capture it BEFORE
+	 * the state command runs — afterwards the row has already moved and the old
+	 * position is only recoverable from the pre-mutation order.
+	 */
+	private capturePositionAnchor(id: string, removedIds: string[] = [id]): PositionAnchor | null {
+		return neighborAfterRemoval(this.orderedIds, removedIds, id);
+	}
+
+	/**
+	 * Issue #254: apply a captured anchor after refresh(). Prefer the row that
+	 * filled the slot, else clamp to the old index. Never assign an id that is no
+	 * longer visible — refresh() would read it as "selected row vanished" and jump
+	 * to the top of the list.
+	 */
+	private applyPositionAnchor(anchor: PositionAnchor | null): void {
+		if (!anchor) return;
+		const last = this.orderedIds.length - 1;
+		if (last < 0) return;
+		const neighbor = anchor.neighborId;
+		const target = neighbor && this.orderedIds.includes(neighbor)
+			? neighbor
+			: this.orderedIds[Math.min(anchor.anchorIndex, last)];
+		if (!target) return;
+		this.selectedId = target;
+		this.selectedSection = null;
+		this.prewarmSelected();
 	}
 
 	private selectedRow(): Row | null {
@@ -1078,11 +1108,18 @@ export class DashboardComponent implements Component {
 		if (!row) return;
 		const holding = row.state?.semanticState === "holding";
 		if (!holding && isAgentBusy(row)) return this.notice("Wait for the active run to finish before placing on hold", "warn");
+		// Issue #254: remember the slot before the state command moves the row.
+		const anchor = this.capturePositionAnchor(row.meta.id);
 		const run = holding ? this.deps.service.clearHoldView(row.meta.id) : this.deps.service.holdView(row.meta.id);
 		void Promise.resolve(run).then((res) => {
-			if (!res.ok) this.notice(res.error ?? (holding ? "Resume failed" : "Hold failed"), "error");
-			else this.notice(holding ? "Resumed — needs instructions" : "On hold", "info");
+			if (!res.ok) {
+				this.notice(res.error ?? (holding ? "Resume failed" : "Hold failed"), "error");
+				this.refresh();
+				return;
+			}
+			this.notice(holding ? "Resumed — needs instructions" : "On hold", "info");
 			this.refresh();
+			this.applyPositionAnchor(anchor);
 		});
 	}
 
