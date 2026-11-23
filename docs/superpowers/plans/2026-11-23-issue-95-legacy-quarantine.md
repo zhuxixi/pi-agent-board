@@ -193,9 +193,13 @@ const TARGET = "test/attach-frame-witness.integration.test.mjs";
 const CASE_NAME = "internal marker failure revokes capability via onUnavailable";
 
 function runTargetFile() {
+	// An inherited NODE_TEST_CONTEXT makes this nested `node --test` skip files
+	// as a recursive run; scrub it so the guard measures the real target file.
+	const { NODE_TEST_CONTEXT, ...parentEnv } = process.env;
 	return new Promise((resolve, reject) => {
 		const child = spawn(process.execPath, ["--test", "--test-reporter=tap", TARGET], {
 			cwd: PACKAGE_ROOT,
+			env: parentEnv,
 			stdio: ["ignore", "pipe", "pipe"],
 		});
 		let stdout = "";
@@ -211,14 +215,17 @@ test("A7: TAP runs owned and skips only legacy with the issue reason", { timeout
 	const result = await runTargetFile();
 	assert.equal(result.signal, null, result.stderr);
 	assert.equal(result.code, 0, `target file failed\n${result.stdout}\n${result.stderr}`);
-	const rows = result.stdout.split(/\r?\n/).filter((line) => line.includes(CASE_NAME));
+	const rows = result.stdout
+		.split(/\r?\n/)
+		// Exclude `# Subtest:` headers, which carry the same case name as result rows.
+		.filter((line) => /^(?:not )?ok \d+ - /.test(line) && line.includes(CASE_NAME));
 	const owned = rows.find((line) => line.includes("(owned main)"));
 	const legacy = rows.find((line) => line.includes("(legacy main)"));
 	assert.ok(owned, `owned TAP row missing\n${result.stdout}`);
 	assert.match(owned, /^ok \d+ - /);
 	assert.doesNotMatch(owned, /# SKIP/i);
 	assert.ok(legacy, `legacy TAP row missing\n${result.stdout}`);
-	assert.match(legacy, /^ok \d+ - .*# SKIP issue #95/);
+	assert.match(legacy, /^ok \d+ - .*# SKIP issue \\?#95/);
 });
 ```
 
@@ -292,6 +299,10 @@ Expected: exit 0, including typecheck, opt-in perf gate, full tests, c8 coverage
 git add test/attach-frame-witness.integration.test.mjs test/frame-witness-quarantine.test.mjs test/frame-witness-quarantine-tap.test.mjs
 git commit -m "test: quarantine the legacy marker-failure case (issue #95)"
 ```
+
+## Implementation Amendments
+
+Task 2 exposed three factual defects in the original A7 sample before the target edit. The controller approved all three without changing scope: scrub inherited `NODE_TEST_CONTEXT`, parse only TAP result rows rather than `# Subtest:` headers, and tolerate Node's escaped `\#95` skip reason. The sample above now matches the tested implementation.
 
 ## Acceptance Traceability
 
