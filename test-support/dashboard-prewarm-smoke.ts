@@ -49,62 +49,73 @@ function makeDashboard(rows: any[], { prewarmResult = { ok: true }, doneCapture 
 	return { dash, getPrewarmCalls: () => prewarmCalls };
 }
 
-// S1: starting host claim — prewarm is a no-op service-wise but marks prewarmedId.
-{
-	const { dash, getPrewarmCalls } = makeDashboard([fakeRow("starting1", { hostActive: true })]);
-	dash.selectedId = "starting1";
-	dash.mode = "list";
-	dash.prewarmSelected();
-	dash.prewarmSelected();
-	results.startingHostPrewarmCalls = getPrewarmCalls();
-	results.startingHostMarked = dash.prewarmedId === "starting1";
+async function main(): Promise<void> {
+	// S1: starting host claim — prewarm is a no-op service-wise but marks prewarmedId.
+	{
+		const { dash, getPrewarmCalls } = makeDashboard([fakeRow("starting1", { hostActive: true })]);
+		dash.selectedId = "starting1";
+		dash.mode = "list";
+		dash.prewarmSelected();
+		dash.prewarmSelected();
+		results.startingHostPrewarmCalls = getPrewarmCalls();
+		results.startingHostMarked = dash.prewarmedId === "starting1";
+	}
+
+	// S2: idle row — one ok prewarm marks; re-entry is idempotent; ok:false never marks.
+	{
+		const { dash, getPrewarmCalls } = makeDashboard([fakeRow("idle1")], { prewarmResult: { ok: true } });
+		dash.selectedId = "idle1";
+		dash.mode = "list";
+		dash.prewarmSelected();
+		dash.prewarmSelected();
+		results.idlePrewarmCalls = getPrewarmCalls();
+		// The service call is async (issue #301): let the promise settle before
+		// reading the mark. The in-flight guard is what keeps the count at 1.
+		await new Promise((resolve) => setImmediate(resolve));
+		results.idleMarked = dash.prewarmedId === "idle1";
+	}
+	{
+		const { dash, getPrewarmCalls } = makeDashboard([fakeRow("idle2")], { prewarmResult: { ok: false, error: "PTY unavailable" } });
+		dash.selectedId = "idle2";
+		dash.mode = "list";
+		dash.prewarmSelected();
+		results.idleFailPrewarmCalls = getPrewarmCalls();
+		await new Promise((resolve) => setImmediate(resolve));
+		results.idleFailMarked = dash.prewarmedId === "idle2";
+	}
+
+	// S3: hostActive busy row attaches directly — no confirm prompt, stopFirst:false.
+	{
+		const done: any[] = [];
+		const { dash } = makeDashboard(
+			[fakeRow("hosted1", { hostActive: true, alive: true, semanticState: "working" })],
+			{ doneCapture: done },
+		);
+		dash.selectedId = "hosted1";
+		dash.mode = "list";
+		dash.requestAttach(dash.selectedRow());
+		results.hostActiveAttachDirect = done.length === 1 && done[0].stopFirst === false;
+		results.hostActiveAttachModeConfirm = dash.mode === "confirm";
+	}
+
+	// S4: busy non-host row goes through the stopFirst confirm; done not called yet.
+	{
+		const done: any[] = [];
+		const { dash } = makeDashboard(
+			[fakeRow("busy1", { alive: true, semanticState: "working" })],
+			{ doneCapture: done },
+		);
+		dash.selectedId = "busy1";
+		dash.mode = "list";
+		dash.requestAttach(dash.selectedRow());
+		results.busyAttachDoneCalled = done.length > 0;
+		results.busyAttachModeConfirm = dash.mode === "confirm";
+	}
+	// Issue #301: prewarmHost is async now; flush until the pending promise
+	// settles (one microtask turn is not enough) before serializing.
+	await new Promise((resolve) => setImmediate(resolve));
+	await new Promise((resolve) => setImmediate(resolve));
+	process.stdout.write(JSON.stringify({ ok: true, ...results }));
 }
 
-// S2: idle row — one ok prewarm marks; re-entry is idempotent; ok:false never marks.
-{
-	const { dash, getPrewarmCalls } = makeDashboard([fakeRow("idle1")], { prewarmResult: { ok: true } });
-	dash.selectedId = "idle1";
-	dash.mode = "list";
-	dash.prewarmSelected();
-	dash.prewarmSelected();
-	results.idlePrewarmCalls = getPrewarmCalls();
-	results.idleMarked = dash.prewarmedId === "idle1";
-}
-{
-	const { dash, getPrewarmCalls } = makeDashboard([fakeRow("idle2")], { prewarmResult: { ok: false, error: "PTY unavailable" } });
-	dash.selectedId = "idle2";
-	dash.mode = "list";
-	dash.prewarmSelected();
-	results.idleFailPrewarmCalls = getPrewarmCalls();
-	results.idleFailMarked = dash.prewarmedId === "idle2";
-}
-
-// S3: hostActive busy row attaches directly — no confirm prompt, stopFirst:false.
-{
-	const done: any[] = [];
-	const { dash } = makeDashboard(
-		[fakeRow("hosted1", { hostActive: true, alive: true, semanticState: "working" })],
-		{ doneCapture: done },
-	);
-	dash.selectedId = "hosted1";
-	dash.mode = "list";
-	dash.requestAttach(dash.selectedRow());
-	results.hostActiveAttachDirect = done.length === 1 && done[0].stopFirst === false;
-	results.hostActiveAttachModeConfirm = dash.mode === "confirm";
-}
-
-// S4: busy non-host row goes through the stopFirst confirm; done not called yet.
-{
-	const done: any[] = [];
-	const { dash } = makeDashboard(
-		[fakeRow("busy1", { alive: true, semanticState: "working" })],
-		{ doneCapture: done },
-	);
-	dash.selectedId = "busy1";
-	dash.mode = "list";
-	dash.requestAttach(dash.selectedRow());
-	results.busyAttachDoneCalled = done.length > 0;
-	results.busyAttachModeConfirm = dash.mode === "confirm";
-}
-
-process.stdout.write(JSON.stringify({ ok: true, ...results }));
+void main();
