@@ -3,6 +3,7 @@
 Drafted: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-11-23T22:52:00+08:00
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-11-23T23:07:00+08:00 (round 1: R1-G1, R1-G2, R1-D1..D6)
 Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-11-23T23:16:00+08:00 (round 2: R2-D1..D6)
+Revised: deepseek/deepseek-flash (selected) · deepseek/deepseek-flash (physical) @ 2026-11-24T00:05:00+08:00 (implementation ruling: `lastRunnerPid` forensic field for the scenario cleanup backstop)
 Issue: https://github.com/zhuxixi/pi-agent-board/issues/301
 Baseline: `pi-agent-board` 0.13.1 @ `b003dd1`
 Research: issue workspace `~/.github-issue-driven/zhuxixi/pi-agent-board/issue-301/research/repro-and-code-path.md`
@@ -133,8 +134,14 @@ The resolver keeps the structured `blocked` payload for its final reason (§4.5)
 - Consequence for `store.loadRow()`: `Object.hasOwn(host, "runnerPid")` stays `true` (the property is
   present, just `null`), so the legacy mirror fallback still applies to old records and never to new ones.
   Terminal records are inactive for `hostAlive` / `hostActive` and for `screen-log-gc` regardless of pid.
-- No other consumer reads a terminal record's `runnerPid` (verified: `store.mjs` liveness projection,
-  `screen-log-gc.mjs:162`, `warm-host-sweeper.mjs`); the launch pid stays in the `launch_host` diagnostic.
+- **Forensic field (post-review ruling).** Production code reads a terminal record's `runnerPid` nowhere
+  (`store.mjs` liveness projection, `screen-log-gc.mjs:162`, `warm-host-sweeper.mjs`), but the attach
+  scenario harness does: `test-support/attach-entry-22-scenario.ts:774` and
+  `test-support/attach-ready-entry-scenario.ts:643` use the pid as a cleanup backstop after the host
+  exits. To keep that backstop without re-poisoning the gate, the terminal write records
+  `lastRunnerPid` (the pid it just dropped) and the harness reads `lastRunnerPid ?? runnerPid`. The
+  replace gate never reads `lastRunnerPid`; `HostStatus` documents it as terminal-only.
+
 
 ### 4.4 Pure formatter (new, `src/core/host-coordination.mjs`)
 

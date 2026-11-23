@@ -1093,6 +1093,9 @@ async function ownedMain(config) {
 				childPid: null,
 				childIdentity: null,
 				childSpawnedAt: null,
+				// Forensic only: the replace gate never reads this (issue #301), and
+				// scenario cleanup uses it as a liveness backstop after the pids clear.
+				lastRunnerPid: cur.runnerPid ?? null,
 				readyAt: null,
 				stopRequestedAt: null,
 				stopReason: reason,

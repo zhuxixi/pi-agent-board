@@ -633,14 +633,14 @@ function createEntryCleanup(): EntryCleanup {
  *  termination evidence; forced SIGKILL is recorded where a known pid was
  *  still alive. */
 async function killOwnedEntryProcesses(root: string, viewId: string, cleanup: EntryCleanup): Promise<void> {
-	let host: { childPid?: number | null; runnerPid?: number | null; state?: string } | null = null;
+	let host: { childPid?: number | null; runnerPid?: number | null; lastRunnerPid?: number | null; state?: string } | null = null;
 	try {
 		host = readHost(root, viewId);
 	} catch {
 		host = null;
 	}
 	cleanup.childPid = typeof host?.childPid === "number" && host.childPid > 0 ? host.childPid : null;
-	cleanup.runnerPid = typeof host?.runnerPid === "number" && host.runnerPid > 0 ? host.runnerPid : null;
+	cleanup.runnerPid = typeof (host?.lastRunnerPid ?? host?.runnerPid) === "number" && (host?.lastRunnerPid ?? host?.runnerPid) > 0 ? (host?.lastRunnerPid ?? host?.runnerPid) : null;
 	cleanup.childKnownAliveBeforeKill = cleanup.childPid === null ? null : isAlive(cleanup.childPid);
 	cleanup.runnerKnownAliveBeforeKill = cleanup.runnerPid === null ? null : isAlive(cleanup.runnerPid);
 	if (cleanup.childPid !== null && cleanup.childKnownAliveBeforeKill) {
@@ -806,7 +806,7 @@ export async function runEntryTrial(options: { artifactDir: string }): Promise<R
 		viewId = `entry-${process.pid}-${Date.now()}`;
 		const meta = createView(root, { id: viewId, name: "entry-prewarm", cwd: process.cwd() });
 		writeFileSync(meta.sessionFile, "");
-		const ensured = service.ensureHost(viewId);
+		const ensured = await service.ensureHost(viewId);
 		if (!ensured.ok) throw new Error(`ensureHost failed: ${ensured.error ?? "unknown"}`);
 		await waitFor(() => {
 			const host = readHost(root!, viewId!);
