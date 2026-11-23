@@ -1096,13 +1096,16 @@ export class DashboardComponent implements Component {
 				// Issue #254: capture before the state command; apply only on success.
 				const anchor = this.capturePositionAnchor(row.meta.id);
 				void this.markCompleted(row).then((res) => {
+					// Read the cursor BEFORE refresh(): a j/k during the round-trip moved it
+					// already, and refresh() re-anchors selectedId off the demoted row in the
+					// active-filter case — so the comparison must see the pre-refresh value.
+					// Peek mode acts on peekId, so a peek repeat is "moved" and skips the
+					// anchor but must still refresh.
+					const moved = this.selectedId !== row.meta.id;
 					if (!res.ok) this.notice(res.error ?? "Mark done failed", "error");
 					else this.notice("Marked done", "info");
-					// The command is async IPC; a j/k during the round-trip moved the
-					// cursor already — never override that newer choice.
-					if (res.ok && this.selectedId !== row.meta.id) return;
 					this.refresh();
-					if (res.ok) this.applyPositionAnchor(anchor);
+					if (res.ok && !moved) this.applyPositionAnchor(anchor);
 				});
 			},
 		};
@@ -1128,9 +1131,12 @@ export class DashboardComponent implements Component {
 			this.notice(holding ? "Resumed — needs instructions" : "On hold", "info");
 			// The command is async IPC; a j/k (or a new peek target) during the
 			// round-trip moved the cursor already — never override that newer choice.
-			if (this.selectedId !== row.meta.id) return;
+			// Read it BEFORE refresh(): refresh() re-anchors selectedId off the demoted
+			// row in the active-filter case. Peek mode acts on peekId, so a peek repeat
+			// is "moved" and skips the anchor but must still refresh.
+			const moved = this.selectedId !== row.meta.id;
 			this.refresh();
-			this.applyPositionAnchor(anchor);
+			if (!moved) this.applyPositionAnchor(anchor);
 		});
 	}
 
@@ -1157,12 +1163,14 @@ export class DashboardComponent implements Component {
 				// moves it, and the anchor must not override that newer choice.
 				const cursorBefore = this.selectedId;
 				void Promise.resolve(this.deps.service.markCompletedMany?.(doneIds) ?? { ok: true, completed: 0, skipped: doneIds.length, completedIds: [] }).then((res) => {
+					// Read the cursor BEFORE refresh(): refresh() re-anchors selectedId off
+					// a demoted row in the active-filter case.
+					const moved = this.selectedId !== cursorBefore;
 					if (!res.ok) this.notice("Mark done failed", "error");
 					else this.notice(`Moved ${res.completed} to Done${res.skipped ? ` · skipped ${res.skipped}` : ""}`, "info");
-					if (res.ok && this.selectedId !== cursorBefore) return;
 					this.refresh();
 					// A batch that completed nothing moved nothing — keep the cursor.
-					if (res.ok && res.completed > 0) this.applyPositionAnchor(anchor);
+					if (res.ok && res.completed > 0 && !moved) this.applyPositionAnchor(anchor);
 				});
 			},
 		};

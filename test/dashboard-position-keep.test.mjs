@@ -51,6 +51,15 @@ test("A10: peek keeps its own target while the list cursor moves to the slot", (
 	assert.equal(report.holdPeek.selectedId, "v4");
 });
 
+test("A10b: a second demote from peek still refreshes the board grouping (PR #303 CR round 1)", () => {
+	assert.equal(report.peekRepeat.selectedId, "v4");
+	assert.equal(report.peekRepeat.peekId, "v3");
+	assert.ok(
+		report.peekRepeat.orderedIds.indexOf("v3") < report.peekRepeat.orderedIds.indexOf("v4"),
+		"the unheld row must be back in front of v4 — orderedIds never refreshed",
+	);
+});
+
 test("A11: background-driven transitions still follow the row", () => {
 	assert.equal(report.backgroundFollow.selectedId, "v3", "follow is the established behavior outside the demote commands");
 });

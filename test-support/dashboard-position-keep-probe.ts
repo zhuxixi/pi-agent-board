@@ -174,6 +174,22 @@ const report: Record<string, unknown> = {};
 	env.dash.dispose();
 }
 
+// A10b: a second distinct demote from peek must still refresh the board. The
+// guard sees `moved` (the list cursor sits on v4, peek still targets v3) and
+// correctly skips the anchor, but refresh() has to run so the grouping is not
+// left stale until the next poll tick.
+{
+	const env = await makeEnv(5);
+	select(env.dash, "v3");
+	env.dash.handleInput(" "); // space opens peek on v3
+	env.dash.handleInput("h"); // hold v3 from peek — the list cursor moves to v4
+	await waitFor(() => priv(env.dash).selectedId === "v4");
+	env.dash.handleInput("h"); // unhold v3 from peek — guard sees moved, refresh must run
+	await waitFor(() => priv(env.dash).orderedIds.indexOf("v3") < priv(env.dash).orderedIds.indexOf("v4"));
+	report.peekRepeat = cursor(env.dash, { peekId: priv(env.dash).peekId });
+	env.dash.dispose();
+}
+
 // A11: a background transition (not driven by the dashboard) still follows.
 {
 	const env = await makeEnv(5);
