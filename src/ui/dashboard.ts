@@ -1098,6 +1098,9 @@ export class DashboardComponent implements Component {
 				void this.markCompleted(row).then((res) => {
 					if (!res.ok) this.notice(res.error ?? "Mark done failed", "error");
 					else this.notice("Marked done", "info");
+					// The command is async IPC; a j/k during the round-trip moved the
+					// cursor already — never override that newer choice.
+					if (res.ok && this.selectedId !== row.meta.id) return;
 					this.refresh();
 					if (res.ok) this.applyPositionAnchor(anchor);
 				});
@@ -1150,9 +1153,13 @@ export class DashboardComponent implements Component {
 				const anchor = Number.isFinite(topmost)
 					? this.capturePositionAnchor(this.orderedIds[topmost], doneIds)
 					: null;
+				// The cursor the batch was confirmed from; a j/k during the round-trip
+				// moves it, and the anchor must not override that newer choice.
+				const cursorBefore = this.selectedId;
 				void Promise.resolve(this.deps.service.markCompletedMany?.(doneIds) ?? { ok: true, completed: 0, skipped: doneIds.length, completedIds: [] }).then((res) => {
 					if (!res.ok) this.notice("Mark done failed", "error");
 					else this.notice(`Moved ${res.completed} to Done${res.skipped ? ` · skipped ${res.skipped}` : ""}`, "info");
+					if (res.ok && this.selectedId !== cursorBefore) return;
 					this.refresh();
 					// A batch that completed nothing moved nothing — keep the cursor.
 					if (res.ok && res.completed > 0) this.applyPositionAnchor(anchor);
