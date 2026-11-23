@@ -73,6 +73,10 @@ export const HOST_RECOVERY_GRACE_MS = 5_000;
 const HOST_RECOVERY_POLL_MS = 150;
 /** Creation-time tolerance when a host role can only be corroborated by process creation time (issue #217). */
 export const HOST_IDENTITY_CREATION_TOLERANCE_MS = 5_000;
+/** Spacing between blocked-replacement retries inside one attach resolution (issue #301). */
+export const HOST_REPLACE_RETRY_MS = 1_000;
+/** Extra ensure attempts after a replacement refusal before the resolver reports the block (issue #301). */
+export const HOST_REPLACE_RETRY_LIMIT = 2;
 /** Default wall-clock budget for one attach resolution (issue #70 Task 12). */
 const ATTACH_RESOLVE_TIMEOUT_MS = 120_000;
 /**
@@ -113,6 +117,11 @@ export function resolveHostRecoveryPollMs(env = process.env) {
 /** @param {NodeJS.ProcessEnv} [env] @returns {number} */
 export function resolveIdentityCreationToleranceMs(env = process.env) {
 	return resolveTestMs(env, "AGENT_BOARD_TEST_IDENTITY_CREATION_TOLERANCE_MS", HOST_IDENTITY_CREATION_TOLERANCE_MS);
+}
+
+/** @param {NodeJS.ProcessEnv} [env] @returns {number} */
+export function resolveHostReplaceRetryMs(env = process.env) {
+	return resolveTestMs(env, "AGENT_BOARD_TEST_HOST_REPLACE_RETRY_MS", HOST_REPLACE_RETRY_MS);
 }
 
 /** @param {NodeJS.ProcessEnv} [env] @returns {number} */
@@ -1632,13 +1641,21 @@ export function createService(opts) {
 		// a successful adoption flips runnerSpawnedAt and the conditions stop
 		// holding), and this timestamp rate-limits post-adopt re-ensures.
 		let lastAdoptAt = 0;
+		// Replacement refusal (issue #301): the ensure returned a structured
+		// `blocked` payload instead of a launch. The block can be transient (an old
+		// runner finishing its own teardown is `owned` for a few hundred ms), so the
+		// resolver retries a bounded number of times before surfacing the blocking
+		// pid. Without this the caller would sleep out the whole budget and report
+		// the generic timeout — the exact silent failure this issue is about.
+		let lastBlock = null;
+		let blockedRetries = 0;
 		/** @param {string} reason @param {string} sessionFile */
 		const pending = (sessionFile, reason) => ({ kind: "pending", sessionFile, reason });
 		for (;;) {
 			const row = loadRow(root, viewId);
 			if (!row) return { kind: "missing" };
 			const sessionFile = row.meta.sessionFile;
-			if (nowImpl() >= deadline) return pending(sessionFile, "host start timed out");
+			if (nowImpl() >= deadline) return pending(sessionFile, lastBlock?.reason ?? "host start timed out");
 			const host = row.host ?? null;
 
 			// No active claim: live JSON runners pend (no parallel PTY child); otherwise
@@ -1669,6 +1686,25 @@ export function createService(opts) {
 						}
 						return pending(sessionFile, res.error ?? "host ensure failed");
 					}
+					if (res.blocked) {
+						lastBlock = res.blocked;
+					} else {
+						// A successful start (or any non-refusal, e.g. another launcher's
+						// claim) supersedes the block: the loop's normal branches take over.
+						lastBlock = null;
+					}
+				}
+				if (lastBlock) {
+					// Rate-limited retry through the injected sleep: a block that clears
+					// (the old runner finished its teardown) must heal inside this
+					// invocation, while a persistent one exhausts the budget and hands the
+					// caller the blocking pid instead of a 20 s spinner.
+					if (blockedRetries >= HOST_REPLACE_RETRY_LIMIT) return pending(sessionFile, lastBlock.reason);
+					blockedRetries += 1;
+					if (nowImpl() + resolveHostReplaceRetryMs() >= deadline) return pending(sessionFile, lastBlock.reason);
+					await sleepFnImpl(resolveHostReplaceRetryMs());
+					ensured = false;
+					continue;
 				}
 				await sleepFnImpl(HOST_PROBE_RETRY_MS);
 				continue;

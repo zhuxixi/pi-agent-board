@@ -193,6 +193,81 @@ test("resolver replaces an exited host whose claimPid is still alive (issue #99)
 	}
 });
 
+test("resolver surfaces the blocking pid instead of the generic timeout (issue #301 A6)", async () => {
+	const root = freshRoot();
+	const oldRetry = process.env.AGENT_BOARD_TEST_HOST_REPLACE_RETRY_MS;
+	try {
+		process.env.AGENT_BOARD_TEST_HOST_REPLACE_RETRY_MS = "1";
+		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeFileSync(meta.sessionFile, "");
+		hostRecord(root, "v1", {
+			instanceId: "i1",
+			state: "exited",
+			runnerPid: 4242,
+			runnerIdentity: { pid: 4242, startToken: "old" },
+			runnerSpawnedAt: Date.now() - 60_000,
+			childPid: null,
+			endedAt: Date.now(),
+			exitCode: 0,
+		});
+		const probe = scriptProbe(["missing"]);
+		const spawns = [];
+		const svc = resolverService(root, {
+			...healServiceOverrides(probe, spawns),
+			observeProcess: async () => "unknown",
+			probeProcessIdentity: async () => null,
+		});
+		const result = await svc.resolveAttachTarget("v1", { timeoutMs: 5_000 });
+		assert.equal(result.kind, "pending");
+		assert.match(result.reason, /runner pid 4242/, `expected the blocking pid in the reason: ${JSON.stringify(result)}`);
+		assert.doesNotMatch(result.reason, /host start timed out/);
+		assert.equal(spawns.length, 0);
+	} finally {
+		if (oldRetry === undefined) delete process.env.AGENT_BOARD_TEST_HOST_REPLACE_RETRY_MS;
+		else process.env.AGENT_BOARD_TEST_HOST_REPLACE_RETRY_MS = oldRetry;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("resolver retries a transient replacement block and attaches when it clears (issue #301 A7)", async () => {
+	const root = freshRoot();
+	const oldRetry = process.env.AGENT_BOARD_TEST_HOST_REPLACE_RETRY_MS;
+	try {
+		process.env.AGENT_BOARD_TEST_HOST_REPLACE_RETRY_MS = "1";
+		const meta = createView(root, { id: "v1", name: "a", cwd: "/r" });
+		writeFileSync(meta.sessionFile, "");
+		hostRecord(root, "v1", {
+			instanceId: "i1",
+			state: "exited",
+			runnerPid: 4242,
+			runnerIdentity: { pid: 4242, startToken: "old" },
+			runnerSpawnedAt: Date.now() - 60_000,
+			childPid: null,
+			endedAt: Date.now(),
+			exitCode: 0,
+		});
+		let observations = 0;
+		const probe = scriptProbe(["missing", "ready"]);
+		const spawns = [];
+		const svc = resolverService(root, {
+			...healServiceOverrides(probe, spawns),
+			observeProcess: async () => {
+				observations += 1;
+				return observations === 1 ? "owned" : "foreign";
+			},
+			probeProcessIdentity: async () => null,
+		});
+		const result = await svc.resolveAttachTarget("v1", { timeoutMs: 5_000 });
+		assert.equal(result.kind, "pty", `a transient block must heal: ${JSON.stringify(result)}`);
+		assert.equal(spawns.length, 1);
+		assert.ok(observations <= 4, `expected a bounded retry budget, saw ${observations} observations`);
+	} finally {
+		if (oldRetry === undefined) delete process.env.AGENT_BOARD_TEST_HOST_REPLACE_RETRY_MS;
+		else process.env.AGENT_BOARD_TEST_HOST_REPLACE_RETRY_MS = oldRetry;
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
 test("resolver keeps pending for a legacy alive host whose runner pid is still alive (issue #87 conservative path)", async () => {
 	const root = freshRoot();
 	try {
