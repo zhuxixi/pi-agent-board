@@ -74,6 +74,11 @@ test("A7 (block at the end): the previous row wins when nothing follows", () => 
 	assert.equal(report.batchEnd.selectedId, "v3");
 });
 
+test("A7: the batch anchor follows board order, not selection order", () => {
+	assert.deepEqual(report.batchBoardOrder.doneIds, ["v5", "v2"], "selection order must differ from board order");
+	assert.equal(report.batchBoardOrder.selectedId, "v3", "doneIds[0] (v5) would anchor on v4; board order (v2) anchors on v3");
+});
+
 test("A13: a batch that completed nothing leaves the cursor alone", () => {
 	assert.equal(report.batchAllSkipped.selectedId, "v3");
 });

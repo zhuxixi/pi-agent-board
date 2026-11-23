@@ -237,6 +237,26 @@ const report: Record<string, unknown> = {};
 	env.dash.dispose();
 }
 
+// A7 (selection order differs from board order): the anchor follows the board,
+// not the Set insertion order. Selecting v5 then v2 leaves doneIds as
+// ["v5", "v2"]; anchoring on doneIds[0] would land on v4, board order lands on
+// v3.
+{
+	const env = await makeEnv(5);
+	select(env.dash, "v5");
+	env.dash.handleInput("m");
+	env.dash.handleInput(" ");
+	env.dash.handleInput("k");
+	env.dash.handleInput("k");
+	env.dash.handleInput("k");
+	env.dash.handleInput(" ");
+	env.dash.handleInput("d");
+	env.dash.handleInput("y");
+	await waitFor(() => priv(env.dash).selectedId === "v3");
+	report.batchBoardOrder = cursor(env.dash, { doneIds: ["v5", "v2"] });
+	env.dash.dispose();
+}
+
 // A13: a batch that completed nothing must not move the cursor.
 {
 	const env = await makeEnv(5);
@@ -245,7 +265,9 @@ const report: Record<string, unknown> = {};
 	env.dash.handleInput(" ");
 	env.dash.handleInput("j");
 	env.dash.handleInput(" ");
-	env.service.markCompletedMany = (() => Promise.resolve({ ok: true, completed: 0, skipped: 2, completedIds: [] })) as typeof env.service.markCompletedMany;
+	// Completed 0 but completedIds non-empty: impossible real output, exactly
+	// what a completed/completedIds field swap looks like.
+	env.service.markCompletedMany = (() => Promise.resolve({ ok: true, completed: 0, skipped: 2, completedIds: ["v2", "v3"] })) as typeof env.service.markCompletedMany;
 	env.dash.handleInput("d");
 	env.dash.handleInput("y");
 	await waitFor(() => priv(env.dash).flash !== null);
