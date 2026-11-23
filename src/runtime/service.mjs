@@ -44,6 +44,7 @@ import {
 	loadRow,
 	readHost,
 	readHostPid,
+	writeHostPid,
 	readLaunchPrefs,
 	readPid,
 	readState,
@@ -2862,7 +2863,12 @@ function finalizeDeadLegacyHost(root, viewId, host, probeClassification, now, ac
 		if (cur.state !== "starting" && cur.state !== "alive") return false; // already finalized
 		if (cur.socketPath !== host.socketPath || cur.state !== host.state) return false; // snapshot drifted
 		const finalizedAt = now;
-		writeHost(root, { ...cur, state: "exited", endedAt: finalizedAt, lastSeenAt: finalizedAt, error: "legacy host finalized: runner pid dead" });
+		// Issue #301: the pid was just proven dead — a terminal record must not keep it.
+		// writeHost() only writes host.json, so the host-pid.json mirror needs its own
+		// explicit clear (updateOwnedHost, which normally mirrors, cannot reach a
+		// legacy record: it has no instanceId to fence against).
+		writeHost(root, { ...cur, runnerPid: null, state: "exited", endedAt: finalizedAt, lastSeenAt: finalizedAt, error: "legacy host finalized: runner pid dead" });
+		try { writeHostPid(root, viewId, null); } catch { /* best effort */ }
 	} finally {
 		try { gate.lease.release(); } catch { /* best effort */ }
 	}

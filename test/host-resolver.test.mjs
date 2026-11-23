@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { createService, HOST_START_GRACE_MS } from "../src/runtime/service.mjs";
 import { readDiagnostics } from "../src/core/diagnostics.mjs";
 import { tryAcquireOwnedViewLock } from "../src/core/locks.mjs";
-import { createView, readHost, writeHost, writeHostPid, writePid, writeState } from "../src/core/store.mjs";
+import { createView, readHost, readHostPid, writeHost, writeHostPid, writePid, writeState } from "../src/core/store.mjs";
 import * as P from "../src/core/paths.mjs";
 
 function freshRoot() {
@@ -236,8 +236,32 @@ test("resolver finalizes a provably-dead legacy starting host instead of waiting
 	}
 });
 
-test("resolver leaves a legacy host untouched while the host-start lease is held elsewhere (issue #87 CR r1)", async () => {
+test("legacy finalize clears the host.json pid and the host-pid mirror (issue #301 A9)", async () => {
 	const root = freshRoot();
+	try {
+		createView(root, { id: "v1", name: "a", cwd: "/r" });
+		legacyHostRecord(root, "v1", 999999, { state: "alive" });
+		assert.equal(readHostPid(root, "v1"), 999999, "test setup: legacy mirror carries the dead pid");
+		const probe = scriptProbe(["missing"]);
+		// PTY unavailable forces the session fallback right after the finalize, so the
+		// finalized record stays on disk for inspection instead of being replaced.
+		const svc = resolverService(root, {
+			probeHostFn: probe.fn,
+			sleepFn: instantSleep,
+			ptySupport: () => ({ ok: false, issue: null }),
+		});
+		const result = await svc.resolveAttachTarget("v1", { timeoutMs: 200 });
+		assert.equal(result.kind, "session", `expected the PTY-unavailable fallback: ${JSON.stringify(result)}`);
+		const finalized = readHost(root, "v1");
+		assert.equal(finalized.state, "exited");
+		assert.equal(finalized.runnerPid, null, "finalized record must drop the proven-dead pid");
+		assert.equal(readHostPid(root, "v1"), null, "host-pid mirror must be cleared explicitly (writeHost does not mirror)");
+	} finally {
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("resolver leaves a legacy host untouched while the host-start lease is held elsewhere (issue #87 CR r1)", async () => {	const root = freshRoot();
 	try {
 		createView(root, { id: "v1", name: "a", cwd: "/r" });
 		legacyHostRecord(root, "v1", 999999, { state: "alive" });
