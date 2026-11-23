@@ -150,6 +150,28 @@ export function canReplaceHost({ host, runnerObservation, childObservation, laun
 }
 
 /**
+ * Human-readable reason for a refused host replacement (issue #301). Null when
+ * the observation is releasable — the formatter defers to `canReplaceHost`, so
+ * the message handed to the user can never drift from the decision itself.
+ * Roles render in fixed order (runner, child) with the pid that blocked release;
+ * a missing pid renders as `?` because the blocking evidence is the observation.
+ * @param {{
+ *   instanceId?: string|null,
+ *   runnerPid?: number|null,
+ *   childPid?: number|null,
+ *   runnerObservation: string,
+ *   childObservation: string,
+ * }} input
+ * @returns {string|null}
+ */
+export function describeHostReplaceBlock({ runnerPid = null, childPid = null, runnerObservation, childObservation }) {
+	// A terminal host is the only shape this gate ever sees (see canReplaceHost).
+	if (canReplaceHost({ host: { state: "exited" }, runnerObservation, childObservation, launchLeaseActive: false })) return null;
+	const role = (name, pid, observation) => `${name} pid ${pid ?? "?"} (${observation})`;
+	return `host replace refused: ${role("runner", runnerPid, runnerObservation)} · ${role("child", childPid, childObservation)}`;
+}
+
+/**
  * Whether the endpoint file at `current` is the one this instance bound.
  * Compares dev+ino so a replaced (rebound) socket path is never unlinked by
  * its former owner.

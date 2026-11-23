@@ -7,6 +7,7 @@ import {
 	classifyProbeResult,
 	classifyUnverifiableProcess,
 	commandLineMentions,
+	describeHostReplaceBlock,
 	isStartingWithinGrace,
 	ownsEndpoint,
 	processIdentityState,
@@ -104,6 +105,39 @@ test("canReplaceHost refuses non-terminal hosts and null host (issue #99)", () =
 test("canReplaceHost SAFE_TO_RELEASE boundary regression (issue #99)", () => {
 	assert.equal(canReplaceHost({ host: { state: "exited" }, runnerObservation: "foreign", childObservation: "dead", launchLeaseActive: false }), true, "foreign runner (pid reuse) is releasable");
 	assert.equal(canReplaceHost({ host: { state: "exited" }, runnerObservation: "not_started", childObservation: "not_started", launchLeaseActive: false }), true);
+});
+
+test("describeHostReplaceBlock: releasable observations produce no reason", () => {
+	for (const runnerObservation of ["not_started", "dead", "foreign"]) {
+		assert.equal(
+			describeHostReplaceBlock({ instanceId: "i1", runnerPid: 1, childPid: null, runnerObservation, childObservation: "dead" }),
+			null,
+			`${runnerObservation} must not produce a refusal reason`,
+		);
+	}
+});
+
+test("describeHostReplaceBlock: names the blocking role, pid and observation (issue #301)", () => {
+	const reason = describeHostReplaceBlock({
+		instanceId: "i1", runnerPid: 4189, childPid: null,
+		runnerObservation: "unknown", childObservation: "dead",
+	});
+	assert.match(reason, /runner pid 4189/);
+	assert.match(reason, /unknown/);
+	assert.match(reason, /child pid \? \(dead\)/, "both roles always render, per the spec's fixed order");
+});
+
+test("describeHostReplaceBlock: renders both roles in fixed order and a missing pid as '?'", () => {
+	const reason = describeHostReplaceBlock({
+		instanceId: "i1", runnerPid: null, childPid: 1610,
+		runnerObservation: "unknown", childObservation: "owned",
+	});
+	assert.ok(reason.indexOf("runner pid ? (unknown)") < reason.indexOf("child pid 1610 (owned)"), reason);
+});
+
+test("describeHostReplaceBlock: defers to canReplaceHost (never disagrees with the gate)", () => {
+	assert.ok(describeHostReplaceBlock({ runnerPid: 1, childPid: null, runnerObservation: "owned", childObservation: "dead" }));
+	assert.equal(describeHostReplaceBlock({ runnerPid: 1, childPid: null, runnerObservation: "foreign", childObservation: "not_started" }), null);
 });
 
 test("canFinalizeLegacyHost requires legacy record + dead pid + unreachable endpoint", () => {
