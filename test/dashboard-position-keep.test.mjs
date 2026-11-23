@@ -54,3 +54,26 @@ test("A10: peek keeps its own target while the list cursor moves to the slot", (
 test("A11: background-driven transitions still follow the row", () => {
 	assert.equal(report.backgroundFollow.selectedId, "v3", "follow is the established behavior outside the demote commands");
 });
+
+test("A5: d+y on a middle row keeps the slot", () => {
+	assert.equal(report.doneMiddle.demotedId, "v3");
+	assert.equal(report.doneMiddle.selectedId, "v4");
+});
+
+test("A8 (done branch): a rejected mark-completed leaves the cursor in place", () => {
+	assert.equal(report.doneFailed.selectedId, "v3");
+	assert.equal(report.doneFailed.notice, "boom");
+});
+
+test("A7: batch done selects the row after the block, not a completed id", () => {
+	assert.equal(report.batchMiddle.selectedId, "v4");
+	assert.ok(!report.batchMiddle.doneIds.includes(report.batchMiddle.selectedId));
+});
+
+test("A7 (block at the end): the previous row wins when nothing follows", () => {
+	assert.equal(report.batchEnd.selectedId, "v3");
+});
+
+test("A13: a batch that completed nothing leaves the cursor alone", () => {
+	assert.equal(report.batchAllSkipped.selectedId, "v3");
+});

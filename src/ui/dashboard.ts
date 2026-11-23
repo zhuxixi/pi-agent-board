@@ -1093,10 +1093,13 @@ export class DashboardComponent implements Component {
 		this.pending = {
 			prompt: `Mark "${row.meta.name}" as done? (y/N)`,
 			onYes: () => {
+				// Issue #254: capture before the state command; apply only on success.
+				const anchor = this.capturePositionAnchor(row.meta.id);
 				void this.markCompleted(row).then((res) => {
 					if (!res.ok) this.notice(res.error ?? "Mark done failed", "error");
 					else this.notice("Marked done", "info");
 					this.refresh();
+					if (res.ok) this.applyPositionAnchor(anchor);
 				});
 			},
 		};
@@ -1138,13 +1141,21 @@ export class DashboardComponent implements Component {
 			prompt: `Mark ${doneIds.length} selected session${doneIds.length === 1 ? "" : "s"} as done?${skipped ? ` ${skipped} will be skipped.` : ""} (y/N)`,
 			returnMode: "select",
 			onYes: () => {
+				// Issue #254: anchor on the topmost selected row in board order —
+				// selectedIds is a Set in insertion order, so doneIds[0] is arbitrary.
+				const topmost = doneIds
+					.map((id) => this.orderedIds.indexOf(id))
+					.filter((index) => index >= 0)
+					.reduce((min, index) => (index < min ? index : min), Number.POSITIVE_INFINITY);
+				const anchor = Number.isFinite(topmost)
+					? this.capturePositionAnchor(this.orderedIds[topmost], doneIds)
+					: null;
 				void Promise.resolve(this.deps.service.markCompletedMany?.(doneIds) ?? { ok: true, completed: 0, skipped: doneIds.length, completedIds: [] }).then((res) => {
 					if (!res.ok) this.notice("Mark done failed", "error");
-					else {
-						if (res.completedIds?.length) this.selectedId = res.completedIds[0];
-						this.notice(`Moved ${res.completed} to Done${res.skipped ? ` · skipped ${res.skipped}` : ""}`, "info");
-					}
+					else this.notice(`Moved ${res.completed} to Done${res.skipped ? ` · skipped ${res.skipped}` : ""}`, "info");
 					this.refresh();
+					// A batch that completed nothing moved nothing — keep the cursor.
+					if (res.ok && res.completed > 0) this.applyPositionAnchor(anchor);
 				});
 			},
 		};

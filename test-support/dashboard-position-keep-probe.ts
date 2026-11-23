@@ -184,4 +184,73 @@ const report: Record<string, unknown> = {};
 	env.dash.dispose();
 }
 
+// A5: d+y on a middle row keeps the slot.
+{
+	const env = await makeEnv(5);
+	select(env.dash, "v3");
+	env.dash.handleInput("d");
+	env.dash.handleInput("y");
+	await waitFor(() => priv(env.dash).selectedId === "v4");
+	report.doneMiddle = cursor(env.dash, { demotedId: "v3" });
+	env.dash.dispose();
+}
+
+// A8 (done branch): a rejected mark-completed leaves the cursor alone.
+{
+	const env = await makeEnv(5);
+	select(env.dash, "v3");
+	env.service.markCompleted = (() => Promise.resolve({ ok: false, error: "boom" })) as typeof env.service.markCompleted;
+	env.dash.handleInput("d");
+	env.dash.handleInput("y");
+	await waitFor(() => priv(env.dash).flash !== null);
+	report.doneFailed = cursor(env.dash, { notice: priv(env.dash).flash?.text ?? null });
+	env.dash.dispose();
+}
+
+// A7: batch done selects the block's neighbour, never a completed id.
+{
+	const env = await makeEnv(5);
+	select(env.dash, "v2");
+	env.dash.handleInput("m");
+	env.dash.handleInput(" ");
+	env.dash.handleInput("j");
+	env.dash.handleInput(" ");
+	env.dash.handleInput("d");
+	env.dash.handleInput("y");
+	await waitFor(() => priv(env.dash).selectedId === "v4");
+	report.batchMiddle = cursor(env.dash, { doneIds: ["v2", "v3"] });
+	env.dash.dispose();
+}
+
+// A7 (block at the end): nothing follows the block, so the previous row wins.
+{
+	const env = await makeEnv(5);
+	select(env.dash, "v4");
+	env.dash.handleInput("m");
+	env.dash.handleInput(" ");
+	env.dash.handleInput("j");
+	env.dash.handleInput(" ");
+	env.dash.handleInput("d");
+	env.dash.handleInput("y");
+	await waitFor(() => priv(env.dash).selectedId === "v3");
+	report.batchEnd = cursor(env.dash, { doneIds: ["v4", "v5"] });
+	env.dash.dispose();
+}
+
+// A13: a batch that completed nothing must not move the cursor.
+{
+	const env = await makeEnv(5);
+	select(env.dash, "v2");
+	env.dash.handleInput("m");
+	env.dash.handleInput(" ");
+	env.dash.handleInput("j");
+	env.dash.handleInput(" ");
+	env.service.markCompletedMany = (() => Promise.resolve({ ok: true, completed: 0, skipped: 2, completedIds: [] })) as typeof env.service.markCompletedMany;
+	env.dash.handleInput("d");
+	env.dash.handleInput("y");
+	await waitFor(() => priv(env.dash).flash !== null);
+	report.batchAllSkipped = cursor(env.dash);
+	env.dash.dispose();
+}
+
 console.log(JSON.stringify(report));
