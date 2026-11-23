@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { filterRows, groupRows, groupRowsByFolder, nextVisibleIdAfterRemoval, parseFilter, rowState, rowView, stateColor, stateGlyph } from "../src/core/rows.mjs";
+import { filterRows, groupRows, groupRowsByFolder, neighborAfterRemoval, nextVisibleIdAfterRemoval, parseFilter, rowState, rowView, stateColor, stateGlyph } from "../src/core/rows.mjs";
 import { createView, listRows } from "../src/core/store.mjs";
 import { GROUP_LABELS, GROUP_ORDER } from "../src/core/types.mjs";
 
@@ -290,4 +290,27 @@ test("nextVisibleIdAfterRemoval: neighbor semantics (issue #147 A2)", () => {
 	} finally {
 		rmSync(root, { recursive: true, force: true });
 	}
+});
+
+test("neighborAfterRemoval: same slot semantics as the delete helper (issue #254 A1)", () => {
+	const ids = ["a", "b", "c", "d"];
+	assert.deepEqual(neighborAfterRemoval(ids, ["b"], "b"), { neighborId: "c", anchorIndex: 1 }, "middle row -> next row");
+	assert.deepEqual(neighborAfterRemoval(ids, ["d"], "d"), { neighborId: "c", anchorIndex: 3 }, "last row -> previous row");
+	assert.deepEqual(neighborAfterRemoval(["a"], ["a"], "a"), { neighborId: null, anchorIndex: 0 }, "only row -> no neighbor, slot kept");
+	assert.equal(neighborAfterRemoval(ids, ["a"], "missing"), null, "unknown anchor -> null");
+	assert.deepEqual(
+		neighborAfterRemoval(ids, ["b", "c"], "b"),
+		{ neighborId: "d", anchorIndex: 1 },
+		"contiguous block -> first row after the block",
+	);
+	assert.deepEqual(
+		neighborAfterRemoval(ids, ["a", "b", "c", "d"], "a"),
+		{ neighborId: null, anchorIndex: 0 },
+		"every row removed -> no neighbor",
+	);
+	assert.deepEqual(
+		neighborAfterRemoval(["a", "b", "c"], new Set(["c"]), "c"),
+		{ neighborId: "b", anchorIndex: 2 },
+		"Set input works and block removal prefers the previous surviving row",
+	);
 });
