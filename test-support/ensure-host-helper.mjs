@@ -38,7 +38,7 @@ const service = createService({
 
 let result;
 try {
-	result = { ok: true, ...service.ensureHost(viewId) };
+	result = { ok: true, ...(await service.ensureHost(viewId)) };
 } catch (err) {
 	result = { ok: false, error: err instanceof Error ? err.message : String(err) };
 }
