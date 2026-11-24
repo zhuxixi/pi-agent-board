@@ -5,6 +5,57 @@ conventional commits by `scripts/release_helper.mjs`. Entries are
 forward-only: they begin with the first release after this file landed —
 for earlier history, see the git log and the pull-request list.
 
+## [0.14.0] - 2026-11-24
+
+### Features
+
+- **dashboard**: keep the cursor in place for d+y and batch done (issue #254)
+- **dashboard**: keep the cursor in place when h demotes a row (issue #254)
+- **core**: add neighborAfterRemoval for keeping the board slot (issue #254)
+- greeting-aware title generation (issue #295) (#298)
+- **attach**: show PR/MR beside session name (#292)
+- **attach**: Alt+H detaches — vim-style third escape (issue #266) (#269)
+- **dashboard**: search PR references by number (#271)
+- **dashboard**: add persistent section folding (#234)
+
+### Fixes
+
+- **dashboard**: refresh before applying the demote anchor guard (issue #254)
+- **dashboard**: skip the done anchor when the cursor moved during the round-trip (issue #254)
+- **dashboard**: debounce the hold anchor prewarm and skip stale anchors (issue #254)
+- mirror the compaction window from live pi sessions (#299)
+- **attach**: satisfy resize intent from snapshot-carried and live evidence (issue #294) (#296)
+- **dashboard**: settle pi's fullscreen selection highlight after copy-on-release (issue #258) (#293)
+- **test**: drain stdout for the six console.log harness exits (issue #273) (#291)
+- cap-floor downgrade for trailing-unsafe attach lockout (#289)
+- leave model/thinking to session restore on host restart (#287)
+- attach UI recovery budget and safe reevaluation (#285)
+- frame-witness candidate termination delivery (#282)
+- show external editor output in modern attach (#281)
+- **paths**: cap POSIX control socket suffix to 8-hex hash to avoid AF_UNIX EINVAL on long $HOME (#277)
+- **test**: drain stdout before exiting test-support harnesses (issue #270) (#274)
+- preserve Kitty images in PTY scrollback (#227)
+- **cwd**: search the full ranked history in the launch picker (issue #262) (#272)
+- restore complete-frame readiness with idle downgrade (#265)
+- **attach**: roll back the complete-frame readiness gate (#263)
+- accelerate attach complete-frame readiness (#261)
+- **runner**: stop the legacy pty-runner from unlinking a replaced endpoint (issue #257) (#260)
+
+### Performance
+
+- **kitty**: zero-copy passthrough and cheaper commits (issue #268) (#275)
+
+### Changes
+
+- quarantine the legacy marker-failure case (issue #95) (#300)
+- **dashboard**: cover board-order batch anchoring and the completed gate (issue #254)
+- implementation plan for the cursor position fix (issue #254)
+- spec for keeping the board cursor in place on demote (issue #254)
+- **dashboard**: keep dashboard-fold deterministic across second boundaries (issue #279) (#290)
+- remove process files accidentally merged with #282 (#283)
+
+[0.14.0]: https://github.com/zhuxixi/pi-agent-board/compare/v0.13.1...v0.14.0
+
 ## [0.13.1] - 2026-10-28
 
 ### Fixes
