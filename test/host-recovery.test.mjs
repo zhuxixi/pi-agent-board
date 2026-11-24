@@ -504,7 +504,7 @@ test("recoverHost's replacement claim is immediately adopt-eligible (no grace wa
 
 		// 100ms after the claim — far inside the grace window — adoption fires.
 		clock += 100;
-		const ensured = svc.ensureHost("v1");
+		const ensured = await svc.ensureHost("v1");
 		assert.equal(ensured.ok, true);
 		assert.equal(ensured.started, true, `adoption must be immediate, got: ${JSON.stringify(ensured)}`);
 		assert.equal(ensured.instanceId, res.instanceId, "adoption spawns the recovery claim, not a new one");

@@ -1083,7 +1083,19 @@ async function ownedMain(config) {
 				state: failed ? "failed" : "exited",
 				endedAt: Date.now(),
 				exitCode: requestedExitCode ?? exitCode ?? 0,
+				// Issue #301: a terminal record must not keep any role pid/identity.
+				// A recycled pid in an exited/failed record is what permanently blocked
+				// the replacement gate. Mirrors recoverHost()'s six-field clear; the
+				// child is already dead at this point (killChild + waitForChildExit).
+				runnerPid: null,
+				runnerIdentity: null,
+				runnerSpawnedAt: null,
 				childPid: null,
+				childIdentity: null,
+				childSpawnedAt: null,
+				// Forensic only: the replace gate never reads this (issue #301), and
+				// scenario cleanup uses it as a liveness backstop after the pids clear.
+				lastRunnerPid: cur.runnerPid ?? null,
 				readyAt: null,
 				stopRequestedAt: null,
 				stopReason: reason,

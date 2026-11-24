@@ -151,6 +151,9 @@ export class DashboardComponent implements Component {
 	private sessionScrollTop = 0;
 	private evidenceScrollTop = 0;
 	private prewarmedId: string | null = null;
+	/** In-flight prewarm (issue #301): prewarmHost is async now, so same-tick
+	 *  re-entry must dedupe here instead of on the resolved `prewarmedId`. */
+	private prewarmingId: string | null = null;
 	private readonly prewarmScheduler = createPrewarmScheduler(() => this.prewarmSelected(), 200);
 	private flash: { text: string; level: FlashLevel } | null = null;
 	private inputNotice: InputNotice | null = null;
@@ -380,6 +383,9 @@ export class DashboardComponent implements Component {
 		if (this.mode !== "list" && this.mode !== "select") return;
 		const id = this.selectedId;
 		if (!id || id === this.prewarmedId) return;
+		// Same-tick re-entry: the service call is async, so `prewarmedId` is not set
+		// yet. Claim the id first so two debounce ticks cannot double-launch.
+		if (this.prewarmingId === id) return;
 		const row = this.selectedRow();
 		if (!row) return;
 		// hostActive claims (starting/alive/stopping) already have a launch — mark
@@ -391,8 +397,11 @@ export class DashboardComponent implements Component {
 			this.prewarmedId = id;
 			return;
 		}
-		const res = this.deps.service.prewarmHost?.(id);
-		if (res?.ok) this.prewarmedId = id;
+		this.prewarmingId = id;
+		void Promise.resolve(this.deps.service.prewarmHost?.(id))
+			.then((res) => { if (res?.ok) this.prewarmedId = id; })
+			.catch(() => {})
+			.finally(() => { if (this.prewarmingId === id) this.prewarmingId = null; });
 	}
 
 	private notice(text: string, level: FlashLevel = "info"): void {

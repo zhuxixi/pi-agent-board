@@ -146,6 +146,7 @@ export const GROUP_LABELS = {
  * @property {string} viewId
  * @property {HostMode} mode
  * @property {number|null} runnerPid
+ * @property {number|null} [lastRunnerPid] Forensic copy of the runner pid on a terminal record (issue #301); the replace gate never reads it.
  * @property {number|null} childPid
  * @property {string|null} socketPath
  * @property {HostState} state

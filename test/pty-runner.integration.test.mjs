@@ -649,6 +649,7 @@ test("owned runner binds unique endpoint, publishes ready, cleans up on natural 
 			return h?.state === "alive" && h?.readyAt != null && h?.childPid ? h : false;
 		});
 		childPid = host.childPid;
+		const runnerPidAtReady = host.runnerPid;
 		assert.ok(isAlive(childPid), "child alive before exit");
 		assert.equal(host.instanceId, "i1");
 		assert.equal(host.socketPath, P.hostEndpointPathFor(process.platform, root, "v1", "i1"));
@@ -662,6 +663,15 @@ test("owned runner binds unique endpoint, publishes ready, cleans up on natural 
 		assert.equal(final.instanceId, "i1");
 		assert.equal(final.childPid, null);
 		assert.equal(final.readyAt, null);
+		// Issue #301: a terminal record must not keep any role pid/identity — a
+		// recycled pid in an exited record is what permanently blocked the
+		// replacement gate on platforms where identity cannot be re-verified.
+		assert.equal(final.runnerPid, null, "terminal record must drop runnerPid");
+		assert.equal(final.runnerIdentity, null, "terminal record must drop runnerIdentity");
+		assert.equal(final.runnerSpawnedAt, null, "terminal record must drop runnerSpawnedAt");
+		assert.equal(final.childIdentity, null, "terminal record must drop childIdentity");
+		assert.equal(final.childSpawnedAt, null, "terminal record must drop childSpawnedAt");
+		assert.equal(final.lastRunnerPid, runnerPidAtReady, "terminal record keeps the old pid for forensics only");
 		assert.ok(final.endedAt != null, "terminal record carries endedAt");
 		assert.equal(existsSync(host.socketPath), false, "instance endpoint must be cleaned up");
 		socket.destroy();
