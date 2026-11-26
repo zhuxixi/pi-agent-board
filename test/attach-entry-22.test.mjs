@@ -6,11 +6,18 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
+import { underCoverageInstrumentation } from "../test-support/instrumentation-gate.mjs";
+
 // Issue #222 step 22 (task-22-brief.md): the OLD-SOURCE real-entry baseline for
 // the two missing cells only — B (25 ms continuous) and Q (nonempty then quiet)
 // — through the accepted step-18 real-entry topology and observer. The baseline
 // now publishes through the modern complete-frame gate; one trial is a witness,
 // never a distribution or P95.
+
+// issue #305: the 200 ms publish target is a product-derived hot-attach budget;
+// one trial is a witness, not a distribution. It is only decided in plain runs —
+// coverage instrumentation (NODE_V8_COVERAGE) inflates latency 2.5–6× (issue #121),
+// so B/Q skip with a reason under c8 and keep running everywhere else.
 
 const REPO_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const scenarioPath = resolve(REPO_ROOT, "test-support/attach-entry-22-scenario.ts");
@@ -62,7 +69,7 @@ test("step 22: the B/Q literal family is declared independently and validated", 
 	assert.deepEqual(s.busyCursor("B0"), { x: "B0 INPUT >".length, y: 21, visible: false });
 });
 
-test("step 22/24 B: 25 ms continuous real-entry modern publish (correct content within budget)", async (t) => {
+test("step 22/24 B: 25 ms continuous real-entry modern publish (correct content within budget)", { skip: underCoverageInstrumentation() ? "issue #305: real-time budget is invalid under coverage instrumentation (NODE_V8_COVERAGE); asserted in plain runs" : undefined }, async (t) => {
 	const r = await runCli(t, "B");
 	assert.equal(r.code, 0, `B must run (stderr: ${r.stderr.slice(-400)})`);
 	const tr = r.parsed;
@@ -120,7 +127,7 @@ test("step 22/24 B: 25 ms continuous real-entry modern publish (correct content 
 	t.diagnostic(`B: total=${tr.totalEntryMs.toFixed(1)}ms component=${tr.componentMs.toFixed(1)}ms overlay=${tr.overlayMs.toFixed(2)}ms childFrames=${tr.continuity.childFramesAfterSeed} outerCommits=${tr.continuity.outerCommitsAfterFirst} fastAndCorrect=${tr.fastAndCorrect}`);
 });
 
-test("step 22/24 Q: nonempty-then-quiet real-entry modern publish (correct content within budget)", async (t) => {
+test("step 22/24 Q: nonempty-then-quiet real-entry modern publish (correct content within budget)", { skip: underCoverageInstrumentation() ? "issue #305: real-time budget is invalid under coverage instrumentation (NODE_V8_COVERAGE); asserted in plain runs" : undefined }, async (t) => {
 	const r = await runCli(t, "Q");
 	assert.equal(r.code, 0, `Q must run (stderr: ${r.stderr.slice(-400)})`);
 	const tr = r.parsed;
